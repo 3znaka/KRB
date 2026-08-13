@@ -34,6 +34,8 @@ export function initUI(map) {
 
     const container = map.targetElement;
 
+    const getImgUrl = (filename) => new URL(`./img/${filename}`, import.meta.url).href;
+
     // Корневой pane
     const pane = document.createElement('div');
     pane.id = 'krb-ui-pane';
@@ -63,7 +65,7 @@ export function initUI(map) {
 
     // Логотип
     const logo = document.createElement('img');
-    logo.src = './img/logo.svg';
+    logo.src = getImgUrl('logo.svg');
     logo.className = 'krb-logo';
     leftBottom.appendChild(logo);
 
@@ -75,15 +77,19 @@ export function initUI(map) {
     // Кнопки
     const buttons = document.createElement('div');
     buttons.className = 'krb-buttons';
+    
     const btnPlus = document.createElement('button');
-    btnPlus.innerHTML = `<img src="./img/plus.svg">`;
+    btnPlus.innerHTML = `<img src="${getImgUrl('plus.svg')}">`;
     btnPlus.className = 'krb-btn';
+    
     const btnMinus = document.createElement('button');
-    btnMinus.innerHTML = `<img src="./img/minus.svg">`;
+    btnMinus.innerHTML = `<img src="${getImgUrl('minus.svg')}">`;
     btnMinus.className = 'krb-btn';
+    
     const btnCompass = document.createElement('button');
-    btnCompass.innerHTML = `<img src="./img/compass.svg">`;
+    btnCompass.innerHTML = `<img src="${getImgUrl('compass.svg')}">`;
     btnCompass.className = 'krb-btn';
+    
     buttons.appendChild(btnPlus);
     buttons.appendChild(btnMinus);
     buttons.appendChild(btnCompass);
@@ -124,43 +130,43 @@ export function initUI(map) {
      * @private
      */
     function updateScaleBar() {
-    const zoom = map.continuousZoom;
-    const worldPos = map.worldGroup.position;
-    const target = map.controls.target;
+        const zoom = map.continuousZoom;
+        const worldPos = map.worldGroup.position;
+        const target = map.controls.target;
 
-    const centerX = target.x - worldPos.x;
-    const centerZ = target.z - worldPos.z;
+        const centerX = target.x - worldPos.x;
+        const centerZ = target.z - worldPos.z;
 
-    const [lon, lat] = toLonLat([centerX, centerZ]);
+        const [lon, lat] = toLonLat([centerX, centerZ]);
 
-    // Новые вычисления углов камеры
-    const cameraPos = map.camera.position;
-    const dir = new THREE.Vector3().subVectors(cameraPos, target);
-    const dist = dir.length();
-    const pitchRad = dist > 1e-6 ? Math.acos(dir.y / dist) : 0;
-    const bearingRad = dist > 1e-6 ? Math.atan2(dir.x, -dir.z) : 0;
-    const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-    const bearingDeg = (bearingRad * 180 / Math.PI).toFixed(1);
+        // Новые вычисления углов камеры
+        const cameraPos = map.camera.position;
+        const dir = new THREE.Vector3().subVectors(cameraPos, target);
+        const dist = dir.length();
+        const pitchRad = dist > 1e-6 ? Math.acos(dir.y / dist) : 0;
+        const bearingRad = dist > 1e-6 ? Math.atan2(dir.x, -dir.z) : 0;
+        const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
+        const bearingDeg = (bearingRad * 180 / Math.PI).toFixed(1);
 
-    // Формируем строку с координатами и углами
-    coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        // Формируем строку с координатами и углами
+        coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
 
-    const R = map.R ?? DEFAULTS.R;
-    const tileSize = 256;
-    const resolutionAtEquator = (2 * Math.PI * R) / (tileSize * Math.pow(2, zoom));
-    const resolution = resolutionAtEquator * Math.cos(lat * Math.PI / 180);
+        const R = map.R ?? DEFAULTS.R;
+        const tileSize = 256;
+        const resolutionAtEquator = (2 * Math.PI * R) / (tileSize * Math.pow(2, zoom));
+        const resolution = resolutionAtEquator * Math.cos(lat * Math.PI / 180);
 
-    const barLengthPx = 100;
-    let distance = resolution * barLengthPx * 0.623 * 1.5;
+        const barLengthPx = 100;
+        let distance = resolution * barLengthPx * 0.623 * 1.5;
 
-    const nice = niceDistance(distance);
-    const ratio = nice / distance;
-    scaleBar.style.width = (barLengthPx * ratio) + 'px';
-    scaleLabel.textContent = formatDistance(nice);
+        const nice = niceDistance(distance);
+        const ratio = nice / distance;
+        scaleBar.style.width = (barLengthPx * ratio) + 'px';
+        scaleLabel.textContent = formatDistance(nice);
 
-    zoomLabel.childNodes[1]?.remove();
-    zoomLabel.appendChild(document.createTextNode(` (${map.currentDiscreteZoom})`));
-}
+        zoomLabel.childNodes[1]?.remove();
+        zoomLabel.appendChild(document.createTextNode(` (${map.currentDiscreteZoom})`));
+    }
 
     /**
      * Приводит расстояние к "красивому" круглому значению для отображения на линейке.
@@ -215,5 +221,6 @@ export function initUI(map) {
         
         requestAnimationFrame(animateUI);
     }
+    
     animateUI();
 }

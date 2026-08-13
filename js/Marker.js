@@ -81,7 +81,7 @@ export class Marker {
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором маркер виден.
      * @param {string} [options.altitudeMode='ground'] - Режим высоты: 'ground' (на поверхности) или 'clampToGround' (прилеплен к рельефу).
      * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML).
-     * @param {string} [options.iconUrl='./img/marker.png'] - URL иконки маркера.
+     * @param {string} [options.iconUrl='img/marker.png'] - URL иконки маркера.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
      * @param {function} [options.onClick] - Callback при клике. Получает событие и экземпляр маркера.
      * @param {string} [options.title=''] - Текст постоянной подписи.
@@ -106,7 +106,7 @@ export class Marker {
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private */ this._altitudeMode = options.altitudeMode || 'ground';
         /** @private */ this._tooltipText = options.tooltip || '';
-        /** @private */ this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : './img/marker.png';
+        /** @private */ this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : 'img/marker.png';
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._onClick = options.onClick || null;
 

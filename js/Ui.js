@@ -65,7 +65,7 @@ export function initUI(map) {
 
     // Логотип
     const logo = document.createElement('img');
-    logo.src = getImgUrl('logo.svg');
+    logo.src = getImgUrl('../img/logo.svg');
     logo.className = 'krb-logo';
     leftBottom.appendChild(logo);
 
@@ -79,15 +79,15 @@ export function initUI(map) {
     buttons.className = 'krb-buttons';
     
     const btnPlus = document.createElement('button');
-    btnPlus.innerHTML = `<img src="${getImgUrl('plus.svg')}">`;
+    btnPlus.innerHTML = `<img src="${getImgUrl('../img/plus.svg')}">`;
     btnPlus.className = 'krb-btn';
     
     const btnMinus = document.createElement('button');
-    btnMinus.innerHTML = `<img src="${getImgUrl('minus.svg')}">`;
+    btnMinus.innerHTML = `<img src="${getImgUrl('../img/minus.svg')}">`;
     btnMinus.className = 'krb-btn';
     
     const btnCompass = document.createElement('button');
-    btnCompass.innerHTML = `<img src="${getImgUrl('compass.svg')}">`;
+    btnCompass.innerHTML = `<img src="${getImgUrl('../img/compass.svg')}">`;
     btnCompass.className = 'krb-btn';
     
     buttons.appendChild(btnPlus);

@@ -109,6 +109,7 @@ export class Marker3D {
         /** @private */ this._isModelLoading = false;
         /** @private */ this._modelPromise = null;
         /** @private */ this._worldPosition = new THREE.Vector3(); // Мировая позиция (с учётом worldGroup)
+        /** @private */ this._localBox = null; // Локальный bounding box объекта (после применения anchor)
     }
 
     /**
@@ -208,6 +209,8 @@ export class Marker3D {
             (0.5 - this._anchor[2]) * d
         );
         geometry.translate(offset.x, offset.y, offset.z);
+        geometry.computeBoundingBox();
+        this._localBox = geometry.boundingBox.clone();
 
         mesh.renderOrder = MARKER_RENDER_ORDER;
         this._geometry = geometry;
@@ -242,6 +245,10 @@ export class Marker3D {
                     );
                     model.position.sub(anchorPoint);
                 }
+
+                // Вычисляем локальный bounding box после применения anchor
+                const localBox = new THREE.Box3().setFromObject(model);
+                this._localBox = localBox;
 
                 // Устанавливаем renderOrder для всех мешей
                 model.traverse((child) => {
@@ -492,6 +499,7 @@ export class Marker3D {
         this._map = null;
         this._isVisible = false;
         this._worldPosition.set(0, 0, 0);
+        this._localBox = null;
     }
 
     /**
@@ -556,17 +564,28 @@ export class Marker3D {
             }
         }
 
-        // Проверка видимости верхней точки объекта в камере.
-        // Если верхняя точка вне экрана или позади камеры, скрываем объект и подпись.
-        this._object3D.updateWorldMatrix(false, false);
-        const topLocal = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
-        const topWorld = topLocal.clone().applyMatrix4(this._object3D.matrixWorld);
-        const topScreen = topWorld.clone().project(mapInstance.camera);
+        // Проверка видимости bounding box объекта в камере.
+        // Объект скрывается только если его bounding box полностью вне frustum.
+        if (this._localBox) {
+            // Обновляем мировую матрицу объекта (без обновления потомков, для скорости)
+            this._object3D.updateWorldMatrix(true, false);
 
-        if (topScreen.z > 1 || Math.abs(topScreen.x) > 1 || Math.abs(topScreen.y) > 1) {
-            this._object3D.visible = false;
-            this._isVisible = false;
-            return;
+            // Вычисляем мировой bounding box
+            const worldBox = this._localBox.clone().applyMatrix4(this._object3D.matrixWorld);
+
+            // Создаём frustum из матриц камеры
+            const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+                mapInstance.camera.projectionMatrix,
+                mapInstance.camera.matrixWorldInverse
+            );
+            const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
+
+            // Если bounding box не пересекается с frustum — скрываем объект
+            if (!frustum.intersectsBox(worldBox)) {
+                this._object3D.visible = false;
+                this._isVisible = false;
+                return;
+            }
         }
 
         this._object3D.visible = true;
@@ -609,7 +628,7 @@ export class Marker3D {
 
     /**
      * Возвращает позицию на экране для отображения подписи.
-     * Теперь вычисляется от фактической верхней точки объекта, а не от точки привязки.
+     * Вычисляется от фактической верхней точки объекта.
      * @returns {{x: number, y: number}|null}
      */
     getScreenPosition() {

@@ -87,7 +87,8 @@ export class Marker3D {
         /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleOffset = options.titleOffset || [0, this._size[1] / 2 + 10];
+        /** @private */ this._titleOffset = options.titleOffset || [0, 10]; // смещение от верхней точки объекта в пикселях
+        /** @private */ this._height = 0; // фактическая высота объекта (будет установлена при создании примитива или загрузке модели)
 
         /** @private */ this._tooltipText = options.tooltip || '';
         /** @private */ this._onClick = options.onClick || null;
@@ -180,6 +181,7 @@ export class Marker3D {
      */
     _createPrimitive() {
         const [w, h, d] = this._size;
+        this._height = h; // сохраняем фактическую высоту примитива
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
             case 'sphere':
@@ -232,6 +234,7 @@ export class Marker3D {
                 if (this._anchor) {
                     const box = new THREE.Box3().setFromObject(model);
                     const size = box.getSize(new THREE.Vector3());
+                    this._height = size.y; // сохраняем фактическую высоту модели
                     const anchorPoint = new THREE.Vector3(
                         box.min.x + this._anchor[0] * size.x,
                         box.min.y + this._anchor[1] * size.y,
@@ -553,6 +556,19 @@ export class Marker3D {
             }
         }
 
+        // Проверка видимости верхней точки объекта в камере.
+        // Если верхняя точка вне экрана или позади камеры, скрываем объект и подпись.
+        this._object3D.updateWorldMatrix(false, false);
+        const topLocal = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
+        const topWorld = topLocal.clone().applyMatrix4(this._object3D.matrixWorld);
+        const topScreen = topWorld.clone().project(mapInstance.camera);
+
+        if (topScreen.z > 1 || Math.abs(topScreen.x) > 1 || Math.abs(topScreen.y) > 1) {
+            this._object3D.visible = false;
+            this._isVisible = false;
+            return;
+        }
+
         this._object3D.visible = true;
         this._isVisible = true;
 
@@ -593,12 +609,28 @@ export class Marker3D {
 
     /**
      * Возвращает позицию на экране для отображения подписи.
+     * Теперь вычисляется от фактической верхней точки объекта, а не от точки привязки.
      * @returns {{x: number, y: number}|null}
      */
     getScreenPosition() {
-        if (!this._isVisible || !this._worldPosition) return null;
-        const screenPos = this._worldPosition.clone().project(this._map.camera);
+        if (!this._isVisible || !this._object3D) return null;
+
+        // Локальная координата верхней точки с учётом якоря
+        const localTop = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
+
+        // Обновляем мировую матрицу объекта
+        this._object3D.updateWorldMatrix(false, false);
+        const worldTop = localTop.clone().applyMatrix4(this._object3D.matrixWorld);
+
+        // Проецируем в экранные координаты
+        const screenPos = worldTop.clone().project(this._map.camera);
         const canvas = this._map.renderer.domElement;
+
+        // Проверяем, что точка находится перед камерой и в пределах NDC
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
+            return null;
+        }
+
         return {
             x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
             y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
@@ -631,24 +663,23 @@ export class Marker3D {
     /** Скрыть тултип */
     hideTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'none'; }
 
-
-/**
- * Устанавливает цвет примитива.
- * @param {string|number} color - Цвет в формате HEX-строки или числа.
- */
-setColor(color) {
-    this._color = color;
-    if (this._object3D && this._object3D.material) {
-        this._object3D.material.color.set(color);
-    } else if (this._object3D) {
-        // Для GLB-моделей: проходим по всем мешам
-        this._object3D.traverse(child => {
-            if (child.isMesh && child.material) {
-                child.material.color.set(color);
-            }
-        });
+    /**
+     * Устанавливает цвет примитива.
+     * @param {string|number} color - Цвет в формате HEX-строки или числа.
+     */
+    setColor(color) {
+        this._color = color;
+        if (this._object3D && this._object3D.material) {
+            this._object3D.material.color.set(color);
+        } else if (this._object3D) {
+            // Для GLB-моделей: проходим по всем мешам
+            this._object3D.traverse(child => {
+                if (child.isMesh && child.material) {
+                    child.material.color.set(color);
+                }
+            });
+        }
     }
-}
 
     /** @private */ _showTooltip() { this.showTooltip(); }
     /** @private */ _hideTooltip() { this.hideTooltip(); }

@@ -4,7 +4,9 @@
  * Обладает свойствами обычного маркера: position, minZoom, maxZoom, title, tooltip, события.
  * Реализованы:
  * - anchor point для точной привязки объекта к координате;
- * - raycasting для событий onClick и onHover.
+ * - raycasting для событий onClick и onHover;
+ * - гибкое позиционирование подписи относительно объекта (top, bottom, left, right)
+ *   с гарантией отсутствия перекрытия.
  *
  * @module 3dMarker
  */
@@ -30,6 +32,7 @@ const MARKER_RENDER_ORDER = 1000; // Выше любого уровня зума
  *   minZoom: 5,
  *   maxZoom: 12,
  *   title: '3D объект',
+ *   titlePlacement: 'top', // 'top' | 'bottom' | 'left' | 'right'
  *   onClick: (e, marker) => console.log('Клик по 3D объекту')
  * });
  * marker3d.addTo(map);
@@ -41,8 +44,8 @@ export class Marker3D {
     /** @private */ static _pressedMarker = null;
     /** @private */ static _pressStart = null;
     static _raycaster = new THREE.Raycaster();
-static _mapEventHandlers = new WeakMap();
-static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
+    static _mapEventHandlers = new WeakMap();
+    static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
     /**
      * @param {Object} options - Настройки 3D-маркера.
@@ -60,6 +63,9 @@ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window
      * @param {Object} [options.titleStyle] - Стили подписи (как у Marker).
      * @param {number} [options.titleMinZoom=-Infinity] - Мин. зум для подписи.
      * @param {number} [options.titleMaxZoom=Infinity] - Макс. зум для подписи.
+     * @param {string} [options.titlePlacement='top'] - Положение подписи относительно объекта: 'top', 'bottom', 'left', 'right'.
+     * @param {string} [options.titleAlign] - Горизонтальное выравнивание подписи. По умолчанию зависит от titlePlacement.
+     * @param {[number, number]} [options.titleOffset] - Смещение подписи в пикселях. По умолчанию зависит от titlePlacement.
      * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML).
      * @param {Function} [options.onClick] - Обработчик клика по объекту (получает событие и маркер).
      * @param {Function} [options.onHover] - Обработчик наведения (получает true/false).
@@ -87,8 +93,53 @@ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window
         /** @private */ this._titleStyle = options.titleStyle || {};
         /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleOffset = options.titleOffset || [0, 10]; // смещение от верхней точки объекта в пикселях
+        /** @private */ this._titlePlacement = options.titlePlacement || 'top'; // 'top' | 'bottom' | 'left' | 'right'
+
+        // Выравнивание и смещение подписи. Если пользователь не задал их явно,
+        // устанавливаем значения по умолчанию в зависимости от titlePlacement,
+        // чтобы подпись гарантированно не перекрывала объект.
+        if (options.titleAlign !== undefined) {
+            this._titleAlign = options.titleAlign;
+        } else {
+            switch (this._titlePlacement) {
+                case 'top':
+                    this._titleAlign = 'center';
+                    break;
+                case 'bottom':
+                    this._titleAlign = 'center';
+                    break;
+                case 'left':
+                    this._titleAlign = 'right';
+                    break;
+                case 'right':
+                    this._titleAlign = 'left';
+                    break;
+                default:
+                    this._titleAlign = 'center';
+            }
+        }
+
+        if (options.titleOffset !== undefined) {
+            this._titleOffset = options.titleOffset;
+        } else {
+            switch (this._titlePlacement) {
+                case 'top':
+                    this._titleOffset = [0, -10]; // вверх
+                    break;
+                case 'bottom':
+                    this._titleOffset = [0, 10]; // вниз
+                    break;
+                case 'left':
+                    this._titleOffset = [-10, 0]; // влево
+                    break;
+                case 'right':
+                    this._titleOffset = [10, 0]; // вправо
+                    break;
+                default:
+                    this._titleOffset = [0, -10];
+            }
+        }
+
         /** @private */ this._height = 0; // фактическая высота объекта (будет установлена при создании примитива или загрузке модели)
 
         /** @private */ this._tooltipText = options.tooltip || '';
@@ -666,32 +717,95 @@ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window
 
     /**
      * Возвращает позицию на экране для отображения подписи.
-     * Вычисляется от фактической верхней точки объекта.
+     * Вычисляется на основе экранного ограничивающего прямоугольника объекта
+     * с учётом выбранного titlePlacement, чтобы подпись не перекрывала объект.
      * @returns {{x: number, y: number}|null}
      */
     getScreenPosition() {
         if (!this._isVisible || !this._object3D) return null;
 
-        // Локальная координата верхней точки с учётом якоря
-        const localTop = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
+        // Если локальный bounding box ещё не определён (например, модель ещё грузится),
+        // используем fallback: верхняя точка объекта по высоте и якорю.
+        if (!this._localBox) {
+            const localTop = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
+            this._object3D.updateWorldMatrix(false, false);
+            const worldTop = localTop.clone().applyMatrix4(this._object3D.matrixWorld);
+            const screenPos = worldTop.clone().project(this._map.camera);
+            const canvas = this._map.renderer.domElement;
 
-        // Обновляем мировую матрицу объекта
-        this._object3D.updateWorldMatrix(false, false);
-        const worldTop = localTop.clone().applyMatrix4(this._object3D.matrixWorld);
+            if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
+                return null;
+            }
 
-        // Проецируем в экранные координаты
-        const screenPos = worldTop.clone().project(this._map.camera);
-        const canvas = this._map.renderer.domElement;
-
-        // Проверяем, что точка находится перед камерой и в пределах NDC
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-            return null;
+            return {
+                x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+                y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+            };
         }
 
-        return {
-            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
-        };
+        // Обновляем мировую матрицу объекта, чтобы bounding box был в мировых координатах
+        this._object3D.updateWorldMatrix(true, false);
+
+        // Получаем экранные координаты всех 8 углов локального bounding box
+        const corners = [];
+        const { min, max } = this._localBox;
+        const canvas = this._map.renderer.domElement;
+
+        for (let i = 0; i < 8; i++) {
+            const corner = new THREE.Vector3(
+                (i & 1) ? max.x : min.x,
+                (i & 2) ? max.y : min.y,
+                (i & 4) ? max.z : min.z
+            );
+            // Преобразуем в мировые координаты, затем проецируем
+            corner.applyMatrix4(this._object3D.matrixWorld);
+            corner.project(this._map.camera);
+
+            // Игнорируем точки позади камеры
+            if (corner.z > 1 || corner.z < -1) continue;
+
+            const x = (corner.x * 0.5 + 0.5) * canvas.clientWidth;
+            const y = (-corner.y * 0.5 + 0.5) * canvas.clientHeight;
+            corners.push({ x, y });
+        }
+
+        if (corners.length === 0) return null; // объект полностью позади камеры
+
+        // Находим min/max экранные координаты
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const c of corners) {
+            if (c.x < minX) minX = c.x;
+            if (c.x > maxX) maxX = c.x;
+            if (c.y < minY) minY = c.y;
+            if (c.y > maxY) maxY = c.y;
+        }
+
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+
+        // Выбираем точку привязки в зависимости от titlePlacement
+        let x, y;
+        switch (this._titlePlacement) {
+            case 'bottom':
+                x = centerX;
+                y = maxY;
+                break;
+            case 'left':
+                x = minX;
+                y = centerY;
+                break;
+            case 'right':
+                x = maxX;
+                y = centerY;
+                break;
+            case 'top':
+            default:
+                x = centerX;
+                y = minY;
+                break;
+        }
+
+        return { x, y };
     }
 
     /** @returns {string} Выравнивание подписи */

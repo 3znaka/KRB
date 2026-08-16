@@ -32348,24 +32348,15 @@ function handleTouchStartMapControls(event) {
     const centerY = (pos0.y + pos1.y) * 0.5;
 
     mapControlsState = {
-        startPos0: pos0.clone(),
-        startPos1: pos1.clone(),
-        prevPos0: pos0.clone(),
-        prevPos1: pos1.clone(),
-
         startDist: dist,
         startAngle: angle,
         startCenterX: centerX,
         startCenterY: centerY,
-
         prevDist: dist,
         prevAngle: angle,
         prevCenterX: centerX,
         prevCenterY: centerY,
-
-        activeGesture: null,
-        gestureScores: { zoom: 0, rotate: 0, tilt: 0 },
-        switchLockFrames: 0
+        activeGesture: null
     };
 }
 
@@ -32383,145 +32374,85 @@ function handleTouchMoveMapControls(event) {
     const currentCenterX = (pos0.x + pos1.x) * 0.5;
     const currentCenterY = (pos0.y + pos1.y) * 0.5;
 
-    // ===== 1. Распознавание по полному смещению от старта =====
-    const startDx = state.startPos1.x - state.startPos0.x;
-    const startDy = state.startPos1.y - state.startPos0.y;
-    let startDist = Math.sqrt(startDx * startDx + startDy * startDy);
-    if (startDist < 1e-3) startDist = 1;
-
-    const radialX = startDx / startDist;
-    const radialY = startDy / startDist;
-    const tangentX = -radialY;
-    const tangentY = radialX;
-
-    const d0x = pos0.x - state.startPos0.x;
-    const d0y = pos0.y - state.startPos0.y;
-    const d1x = pos1.x - state.startPos1.x;
-    const d1y = pos1.y - state.startPos1.y;
-
-    const commonY = (d0y + d1y) * 0.5;
-    const diffX = d1x - d0x;
-    const diffY = d1y - d0y;
-
-    const zoomSignal = Math.abs(diffX * radialX + diffY * radialY);
-    const rotateSignal = Math.abs(diffX * tangentX + diffY * tangentY);
-    const tiltSignal = Math.abs(commonY);
-
-    // ===== 2. Первичная фиксация жеста =====
+    // Жест ещё не распознан
     if (state.activeGesture === null) {
-        const GESTURE_THRESHOLD_PX = 10;   // минимальное смещение в px
-        const DOMINANCE_RATIO = 3;       // во сколько раз жест должен быть сильнее второго
+        const GESTURE_THRESHOLD_PX = 10;   // минимальное смещение для фиксации жеста
+        const DOMINANCE_RATIO = 1.5;       // во сколько раз сигнал должен быть больше другого
 
-        const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
+        // Сигнал zoom – изменение расстояния между пальцами
+        const zoomSignal = Math.abs(currentDist - state.startDist);
 
-        const signals = [
-            { name: 'zoom', value: zoomSignal },
-            { name: 'rotate', value: rotateSignal },
-            { name: 'tilt', value: tiltSignal }
-        ].sort((a, b) => b.value - a.value);
+        // Сигнал rotate/tilt:
+        //  - rotate: изменение угла, переведённое в пиксели дуги
+        //  - tilt: вертикальное смещение средней точки
+        const angleDiff = normalizeAngleDiff(currentAngle - state.startAngle);
+        const rotateSignalPx = Math.abs(angleDiff) * state.startDist * 0.5;
+        const tiltSignal = Math.abs(currentCenterY - state.startCenterY);
+        const rotateTiltSignal = Math.max(rotateSignalPx, tiltSignal);
 
-        if (
-            maxSignal >= GESTURE_THRESHOLD_PX &&
-            signals[0].value >= signals[1].value * DOMINANCE_RATIO
-        ) {
-            state.activeGesture = signals[0].name;
-            applyMapGestureFromStart(
-                state,
-                state.activeGesture,
-                currentDist,
-                currentAngle,
-                currentCenterX,
-                currentCenterY
-            );
+        const maxSignal = Math.max(zoomSignal, rotateTiltSignal);
+
+        // Ждём, пока сигнал не превысит порог
+        if (maxSignal < GESTURE_THRESHOLD_PX) {
+            state.prevDist = currentDist;
+            state.prevAngle = currentAngle;
+            state.prevCenterX = currentCenterX;
+            state.prevCenterY = currentCenterY;
+            return;
         }
 
-    // ===== 3. Жест уже активен, работаем по кадрам =====
+        // Выбираем жест по доминированию
+        if (zoomSignal > rotateTiltSignal * DOMINANCE_RATIO) {
+            // --- ZOOM ---
+            state.activeGesture = 'zoom';
+            const factor = currentDist / state.startDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+        } else if (rotateTiltSignal > zoomSignal * DOMINANCE_RATIO) {
+            // --- ROTATE + TILT ---
+            state.activeGesture = 'rotateTilt';
+            const angleDiff = normalizeAngleDiff(currentAngle - state.startAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
+
+            const tiltAmount = 2 * Math.PI * (state.startCenterY - currentCenterY) /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
+        } else {
+            // Сигналы сопоставимы – ждём более явного движения
+            state.prevDist = currentDist;
+            state.prevAngle = currentAngle;
+            state.prevCenterX = currentCenterX;
+            state.prevCenterY = currentCenterY;
+            return;
+        }
     } else {
-        // Инкрементальные смещения с прошлого кадра
-        const prevPos0 = state.prevPos0;
-        const prevPos1 = state.prevPos1;
+        // Жест уже зафиксирован, работаем по кадрам
+        if (state.activeGesture === 'zoom') {
+            const factor = currentDist / state.prevDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+        } else if (state.activeGesture === 'rotateTilt') {
+            // Применяем одновременно rotate и tilt
+            const angleDiff = normalizeAngleDiff(currentAngle - state.prevAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
 
-        const incD0x = pos0.x - prevPos0.x;
-        const incD0y = pos0.y - prevPos0.y;
-        const incD1x = pos1.x - prevPos1.x;
-        const incD1y = pos1.y - prevPos1.y;
-
-        const prevDx = prevPos1.x - prevPos0.x;
-        const prevDy = prevPos1.y - prevPos0.y;
-        let prevDist = Math.sqrt(prevDx * prevDx + prevDy * prevDy);
-        if (prevDist < 1e-3) prevDist = 1;
-
-        const prevRadialX = prevDx / prevDist;
-        const prevRadialY = prevDy / prevDist;
-        const prevTangentX = -prevRadialY;
-        const prevTangentY = prevRadialX;
-
-        const incCommonY = (incD0y + incD1y) * 0.5;
-        const incDiffX = incD1x - incD0x;
-        const incDiffY = incD1y - incD0y;
-
-        const incZoom = incDiffX * prevRadialX + incDiffY * prevRadialY;
-        const incRotate = incDiffX * prevTangentX + incDiffY * prevTangentY;
-        const incTilt = incCommonY;
-
-        // Сглаживаем сигналы, чтобы избежать дребезга
-        const alpha = 0.55;
-        state.gestureScores.zoom = state.gestureScores.zoom * (1 - alpha) + Math.abs(incZoom) * alpha;
-        state.gestureScores.rotate = state.gestureScores.rotate * (1 - alpha) + Math.abs(incRotate) * alpha;
-        state.gestureScores.tilt = state.gestureScores.tilt * (1 - alpha) + Math.abs(incTilt) * alpha;
-
-        // ===== 4. Проверка, не сменился ли жест =====
-        const activeScore = state.gestureScores[state.activeGesture];
-        const alternatives = [];
-
-        if (state.activeGesture !== 'zoom') alternatives.push({ name: 'zoom', value: state.gestureScores.zoom });
-        if (state.activeGesture !== 'rotate') alternatives.push({ name: 'rotate', value: state.gestureScores.rotate });
-        if (state.activeGesture !== 'tilt') alternatives.push({ name: 'tilt', value: state.gestureScores.tilt });
-
-        let maxAlt = { name: null, value: 0 };
-        for (const alt of alternatives) {
-            if (alt.value > maxAlt.value) maxAlt = alt;
+            const tiltDeltaY = state.prevCenterY - currentCenterY;
+            const tiltAmount = 2 * Math.PI * tiltDeltaY /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
         }
-
-        const SWITCH_THRESHOLD_PX = 6;
-        const SWITCH_RATIO = 1.8;
-
-        if (state.switchLockFrames > 0) {
-            // После переключения даем пару кадров новому жесту закрепиться
-            state.switchLockFrames--;
-        } else if (
-            activeScore < SWITCH_THRESHOLD_PX &&
-            maxAlt.value > SWITCH_THRESHOLD_PX &&
-            maxAlt.value > activeScore * SWITCH_RATIO
-        ) {
-            // Переключаем жест
-            state.activeGesture = maxAlt.name;
-            state.gestureScores.zoom = 0;
-            state.gestureScores.rotate = 0;
-            state.gestureScores.tilt = 0;
-            state.switchLockFrames = 2;
-        }
-
-        // Применяем текущий активный жест
-        applyMapGestureIncrement(
-            state,
-            state.activeGesture,
-            currentDist,
-            currentAngle,
-            currentCenterX,
-            currentCenterY
-        );
     }
 
-    // ===== 5. Обновляем предыдущие значения для следующего кадра =====
-    state.prevPos0.copy(pos0);
-    state.prevPos1.copy(pos1);
+    // Обновляем предыдущие значения
     state.prevDist = currentDist;
     state.prevAngle = currentAngle;
     state.prevCenterX = currentCenterX;
     state.prevCenterY = currentCenterY;
 }
-
 
     function handleTouchStartRotate(event) {
       if (pointers.length === 1) {

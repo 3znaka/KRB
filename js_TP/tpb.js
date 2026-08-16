@@ -32410,7 +32410,7 @@ function handleTouchMoveMapControls(event) {
     // ===== 2. Первичная фиксация жеста =====
     if (state.activeGesture === null) {
         const GESTURE_THRESHOLD_PX = 10;   // минимальное смещение в px
-        const DOMINANCE_RATIO = 1.5;       // во сколько раз жест должен быть сильнее второго
+        const DOMINANCE_RATIO = 3;       // во сколько раз жест должен быть сильнее второго
 
         const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
 

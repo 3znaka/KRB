@@ -815,7 +815,18 @@ export class Marker3D {
     getTitleOffset() { return this._titleOffset; }
 
     /** @returns {string} Вертикальное выравнивание */
-    getTitleVerticalAlign() { return 'center'; }
+    getTitleVerticalAlign() {
+        switch (this._titlePlacement) {
+            case 'bottom':
+                return 'top';       // подпись ниже точки, растёт вниз
+            case 'left':
+            case 'right':
+                return 'center';    // по вертикали центр
+            case 'top':
+            default:
+                return 'bottom';    // подпись выше точки, растёт вверх
+        }
+    }
 
     /** @returns {boolean} Разрешать ли выход за границы */
     getAllowOverflow() { return false; }

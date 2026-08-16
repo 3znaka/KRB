@@ -268,27 +268,35 @@ export class GeoJSONLayer extends Layer {
                 options = this._default3DPointOptions(feature, props);
             }
 
-            const marker3DOptions = {
-                position: coords,
-                title: options.title || props.title || props.name || '',
-                tooltip: options.tooltip || props.tooltip || props.description || '',
-                primitiveType: options.primitiveType || props.primitiveType || this.default3DPrimitiveType,
-                size: options.size || this._parseSize(props.size) || this.default3DSize,
-                anchor: options.anchor || this._parseTriple(props.anchor) || this.default3DAnchor,
-                altitude: options.altitude ?? props.altitude ?? this.default3DAltitude,
-                altitudeMode: options.altitudeMode || props.altitudeMode || this.default3DAltitudeMode,
-                rotation: options.rotation || props.rotation || [0, 0, 0],
-                modelUrl: options.modelUrl || props.modelUrl,
-                minZoom: options.minZoom ?? props.minZoom ?? -Infinity,
-                maxZoom: options.maxZoom ?? props.maxZoom ?? Infinity,
-                titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
-                titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
-                onHover: options.onHover,
-                onClick: options.onClick,
-                color: options.color || props.color,
-                clusterable: options.clusterable !== undefined ? options.clusterable : false // 3D-маркеры по умолчанию не кластеризуются
-                
-            };
+           const marker3DOptions = {
+    position: coords,
+    title: options.title || props.title || props.name || '',
+    tooltip: options.tooltip || props.tooltip || props.description || '',
+    primitiveType: options.primitiveType || props.primitiveType || this.default3DPrimitiveType,
+    size: options.size || this._parseSize(props.size) || this.default3DSize,
+    anchor: options.anchor || this._parseTriple(props.anchor) || this.default3DAnchor,
+    altitude: options.altitude ?? props.altitude ?? this.default3DAltitude,
+    altitudeMode: options.altitudeMode || props.altitudeMode || this.default3DAltitudeMode,
+    rotation: options.rotation || props.rotation || [0, 0, 0],
+    modelUrl: options.modelUrl || props.modelUrl,
+    minZoom: options.minZoom ?? props.minZoom ?? -Infinity,
+    maxZoom: options.maxZoom ?? props.maxZoom ?? Infinity,
+
+    // ===== ДОБАВИТЬ ЭТИ ПОЛЯ =====
+    titlePlacement: options.titlePlacement || props.titlePlacement || 'top',
+    titleAlign: options.titleAlign || props.titleAlign || undefined,
+    titleOffset: options.titleOffset || this._parsePair(props.titleOffset) || undefined,
+    titleStyle: options.titleStyle || props.titleStyle || {},
+    // ============================
+
+    titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
+    titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+
+    onHover: options.onHover,
+    onClick: options.onClick,
+    color: options.color || props.color,
+    clusterable: options.clusterable !== undefined ? options.clusterable : false
+};
 
             const marker3D = new Marker3D(marker3DOptions);
             this.add(marker3D);

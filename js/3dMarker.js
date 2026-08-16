@@ -40,8 +40,9 @@ export class Marker3D {
     /** @private */ static _hoveredMarker = null;
     /** @private */ static _pressedMarker = null;
     /** @private */ static _pressStart = null;
-    /** @private */ static _raycaster = new THREE.Raycaster();
-    /** @private */ static _mapEventHandlers = new WeakMap();
+    static _raycaster = new THREE.Raycaster();
+static _mapEventHandlers = new WeakMap();
+static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
     /**
      * @param {Object} options - Настройки 3D-маркера.
@@ -345,27 +346,29 @@ export class Marker3D {
      * @param {Object} map - Карта.
      * @private
      */
-    _onPointerMove(e, map) {
-        const mouse = this._getNDC(e, map);
-        const marker = this._getMarkerUnderPointer(mouse, map);
-        if (marker !== Marker3D._hoveredMarker) {
-            if (Marker3D._hoveredMarker) {
-                if (Marker3D._hoveredMarker._onHover) {
-                    Marker3D._hoveredMarker._onHover(false);
-                } else {
-                    Marker3D._hoveredMarker.hideTooltip();
-                }
+   _onPointerMove(e, map) {
+    if (Marker3D._isMobile) return; // на мобильных не обрабатываем движение пальца как hover
+
+    const mouse = this._getNDC(e, map);
+    const marker = this._getMarkerUnderPointer(mouse, map);
+    if (marker !== Marker3D._hoveredMarker) {
+        if (Marker3D._hoveredMarker) {
+            if (Marker3D._hoveredMarker._onHover) {
+                Marker3D._hoveredMarker._onHover(false);
+            } else {
+                Marker3D._hoveredMarker.hideTooltip();
             }
-            if (marker) {
-                if (marker._onHover) {
-                    marker._onHover(true);
-                } else {
-                    marker.showTooltip();
-                }
-            }
-            Marker3D._hoveredMarker = marker;
         }
+        if (marker) {
+            if (marker._onHover) {
+                marker._onHover(true);
+            } else {
+                marker.showTooltip();
+            }
+        }
+        Marker3D._hoveredMarker = marker;
     }
+}
 
     /**
      * Обработчик pointerdown: запоминает маркер и координаты для клика.
@@ -373,17 +376,12 @@ export class Marker3D {
      * @param {Object} map - Карта.
      * @private
      */
-    _onPointerDown(e, map) {
-        const mouse = this._getNDC(e, map);
-        const marker = this._getMarkerUnderPointer(mouse, map);
-        if (marker) {
-            Marker3D._pressedMarker = marker;
-            Marker3D._pressStart = { x: e.clientX, y: e.clientY };
-        } else {
-            Marker3D._pressedMarker = null;
-            Marker3D._pressStart = null;
-        }
-    }
+   _onPointerDown(e, map) {
+    const mouse = this._getNDC(e, map);
+    const marker = this._getMarkerUnderPointer(mouse, map);
+    Marker3D._pressedMarker = marker; // может быть null
+    Marker3D._pressStart = { x: e.clientX, y: e.clientY };
+}
 
     /**
      * Обработчик pointerup: если было короткое нажатие без перемещения, вызывает onClick.
@@ -391,23 +389,61 @@ export class Marker3D {
      * @param {Object} map - Карта.
      * @private
      */
-    _onPointerUp(e, map) {
-        const pressed = Marker3D._pressedMarker;
-        const start = Marker3D._pressStart;
-        Marker3D._pressedMarker = null;
-        Marker3D._pressStart = null;
-        if (!pressed || !start) return;
+  _onPointerUp(e, map) {
+    const pressed = Marker3D._pressedMarker;
+    const start = Marker3D._pressStart;
+    Marker3D._pressedMarker = null;
+    Marker3D._pressStart = null;
+    if (!start) return;
 
-        const dx = e.clientX - start.x;
-        const dy = e.clientY - start.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > 5) return; // клик не засчитывается, если было перемещение
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 5) return; // клик не засчитывается, если было перемещение
 
-        if (pressed._onClick) {
-            pressed._onClick(e, pressed);
+    // Эмуляция onHover как клика на мобильных устройствах
+    if (Marker3D._isMobile) {
+        if (!pressed) {
+            // Тап по пустому месту — скрываем текущий тултип/ховер
+            if (Marker3D._hoveredMarker) {
+                if (Marker3D._hoveredMarker._onHover) {
+                    Marker3D._hoveredMarker._onHover(false);
+                } else {
+                    Marker3D._hoveredMarker.hideTooltip();
+                }
+                Marker3D._hoveredMarker = null;
+            }
+            return;
         }
-        // Если нет обработчика, можно выполнить действие по умолчанию (например, переместить камеру)
+
+        // Если у маркера нет onClick, но есть onHover или tooltip, показываем как при клике
+        if (!pressed._onClick && (pressed._onHover || pressed._tooltipText)) {
+            // Скрываем предыдущий hovered маркер
+            if (Marker3D._hoveredMarker && Marker3D._hoveredMarker !== pressed) {
+                if (Marker3D._hoveredMarker._onHover) {
+                    Marker3D._hoveredMarker._onHover(false);
+                } else {
+                    Marker3D._hoveredMarker.hideTooltip();
+                }
+            }
+            // Показываем текущий
+            if (Marker3D._hoveredMarker !== pressed) {
+                if (pressed._onHover) {
+                    pressed._onHover(true);
+                } else {
+                    pressed.showTooltip();
+                }
+                Marker3D._hoveredMarker = pressed;
+            }
+            return; // не вызываем onClick
+        }
     }
+
+    // Если есть onClick, вызываем его
+    if (pressed && pressed._onClick) {
+        pressed._onClick(e, pressed);
+    }
+}
 
     /**
      * Обработчик pointerleave: сбрасывает hover.
@@ -415,16 +451,18 @@ export class Marker3D {
      * @param {Object} map - Карта.
      * @private
      */
-    _onPointerLeave(e, map) {
-        if (Marker3D._hoveredMarker) {
-            if (Marker3D._hoveredMarker._onHover) {
-                Marker3D._hoveredMarker._onHover(false);
-            } else {
-                Marker3D._hoveredMarker.hideTooltip();
-            }
-            Marker3D._hoveredMarker = null;
+   _onPointerLeave(e, map) {
+    if (Marker3D._isMobile) return; // на мобильных тултип скрывается только по тапу на пустое место или другой маркер
+
+    if (Marker3D._hoveredMarker) {
+        if (Marker3D._hoveredMarker._onHover) {
+            Marker3D._hoveredMarker._onHover(false);
+        } else {
+            Marker3D._hoveredMarker.hideTooltip();
         }
+        Marker3D._hoveredMarker = null;
     }
+}
 
     /**
      * Получение DOM-панелей маркера (аналогично Marker._getPanes).

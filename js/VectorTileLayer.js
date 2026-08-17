@@ -766,7 +766,7 @@ export class VectorTileLayer {
 
         this._lastCanvasSize = { width: 0, height: 0 };
 
-        const rawScripts = options.workerScripts || ['https://4gis.art/krb/v5/js_TP/tpb.js', 'https://4gis.art/krb/v5/js_TP/earcut.js'];
+        const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
         this._workerScriptUrls = rawScripts.map(s => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
             try {

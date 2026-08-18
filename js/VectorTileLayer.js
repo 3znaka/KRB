@@ -511,18 +511,14 @@ function extrudeBuilding(rings, height, minHeight = 0, eps) {
     };
 }
 
-function createLinePositions(rings, closeRings = false) {
+function createLinePositions(rings) {
     const pts = [];
     for (const ring of rings) {
         if (!ring || ring.length < 2) continue;
-        // Количество сегментов: если closeRings, то добавляем замыкающий сегмент
-        const segments = closeRings ? ring.length : ring.length - 1;
-        for (let i = 0; i < segments; i++) {
-            const p0 = ring[i];
-            const p1 = ring[(i + 1) % ring.length];
-            pts.push(p0.x, 0, p0.z, p1.x, 0, p1.z);
-        }
+        for (const pt of ring) pts.push(pt.x, 0, pt.z);
+        pts.push(NaN, NaN, NaN);
     }
+    while (pts.length > 0 && isNaN(pts[pts.length - 1])) pts.pop();
     return pts.length >= 6 ? new Float32Array(pts) : null;
 }
 
@@ -739,7 +735,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     }
 
     for (const [key, strokeGroup] of strokesMap) {
-        const positions = createLinePositions(strokeGroup.map(s => s.ring), true);
+        const positions = createLinePositions(strokeGroup.map(s => s.ring));
         if (!positions) continue;
         const parts = key.split(':');
         const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;

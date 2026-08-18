@@ -19,6 +19,7 @@ import { Layer } from './Layers.js';
 
 /**
  * Вычисляет минимальное расстояние от точки до отрезка.
+ *
  * @param {THREE.Vector3} point - Точка.
  * @param {THREE.Vector3} a - Начало отрезка.
  * @param {THREE.Vector3} b - Конец отрезка.
@@ -43,15 +44,60 @@ function pointToSegmentDistance(point, a, b) {
  * ограничения по зуму и текстовую подпись.
  *
  * @example
- * const line = new Polyline({
- *   positions: [[30.5, 50.4], [31.0, 50.5]],
- *   color: '#ff0000',
- *   width: 3
- * });
- * line.addTo(map);
+ * // Предполагается, что переменная map уже содержит экземпляр карты.
+ * try {
+ *   const line = new Polyline({
+ *     positions: [[30.5, 50.4], [31.0, 50.5]],
+ *     color: '#ff0000',
+ *     opacity: 0.8,
+ *     width: 4,
+ *     altitudeMode: 'absolute',
+ *     altitudeOffset: 50,
+ *     minZoom: 5,
+ *     maxZoom: 18,
+ *     depthTest: true,
+ *     depthWrite: true,
+ *     heightUpdateInterval: 1000,
+ *     title: 'Моя линия',
+ *     titleOffset: [10, -5],
+ *     titleAlign: 'left',
+ *     titleStyle: { fontFamily: 'Arial', color: '#000', fontSize: '14px', fontWeight: 'bold' },
+ *     titleMinZoom: 6,
+ *     titleMaxZoom: 17,
+ *     titlePlacement: 'along',
+ *     titleVerticalAlign: 'middle',
+ *     titleAllowOverflow: true,
+ *     titlePriority: 10
+ *   });
+ *
+ *   line.addTo(map);
+ *
+ *   console.log(line.getText());
+ *   console.log(line.getTextStyle());
+ *   console.log(line.getTextZoomBounds());
+ *   console.log(line.getLabelType());
+ *   console.log(line.isVisible());
+ *   console.log(line.getVisibleInterval());
+ *   console.log(line.getAllowOverflow());
+ *   console.log(line.getPriority());
+ *   console.log(line.getScreenPositionAt(0.5));
+ *   console.log(line.getScreenAngleAt(0.5));
+ *   console.log(line.getLabelParameter());
+ *   line.setLabelParameter(0.7);
+ *   console.log(line.getPlacement());
+ *   console.log(line.getTitleAlign());
+ *   console.log(line.getTitleVerticalAlign());
+ *   console.log(line.getTitleOffset());
+ *
+ *   line.remove();
+ * } catch (error) {
+ *   console.error('Ошибка:', error.message);
+ * }
  */
 export class Polyline {
     /**
+     * Создаёт экземпляр полилинии с заданными настройками.
+     *
      * @param {Object} options - Настройки полилинии.
      * @param {[number, number][]} options.positions - Массив точек [долгота, широта] (минимум 2).
      * @param {string} [options.color='#3388ff'] - Цвет линии (CSS).
@@ -74,6 +120,7 @@ export class Polyline {
      * @param {string} [options.titleVerticalAlign='center'] - Вертикальное выравнивание подписи.
      * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
+     * @throws {Error} Если options.positions отсутствует или содержит менее 2 точек.
      */
     constructor(options = {}) {
         if (!options.positions?.length || options.positions.length < 2) {
@@ -272,6 +319,7 @@ export class Polyline {
 
     /**
      * Обновляет кэшированные высоты для всех вершин линии.
+     *
      * @private
      */
     _updateHeights() {
@@ -297,6 +345,7 @@ export class Polyline {
 
     /**
      * Передаёт позиции вершин в LineGeometry.
+     *
      * @private
      */
     _applyPositions() {
@@ -317,6 +366,7 @@ export class Polyline {
     /**
      * Рассчитывает данные, необходимые для позиционирования подписи:
      * 3D-точки линии, длины сегментов, общую длину, видимый интервал на экране.
+     *
      * @private
      */
     _computeScreenData() {
@@ -417,10 +467,18 @@ export class Polyline {
      *  Интерфейс для TextManager
      * ================================================================= */
 
-    /** @returns {string} Текст подписи */
+    /**
+     * Возвращает текст подписи.
+     *
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
 
-    /** @returns {Object} Объект CSS-стилей подписи */
+    /**
+     * Возвращает объект CSS-стилей подписи.
+     *
+     * @returns {Object} Объект CSS-стилей подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -430,28 +488,53 @@ export class Polyline {
         }, this._titleStyle);
     }
 
-    /** @returns {{min: number, max: number}} Границы зума для отображения подписи */
+    /**
+     * Возвращает границы зума для отображения подписи.
+     *
+     * @returns {{min: number, max: number}} Границы зума для отображения подписи.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
 
-    /** @returns {string} Тип подписи ('line') */
+    /**
+     * Возвращает тип подписи.
+     *
+     * @returns {string} Тип подписи ('line').
+     */
     getLabelType() { return 'line'; }
 
-    /** @returns {boolean} Видима ли линия в текущем кадре */
+    /**
+     * Проверяет, видима ли линия в текущем кадре.
+     *
+     * @returns {boolean} Видима ли линия в текущем кадре.
+     */
     isVisible() { return this._line?.visible ?? false; }
 
-    /** @returns {{min: number, max: number}|null} Видимый интервал параметра t */
+    /**
+     * Возвращает видимый интервал параметра t.
+     *
+     * @returns {{min: number, max: number}|null} Видимый интервал параметра t.
+     */
     getVisibleInterval() {
         return this._screenData.valid ? this._screenData.visibleInterval : null;
     }
 
-    /** @returns {boolean} Разрешён ли выход подписи за границы экрана */
+    /**
+     * Возвращает, разрешён ли выход подписи за границы экрана.
+     *
+     * @returns {boolean} Разрешён ли выход подписи за границы экрана.
+     */
     getAllowOverflow() { return this._titleAllowOverflow; }
 
-    /** @returns {number} Приоритет подписи */
+    /**
+     * Возвращает приоритет подписи.
+     *
+     * @returns {number} Приоритет подписи.
+     */
     getPriority() { return this._titlePriority; }
 
     /**
      * Возвращает экранные координаты для заданного параметра t (0..1).
+     *
      * @param {number} t - Параметр вдоль линии.
      * @returns {{x: number, y: number}|null} Позиция в пикселях или null, если не видна.
      */
@@ -485,6 +568,7 @@ export class Polyline {
     /**
      * Возвращает угол (в градусах) поворота подписи в заданной точке t.
      * Используется, если размещение подписи 'along'.
+     *
      * @param {number} t - Параметр вдоль линии.
      * @returns {number} Угол в градусах.
      */
@@ -519,7 +603,8 @@ export class Polyline {
 
     /**
      * Возвращает индекс сегмента, которому принадлежит параметр t.
-     * @param {number} t
+     *
+     * @param {number} t - Параметр вдоль линии.
      * @returns {number} Индекс сегмента.
      * @private
      */
@@ -535,11 +620,16 @@ export class Polyline {
         return data.segLengths.length - 1;
     }
 
-    /** @returns {number} Текущий параметр t подписи. */
+    /**
+     * Возвращает текущий параметр t подписи.
+     *
+     * @returns {number} Текущий параметр t подписи.
+     */
     getLabelParameter() { return this._labelT; }
 
     /**
      * Устанавливает параметр t подписи, ограничивая его видимым интервалом.
+     *
      * @param {number} t - Новое значение.
      */
     setLabelParameter(t) {
@@ -551,15 +641,31 @@ export class Polyline {
         }
     }
 
-    /** @returns {string} Тип размещения подписи. */
+    /**
+     * Возвращает тип размещения подписи.
+     *
+     * @returns {string} Тип размещения подписи.
+     */
     getPlacement() { return this._titlePlacement; }
 
-    /** @returns {string} Горизонтальное выравнивание. */
+    /**
+     * Возвращает горизонтальное выравнивание.
+     *
+     * @returns {string} Горизонтальное выравнивание.
+     */
     getTitleAlign() { return this._titleAlign; }
 
-    /** @returns {string} Вертикальное выравнивание. */
+    /**
+     * Возвращает вертикальное выравнивание.
+     *
+     * @returns {string} Вертикальное выравнивание.
+     */
     getTitleVerticalAlign() { return this._titleVerticalAlign || 'center'; }
 
-    /** @returns {[number, number]} Смещение подписи. */
+    /**
+     * Возвращает смещение подписи.
+     *
+     * @returns {[number, number]} Смещение подписи.
+     */
     getTitleOffset() { return this._titleOffset; }
 }

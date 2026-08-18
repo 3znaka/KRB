@@ -14,16 +14,36 @@ import {
 
 /**
  * Базовый слой, управляющий коллекцией объектов карты.
- * Объекты могут быть маркерами, линиями, полигонами и т.д.
+ * Объекты могут быть маркерами, линиями, полигонами и т. д.
  * Слой автоматически вызывает метод `_update` каждого объекта на каждом кадре,
  * если он определён.
  *
- * @class
+ * @example
+ * const layer = new Layer();
+ * const map = {
+ *   _dynamicLayers: [],
+ *   targetElement: document.createElement('div'),
+ *   textManager: {
+ *     addLabel: () => {},
+ *     removeLabel: () => {}
+ *   }
+ * };
+ * layer.addTo(map);
+ * const marker = new Marker({
+ *   position: [37.662039, 55.763493],
+ *   tooltip: 'МИИГАиК'
+ * });
+ * layer.add(marker);
+ * layer.setVisible(false);
+ * layer.setVisible(true);
+ * layer.remove(marker);
+ * layer.removeFromMap();
  */
+
 export class Layer {
     constructor() {
         /** @private */ this._objects = [];
-        /** @type {boolean} Видимость слоя */
+        /** @type {boolean} Видимость слоя. */
         this.visible = true;
         /** @private */ this._map = null;
     }
@@ -65,7 +85,7 @@ export class Layer {
      * Добавляет один или несколько объектов на слой.
      * Объекты будут автоматически прикреплены к карте.
      *
-     * @param {...Object} objects - Объекты карты (маркеры и т.п.).
+     * @param {...Object} objects - Объекты карты (маркеры и т. п.).
      * @returns {Layer} this
      */
     add(...objects) {
@@ -95,6 +115,7 @@ export class Layer {
 
     /**
      * Удаляет ссылку на объект из внутреннего массива (вызывается при удалении объекта).
+     *
      * @param {Object} obj - Удаляемый объект.
      * @private
      */
@@ -116,6 +137,7 @@ export class Layer {
 
     /**
      * Вызывается картой на каждом кадре для обновления всех объектов слоя.
+     *
      * @param {Object} map - Экземпляр карты.
      * @private
      */
@@ -130,23 +152,56 @@ export class Layer {
 /**
  * Слой с поддержкой кластеризации маркеров.
  * Группирует близко расположенные маркеры в кластеры, отображаемые
- * в виде специальных DOM-элементов.
+ * в виде специальных DOM-элементов. Наследует {@link Layer}.
  *
- * @extends Layer
+ * @example
+ * const layer = new ClusterLayer({
+ *     clusterDistance: 60,
+ *     clusterMinSize: 3,
+ *     clusterMaxZoom: 16,
+ *     clusterIconUrl: 'cluster.png',
+ *     clusterIconSize: [50, 50],
+ *     clusterAnchor: [0.5, 0.5],
+ *     clusterTextStyle: { color: '#ffffff', font: 'bold 14px sans-serif', textShadow: '1px 1px 2px black' },
+ *     clusterStyleFunction: ({ count, markers }) => ({ html: `<div>${count}</div>` }),
+ *     updateThrottle: 30,
+ *     clusterZoomOnClick: 2,
+ * });
+ * const map = { _dynamicLayers: [], _panes: { markerPane: { addEventListener() {}, removeEventListener() {} } } };
+ * layer.addTo(map);
+ * const marker = {
+ *     _map: null,
+ *     _clusterable: true,
+ *     _minZoom: 0,
+ *     _maxZoom: 22,
+ *     _lon: 0,
+ *     _lat: 0,
+ *     _altitudeMode: 'absolute',
+ *     _element: document.createElement('div'),
+ *     _attach(map, layer) { this._map = map; this._layer = layer; },
+ *     remove() { this._layer._removeRef(this); this._map = null; },
+ *     _update(map) {},
+ * };
+ * layer.add(marker);
+ * layer.setVisible(true);
+ * layer.remove(marker);
+ * layer.removeFromMap();
  */
 export class ClusterLayer extends Layer {
     /**
+     * Создаёт слой кластеризации маркеров.
+     *
      * @param {Object} [options] - Настройки кластеризации.
      * @param {number} [options.clusterDistance=50] - Максимальное расстояние в пикселях между маркерами для объединения.
      * @param {number} [options.clusterMinSize=2] - Минимальное количество маркеров для формирования кластера.
      * @param {number} [options.clusterMaxZoom=18] - Уровень зума, выше которого кластеризация отключается.
      * @param {string} [options.clusterIconUrl] - URL изображения для иконки кластера.
-     * @param {[number, number]} [options.clusterIconSize=[40,40]] - Размер иконки кластера в пикселях [ширина, высота].
-     * @param {[number, number]} [options.clusterAnchor=[0.5,0.5]] - Якорь иконки (доли от размера).
+     * @param {Array.<number>} [options.clusterIconSize=[40, 40]] - Размер иконки кластера в пикселях [ширина, высота].
+     * @param {Array.<number>} [options.clusterAnchor=[0.5, 0.5]] - Якорь иконки (доли от размера).
      * @param {Object} [options.clusterTextStyle] - CSS-стили для текста количества внутри кластера.
      * @param {Function} [options.clusterStyleFunction] - Функция кастомизации внешнего вида кластера.
-     *        Принимает объект `{ count, markers }` и может вернуть `{ iconUrl?, iconSize?, anchor?, html? }`.
-     * @param {number} [options.updateThrottle=50] - Минимальный интервал между пересчётами кластеров (мс).
+     *     Принимает объект `{ count, markers }` и может вернуть `{ iconUrl?, iconSize?, anchor?, html? }`.
+     * @param {number} [options.updateThrottle=0] - Минимальный интервал между пересчётами кластеров (мс).
      * @param {number} [options.clusterZoomOnClick=1.5] - Величина приближения при клике на кластер.
      */
     constructor(options = {}) {
@@ -172,6 +227,7 @@ export class ClusterLayer extends Layer {
 
     /**
      * Добавляет слой на карту и инициализирует обработчик кликов по кластерам.
+     *
      * @param {Object} map - Экземпляр карты.
      * @returns {ClusterLayer} this
      */
@@ -210,6 +266,7 @@ export class ClusterLayer extends Layer {
 
     /**
      * Удаляет все DOM-элементы кластеров и сбрасывает состояние.
+     *
      * @private
      */
     _clearClusters() {
@@ -224,6 +281,7 @@ export class ClusterLayer extends Layer {
 
     /**
      * Обновляет состояние кластеров на каждом кадре с учётом троттлинга.
+     *
      * @param {Object} map - Экземпляр карты.
      * @private
      */

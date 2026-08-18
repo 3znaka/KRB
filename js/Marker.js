@@ -12,10 +12,19 @@ import {
 } from '../js_TP/tpb.js';  
 import { Layer } from './Layers.js';
 
+/**
+ * URL иконки маркера по умолчанию.
+ *
+ * @type {string}
+ * @example
+ * const iconUrl = DEFAULT_ICON_URL;
+ * console.log(iconUrl);
+ */
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
 /**
  * Слабая карта для хранения привязки панелей к экземпляру карты.
+ *
  * @type {WeakMap<Object, {markerPane: HTMLElement, tooltipPane: HTMLElement}>}
  * @private
  */
@@ -61,16 +70,62 @@ export function _getPanes(map) {
  * кластеризацию и ограничения по зуму.
  *
  * @example
+ * // Предполагается, что map уже создан и доступен.
  * const marker = new Marker({
  *   position: [37.662039, 55.763493],
- *   tooltip: 'МИИГАиК',
- *   title: 'Университет'
+ *   iconSize: [32, 32],
+ *   anchor: [0.5, 1.0],
+ *   minZoom: 5,
+ *   maxZoom: 18,
+ *   altitudeMode: 'clampToGround',
+ *   tooltip: '<b>МИИГАиК</b>',
+ *   iconUrl: './custom-marker.png',
+ *   onHover: (hovered) => console.log('Hover:', hovered),
+ *   onClick: (event, marker) => console.log('Clicked:', marker),
+ *   title: 'Университет',
+ *   titleAlign: 'center',
+ *   titleStyle: { color: 'blue', fontSize: '14px' },
+ *   titleMinZoom: 8,
+ *   titleMaxZoom: 16,
+ *   titleOffset: [10, -10],
+ *   clusterable: true,
+ *   titleAllowOverflow: false,
+ *   titlePriority: 5
  * });
  * marker.addTo(map);
+ * console.log(marker.getText());
+ * console.log(marker.getTextStyle());
+ * console.log(marker.getTextZoomBounds());
+ * console.log(marker.getLabelType());
+ * console.log(marker.isVisible());
+ * console.log(marker.getScreenPosition());
+ * console.log(marker.getTitleAlign());
+ * console.log(marker.getTitleOffset());
+ * console.log(marker.getTitleVerticalAlign());
+ * console.log(marker.getAllowOverflow());
+ * console.log(marker.getPriority());
+ * marker.showTooltip();
+ * marker.hideTooltip();
+ * marker.remove();
+ * try {
+ *   new Marker({}); // Бросит ошибку, так как position обязателен.
+ * } catch (error) {
+ *   console.error(error.message);
+ * }
  */
 export class Marker {
-    /** @private */ static _activeMobileMarker = null;
-    /** @private */ static _idCounter = 0;
+    /**
+     * Активный мобильный маркер.
+     *
+     * @private
+     */
+    static _activeMobileMarker = null;
+    /**
+     * Счётчик идентификаторов маркеров.
+     *
+     * @private
+     */
+    static _idCounter = 0;
 
     /**
      * Создаёт новый маркер.
@@ -95,6 +150,7 @@ export class Marker {
      * @param {boolean} [options.clusterable=true] - Участвует ли маркер в кластеризации.
      * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее при конфликтах).
+     * @throws {Error} Бросает ошибку, если options.position отсутствует или имеет неверный формат.
      */
     constructor(options = {}) {
         if (!options.position || options.position.length !== 2) {
@@ -248,6 +304,7 @@ export class Marker {
     /**
      * Действие по умолчанию при клике: плавное перемещение камеры к маркеру.
      * На мобильных устройствах также показывает всплывающую подсказку.
+     *
      * @private
      */
     _defaultClickAction() {
@@ -258,12 +315,29 @@ export class Marker {
         }
     }
 
-    /** Показать всплывающую подсказку */
+    /**
+     * Показывает всплывающую подсказку.
+     */
     showTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'block'; }
-    /** Скрыть всплывающую подсказку */
+
+    /**
+     * Скрывает всплывающую подсказку.
+     */
     hideTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'none'; }
-    /** @private */ _showTooltip() { this.showTooltip(); }
-    /** @private */ _hideTooltip() { this.hideTooltip(); }
+
+    /**
+     * Внутренний метод для показа всплывающей подсказки.
+     *
+     * @private
+     */
+    _showTooltip() { this.showTooltip(); }
+
+    /**
+     * Внутренний метод для скрытия всплывающей подсказки.
+     *
+     * @private
+     */
+    _hideTooltip() { this.hideTooltip(); }
 
     /**
      * Удаляет маркер с карты: уничтожает DOM-элементы, удаляет подпись,
@@ -384,10 +458,18 @@ export class Marker {
 
     // ---------- Интерфейс для TextManager ----------
 
-    /** @returns {string} Текст подписи */
+    /**
+     * Возвращает текст подписи.
+     *
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
 
-    /** @returns {Object} Объект CSS-стилей подписи */
+    /**
+     * Возвращает объект CSS-стилей подписи.
+     *
+     * @returns {Object} Объект CSS-стилей подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -397,30 +479,66 @@ export class Marker {
         }, this._titleStyle);
     }
 
-    /** @returns {{min: number, max: number}} Границы зума для отображения подписи */
+    /**
+     * Возвращает границы зума для отображения подписи.
+     *
+     * @returns {{min: number, max: number}} Границы зума.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
 
-    /** @returns {string} Тип подписи ('point') */
+    /**
+     * Возвращает тип подписи.
+     *
+     * @returns {string} Тип подписи ('point').
+     */
     getLabelType() { return 'point'; }
 
-    /** @returns {boolean} Видим ли маркер в текущем кадре */
+    /**
+     * Проверяет, виден ли маркер в текущем кадре.
+     *
+     * @returns {boolean} Видимость маркера.
+     */
     isVisible() { return this._isVisible; }
 
-    /** @returns {{x: number, y: number}|null} Позиция маркера на экране в пикселях или null */
+    /**
+     * Возвращает позицию маркера на экране в пикселях или null.
+     *
+     * @returns {{x: number, y: number}|null} Позиция маркера на экране или null.
+     */
     getScreenPosition() { return this._isVisible ? this._lastScreenPos : null; }
 
-    /** @returns {string} Выравнивание подписи */
+    /**
+     * Возвращает выравнивание подписи.
+     *
+     * @returns {string} Выравнивание подписи.
+     */
     getTitleAlign() { return this._titleAlign; }
 
-    /** @returns {[number, number]} Смещение подписи в пикселях */
+    /**
+     * Возвращает смещение подписи в пикселях.
+     *
+     * @returns {[number, number]} Смещение подписи.
+     */
     getTitleOffset() { return this._titleOffset; }
 
-    /** @returns {string} Вертикальное выравнивание (всегда 'center') */
+    /**
+     * Возвращает вертикальное выравнивание подписи.
+     *
+     * @returns {string} Вертикальное выравнивание (всегда 'center').
+     */
     getTitleVerticalAlign() { return 'center'; }
 
-    /** @returns {boolean} Разрешён ли выход подписи за границы */
+    /**
+     * Проверяет, разрешён ли выход подписи за границы экрана.
+     *
+     * @returns {boolean} Разрешение на выход за границы.
+     */
     getAllowOverflow() { return this._titleAllowOverflow; }
 
-    /** @returns {number} Приоритет подписи */
+    /**
+     * Возвращает приоритет подписи.
+     *
+     * @returns {number} Приоритет подписи.
+     */
     getPriority() { return this._titlePriority; }
 }

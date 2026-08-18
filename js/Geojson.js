@@ -16,8 +16,96 @@ import { proj } from './Utils.js';
  * - фильтрацию объектов (feature) перед добавлением на карту;
  * - кастомную стилизацию через коллбэки: pointToOptions, lineToOptions, polygonToOptions;
  * - добавление 3D-маркеров для точечных объектов (см. point3DToOptions и свойства 3d);
- * - вызов onEachFeature(feature, object) после создания каждого графического объекта;
- * - прямое чтение свойств из properties: title, tooltip, icon, stroke, fill, opacity и других.
+ * - вызов onEachFeature(feature, object) после создания каждого графического объекта.
+ *
+ * @param {Object} [options={}] - Объект с настройками слоя.
+ * @param {string} [options.url] - URL GeoJSON-файла для загрузки данных.
+ * @param {Object} [options.data] - Готовый GeoJSON-объект (FeatureCollection, Feature или отдельная геометрия).
+ * @param {Function} [options.pointToOptions] - Функция для создания опций маркера.
+ *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker}.
+ * @param {Function} [options.point3DToOptions] - Функция для создания опций 3D-маркера.
+ *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker3D}.
+ * @param {Function} [options.lineToOptions] - Функция для создания опций линии.
+ *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polyline}.
+ * @param {Function} [options.polygonToOptions] - Функция для создания опций полигона.
+ *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polygon}.
+ * @param {Function} [options.filter] - Функция фильтрации фич. Принимает feature, должна вернуть true, чтобы фича была добавлена.
+ * @param {Function} [options.onEachFeature] - Функция, вызываемая после создания каждого графического объекта.
+ *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline или Polygon.
+ *
+ * @param {string} [options.defaultIconUrl='marker.png'] - URL иконки по умолчанию для маркеров.
+ * @param {number[]} [options.defaultIconSize=[16,16]] - Размер иконки по умолчанию [ширина, высота].
+ * @param {number[]} [options.defaultAnchor=[0.5,1.0]] - Якорь иконки по умолчанию [x, y] в долях от размеров иконки.
+ *
+ * @param {string} [options.default3DPrimitiveType='box'] - Тип примитива 3D-маркера по умолчанию ('box', 'sphere', 'cylinder', 'cone').
+ * @param {number[]} [options.default3DSize=[100,100,100]] - Размеры 3D-маркера по умолчанию [width, height, depth].
+ * @param {number[]} [options.default3DAnchor=[0.5,0,0.5]] - Anchor point 3D-маркера по умолчанию.
+ * @param {number} [options.default3DAltitude=0] - Высота 3D-маркера по умолчанию.
+ * @param {string} [options.default3DAltitudeMode='clampToGround'] - Режим высоты 3D-маркера по умолчанию.
+ *
+ * @param {string} [options.defaultLineColor='#3388ff'] - Цвет линии по умолчанию.
+ * @param {number} [options.defaultLineWidth=2] - Толщина линии по умолчанию.
+ * @param {number} [options.defaultLineOpacity=1] - Прозрачность линии по умолчанию (0..1).
+ * @param {'ground'|'clampToGround'} [options.defaultLineAltitudeMode='ground'] - Режим высоты линии по умолчанию.
+ * @param {number} [options.defaultLineAltitudeOffset=10] - Смещение высоты линии по умолчанию.
+ * @param {boolean} [options.defaultLineDepthTest=false] - Включение теста глубины для линии по умолчанию.
+ * @param {boolean} [options.defaultLineDepthWrite=false] - Запись глубины для линии по умолчанию.
+ * @param {number} [options.defaultLineMinZoom=-Infinity] - Минимальный zoom видимости линии по умолчанию.
+ * @param {number} [options.defaultLineMaxZoom=Infinity] - Максимальный zoom видимости линии по умолчанию.
+ *
+ * @param {string} [options.defaultFillColor='#3388ff'] - Цвет заливки полигона по умолчанию.
+ * @param {number} [options.defaultFillOpacity=0.5] - Прозрачность заливки полигона по умолчанию.
+ * @param {string} [options.defaultStrokeColor='#000000'] - Цвет обводки полигона по умолчанию.
+ * @param {number} [options.defaultStrokeWidth=2] - Толщина обводки полигона по умолчанию.
+ * @param {number} [options.defaultStrokeOpacity=1] - Прозрачность обводки полигона по умолчанию.
+ * @param {'ground'|'clampToGround'} [options.defaultPolygonAltitudeMode='ground'] - Режим высоты полигона по умолчанию.
+ * @param {number} [options.defaultPolygonAltitudeOffset=10] - Смещение высоты полигона по умолчанию.
+ * @param {boolean} [options.defaultPolygonDepthTest=false] - Включение теста глубины для полигона по умолчанию.
+ * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
+ * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
+ * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
+ *
+ * @example
+ * const layer = new GeoJSONLayer({
+ *     url: 'data.geojson',
+ *     pointToOptions: (feature, props) => ({ title: props.name, iconUrl: props.icon }),
+ *     point3DToOptions: (feature, props) => ({ primitiveType: props.primitiveType, altitude: props.altitude }),
+ *     lineToOptions: (feature, props) => ({ color: props.stroke }),
+ *     polygonToOptions: (feature, props) => ({ fillColor: props.fill }),
+ *     filter: (feature) => feature.properties.visible !== false,
+ *     onEachFeature: (feature, object) => console.log(feature, object),
+ *     defaultIconUrl: 'custom-marker.png',
+ *     defaultIconSize: [24, 24],
+ *     defaultAnchor: [0.5, 1],
+ *     default3DPrimitiveType: 'cylinder',
+ *     default3DSize: [50, 50, 50],
+ *     default3DAnchor: [0.5, 0, 0.5],
+ *     default3DAltitude: 100,
+ *     default3DAltitudeMode: 'relativeToGround',
+ *     defaultLineColor: '#ff0000',
+ *     defaultLineWidth: 4,
+ *     defaultLineOpacity: 0.8,
+ *     defaultLineAltitudeMode: 'clampToGround',
+ *     defaultLineAltitudeOffset: 20,
+ *     defaultLineDepthTest: true,
+ *     defaultLineDepthWrite: true,
+ *     defaultLineMinZoom: 10,
+ *     defaultLineMaxZoom: 18,
+ *     defaultFillColor: '#00ff00',
+ *     defaultFillOpacity: 0.7,
+ *     defaultStrokeColor: '#000000',
+ *     defaultStrokeWidth: 3,
+ *     defaultStrokeOpacity: 0.9,
+ *     defaultPolygonAltitudeMode: 'clampToGround',
+ *     defaultPolygonAltitudeOffset: 15,
+ *     defaultPolygonDepthTest: true,
+ *     defaultPolygonDepthWrite: true,
+ *     defaultPolygonMinZoom: 10,
+ *     defaultPolygonMaxZoom: 18
+ * });
+ * const map = new Map();
+ * layer.addTo(map);
+ * layer.reload();
  */
 export class GeoJSONLayer extends Layer {
     /**
@@ -125,6 +213,7 @@ export class GeoJSONLayer extends Layer {
 
     /**
      * Добавляет слой на карту и запускает загрузку данных, если они ещё не были загружены.
+     *
      * @param {Map} map - Экземпляр карты.
      * @returns {this} Текущий экземпляр слоя для цепочек вызовов.
      */
@@ -139,6 +228,8 @@ export class GeoJSONLayer extends Layer {
     /**
      * Полностью перезагружает данные слоя: удаляет все созданные объекты, сбрасывает флаг загрузки
      * и повторно запускает процесс загрузки, если слой прикреплён к карте.
+     *
+     * @returns {void} Метод ничего не возвращает.
      */
     reload() {
         for (const obj of [...this._objects]) {
@@ -153,6 +244,7 @@ export class GeoJSONLayer extends Layer {
 
     /**
      * Загружает GeoJSON-данные: из URL или готового объекта, парсит и создаёт графические объекты.
+     *
      * @returns {Promise<void>} Промис без значения.
      * @private
      */
@@ -180,6 +272,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Разбирает корневой объект GeoJSON и направляет фичи на дальнейшую обработку.
      * Поддерживаются типы: FeatureCollection, Feature, Point, LineString, MultiLineString, Polygon, MultiPolygon.
+     *
      * @param {Object} geojson - Корневой объект GeoJSON.
      * @private
      */
@@ -217,6 +310,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Обрабатывает отдельную фичу: применяет фильтр и в зависимости от типа геометрии
      * вызывает соответствующий метод создания объектов.
+     *
      * @param {Object} feature - Объект GeoJSON Feature.
      * @private
      */
@@ -246,6 +340,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Создаёт маркер (обычный или 3D) на основе точечной фичи.
      * Решение о типе маркера принимается по коллбэку point3DToOptions или по свойству `3d: true` / `type: '3d'` в properties.
+     *
      * @param {Object} feature - GeoJSON-фича с геометрией типа Point.
      * @private
      */
@@ -340,6 +435,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Возвращает умолчательные опции для точечного объекта, полученные из свойств фичи.
      * Используется, когда не задан коллбэк pointToOptions.
+     *
      * @param {Object} feature - GeoJSON-фича.
      * @param {Object} props - Свойства (properties) фичи.
      * @returns {Object} Объект с опциями маркера.
@@ -360,6 +456,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Возвращает умолчательные опции для 3D-точечного объекта, полученные из свойств фичи.
      * Используется, когда не задан коллбэк point3DToOptions, но точка определена как 3D.
+     *
      * @param {Object} feature - GeoJSON-фича.
      * @param {Object} props - Свойства (properties) фичи.
      * @returns {Object} Объект с опциями Marker3D.
@@ -385,6 +482,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Создаёт линейные объекты (Polyline) на основе фичи с геометрией LineString или MultiLineString.
      * Для MultiLineString создаётся отдельная линия на каждую группу координат.
+     *
      * @param {Object} feature - GeoJSON-фича с геометрией LineString или MultiLineString.
      * @private
      */
@@ -428,6 +526,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Возвращает умолчательные опции для линейного объекта, полученные из свойств фичи.
      * Используется, когда не задан коллбэк lineToOptions.
+     *
      * @param {Object} feature - GeoJSON-фича.
      * @param {Object} props - Свойства (properties) фичи.
      * @returns {Object} Объект с опциями полилинии.
@@ -450,6 +549,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Создаёт полигональные объекты (Polygon) на основе фичи с геометрией Polygon или MultiPolygon.
      * Для MultiPolygon создаётся отдельный полигон на каждый набор колец.
+     *
      * @param {Object} feature - GeoJSON-фича с геометрией Polygon или MultiPolygon.
      * @private
      */
@@ -492,6 +592,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Возвращает умолчательные опции для полигонального объекта, полученные из свойств фичи.
      * Используется, когда не задан коллбэк polygonToOptions.
+     *
      * @param {Object} feature - GeoJSON-фича.
      * @param {Object} props - Свойства (properties) фичи.
      * @returns {Object} Объект с опциями полигона.
@@ -515,6 +616,7 @@ export class GeoJSONLayer extends Layer {
 
     /**
      * Преобразует сырое значение размера (массив или строка с запятой) в массив двух чисел.
+     *
      * @param {number[]|string} raw - Исходное значение.
      * @returns {number[]|null} Массив [ширина, высота] или null, если преобразовать не удалось.
      * @private
@@ -532,6 +634,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Преобразует сырое значение пары чисел (массив или строка с запятой) в массив двух чисел.
      * Используется, например, для смещения подписи.
+     *
      * @param {number[]|string} raw - Исходное значение.
      * @returns {number[]|null} Массив [x, y] или null.
      * @private
@@ -548,6 +651,7 @@ export class GeoJSONLayer extends Layer {
 
     /**
      * Преобразует сырое значение якоря (массив или строка с запятой) в массив двух чисел.
+     *
      * @param {number[]|string} raw - Исходное значение.
      * @returns {number[]|null} Массив [x, y] или null.
      * @private
@@ -565,6 +669,7 @@ export class GeoJSONLayer extends Layer {
     /**
      * Преобразует сырое значение тройки чисел (массив или строка с запятой) в массив трёх чисел.
      * Используется для anchor и rotation 3D-маркеров.
+     *
      * @param {number[]|string} raw - Исходное значение.
      * @returns {number[]|null} Массив [x, y, z] или null.
      * @private

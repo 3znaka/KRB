@@ -24,12 +24,17 @@ import { Layer } from './Layers.js';
  *   rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *   fillColor: '#ff0000',
  *   fillOpacity: 0.6,
+ *   strokeColor: '#000000',
+ *   strokeWidth: 1,
  *   offsetY: 0.2
  * });
  * poly.addTo(map);
+ * poly.remove();
  */
 export class SurfacePolygon {
     /**
+     * Создаёт экземпляр полигона, натянутого на рельеф.
+     *
      * @param {Object} options - Настройки полигона.
      * @param {Array<Array<[number,number]>>} options.rings - Массив колец.
      *        Первое кольцо – внешний контур (обязательно), остальные (опционально) – отверстия.
@@ -63,7 +68,7 @@ export class SurfacePolygon {
      * и помещает в него данный полигон.
      *
      * @param {Object} map - Экземпляр карты.
-     * @returns {SurfacePolygon} this
+     * @returns {SurfacePolygon} Текущий экземпляр полигона.
      */
     addTo(map) {
         if (this._map) this.remove();
@@ -245,6 +250,9 @@ export class SurfacePolygon {
     /**
      * Удаляет полигон с карты: отписывается от событий тайлов,
      * удаляет все созданные оверлеи и освобождает ресурсы.
+     *
+     * @example
+     * poly.remove();
      */
     remove() {
         if (this._map && this._callback) {

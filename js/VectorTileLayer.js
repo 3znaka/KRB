@@ -1,4 +1,6 @@
-/** @fileoverview Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер). */
+/**
+ * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
+ */
 
 import {
   THREE,
@@ -9,7 +11,39 @@ import {
 
 /**
  * Стили по умолчанию для различных типов объектов, сгруппированные по слоям.
- * @constant {Object}
+ *
+ * @property {Object} water - Стили водных объектов.
+ * @property {Object} waterway - Стиль водных путей.
+ * @property {Object} building - Стиль зданий.
+ * @property {Object} landcover - Стили растительного покрова.
+ * @property {Object} landuse - Стили землепользования.
+ * @property {Object} park - Стили парковых зон.
+ * @property {Object} transportation - Стили дорог.
+ * @property {Object} transportation_name - Стили подписей дорог.
+ * @property {Object} aeroway - Стили авиационных объектов.
+ * @property {Object} place - Стили населённых пунктов.
+ * @property {Object} poi - Стили точек интереса.
+ * @property {Object} mountain_peak - Стили горных вершин.
+ * @property {Object} boundary - Стиль границ.
+ * @property {Object} water_name - Стили подписей водных объектов.
+ *
+ * @example
+ * console.log(DEFAULT_STYLES.water);
+ * console.log(DEFAULT_STYLES.waterway);
+ * console.log(DEFAULT_STYLES.building);
+ * console.log(DEFAULT_STYLES.landcover);
+ * console.log(DEFAULT_STYLES.landuse);
+ * console.log(DEFAULT_STYLES.park);
+ * console.log(DEFAULT_STYLES.transportation);
+ * console.log(DEFAULT_STYLES.transportation_name);
+ * console.log(DEFAULT_STYLES.aeroway);
+ * console.log(DEFAULT_STYLES.place);
+ * console.log(DEFAULT_STYLES.poi);
+ * console.log(DEFAULT_STYLES.mountain_peak);
+ * console.log(DEFAULT_STYLES.boundary);
+ * console.log(DEFAULT_STYLES.water_name);
+ *
+ * @type {Object}
  */
 const DEFAULT_STYLES = {
     water: {
@@ -134,7 +168,39 @@ const DEFAULT_STYLES = {
 
 /**
  * Порядок отрисовки слоёв.
- * @constant {Object}
+ *
+ * @property {number} water - Порядок отрисовки водных объектов.
+ * @property {number} waterway - Порядок отрисовки водных путей.
+ * @property {number} water_name - Порядок отрисовки подписей водных объектов.
+ * @property {number} landuse - Порядок отрисовки землепользования.
+ * @property {number} landcover - Порядок отрисовки растительного покрова.
+ * @property {number} park - Порядок отрисовки парковых зон.
+ * @property {number} building - Порядок отрисовки зданий.
+ * @property {number} place - Порядок отрисовки населённых пунктов.
+ * @property {number} boundary - Порядок отрисовки границ.
+ * @property {number} aeroway - Порядок отрисовки авиационных объектов.
+ * @property {number} transportation - Порядок отрисовки дорог.
+ * @property {number} transportation_name - Порядок отрисовки подписей дорог.
+ * @property {number} poi - Порядок отрисовки точек интереса.
+ * @property {number} mountain_peak - Порядок отрисовки горных вершин.
+ *
+ * @example
+ * console.log(LAYER_RENDER_ORDER.water);
+ * console.log(LAYER_RENDER_ORDER.waterway);
+ * console.log(LAYER_RENDER_ORDER.water_name);
+ * console.log(LAYER_RENDER_ORDER.landuse);
+ * console.log(LAYER_RENDER_ORDER.landcover);
+ * console.log(LAYER_RENDER_ORDER.park);
+ * console.log(LAYER_RENDER_ORDER.building);
+ * console.log(LAYER_RENDER_ORDER.place);
+ * console.log(LAYER_RENDER_ORDER.boundary);
+ * console.log(LAYER_RENDER_ORDER.aeroway);
+ * console.log(LAYER_RENDER_ORDER.transportation);
+ * console.log(LAYER_RENDER_ORDER.transportation_name);
+ * console.log(LAYER_RENDER_ORDER.poi);
+ * console.log(LAYER_RENDER_ORDER.mountain_peak);
+ *
+ * @type {Object}
  */
 const LAYER_RENDER_ORDER = {
     water: 1,
@@ -156,6 +222,14 @@ const LAYER_RENDER_ORDER = {
 // -----------------------------------------------------------------------------
 // Генерация кода модульного воркера (с data: URL для библиотек)
 // -----------------------------------------------------------------------------
+/**
+ * Формирует исходный код модульного воркера.
+ *
+ * @param {string} tpbDataURL - Data URL библиотеки tpb.js.
+ * @param {string} earcutDataURL - Data URL библиотеки earcut.
+ * @returns {string} Исходный код воркера.
+ * @private
+ */
 function createWorkerCode(tpbDataURL, earcutDataURL) {
     return `
 // Динамический импорт библиотек из data: URL (не зависит от серверных MIME-типов)
@@ -690,6 +764,13 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
 `;
 }
 
+/**
+ * Преобразует строку в base64.
+ *
+ * @param {string} str - Исходная строка.
+ * @returns {string} Строка в кодировке base64.
+ * @private
+ */
 function _stringToBase64(str) {
     const bytes = new TextEncoder().encode(str);
     let binary = '';
@@ -702,22 +783,47 @@ function _stringToBase64(str) {
 // -----------------------------------------------------------------------------
 // Основной класс
 // -----------------------------------------------------------------------------
+/**
+ * Слой векторных тайлов с объёмными зданиями
+ *
+ * @example
+ * const layer = new VectorTileLayer({
+ *   url: 'https://example.com/tiles/{z}/{x}/{y}.pbf',
+ *   minZoom: 0,
+ *   maxZoom: 22,
+ *   maxSourceZoom: 14,
+ *   lineWidthMultiplier: 1.5,
+ *   fillOpacity: 0.8,
+ *   depthTest: true,
+ *   visibleLayers: ['water', 'building', 'transportation'],
+ *   styles: { building: { color: 0xff0000 } },
+ *   buildings3d: true,
+ *   buildings3dMinZoom: 17,
+ *   debug: true,
+ *   workerScripts: ['/tpb.js', '/earcut.js']
+ * });
+ * layer.addTo(map);
+ * layer.printDiscoveredClasses();
+ * layer.removeFromMap();
+ */
 export class VectorTileLayer {
     /**
-     * @param {Object} [options]
-     * @param {string} options.url
-     * @param {number} [options.minZoom=0]
-     * @param {number} [options.maxZoom=Infinity]
-     * @param {number} [options.maxSourceZoom=14]
-     * @param {number} [options.lineWidthMultiplier=1.0]
-     * @param {number} [options.fillOpacity=1.0]
-     * @param {boolean} [options.depthTest=false]
-     * @param {string[]|null} [options.visibleLayers=null]
-     * @param {Object} [options.styles={}]
-     * @param {boolean} [options.buildings3d=true]
-     * @param {number} [options.buildings3dMinZoom=17]
-     * @param {boolean} [options.debug=false]
-     * @param {string[]} [options.workerScripts=[]]
+     * Создаёт экземпляр слоя векторных тайлов.
+     *
+     * @param {Object} [options] - Объект с параметрами слоя.
+     * @property {string} options.url - Шаблон URL тайлов с плейсхолдерами {z}, {x} и {y}.
+     * @property {number} [options.minZoom=0] - Минимальный допустимый зум.
+     * @property {number} [options.maxZoom=Infinity] - Максимальный допустимый зум.
+     * @property {number} [options.maxSourceZoom=14] - Максимальный зум исходных тайлов.
+     * @property {number} [options.lineWidthMultiplier=1.0] - Множитель ширины линий.
+     * @property {number} [options.fillOpacity=1.0] - Глобальная непрозрачность заливок.
+     * @property {boolean} [options.depthTest=false] - Включает тест глубины для материалов.
+     * @property {string[]|null} [options.visibleLayers=null] - Список видимых слоёв или null для отображения всех слоёв.
+     * @property {Object} [options.styles={}] - Пользовательские стили, объединяемые со стилями по умолчанию.
+     * @property {boolean} [options.buildings3d=true] - Включает отображение объёмных зданий.
+     * @property {number} [options.buildings3dMinZoom=17] - Минимальный зум для отображения объёмных зданий.
+     * @property {boolean} [options.debug=false] - Включает отладочный режим.
+     * @property {string[]} [options.workerScripts=[]] - Массив URL скриптов воркера (tpb.js и earcut.js).
      */
     constructor(options = {}) {
         this.url = options.url;
@@ -933,6 +1039,11 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
     // Публичные методы
     // -------------------------------------------------------------------------
+    /**
+     * Выводит в консоль список обнаруженных классов стилей по слоям.
+     *
+     * @returns {void} Ничего не возвращает.
+     */
     printDiscoveredClasses() {
         if (this._discoveredClasses.size === 0) {
             console.log('[VectorTileLayer] No classes discovered yet.');
@@ -956,6 +1067,12 @@ export class VectorTileLayer {
         return merged;
     }
 
+    /**
+     * Добавляет слой на карту.
+     *
+     * @param {Object} map - Объект карты, к которому добавляется слой.
+     * @returns {VectorTileLayer} Текущий экземпляр слоя.
+     */
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
@@ -964,6 +1081,11 @@ export class VectorTileLayer {
         return this;
     }
 
+    /**
+     * Удаляет слой с карты и освобождает все связанные ресурсы.
+     *
+     * @returns {void} Ничего не возвращает.
+     */
     removeFromMap() {
         if (!this._map) return;
         this._clearAllTiles();

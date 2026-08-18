@@ -23,19 +23,58 @@ const MARKER_RENDER_ORDER = 1000; // Выше любого уровня зума
  *
  * @example
  * const marker3d = new Marker3D({
- *   position: [37.6178, 55.7558],
- *   primitiveType: 'box',
- *   size: [1000, 500, 1000],
- *   anchor: [0.5, 0, 0.5], // низ по центру
- *   altitude: 200,
- *   altitudeMode: 'clampToGround',
- *   minZoom: 5,
- *   maxZoom: 12,
- *   title: '3D объект',
- *   titlePlacement: 'top', // 'top' | 'bottom' | 'left' | 'right'
- *   onClick: (e, marker) => console.log('Клик по 3D объекту')
+ *     position: [37.6178, 55.7558],
+ *     primitiveType: 'box',
+ *     size: [1000, 500, 1000],
+ *     modelUrl: null,
+ *     altitude: 200,
+ *     altitudeMode: 'clampToGround',
+ *     rotation: [0, Math.PI / 2, 0],
+ *     anchor: [0.5, 0, 0.5],
+ *     minZoom: 5,
+ *     maxZoom: 12,
+ *     title: '3D объект',
+ *     titleStyle: { color: '#ff0000', fontSize: '14px' },
+ *     titleMinZoom: 5,
+ *     titleMaxZoom: 12,
+ *     titlePlacement: 'top',
+ *     titleAlign: 'center',
+ *     titleOffset: [0, -10],
+ *     tooltip: '<b>3D объект</b>',
+ *     color: 0x3388ff,
+ *     clusterable: false,
+ *     onClick: (e, marker) => console.log('Клик по 3D объекту', e, marker),
+ *     onHover: (hovered) => console.log('Hover:', hovered)
  * });
  * marker3d.addTo(map);
+ * marker3d.setColor(0xff5500);
+ * console.log(marker3d.getText());
+ * console.log(marker3d.getTextStyle());
+ * console.log(marker3d.getTextZoomBounds());
+ * console.log(marker3d.getLabelType());
+ * console.log(marker3d.isVisible());
+ * console.log(marker3d.getScreenPosition());
+ * console.log(marker3d.getTitleAlign());
+ * console.log(marker3d.getTitleOffset());
+ * console.log(marker3d.getTitleVerticalAlign());
+ * console.log(marker3d.getAllowOverflow());
+ * console.log(marker3d.getPriority());
+ * console.log(marker3d.getClusterable());
+ * marker3d.showTooltip();
+ * marker3d.hideTooltip();
+ * marker3d.remove();
+ *
+ * const absoluteMarker = new Marker3D({
+ *     position: [37.6, 55.7],
+ *     primitiveType: 'sphere',
+ *     size: [200, 200, 200],
+ *     altitude: 500,
+ *     altitudeMode: 'absolute',
+ *     anchor: [0.5, 0.5, 0.5],
+ *     title: 'Сфера',
+ *     titlePlacement: 'bottom'
+ * });
+ * absoluteMarker.addTo(map);
  */
 export class Marker3D {
     /** @private */ static _idCounter = 0;
@@ -43,11 +82,13 @@ export class Marker3D {
     /** @private */ static _hoveredMarker = null;
     /** @private */ static _pressedMarker = null;
     /** @private */ static _pressStart = null;
-    static _raycaster = new THREE.Raycaster();
-    static _mapEventHandlers = new WeakMap();
-    static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
+    /** @private */ static _raycaster = new THREE.Raycaster();
+    /** @private */ static _mapEventHandlers = new WeakMap();
+    /** @private */ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
     /**
+     * Создаёт 3D-маркер.
+     *
      * @param {Object} options - Настройки 3D-маркера.
      * @param {[number, number]} options.position - Географические координаты [lon, lat].
      * @param {string} [options.primitiveType='box'] - Тип примитива: 'box', 'sphere', 'cylinder', 'cone'.
@@ -67,9 +108,11 @@ export class Marker3D {
      * @param {string} [options.titleAlign] - Горизонтальное выравнивание подписи. По умолчанию зависит от titlePlacement.
      * @param {[number, number]} [options.titleOffset] - Смещение подписи в пикселях. По умолчанию зависит от titlePlacement.
      * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML).
+     * @param {string|number} [options.color=0x3388ff] - Цвет примитива.
      * @param {Function} [options.onClick] - Обработчик клика по объекту (получает событие и маркер).
      * @param {Function} [options.onHover] - Обработчик наведения (получает true/false).
      * @param {boolean} [options.clusterable=false] - 3D-маркеры по умолчанию не участвуют в кластеризации.
+     * @throws {Error} Если options.position отсутствует или имеет неверный формат.
      */
     constructor(options = {}) {
         if (!options.position || options.position.length !== 2) {
@@ -165,10 +208,10 @@ export class Marker3D {
     }
 
     /**
-     * Удобный метод: создаёт персональный слой, добавляет его на карту
-     * и помещает в него данный 3D-маркер.
+     * Удобный метод: создаёт персональный слой, добавляет его на карту и помещает в него данный 3D-маркер.
+     *
      * @param {Object} map - Экземпляр карты.
-     * @returns {Marker3D} this
+     * @returns {Marker3D} Возвращает this для цепочки вызовов.
      */
     addTo(map) {
         if (this._map) this.remove();
@@ -181,6 +224,7 @@ export class Marker3D {
     /**
      * Внутренний метод, вызываемый слоем при добавлении.
      * Создаёт 3D-объект, загружает модель при необходимости, регистрирует подпись.
+     *
      * @param {Object} map - Карта.
      * @param {Layer} layer - Слой-владелец.
      * @private
@@ -230,6 +274,7 @@ export class Marker3D {
     /**
      * Создаёт примитивный меш на основе primitiveType и size.
      * Применяет anchor point.
+     *
      * @private
      */
     _createPrimitive() {
@@ -273,6 +318,8 @@ export class Marker3D {
     /**
      * Загружает GLB-модель с помощью динамического импорта GLTFLoader с CDN.
      * Применяет anchor point после загрузки.
+     *
+     * @returns {Promise<void>} Промис, который разрешается после завершения загрузки модели.
      * @private
      */
     async _loadModel() {
@@ -331,6 +378,7 @@ export class Marker3D {
 
     /**
      * Регистрирует глобальные обработчики событий для рейкастинга на canvas карты.
+     *
      * @param {Object} map - Карта.
      * @private
      */
@@ -355,10 +403,11 @@ export class Marker3D {
     }
 
     /**
-     * Получение NDC координат из события указателя.
-     * @param {PointerEvent} e - Событие.
+     * Получает NDC координаты из события указателя.
+     *
+     * @param {PointerEvent} e - Событие указателя.
      * @param {Object} map - Карта.
-     * @returns {THREE.Vector2}
+     * @returns {THREE.Vector2} NDC координаты указателя.
      * @private
      */
     _getNDC(e, map) {
@@ -370,9 +419,10 @@ export class Marker3D {
 
     /**
      * Находит 3D-маркер под курсором.
+     *
      * @param {THREE.Vector2} mouse - NDC координаты.
      * @param {Object} map - Карта.
-     * @returns {Marker3D|null}
+     * @returns {Marker3D|null} Найденный маркер или null, если под курсором нет маркеров.
      * @private
      */
     _getMarkerUnderPointer(mouse, map) {
@@ -393,132 +443,137 @@ export class Marker3D {
 
     /**
      * Обработчик pointermove: обновляет hover-состояние.
-     * @param {PointerEvent} e - Событие.
+     *
+     * @param {PointerEvent} e - Событие указателя.
      * @param {Object} map - Карта.
      * @private
      */
-   _onPointerMove(e, map) {
-    if (Marker3D._isMobile) return; // на мобильных не обрабатываем движение пальца как hover
+    _onPointerMove(e, map) {
+        if (Marker3D._isMobile) return; // на мобильных не обрабатываем движение пальца как hover
 
-    const mouse = this._getNDC(e, map);
-    const marker = this._getMarkerUnderPointer(mouse, map);
-    if (marker !== Marker3D._hoveredMarker) {
-        if (Marker3D._hoveredMarker) {
-            if (Marker3D._hoveredMarker._onHover) {
-                Marker3D._hoveredMarker._onHover(false);
-            } else {
-                Marker3D._hoveredMarker.hideTooltip();
-            }
-        }
-        if (marker) {
-            if (marker._onHover) {
-                marker._onHover(true);
-            } else {
-                marker.showTooltip();
-            }
-        }
-        Marker3D._hoveredMarker = marker;
-    }
-}
-
-    /**
-     * Обработчик pointerdown: запоминает маркер и координаты для клика.
-     * @param {PointerEvent} e - Событие.
-     * @param {Object} map - Карта.
-     * @private
-     */
-   _onPointerDown(e, map) {
-    const mouse = this._getNDC(e, map);
-    const marker = this._getMarkerUnderPointer(mouse, map);
-    Marker3D._pressedMarker = marker; // может быть null
-    Marker3D._pressStart = { x: e.clientX, y: e.clientY };
-}
-
-    /**
-     * Обработчик pointerup: если было короткое нажатие без перемещения, вызывает onClick.
-     * @param {PointerEvent} e - Событие.
-     * @param {Object} map - Карта.
-     * @private
-     */
-  _onPointerUp(e, map) {
-    const pressed = Marker3D._pressedMarker;
-    const start = Marker3D._pressStart;
-    Marker3D._pressedMarker = null;
-    Marker3D._pressStart = null;
-    if (!start) return;
-
-    const dx = e.clientX - start.x;
-    const dy = e.clientY - start.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > 5) return; // клик не засчитывается, если было перемещение
-
-    // Эмуляция onHover как клика на мобильных устройствах
-    if (Marker3D._isMobile) {
-        if (!pressed) {
-            // Тап по пустому месту — скрываем текущий тултип/ховер
+        const mouse = this._getNDC(e, map);
+        const marker = this._getMarkerUnderPointer(mouse, map);
+        if (marker !== Marker3D._hoveredMarker) {
             if (Marker3D._hoveredMarker) {
                 if (Marker3D._hoveredMarker._onHover) {
                     Marker3D._hoveredMarker._onHover(false);
                 } else {
                     Marker3D._hoveredMarker.hideTooltip();
                 }
-                Marker3D._hoveredMarker = null;
             }
-            return;
-        }
-
-        // Если у маркера нет onClick, но есть onHover или tooltip, показываем как при клике
-        if (!pressed._onClick && (pressed._onHover || pressed._tooltipText)) {
-            // Скрываем предыдущий hovered маркер
-            if (Marker3D._hoveredMarker && Marker3D._hoveredMarker !== pressed) {
-                if (Marker3D._hoveredMarker._onHover) {
-                    Marker3D._hoveredMarker._onHover(false);
+            if (marker) {
+                if (marker._onHover) {
+                    marker._onHover(true);
                 } else {
-                    Marker3D._hoveredMarker.hideTooltip();
+                    marker.showTooltip();
                 }
             }
-            // Показываем текущий
-            if (Marker3D._hoveredMarker !== pressed) {
-                if (pressed._onHover) {
-                    pressed._onHover(true);
-                } else {
-                    pressed.showTooltip();
-                }
-                Marker3D._hoveredMarker = pressed;
-            }
-            return; // не вызываем onClick
+            Marker3D._hoveredMarker = marker;
         }
     }
-
-    // Если есть onClick, вызываем его
-    if (pressed && pressed._onClick) {
-        pressed._onClick(e, pressed);
-    }
-}
 
     /**
-     * Обработчик pointerleave: сбрасывает hover.
-     * @param {PointerEvent} e - Событие.
+     * Обработчик pointerdown: запоминает маркер и координаты для клика.
+     *
+     * @param {PointerEvent} e - Событие указателя.
      * @param {Object} map - Карта.
      * @private
      */
-   _onPointerLeave(e, map) {
-    if (Marker3D._isMobile) return; // на мобильных тултип скрывается только по тапу на пустое место или другой маркер
-
-    if (Marker3D._hoveredMarker) {
-        if (Marker3D._hoveredMarker._onHover) {
-            Marker3D._hoveredMarker._onHover(false);
-        } else {
-            Marker3D._hoveredMarker.hideTooltip();
-        }
-        Marker3D._hoveredMarker = null;
+    _onPointerDown(e, map) {
+        const mouse = this._getNDC(e, map);
+        const marker = this._getMarkerUnderPointer(mouse, map);
+        Marker3D._pressedMarker = marker; // может быть null
+        Marker3D._pressStart = { x: e.clientX, y: e.clientY };
     }
-}
 
     /**
-     * Получение DOM-панелей маркера (аналогично Marker._getPanes).
+     * Обработчик pointerup: если было короткое нажатие без перемещения, вызывает onClick.
+     *
+     * @param {PointerEvent} e - Событие указателя.
      * @param {Object} map - Карта.
-     * @returns {{markerPane: HTMLElement, tooltipPane: HTMLElement}}
+     * @private
+     */
+    _onPointerUp(e, map) {
+        const pressed = Marker3D._pressedMarker;
+        const start = Marker3D._pressStart;
+        Marker3D._pressedMarker = null;
+        Marker3D._pressStart = null;
+        if (!start) return;
+
+        const dx = e.clientX - start.x;
+        const dy = e.clientY - start.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > 5) return; // клик не засчитывается, если было перемещение
+
+        // Эмуляция onHover как клика на мобильных устройствах
+        if (Marker3D._isMobile) {
+            if (!pressed) {
+                // Тап по пустому месту — скрываем текущий тултип/ховер
+                if (Marker3D._hoveredMarker) {
+                    if (Marker3D._hoveredMarker._onHover) {
+                        Marker3D._hoveredMarker._onHover(false);
+                    } else {
+                        Marker3D._hoveredMarker.hideTooltip();
+                    }
+                    Marker3D._hoveredMarker = null;
+                }
+                return;
+            }
+
+            // Если у маркера нет onClick, но есть onHover или tooltip, показываем как при клике
+            if (!pressed._onClick && (pressed._onHover || pressed._tooltipText)) {
+                // Скрываем предыдущий hovered маркер
+                if (Marker3D._hoveredMarker && Marker3D._hoveredMarker !== pressed) {
+                    if (Marker3D._hoveredMarker._onHover) {
+                        Marker3D._hoveredMarker._onHover(false);
+                    } else {
+                        Marker3D._hoveredMarker.hideTooltip();
+                    }
+                }
+                // Показываем текущий
+                if (Marker3D._hoveredMarker !== pressed) {
+                    if (pressed._onHover) {
+                        pressed._onHover(true);
+                    } else {
+                        pressed.showTooltip();
+                    }
+                    Marker3D._hoveredMarker = pressed;
+                }
+                return; // не вызываем onClick
+            }
+        }
+
+        // Если есть onClick, вызываем его
+        if (pressed && pressed._onClick) {
+            pressed._onClick(e, pressed);
+        }
+    }
+
+    /**
+     * Обработчик pointerleave: сбрасывает hover.
+     *
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {Object} map - Карта.
+     * @private
+     */
+    _onPointerLeave(e, map) {
+        if (Marker3D._isMobile) return; // на мобильных тултип скрывается только по тапу на пустое место или другой маркер
+
+        if (Marker3D._hoveredMarker) {
+            if (Marker3D._hoveredMarker._onHover) {
+                Marker3D._hoveredMarker._onHover(false);
+            } else {
+                Marker3D._hoveredMarker.hideTooltip();
+            }
+            Marker3D._hoveredMarker = null;
+        }
+    }
+
+    /**
+     * Получает DOM-панели маркера (аналогично Marker._getPanes).
+     *
+     * @param {Object} map - Карта.
+     * @returns {{markerPane: HTMLElement, tooltipPane: HTMLElement}} Объект с DOM-панелями маркера и тултипа.
      * @private
      */
     _getPanes(map) {
@@ -593,6 +648,7 @@ export class Marker3D {
 
     /**
      * Обновляет позицию и видимость 3D-маркера. Вызывается картой каждый кадр.
+     *
      * @param {Object} map - Экземпляр карты (может не совпадать с this._map, если передан извне).
      * @private
      */
@@ -693,10 +749,18 @@ export class Marker3D {
 
     // ---------- Интерфейс для TextManager ----------
 
-    /** @returns {string} Текст подписи */
+    /**
+     * Возвращает текст подписи.
+     *
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
 
-    /** @returns {Object} Стили подписи */
+    /**
+     * Возвращает стили подписи.
+     *
+     * @returns {Object} Стили подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -706,20 +770,33 @@ export class Marker3D {
         }, this._titleStyle);
     }
 
-    /** @returns {{min: number, max: number}} Границы зума для подписи */
+    /**
+     * Возвращает границы зума для подписи.
+     *
+     * @returns {{min: number, max: number}} Границы зума для подписи.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
 
-    /** @returns {string} Тип подписи ('point') */
+    /**
+     * Возвращает тип подписи.
+     *
+     * @returns {string} Тип подписи ('point').
+     */
     getLabelType() { return 'point'; }
 
-    /** @returns {boolean} Видим ли маркер в текущем кадре */
+    /**
+     * Возвращает видимость маркера в текущем кадре.
+     *
+     * @returns {boolean} Видим ли маркер в текущем кадре.
+     */
     isVisible() { return this._isVisible; }
 
     /**
      * Возвращает позицию на экране для отображения подписи.
      * Вычисляется на основе экранного ограничивающего прямоугольника объекта
      * с учётом выбранного titlePlacement, чтобы подпись не перекрывала объект.
-     * @returns {{x: number, y: number}|null}
+     *
+     * @returns {{x: number, y: number}|null} Позиция на экране для подписи или null, если маркер не видим.
      */
     getScreenPosition() {
         if (!this._isVisible || !this._object3D) return null;
@@ -808,13 +885,25 @@ export class Marker3D {
         return { x, y };
     }
 
-    /** @returns {string} Выравнивание подписи */
+    /**
+     * Возвращает выравнивание подписи.
+     *
+     * @returns {string} Выравнивание подписи.
+     */
     getTitleAlign() { return this._titleAlign; }
 
-    /** @returns {[number, number]} Смещение подписи */
+    /**
+     * Возвращает смещение подписи.
+     *
+     * @returns {[number, number]} Смещение подписи в пикселях.
+     */
     getTitleOffset() { return this._titleOffset; }
 
-    /** @returns {string} Вертикальное выравнивание */
+    /**
+     * Возвращает вертикальное выравнивание подписи.
+     *
+     * @returns {string} Вертикальное выравнивание.
+     */
     getTitleVerticalAlign() {
         switch (this._titlePlacement) {
             case 'bottom':
@@ -828,25 +917,42 @@ export class Marker3D {
         }
     }
 
-    /** @returns {boolean} Разрешать ли выход за границы */
+    /**
+     * Возвращает разрешение на выход за границы.
+     *
+     * @returns {boolean} Разрешать ли выход за границы.
+     */
     getAllowOverflow() { return false; }
 
-    /** @returns {number} Приоритет подписи */
+    /**
+     * Возвращает приоритет подписи.
+     *
+     * @returns {number} Приоритет подписи.
+     */
     getPriority() { return 0; }
 
-    /** @returns {boolean} Участвует ли в кластеризации */
+    /**
+     * Возвращает участие в кластеризации.
+     *
+     * @returns {boolean} Участвует ли в кластеризации.
+     */
     getClusterable() { return this._clusterable; }
 
     // ---------- Вспомогательные методы ----------
 
-    /** Показать тултип */
+    /**
+     * Показывает тултип.
+     */
     showTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'block'; }
 
-    /** Скрыть тултип */
+    /**
+     * Скрывает тултип.
+     */
     hideTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'none'; }
 
     /**
      * Устанавливает цвет примитива.
+     *
      * @param {string|number} color - Цвет в формате HEX-строки или числа.
      */
     setColor(color) {
@@ -863,6 +969,17 @@ export class Marker3D {
         }
     }
 
-    /** @private */ _showTooltip() { this.showTooltip(); }
-    /** @private */ _hideTooltip() { this.hideTooltip(); }
+    /**
+     * Показывает тултип.
+     *
+     * @private
+     */
+    _showTooltip() { this.showTooltip(); }
+
+    /**
+     * Скрывает тултип.
+     *
+     * @private
+     */
+    _hideTooltip() { this.hideTooltip(); }
 }

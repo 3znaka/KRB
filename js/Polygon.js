@@ -1,10 +1,8 @@
 /**
  * Модуль для рисования полигонов (многоугольников) на карте.
- * Предоставляет класс {@link Polygon}, использующий триангуляцию Earcut
+ * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * видимости по зуму и подписей через TextManager.
- *
- * @module polygon
  */
 
 
@@ -22,6 +20,7 @@ import earcut from '../js_TP/earcut.js';
 
 /**
  * Вычисляет минимальное расстояние от точки до отрезка.
+ *
  * @param {THREE.Vector3} point - Точка.
  * @param {THREE.Vector3} a - Начало отрезка.
  * @param {THREE.Vector3} b - Конец отрезка.
@@ -41,24 +40,60 @@ function pointToSegmentDistance(point, a, b) {
 
 /**
  * Класс, представляющий полигон на карте.
- * Поддерживает заливку, обводку, настройку высот, ограничения по зуму
- * и текстовую подпись.
+ * Поддерживает заливку, обводку, настройку высот, ограничения по зуму и текстовую подпись.
  *
  * @example
- * const polygon = new Polygon({
- *   rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
- *   fillColor: '#ff0000',
- *   fillOpacity: 0.3,
- *   strokeColor: '#000',
- *   strokeWidth: 2
- * });
- * polygon.addTo(map);
+ * try {
+ *   const polygon = new Polygon({
+ *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
+ *     fillColor: '#ff0000',
+ *     fillOpacity: 0.3,
+ *     strokeColor: '#000000',
+ *     strokeWidth: 2,
+ *     strokeOpacity: 1,
+ *     altitudeMode: 'absolute',
+ *     altitudeOffset: 10,
+ *     depthTest: false,
+ *     depthWrite: false,
+ *     minZoom: 5,
+ *     maxZoom: 18,
+ *     title: 'Мой полигон',
+ *     titleOffset: [10, -10],
+ *     titleAlign: 'center',
+ *     titleStyle: { fontSize: '14px' },
+ *     titleMinZoom: 10,
+ *     titleMaxZoom: 18,
+ *     titleAllowOverflow: true,
+ *     titlePriority: 1
+ *   });
+ *   polygon.addTo(map);
+ *   polygon.getText();
+ *   polygon.getTextStyle();
+ *   polygon.getTextZoomBounds();
+ *   polygon.getLabelType();
+ *   polygon.isVisible();
+ *   polygon.getScreenPosition();
+ *   polygon.getTitleAlign();
+ *   polygon.getTitleOffset();
+ *   polygon.getTitleVerticalAlign();
+ *   polygon.getAllowOverflow();
+ *   polygon.getPriority();
+ *   polygon.remove();
+ * } catch (e) {
+ *   console.error(e);
+ * }
+ * try {
+ *   new Polygon({});
+ * } catch (e) {
+ *   console.error('Ошибка:', e.message);
+ * }
  */
 export class Polygon {
     /**
+     * Инициализирует новый экземпляр полигона с заданными настройками.
+     *
      * @param {Object} options - Настройки полигона.
-     * @param {[number, number][][]} options.rings - Массив колец. Первое кольцо – внешний контур,
-     *        остальные (опционально) – отверстия. Каждое кольцо – массив точек [долгота, широта].
+     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец. Первое кольцо – внешний контур, остальные (опционально) – отверстия. Каждое кольцо – массив точек [долгота, широта].
      * @param {string} [options.fillColor='#3388ff'] - Цвет заливки (CSS).
      * @param {number} [options.fillOpacity=0.5] - Прозрачность заливки (0..1).
      * @param {string} [options.strokeColor='#000000'] - Цвет обводки.
@@ -71,13 +106,14 @@ export class Polygon {
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором полигон виден.
      * @param {string} [options.title=''] - Текст постоянной подписи.
-     * @param {[number, number]} [options.titleOffset=[0,0]] - Смещение подписи в пикселях.
+     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи в пикселях.
      * @param {string} [options.titleAlign='center'] - Горизонтальное выравнивание подписи ('left', 'center', 'right').
      * @param {Object} [options.titleStyle={}] - CSS-стили подписи.
      * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум для отображения подписи.
      * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум для отображения подписи.
      * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
+     * @throws {Error} Если не передан массив колец или он пуст.
      */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
@@ -132,11 +168,10 @@ export class Polygon {
     }
 
     /**
-     * Удобный метод: создаёт персональный слой, добавляет его на карту
-     * и помещает в него данный полигон.
+     * Создаёт персональный слой, добавляет его на карту и помещает в него данный полигон.
      *
      * @param {Object} map - Экземпляр карты.
-     * @returns {Polygon} this
+     * @returns {Polygon} Текущий экземпляр полигона.
      */
     addTo(map) {
         if (this._map) this.remove();
@@ -147,12 +182,11 @@ export class Polygon {
     }
 
     /**
-     * Внутренний метод, вызываемый слоем при добавлении.
-     * Строит геометрию заливки и обводки, добавляет их в сцену
-     * и регистрирует подпись.
+     * Вызывается слоем при добавлении, строит геометрию и регистрирует подпись.
      *
-     * @param {Object} map - Карта.
+     * @param {Object} map - Экземпляр карты.
      * @param {Layer} layer - Слой-владелец.
+     * @returns {void}
      * @private
      */
     _attach(map, layer) {
@@ -172,7 +206,8 @@ export class Polygon {
 
     /**
      * Возвращает CSS-трансформацию для подписи в зависимости от выравнивания.
-     * @returns {string} CSS transform.
+     *
+     * @returns {string} CSS-трансформация.
      * @private
      */
     _getTitleTransform() {
@@ -185,7 +220,9 @@ export class Polygon {
 
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
+     *
      * @param {Object} map - Экземпляр карты.
+     * @returns {void}
      * @private
      */
     _buildFillGeometry(map) {
@@ -266,7 +303,9 @@ export class Polygon {
 
     /**
      * Строит геометрию обводки полигона на основе Line2.
+     *
      * @param {Object} map - Экземпляр карты.
+     * @returns {void}
      * @private
      */
     _buildStrokeGeometry(map) {
@@ -291,6 +330,8 @@ export class Polygon {
 
     /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
+     *
+     * @returns {void}
      */
     remove() {
         if (this._group) {
@@ -316,10 +357,10 @@ export class Polygon {
     }
 
     /**
-     * Обновляет состояние полигона на каждом кадре:
-     * видимость по зуму и слою, высоты, обводку, позицию центроида для подписи.
+     * Обновляет состояние полигона на каждом кадре: видимость по зуму, высоты и позицию центроида.
      *
      * @param {Object} map - Экземпляр карты.
+     * @returns {void}
      * @private
      */
     _update(map) {
@@ -388,6 +429,8 @@ export class Polygon {
 
     /**
      * Обновляет высоты вершин заливки и обводки в соответствии с рельефом.
+     *
+     * @returns {void}
      * @private
      */
     _updateHeights() {
@@ -442,6 +485,8 @@ export class Polygon {
 
     /**
      * Обновляет позиции вершин обводки.
+     *
+     * @returns {void}
      * @private
      */
     _updateStroke() {
@@ -469,7 +514,9 @@ export class Polygon {
     }
 
     /**
-     * Пересчитывает экранную позицию центроида полигона (для подписи).
+     * Пересчитывает экранную позицию центроида полигона для подписи.
+     *
+     * @returns {void}
      * @private
      */
     _updateCentroidScreenPos() {
@@ -507,10 +554,18 @@ export class Polygon {
 
     // ---------- Интерфейс для TextManager ----------
 
-    /** @returns {string} Текст подписи */
+    /**
+     * Возвращает текст подписи.
+     *
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
 
-    /** @returns {Object} Объект CSS-стилей подписи */
+    /**
+     * Возвращает объект CSS-стилей подписи.
+     *
+     * @returns {Object} Объект CSS-стилей подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -520,30 +575,70 @@ export class Polygon {
         }, this._titleStyle);
     }
 
-    /** @returns {{min: number, max: number}} Границы зума для отображения подписи */
+    /**
+     * Возвращает границы зума для отображения подписи.
+     *
+     * @property {number} min - Минимальный зум.
+     * @property {number} max - Максимальный зум.
+     * @returns {Object} Границы зума.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
 
-    /** @returns {string} Тип подписи ('polygon') */
+    /**
+     * Возвращает тип подписи.
+     *
+     * @returns {string} Тип подписи ('polygon').
+     */
     getLabelType() { return 'polygon'; }
 
-    /** @returns {boolean} Видим ли полигон в текущем кадре */
+    /**
+     * Проверяет, видим ли полигон в текущем кадре.
+     *
+     * @returns {boolean} Результат проверки видимости.
+     */
     isVisible() { return this._group?.visible ?? false; }
 
-    /** @returns {{x: number, y: number}|null} Экранная позиция центроида (или null) */
+    /**
+     * Возвращает экранную позицию центроида.
+     *
+     * @property {number} x - Координата X.
+     * @property {number} y - Координата Y.
+     * @returns {Object|null} Экранная позиция центроида (или null).
+     */
     getScreenPosition() { return this._centroidScreenPos; }
 
-    /** @returns {string} Горизонтальное выравнивание подписи */
+    /**
+     * Возвращает горизонтальное выравнивание подписи.
+     *
+     * @returns {string} Горизонтальное выравнивание подписи.
+     */
     getTitleAlign() { return this._titleAlign; }
 
-    /** @returns {[number, number]} Смещение подписи в пикселях */
+    /**
+     * Возвращает смещение подписи в пикселях.
+     *
+     * @returns {Array.<number>} Смещение подписи в пикселях.
+     */
     getTitleOffset() { return this._titleOffset; }
 
-    /** @returns {string} Вертикальное выравнивание (всегда 'center') */
+    /**
+     * Возвращает вертикальное выравнивание.
+     *
+     * @returns {string} Вертикальное выравнивание (всегда 'center').
+     */
     getTitleVerticalAlign() { return 'center'; }
 
-    /** @returns {boolean} Разрешён ли выход подписи за границы */
+    /**
+     * Проверяет, разрешён ли выход подписи за границы.
+     *
+     * @returns {boolean} Разрешён ли выход подписи за границы.
+     */
     getAllowOverflow() { return this._titleAllowOverflow; }
 
-    /** @returns {number} Приоритет подписи */
+    /**
+     * Возвращает приоритет подписи.
+     *
+     * @returns {number} Приоритет подписи.
+     */
     getPriority() { return this._titlePriority; }
 }

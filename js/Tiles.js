@@ -3,7 +3,63 @@ import {
 } from '../js_TP/tpb.js';  
 import { getOriginZ, getSrcKey, getVirtKey, DEFAULTS } from './Utils.js';
 
+/**
+ * Шаг по вертикали между уровнями тайлов.
+ * @type {number}
+ * @private
+ */
+const LEVEL_Y_STEP = 1;
+
+/**
+ * Максимальное количество кэшируемых тайлов.
+ * @type {number}
+ * @private
+ */
+const MAX_CACHED_TILES = 350;
+
+/**
+ * Количество уровней предков для фолбэка при приближении.
+ * @type {number}
+ * @private
+ */
+const ANCESTOR_FALLBACK = 4;
+
+/**
+ * Максимальная глубина поиска потомков при отдалении.
+ * @type {number}
+ * @private
+ */
+const MAX_COVER_DEPTH = 2; // глубина поиска потомков при отдалении
+
+/**
+ * Тайл карты с текстурой, данными высоты и атрибуцией.
+ *
+ * @property {THREE.Texture} texture - Текстура тайла.
+ * @property {*} elevation - Данные о высоте тайла.
+ * @property {string} attributionTitle - Название атрибуции.
+ * @property {string} attributionUrl - URL атрибуции.
+ * @property {number} heightScale - Масштаб высот.
+ *
+ * @example
+ * const tile = new Tile({
+ *     texture: 'https://example.com/tms/{z}/{x}/{y}.png',
+ *     elevation: 'https://example.com/elevation/{z}/{x}/{y}.png',
+ *     attributionTitle: 'Example',
+ *     attributionUrl: 'https://example.com',
+ *     heightScale: 1.5
+ * });
+ */
 export class Tile {
+    /**
+     * Создаёт тайл карты.
+     *
+     * @param {Object} options - Объект параметров тайла.
+     * @param {THREE.Texture} options.texture - Текстура тайла.
+     * @param {*} options.elevation - Данные о высоте тайла.
+     * @param {string} [options.attributionTitle] - Название атрибуции.
+     * @param {string} [options.attributionUrl] - URL атрибуции.
+     * @param {number} [options.heightScale] - Масштаб высот. По умолчанию DEFAULTS.HEIGHT_SCALE.
+     */
     constructor(options) {
         this.texture = options.texture;
         this.elevation = options.elevation;
@@ -13,12 +69,83 @@ export class Tile {
     }
 }
 
-const LEVEL_Y_STEP = 1;
-const MAX_CACHED_TILES = 350;
-const ANCESTOR_FALLBACK = 4;
-const MAX_COVER_DEPTH = 2; // глубина поиска потомков при отдалении
-
+/**
+ * Менеджер тайлов: загрузка текстур и высот, управление кэшем и видимостью.
+ *
+ * @property {Map} tiles - Хранилище тайлов.
+ * @property {Map} textureCache - Кэш текстур.
+ * @property {THREE.TextureLoader} textureLoader - Загрузчик текстур.
+ * @property {number} frame - Счётчик кадров.
+ * @property {boolean} hasElevation - Флаг наличия рельефа.
+ * @property {Map} srcKeyToElevUrl - Сопоставление ключа исходного тайла и URL высоты.
+ * @property {Map} parentElevCache - Кэш данных высот родительских тайлов.
+ * @property {Map} parentElevPromises - Промисы загрузки данных высот родительских тайлов.
+ * @property {Map} elevDirectPromises - Промисы прямых запросов высот.
+ * @property {Array} elevationQueue - Очередь запросов высот.
+ * @property {number} activeElevationFetches - Количество активных запросов высот.
+ * @property {number} MAX_ELEVATION_FETCHES - Максимум одновременных запросов высот.
+ * @property {Worker} worker - Воркер для вычисления высот.
+ * @property {Array} pendingWorkerJobs - Очередь задач для воркера.
+ * @property {number} activeWorkerJobs - Количество активных задач воркера.
+ * @property {number} nextJobId - Следующий идентификатор задачи.
+ * @property {Map} workerPromises - Промисы задач воркера.
+ * @property {Array} onTileHeightAppliedCallbacks - Колбэки после применения высот.
+ *
+ * @example
+ * (async () => {
+ *     const engine = {
+ *         currentDiscreteZoom: 3,
+ *         TILE_MARGIN: 0.1,
+ *         WORLD_SIZE: 2 * Math.PI * 6371000,
+ *         MAX_MERCATOR: Math.PI * 6371000,
+ *         SEGMENTS: 32,
+ *         MIN_ZOOM: 0,
+ *         MAX_ZOOM: 18,
+ *         MIN_RELIEF_Z: 5,
+ *         MAX_RELIEF_Z: 15,
+ *         TILE_PIXELS: 256,
+ *         hasElevation: true,
+ *         globalElevCache: new Map(),
+ *         worldGroup: new THREE.Group(),
+ *         getTextureUrl: (z, x, y) => `https://example.com/tiles/${z}/${x}/${y}.png`,
+ *         getElevationUrl: (z, x, y) => `https://example.com/elevation/${z}/${x}/${y}.png`,
+ *         camera: new THREE.PerspectiveCamera(),
+ *         controlsTarget: new THREE.Vector3(),
+ *         MAX_WORKER_REQUESTS: 4,
+ *         layers: [{ elevation: true, heightScale: 1.2 }]
+ *     };
+ *     const tileManager = new TileManager(engine);
+ *     tileManager.update(engine.camera, engine.controlsTarget, 3, engine.worldGroup.position);
+ *     tileManager.ensureTile(3, 0, 0);
+ *     const texture = await tileManager.loadTextureAsync('https://example.com/tile.png');
+ *     tileManager.createStaticTileMesh(1000, -500, -500, texture);
+ *     tileManager.prefetchParentElevations(new THREE.Vector3(0, 0, 0), 3, engine.worldGroup.position);
+ * })();
+ */
 export class TileManager {
+    /**
+     * Создаёт менеджер тайлов.
+     *
+     * @param {Object} engine - Объект движка карты.
+     * @param {boolean} engine.hasElevation - Флаг наличия рельефа.
+     * @param {Map} [engine.globalElevCache] - Глобальный кэш данных высот.
+     * @param {THREE.Group} engine.worldGroup - Группа мира.
+     * @param {number} engine.MAX_MERCATOR - Максимальное значение проекции Меркатора.
+     * @param {number} engine.WORLD_SIZE - Размер мира.
+     * @param {number} engine.SEGMENTS - Количество сегментов сетки.
+     * @param {number} engine.MIN_ZOOM - Минимальный зум.
+     * @param {number} engine.MAX_ZOOM - Максимальный зум.
+     * @param {number} engine.MIN_RELIEF_Z - Минимальный зум для рельефа.
+     * @param {number} engine.MAX_RELIEF_Z - Максимальный зум для рельефа.
+     * @param {number} engine.TILE_PIXELS - Размер тайла в пикселях.
+     * @param {Function} engine.getTextureUrl - Функция получения URL текстуры.
+     * @param {Function} engine.getElevationUrl - Функция получения URL высоты.
+     * @param {number} engine.TILE_MARGIN - Отступ тайлов.
+     * @param {number} engine.MAX_WORKER_REQUESTS - Максимум одновременных запросов к воркеру.
+     * @param {THREE.Camera} engine.camera - Камера.
+     * @param {THREE.Vector3} engine.controlsTarget - Цель контролов.
+     * @param {Array.<Object>} engine.layers - Слои карты (для получения масштаба высот).
+     */
     constructor(engine) {
         this.engine = engine;
         this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation }
@@ -42,11 +169,29 @@ export class TileManager {
         this.onTileHeightAppliedCallbacks = [];
     }
 
+    /**
+     * Возвращает строковый ключ тайла по координатам.
+     *
+     * @param {number} z - Уровень зума.
+     * @param {number} virtX - Виртуальная координата X.
+     * @param {number} y - Координата Y.
+     * @returns {string} Ключ тайла.
+     * @private
+     */
     key(z, virtX, y) {
         return `${z},${virtX},${y}`;
     }
 
     /* ---- основной метод, вызывается из Core.maybeUpdateVisibleTiles ---- */
+    /**
+     * Обновляет видимые тайлы на основе положения камеры и зума.
+     *
+     * @param {THREE.Camera} camera - Камера.
+     * @param {THREE.Vector3} controlsTarget - Цель контролов.
+     * @param {number} continuousZoom - Непрерывный зум.
+     * @param {THREE.Vector3} worldGroupPos - Позиция мировой группы.
+     * @returns {number} Идеальный дискретный зум.
+     */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
         this.frame++;
         const idealZ = this.engine.currentDiscreteZoom;
@@ -109,7 +254,17 @@ export class TileManager {
         return idealZ;
     }
 
-    /** Рекурсивно собирает готовых потомков тайла в renderSet (только чтение) */
+    /**
+     * Рекурсивно собирает готовых потомков тайла в renderSet.
+     *
+     * @param {number} z - Уровень зума.
+     * @param {number} virtX - Виртуальная координата X.
+     * @param {number} y - Координата Y.
+     * @param {Set} renderSet - Множество ключей для отрисовки.
+     * @param {number} [depth] - Текущая глубина рекурсии.
+     * @returns {boolean} True, если все потомки покрывают тайл.
+     * @private
+     */
     collectCover(z, virtX, y, renderSet, depth = 0) {
         const k = this.key(z, virtX, y);
         const inst = this.tiles.get(k);
@@ -130,6 +285,15 @@ export class TileManager {
         return full;
     }
 
+    /**
+     * Ищет ближайшего готового предка для тайла.
+     *
+     * @param {number} z - Уровень зума.
+     * @param {number} virtX - Виртуальная координата X.
+     * @param {number} y - Координата Y.
+     * @returns {Object|null} Объект тайла или null.
+     * @private
+     */
     findReadyAncestor(z, virtX, y) {
         for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= this.engine.MIN_ZOOM; dz++) {
             const az = z - dz;
@@ -141,6 +305,14 @@ export class TileManager {
         return null;
     }
 
+    /**
+     * Возвращает существующий тайл или создаёт и запускает загрузку нового.
+     *
+     * @param {number} z - Уровень зума.
+     * @param {number} virtX - Виртуальная координата X.
+     * @param {number} y - Координата Y.
+     * @returns {Object} Объект тайла.
+     */
     ensureTile(z, virtX, y) {
         const k = this.key(z, virtX, y);
         let inst = this.tiles.get(k);
@@ -166,6 +338,13 @@ export class TileManager {
         return inst;
     }
 
+    /**
+     * Асинхронно загружает текстуру тайла и создаёт меш.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {Promise<void>}
+     * @private
+     */
     async loadTile(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -207,10 +386,25 @@ export class TileManager {
         }
     }
 
+    /**
+     * Определяет, нужно ли запрашивать данные высот для тайла.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {boolean} True, если нужно.
+     * @private
+     */
     shouldRequestElevation(inst) {
         return inst.z >= this.engine.MIN_RELIEF_Z;
     }
 
+    /**
+     * Создаёт меш для тайла с текстурой.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @param {THREE.Texture} texture - Текстура.
+     * @returns {THREE.Mesh} Меш тайла.
+     * @private
+     */
     createTileMesh(inst, texture) {
         const { z, virtX, y } = inst;
         const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
@@ -242,6 +436,15 @@ export class TileManager {
         return mesh;
     }
 
+    /**
+     * Создаёт статический фоновый меш тайла.
+     *
+     * @param {number} tileSize - Размер тайла в мировых единицах.
+     * @param {number} originX - Мировая координата X начала тайла.
+     * @param {number} originZ - Мировая координата Z начала тайла.
+     * @param {THREE.Texture|null} texture - Текстура (может быть null).
+     * @returns {THREE.Mesh} Меш фонового тайла.
+     */
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
@@ -258,6 +461,12 @@ export class TileManager {
     }
 
     /* ---- текстуры ---- */
+    /**
+     * Асинхронно загружает текстуру по URL с кэшированием.
+     *
+     * @param {string} url - URL текстуры.
+     * @returns {Promise<THREE.Texture|null>} Текстура или null при ошибке.
+     */
     async loadTextureAsync(url) {
         if (!url) return null;
         if (this.textureCache.has(url)) {
@@ -277,6 +486,13 @@ export class TileManager {
         return texture;
     }
 
+    /**
+     * Уменьшает счётчик ссылок текстуры и освобождает при необходимости.
+     *
+     * @param {string} url - URL текстуры.
+     * @returns {void}
+     * @private
+     */
     releaseTexture(url) {
         if (!url) return;
         const e = this.textureCache.get(url);
@@ -289,6 +505,13 @@ export class TileManager {
     }
 
     /* ---- высоты ---- */
+    /**
+     * Запрашивает данные высот для тайла и применяет их к геометрии.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {Promise<void>}
+     * @private
+     */
     async requestElevation(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -315,6 +538,17 @@ export class TileManager {
         }
     }
 
+    /**
+     * Получает данные высот напрямую по URL или из кэша.
+     *
+     * @param {string} srcKey - Ключ исходного тайла.
+     * @param {string} elevUrl - URL карты высот.
+     * @param {number} tileSize - Размер тайла.
+     * @param {number} originX - Мировая X начала тайла.
+     * @param {number} originZ - Мировая Z начала тайла.
+     * @returns {Promise<Float32Array>} Массив высот.
+     * @private
+     */
     async getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ) {
         const heightScale = this.getElevationHeightScale();
         if (this.parentElevCache.has(srcKey)) {
@@ -359,6 +593,12 @@ export class TileManager {
         return promise;
     }
 
+    /**
+     * Обрабатывает очередь запросов высот.
+     *
+     * @returns {void}
+     * @private
+     */
     _processElevationQueue() {
         while (this.activeElevationFetches < this.MAX_ELEVATION_FETCHES && this.elevationQueue.length > 0) {
             const { execute, resolve, reject } = this.elevationQueue.shift();
@@ -366,6 +606,14 @@ export class TileManager {
         }
     }
 
+    /**
+     * Получает высоты из родительского тайла при отсутствии прямых данных.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {Promise<Float32Array>} Массив высот.
+     * @throws {Error} Если нет доступного родительского тайла.
+     * @private
+     */
     async getFallbackElevation(inst) {
         let fz = inst.z - 1;
         while (fz > this.engine.MAX_RELIEF_Z) fz--;
@@ -403,6 +651,15 @@ export class TileManager {
         return result.heights;
     }
 
+    /**
+     * Загружает данные высот родительского тайла.
+     *
+     * @param {number} z - Уровень зума.
+     * @param {number} srcX - Исходная координата X.
+     * @param {number} y - Координата Y.
+     * @returns {Promise<ImageData|null>} Данные изображения или null.
+     * @private
+     */
     async getParentElevData(z, srcX, y) {
         if (z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return null;
         const key = `${z},${srcX},${y}`;
@@ -433,6 +690,14 @@ export class TileManager {
         return promise;
     }
 
+    /**
+     * Применяет массив высот к геометрии тайла.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @param {Float32Array} heights - Массив высот.
+     * @returns {void}
+     * @private
+     */
     applyHeightsToGeometry(inst, heights) {
         const pos = inst.geometry.attributes.position.array;
         for (let i = 0; i < heights.length; i++) pos[i * 3 + 1] = heights[i];
@@ -449,6 +714,13 @@ export class TileManager {
         }
     }
 
+    /**
+     * Синхронизирует высоты с соседними тайлами.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {void}
+     * @private
+     */
     syncTileWithNeighbors(inst) {
         const neighbors = [[1,0], [-1,0], [0,1], [0,-1]];
         for (const [dx, dy] of neighbors) {
@@ -461,6 +733,16 @@ export class TileManager {
         }
     }
 
+    /**
+     * Синхронизирует высоты по общему ребру двух тайлов.
+     *
+     * @param {Object} instA - Первый тайл.
+     * @param {Object} instB - Второй тайл.
+     * @param {number} dx - Смещение по X от A к B.
+     * @param {number} dy - Смещение по Y от A к B.
+     * @returns {void}
+     * @private
+     */
     syncEdgesBetween(instA, instB, dx, dy) {
         const posA = instA.geometry.attributes.position.array;
         const posB = instB.geometry.attributes.position.array;
@@ -484,11 +766,25 @@ export class TileManager {
         instB.geometry.attributes.position.needsUpdate = true;
     }
 
+    /**
+     * Возвращает масштаб высот из слоёв движка.
+     *
+     * @returns {number} Масштаб высот.
+     * @private
+     */
     getElevationHeightScale() {
         const layerWithElev = this.engine.layers.find(l => l.elevation);
         return layerWithElev ? layerWithElev.heightScale : DEFAULTS.HEIGHT_SCALE;
     }
 
+    /**
+     * Предзагружает данные высот родительских тайлов в окрестности точки.
+     *
+     * @param {THREE.Vector3} center - Центральная точка.
+     * @param {number} z - Уровень зума.
+     * @param {THREE.Vector3} worldGroupPos - Позиция мировой группы.
+     * @returns {void}
+     */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation || z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return;
         const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
@@ -506,6 +802,13 @@ export class TileManager {
     }
 
     /* ---- LRU сборщик мусора ---- */
+    /**
+     * Выполняет сборку мусора для тайлов.
+     *
+     * @param {Set} renderSet - Множество ключей для отрисовки.
+     * @returns {void}
+     * @private
+     */
     gc(renderSet) {
         if (this.tiles.size <= MAX_CACHED_TILES) return;
         const candidates = [];
@@ -521,6 +824,13 @@ export class TileManager {
         }
     }
 
+    /**
+     * Освобождает ресурсы тайла.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {void}
+     * @private
+     */
     disposeTile(inst) {
         this.tiles.delete(this.key(inst.z, inst.virtX, inst.y));
         if (inst.mesh) {
@@ -532,6 +842,12 @@ export class TileManager {
     }
 
     /* ---- Worker (без изменений) ---- */
+    /**
+     * Инициализирует воркер для вычисления высот.
+     *
+     * @returns {void}
+     * @private
+     */
     initWorker() {
         const TILE_PIXELS = this.engine.TILE_PIXELS;
         const workerCode = `
@@ -628,6 +944,12 @@ export class TileManager {
         this.workerPromises = new Map();
     }
 
+    /**
+     * Обрабатывает очередь задач воркера.
+     *
+     * @returns {void}
+     * @private
+     */
     processWorkerQueue() {
         while (this.activeWorkerJobs < this.engine.MAX_WORKER_REQUESTS && this.pendingWorkerJobs.length > 0) {
             const job = this.pendingWorkerJobs.shift();
@@ -636,6 +958,14 @@ export class TileManager {
         }
     }
 
+    /**
+     * Планирует задачу для воркера.
+     *
+     * @param {string} type - Тип задачи.
+     * @param {Object} payload - Данные задачи.
+     * @returns {Promise<Object>} Результат задачи.
+     * @private
+     */
     scheduleWorkerJob(type, payload) {
         const id = this.nextJobId++;
         const promise = new Promise((resolve, reject) => {

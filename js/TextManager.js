@@ -4,16 +4,18 @@ import {
 
 /**
  * Менеджер текстовых подписей (лейблов) для карты.
- * 
+ *
  * Управляет жизненным циклом DOM-элементов подписей: создание, позиционирование,
  * разрешение коллизий и отрисовка. Поддерживает подписи для точечных объектов
  * (Point) и линейных объектов (LineString). Для линейных подписей реализовано
  * анимированное перемещение вдоль линии с целью избежать перекрытий, а также
  * жадная приоритезация всех видимых подписей для предотвращения наложений.
+ *
  */
 export class TextManager {
     /**
      * Создаёт экземпляр менеджера подписей, привязанный к карте.
+     *
      * @param {Map} map - Экземпляр карты, к которой прикрепляются подписи.
      */
     constructor(map) {
@@ -37,6 +39,7 @@ export class TextManager {
 
         /**
          * Флаг, указывающий, запущен ли цикл анимации.
+         *
          * @type {boolean}
          * @private
          */
@@ -44,6 +47,7 @@ export class TextManager {
 
         /**
          * Идентификатор текущего animation frame или null.
+         *
          * @type {number|null}
          * @private
          */
@@ -52,6 +56,7 @@ export class TextManager {
         /**
          * Набор идентификаторов источников подписей, видимых в предыдущем кадре.
          * Используется для сброса флагов stuck при изменении состава подписей.
+         *
          * @type {Set|null}
          * @private
          */
@@ -59,6 +64,7 @@ export class TextManager {
 
         /**
          * Уровень зума в предыдущем кадре.
+         *
          * @type {number|null}
          * @private
          */
@@ -71,6 +77,7 @@ export class TextManager {
      * Инициализирует DOM-контейнер для подписей.
      * Если контейнер с id="krb-label-pane" отсутствует в целевом элементе карты,
      * создаёт новый div с абсолютным позиционированием и добавляет его в DOM.
+     *
      * @private
      */
     _initPane() {
@@ -94,12 +101,25 @@ export class TextManager {
     /**
      * Добавляет новую подпись на карту на основе объекта-источника.
      * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
-     * 
-     * @param {Object} source - Объект-источник подписи, предоставляющий методы:
-     *   getText(), getTextStyle(), getPriority(), getAllowOverflow(),
-     *   getLabelType(), getScreenPosition(), getScreenPositionAt(t),
-     *   getScreenAngleAt(t), getTitleAlign(), getTitleVerticalAlign(),
-     *   getTitleOffset(), getTextZoomBounds(), isVisible() и др.
+     *
+     * @param {Object} source - Объект-источник подписи.
+     * @property {Function} source.getText - Возвращает текст подписи.
+     * @property {Function} source.getTextStyle - Возвращает стили текста.
+     * @property {Function} source.getPriority - Возвращает приоритет подписи.
+     * @property {Function} source.getAllowOverflow - Возвращает разрешение на переполнение интервала.
+     * @property {Function} source.getLabelType - Возвращает тип подписи ('point' или 'line').
+     * @property {Function} source.getScreenPosition - Возвращает экранную позицию точки.
+     * @property {Function} source.getScreenPositionAt - Возвращает экранную позицию линии по параметру t.
+     * @property {Function} source.getScreenAngleAt - Возвращает угол подписи по параметру t.
+     * @property {Function} source.getTitleAlign - Возвращает горизонтальное выравнивание.
+     * @property {Function} source.getTitleVerticalAlign - Возвращает вертикальное выравнивание.
+     * @property {Function} source.getTitleOffset - Возвращает смещение подписи.
+     * @property {Function} source.getTextZoomBounds - Возвращает границы видимости по зуму.
+     * @property {Function} source.isVisible - Возвращает видимость источника.
+     * @property {Function} source.getVisibleInterval - Возвращает видимый интервал линии.
+     * @property {Function} source.getLabelParameter - Возвращает текущий параметр линии.
+     * @property {Function} source.setLabelParameter - Устанавливает параметр линии.
+     * @property {Function} source.getPlacement - Возвращает режим размещения вдоль линии.
      * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
     addLabel(source) {
@@ -140,6 +160,7 @@ export class TextManager {
 
     /**
      * Удаляет подпись из менеджера и из DOM.
+     *
      * @param {Object} label - Объект подписи, ранее возвращённый методом addLabel.
      */
     removeLabel(label) {
@@ -154,6 +175,7 @@ export class TextManager {
      * Измеряет реальные ширину и высоту DOM-элемента подписи.
      * Временно делает элемент видимым (но невидимым для пользователя через visibility:hidden),
      * считывает offsetWidth/offsetHeight и возвращает исходное состояние.
+     *
      * @param {Object} label - Объект подписи.
      * @private
      */
@@ -192,6 +214,7 @@ export class TextManager {
 
     /**
      * Внутренний рекурсивный метод, вызывающий update() на каждом animation frame.
+     *
      * @private
      */
     _animate() {
@@ -203,9 +226,9 @@ export class TextManager {
     /**
      * Вычисляет экранные координаты четырёх углов прямоугольника подписи
      * с учётом выравнивания, смещения и поворота.
-     * 
+     *
      * @param {Object} label - Объект подписи.
-     * @param {number} [tOverride=null] - Параметр t для линейной подписи (если отличается от label.t).
+     * @param {number|null} [tOverride=null] - Параметр t для линейной подписи (если отличается от label.t).
      * @returns {Object[]|null} Массив из четырёх точек {x, y} углов прямоугольника или null, если позиция не определена.
      * @private
      */
@@ -285,7 +308,7 @@ export class TextManager {
     /**
      * Проецирует полигон на заданную ось и возвращает минимальную и максимальную проекции.
      * Используется в алгоритме разделяющих осей (SAT).
-     * 
+     *
      * @param {{x: number, y: number}} axis - Нормализованный вектор оси.
      * @param {Object[]} poly - Массив точек полигона {x, y}.
      * @returns {{min: number, max: number}} Минимальная и максимальная проекции.
@@ -305,10 +328,10 @@ export class TextManager {
     /**
      * Проверяет пересечение двух выпуклых полигонов (прямоугольников) методом разделяющих осей (SAT).
      * Прямоугольники задаются массивом из четырёх углов.
-     * 
+     *
      * @param {Object[]|null} rectA - Первый прямоугольник (массив точек).
      * @param {Object[]|null} rectB - Второй прямоугольник.
-     * @returns {boolean} true, если прямоугольники пересекаются.
+     * @returns {boolean} True, если прямоугольники пересекаются.
      * @private
      */
     _rectsIntersect(rectA, rectB) {

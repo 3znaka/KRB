@@ -194,7 +194,6 @@ export class Marker3D {
         /** @private */ this._isModel = !!this._modelUrl;               // флаг, что используется GLB-модель
         /** @private */ this._modelAnchorOffset = new THREE.Vector3(); // смещение для anchor point модели
         /** @private */ this._sizeAnimation = null; // объект анимации: { startSize, endSize, startTime, duration, easing }
-        /** @private */ this._prevWgPos = null; // предыдущая позиция worldGroup для сброса кэша высоты
     }
 
     /**
@@ -932,15 +931,6 @@ this._updateSizeAnimation(performance.now());
         const worldX = absWorldX + wgPos.x;
         const worldZ = absWorldZ + wgPos.z;
 
-        // Проверяем, изменилась ли позиция worldGroup, чтобы сбросить кэш высоты
-        if (this._altitudeMode === 'clampToGround') {
-            if (this._prevWgPos && (this._prevWgPos.x !== wgPos.x || this._prevWgPos.z !== wgPos.z)) {
-                this._lastHeightUpdateTime = 0; // принудительное обновление высоты
-            }
-            this._prevWgPos = wgPos.clone();
-        }
-
-
         let worldY = 0;
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
@@ -957,11 +947,11 @@ this._updateSizeAnimation(performance.now());
         }
 
         if (this._isModel && this._modelAnchorOffset) {
-    // Для моделей вычитаем смещение anchor, чтобы точка привязки совпадала с координатой
+    // Для моделей добавляем смещение anchor, чтобы точка привязки совпадала с координатой
     this._object3D.position.set(
-        absWorldX - this._modelAnchorOffset.x,
-        worldY - this._modelAnchorOffset.y,
-        absWorldZ - this._modelAnchorOffset.z
+        absWorldX + this._modelAnchorOffset.x,
+        worldY + this._modelAnchorOffset.y,
+        absWorldZ + this._modelAnchorOffset.z
     );
 } else {
     // Для примитивов смещение уже учтено в геометрии

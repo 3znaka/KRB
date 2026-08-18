@@ -69,6 +69,7 @@ logo.src = getImgUrl('../img/logo.svg');
 logo.className = 'krb-logo';
 const link = document.createElement('a');
 link.href = 'https://mapengine.ru'; 
+link.style.pointerEvents = 'all';
 link.target = '_blank';
 
 link.appendChild(logo);

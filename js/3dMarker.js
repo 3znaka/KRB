@@ -15,7 +15,13 @@ import { THREE } from '../js_TP/tpb.js';
 import { proj } from './Utils.js';
 import { Layer } from './Layers.js';
 
-const MARKER_RENDER_ORDER = 1000; // Выше любого уровня зума тайлов
+
+/**
+ * Рендерит 3д-маркеры выше любого уровня зума тайлов
+ *
+ * @private
+ */
+const MARKER_RENDER_ORDER = 1000; 
 
 /**
  * Класс 3D-маркера.

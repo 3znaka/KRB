@@ -391,22 +391,27 @@ export class Marker3D {
  * @private
  */
 _applyModelSizeAndAnchor(model) {
-    // Сбрасываем к исходному состоянию
     model.scale.copy(this._originalModelScale);
     model.position.copy(this._originalModelPosition);
 
-    // Применяем масштаб, если задан size
     if (this._size) {
         const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
         model.scale.copy(scaleFactors);
     }
 
-    // Вычисляем bounding box после масштабирования (без учёта позиции)
+    // setFromObject возвращает box в МИРОВЫХ координатах сцены,
+    // включая сдвиг worldGroup. Переводим в локальные координаты
+    // родителя, чтобы anchor-смещение не зависело от панорамирования.
     const box = new THREE.Box3().setFromObject(model);
+    if (model.parent) {
+        model.parent.updateWorldMatrix(true, false);
+        const parentInv = new THREE.Matrix4().copy(model.parent.matrixWorld).invert();
+        box.applyMatrix4(parentInv);
+    }
+
     const size = box.getSize(new THREE.Vector3());
     this._height = size.y;
 
-    // Вычисляем точку anchor внутри bounding box и сохраняем её как смещение
     if (this._anchor) {
         const anchorPoint = new THREE.Vector3(
             box.min.x + this._anchor[0] * size.x,
@@ -417,8 +422,8 @@ _applyModelSizeAndAnchor(model) {
     } else {
         this._modelAnchorOffset.set(0, 0, 0);
     }
-
 }
+
     /**
      * Вычисляет коэффициенты масштабирования модели на основе size и исходных размеров.
      *

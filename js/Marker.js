@@ -12,9 +12,6 @@ import {
 } from '../js_TP/tpb.js';  
 import { Layer } from './Layers.js';
 
-
-const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
-
 /**
  * Слабая карта для хранения привязки панелей к экземпляру карты.
  *
@@ -22,6 +19,17 @@ const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
  * @private
  */
 const _mapPanes = new WeakMap();
+
+/**
+ * URL иконки маркера по умолчанию.
+ *
+ * @type {string}
+ * @private
+ * @example
+ * const iconUrl = DEFAULT_ICON_URL;
+ * console.log(iconUrl);
+ */
+const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
 /**
  * Возвращает (и при необходимости создаёт) DOM-панели для маркеров и подсказок,

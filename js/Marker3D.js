@@ -391,22 +391,19 @@ export class Marker3D {
  * @private
  */
 _applyModelSizeAndAnchor(model) {
-    // Сбрасываем к исходному состоянию
-    model.scale.copy(this._originalModelScale);
-    model.position.copy(this._originalModelPosition);
+    const currentPos = model.position.clone();   // сохраняем текущую позицию
+    model.scale.copy(this._originalModelScale);  // сбрасываем масштаб
 
-    // Применяем масштаб, если задан size
     if (this._size) {
         const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
         model.scale.copy(scaleFactors);
     }
 
-    // Вычисляем bounding box после масштабирования (без учёта позиции)
+    // Вычисляем bounding box после масштабирования (без изменения позиции)
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     this._height = size.y;
 
-    // Вычисляем точку anchor внутри bounding box и сохраняем её как смещение
     if (this._anchor) {
         const anchorPoint = new THREE.Vector3(
             box.min.x + this._anchor[0] * size.x,
@@ -418,7 +415,10 @@ _applyModelSizeAndAnchor(model) {
         this._modelAnchorOffset.set(0, 0, 0);
     }
 
+    model.position.copy(currentPos);             // восстанавливаем позицию
 }
+
+
     /**
      * Вычисляет коэффициенты масштабирования модели на основе size и исходных размеров.
      *
@@ -946,15 +946,14 @@ this._updateSizeAnimation(performance.now());
             worldY = this._altitude;
         }
 
-        if (this._isModel && this._modelAnchorOffset) {
-    // Для моделей добавляем смещение anchor, чтобы точка привязки совпадала с координатой
+if (this._isModel && this._modelAnchorOffset) {
     this._object3D.position.set(
-        absWorldX + this._modelAnchorOffset.x,
-        worldY + this._modelAnchorOffset.y,
-        absWorldZ + this._modelAnchorOffset.z
+        absWorldX - this._modelAnchorOffset.x,
+        worldY - this._modelAnchorOffset.y,
+        absWorldZ - this._modelAnchorOffset.z
     );
 } else {
-    // Для примитивов смещение уже учтено в геометрии
+    // для примитивов якорь уже учтён в геометрии
     this._object3D.position.set(absWorldX, worldY, absWorldZ);
 }
 

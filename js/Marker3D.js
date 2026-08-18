@@ -946,12 +946,12 @@ this._updateSizeAnimation(performance.now());
             worldY = this._altitude;
         }
 
-if (this._isModel && this._modelAnchorOffset) {
-    // Для моделей: позиционируем так, чтобы точка якоря совпала с координатой маркера
+        if (this._isModel && this._modelAnchorOffset) {
+    // Для моделей добавляем смещение anchor, чтобы точка привязки совпадала с координатой
     this._object3D.position.set(
-        absWorldX - this._modelAnchorOffset.x,
-        worldY - this._modelAnchorOffset.y,
-        absWorldZ - this._modelAnchorOffset.z
+        absWorldX + this._modelAnchorOffset.x,
+        worldY + this._modelAnchorOffset.y,
+        absWorldZ + this._modelAnchorOffset.z
     );
 } else {
     // Для примитивов смещение уже учтено в геометрии

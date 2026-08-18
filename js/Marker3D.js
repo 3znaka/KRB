@@ -7,6 +7,7 @@
  * - raycasting для событий onClick и onHover;
  * - гибкое позиционирование подписи относительно объекта (top, bottom, left, right)
  *   с гарантией отсутствия перекрытия.
+ * - масштабирование GLB-моделей через size (число, [height], [width,height], [width,height,depth])
  *
  * @module Marker3D
  */
@@ -15,13 +16,12 @@ import { THREE } from '../js_TP/tpb.js';
 import { proj } from './Utils.js';
 import { Layer } from './Layers.js';
 
-
 /**
  * Рендерит 3д-маркеры выше любого уровня зума тайлов
  *
  * @private
  */
-const MARKER_RENDER_ORDER = 1000; 
+const MARKER_RENDER_ORDER = 1000;
 
 /**
  * Класс 3D-маркера.
@@ -54,33 +54,9 @@ const MARKER_RENDER_ORDER = 1000;
  * });
  * marker3d.addTo(map);
  * marker3d.setColor(0xff5500);
- * console.log(marker3d.getText());
- * console.log(marker3d.getTextStyle());
- * console.log(marker3d.getTextZoomBounds());
- * console.log(marker3d.getLabelType());
- * console.log(marker3d.isVisible());
- * console.log(marker3d.getScreenPosition());
- * console.log(marker3d.getTitleAlign());
- * console.log(marker3d.getTitleOffset());
- * console.log(marker3d.getTitleVerticalAlign());
- * console.log(marker3d.getAllowOverflow());
- * console.log(marker3d.getPriority());
- * console.log(marker3d.getClusterable());
- * marker3d.showTooltip();
- * marker3d.hideTooltip();
- * marker3d.remove();
- *
- * const absoluteMarker = new Marker3D({
- *     position: [37.6, 55.7],
- *     primitiveType: 'sphere',
- *     size: [200, 200, 200],
- *     altitude: 500,
- *     altitudeMode: 'absolute',
- *     anchor: [0.5, 0.5, 0.5],
- *     title: 'Сфера',
- *     titlePlacement: 'bottom'
- * });
- * absoluteMarker.addTo(map);
+ * marker3d.setSize(500); // равномерно увеличить модель до 500 м по максимальному габариту
+ * console.log(marker3d.getSize()); // 500
+ * ...
  */
 export class Marker3D {
     /** @private */ static _idCounter = 0;
@@ -98,7 +74,7 @@ export class Marker3D {
      * @param {Object} options - Настройки 3D-маркера.
      * @param {[number, number]} options.position - Географические координаты [lon, lat].
      * @param {string} [options.primitiveType='box'] - Тип примитива: 'box', 'sphere', 'cylinder', 'cone'.
-     * @param {[number, number, number]} [options.size=[100,100,100]] - Размеры объекта: [width, height, depth] в метрах.
+     * @param {number|Array<number>} [options.size] - Размеры объекта. Для примитивов: массив [width, height, depth] в метрах; число или массивы из 1-3 элементов преобразуются к тройке. Для GLB-моделей: число - равномерное масштабирование до максимального габарита; [height] - масштабирование по высоте с сохранением пропорций; [width, height] - ширина и высота, глубина пропорционально среднему; [width, height, depth] - точные размеры по осям.
      * @param {string} [options.modelUrl] - URL GLB-модели. Если указан, примитив игнорируется.
      * @param {number} [options.altitude=0] - Высота над поверхностью (если altitudeMode='clampToGround') или абсолютная высота (если altitudeMode='absolute').
      * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты: 'clampToGround' (прижат к рельефу), 'absolute' (абсолютная высота в мировых координатах Y).
@@ -128,7 +104,7 @@ export class Marker3D {
         /** @private */ this._lon = options.position[0];
         /** @private */ this._lat = options.position[1];
         /** @private */ this._primitiveType = options.primitiveType || 'box';
-        /** @private */ this._size = options.size || [100, 100, 100];
+        /** @private */ this._size = options.size || null; // размер, может быть null/undefined
         /** @private */ this._modelUrl = options.modelUrl || null;
         /** @private */ this._altitude = options.altitude || 0;
         /** @private */ this._altitudeMode = options.altitudeMode || 'clampToGround';
@@ -211,6 +187,10 @@ export class Marker3D {
         /** @private */ this._modelPromise = null;
         /** @private */ this._worldPosition = new THREE.Vector3(); // Мировая позиция (с учётом worldGroup)
         /** @private */ this._localBox = null; // Локальный bounding box объекта (после применения anchor)
+        // Для моделей
+        /** @private */ this._originalModelSize = null; // Vector3
+        /** @private */ this._originalModelScale = null; // Vector3
+        /** @private */ this._originalModelPosition = null; // Vector3
     }
 
     /**
@@ -284,7 +264,8 @@ export class Marker3D {
      * @private
      */
     _createPrimitive() {
-        const [w, h, d] = this._size;
+        // Преобразуем size в массив [w, h, d] в зависимости от типа
+        let [w, h, d] = this._normalizePrimitiveSize(this._size);
         this._height = h; // сохраняем фактическую высоту примитива
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
@@ -322,8 +303,32 @@ export class Marker3D {
     }
 
     /**
+     * Преобразует входной size для примитива в массив [width, height, depth].
+     * Поддерживает number, [h], [w,h], [w,h,d].
+     *
+     * @param {number|Array<number>} size - Входной размер.
+     * @returns {[number, number, number]} Нормализованный размер.
+     * @private
+     */
+    _normalizePrimitiveSize(size) {
+        if (!size) return [100, 100, 100]; // default
+        if (typeof size === 'number') {
+            return [size, size, size];
+        }
+        if (Array.isArray(size)) {
+            switch (size.length) {
+                case 1: return [size[0], size[0], size[0]];
+                case 2: return [size[0], size[1], size[0]]; // глубина = ширине
+                case 3: return [size[0], size[1], size[2]];
+                default: throw new Error('Marker3D: size array must have 1, 2, or 3 elements');
+            }
+        }
+        throw new Error('Marker3D: invalid size type');
+    }
+
+    /**
      * Загружает GLB-модель с помощью динамического импорта GLTFLoader с CDN.
-     * Применяет anchor point после загрузки.
+     * Применяет anchor point и масштабирование после загрузки.
      *
      * @returns {Promise<void>} Промис, который разрешается после завершения загрузки модели.
      * @private
@@ -338,22 +343,14 @@ export class Marker3D {
                 const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
 
-                // Применяем anchor point
-                if (this._anchor) {
-                    const box = new THREE.Box3().setFromObject(model);
-                    const size = box.getSize(new THREE.Vector3());
-                    this._height = size.y; // сохраняем фактическую высоту модели
-                    const anchorPoint = new THREE.Vector3(
-                        box.min.x + this._anchor[0] * size.x,
-                        box.min.y + this._anchor[1] * size.y,
-                        box.min.z + this._anchor[2] * size.z
-                    );
-                    model.position.sub(anchorPoint);
-                }
+                // Сохраняем исходные параметры модели для последующего изменения размера
+                const originalBox = new THREE.Box3().setFromObject(model);
+                this._originalModelSize = originalBox.getSize(new THREE.Vector3());
+                this._originalModelScale = model.scale.clone();
+                this._originalModelPosition = model.position.clone();
 
-                // Вычисляем локальный bounding box после применения anchor
-                const localBox = new THREE.Box3().setFromObject(model);
-                this._localBox = localBox;
+                // Применяем размер и anchor
+                this._applyModelSizeAndAnchor(model);
 
                 // Устанавливаем renderOrder для всех мешей
                 model.traverse((child) => {
@@ -381,6 +378,142 @@ export class Marker3D {
         })();
         return this._modelPromise;
     }
+
+    /**
+     * Применяет масштабирование и anchor к модели на основе this._size и this._anchor.
+     * Пересчитывает this._localBox и this._height.
+     *
+     * @param {THREE.Object3D} model - Корневой объект модели.
+     * @private
+     */
+    _applyModelSizeAndAnchor(model) {
+        // Сбрасываем к исходному состоянию
+        model.scale.copy(this._originalModelScale);
+        model.position.copy(this._originalModelPosition);
+
+        // Применяем масштаб, если задан size
+        if (this._size) {
+            const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
+            model.scale.copy(scaleFactors);
+        }
+
+        // Вычисляем bounding box после масштабирования (без учёта позиции)
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        this._height = size.y;
+
+        // Применяем anchor: смещаем модель так, чтобы указанная точка совпала с началом координат
+        if (this._anchor) {
+            const anchorPoint = new THREE.Vector3(
+                box.min.x + this._anchor[0] * size.x,
+                box.min.y + this._anchor[1] * size.y,
+                box.min.z + this._anchor[2] * size.z
+            );
+            model.position.sub(anchorPoint);
+        }
+
+        // Сохраняем локальный bounding box (после масштабирования, но до смещения позиции)
+        this._localBox = box.clone();
+    }
+
+    /**
+     * Вычисляет коэффициенты масштабирования модели на основе size и исходных размеров.
+     *
+     * @param {number|Array<number>} size - Желаемый размер.
+     * @param {THREE.Vector3} originalSize - Исходные размеры модели по осям.
+     * @returns {THREE.Vector3} Вектор масштабных коэффициентов.
+     * @private
+     */
+    _calculateModelScale(size, originalSize) {
+        if (typeof size === 'number') {
+            const targetMaxDim = size;
+            const currentMaxDim = Math.max(originalSize.x, originalSize.y, originalSize.z);
+            const factor = targetMaxDim / currentMaxDim;
+            return new THREE.Vector3(factor, factor, factor);
+        }
+
+        if (Array.isArray(size)) {
+            switch (size.length) {
+                case 1: {
+                    const targetHeight = size[0];
+                    const factor = targetHeight / originalSize.y;
+                    return new THREE.Vector3(factor, factor, factor);
+                }
+                case 2: {
+                    const targetWidth = size[0];
+                    const targetHeight = size[1];
+                    const scaleX = targetWidth / originalSize.x;
+                    const scaleY = targetHeight / originalSize.y;
+                    const scaleZ = (scaleX + scaleY) / 2; // глубина пропорционально среднему
+                    return new THREE.Vector3(scaleX, scaleY, scaleZ);
+                }
+                case 3: {
+                    return new THREE.Vector3(
+                        size[0] / originalSize.x,
+                        size[1] / originalSize.y,
+                        size[2] / originalSize.z
+                    );
+                }
+                default:
+                    throw new Error('Marker3D: size array must have 1, 2, or 3 elements');
+            }
+        }
+
+        throw new Error('Marker3D: invalid size type');
+    }
+
+    /**
+     * Устанавливает новый размер объекта (для моделей и примитивов).
+     * Для моделей изменяет масштаб, для примитивов пересоздаёт меш.
+     *
+     * @param {number|Array<number>} size - Новый размер (см. документацию конструктора).
+     * @returns {Marker3D} this для цепочки вызовов.
+     */
+    setSize(size) {
+        this._size = size;
+
+        if (!this._object3D) {
+            // Если объект ещё не создан, просто сохраняем размер
+            return this;
+        }
+
+        if (this._modelUrl) {
+            // Для модели
+            if (this._isModelLoading) {
+                // Модель ещё загружается, размер будет применён после загрузки
+                return this;
+            }
+            // Если модель уже загружена и является this._object3D
+            this._applyModelSizeAndAnchor(this._object3D);
+            // Обновляем поворот (на случай если был изменён)
+            this._object3D.rotation.set(...this._rotation);
+        } else {
+            // Для примитива пересоздаём меш
+            if (this._object3D.parent) {
+                const oldObject = this._object3D;
+                const oldPosition = oldObject.position.clone();
+                const oldRotation = oldObject.rotation.clone();
+                oldObject.parent.remove(oldObject);
+
+                this._createPrimitive(); // создаст новый this._object3D
+                this._object3D.position.copy(oldPosition);
+                this._object3D.rotation.copy(oldRotation);
+                this._map.worldGroup.add(this._object3D);
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Возвращает текущий размер объекта.
+     *
+     * @returns {number|Array<number>|null} Текущий размер.
+     */
+    getSize() {
+        return this._size;
+    }
+
+ 
 
     /**
      * Регистрирует глобальные обработчики событий для рейкастинга на canvas карты.

@@ -63,11 +63,16 @@ export function initUI(map) {
     scaleBar.appendChild(scaleLabel);
     leftBottom.appendChild(scaleContainer);
 
-    // Логотип
-    const logo = document.createElement('img');
-    logo.src = getImgUrl('../img/logo.svg');
-    logo.className = 'krb-logo';
-    leftBottom.appendChild(logo);
+// Логотип
+const logo = document.createElement('img');
+logo.src = getImgUrl('../img/logo.svg');
+logo.className = 'krb-logo';
+const link = document.createElement('a');
+link.href = 'https://mapengine.ru'; 
+link.target = '_blank';
+
+link.appendChild(logo);
+leftBottom.appendChild(link);
 
     // Правый нижний угол: кнопки и атрибуция
     const rightBottom = document.createElement('div');

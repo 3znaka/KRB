@@ -228,13 +228,13 @@ export class KrbMap {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);
 
-        // Создаём освещение по умолчанию и сохраняем ссылки
-        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
-        this.scene.add(this.ambientLight);
+// Создаём освещение по умолчанию и сохраняем ссылки
+this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+this.scene.add(this.ambientLight);
 
-        this.sunLight = new THREE.DirectionalLight(0xffffff, 1.3);
-        this.sunLight.position.set(1, -1, 1);
-        this.scene.add(this.sunLight);
+this.sunLight = new THREE.DirectionalLight(0xffffff, 3);
+this.sunLight.position.set(1, 2, 3);
+this.scene.add(this.sunLight);
     }
 
     /* ================================================================

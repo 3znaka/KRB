@@ -12,14 +12,7 @@ import {
 } from '../js_TP/tpb.js';  
 import { Layer } from './Layers.js';
 
-/**
- * URL иконки маркера по умолчанию.
- *
- * @type {string}
- * @example
- * const iconUrl = DEFAULT_ICON_URL;
- * console.log(iconUrl);
- */
+
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
 /**

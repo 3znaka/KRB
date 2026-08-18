@@ -8,7 +8,7 @@
  * - гибкое позиционирование подписи относительно объекта (top, bottom, left, right)
  *   с гарантией отсутствия перекрытия.
  *
- * @module 3dMarker
+ * @module Marker3D
  */
 
 import { THREE } from '../js_TP/tpb.js';

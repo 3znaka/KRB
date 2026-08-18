@@ -1,7 +1,7 @@
 // geojson.js — загрузка GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon), стилизация через свойства и коллбэки
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
-import { Marker3D } from './3dMarker.js'; // Добавлен импорт 3D-маркера
+import { Marker3D } from './Marker3D.js'; // Добавлен импорт 3D-маркера
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
 import { proj } from './Utils.js';

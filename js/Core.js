@@ -1,3 +1,12 @@
+import {
+  THREE,
+  OrbitControls
+} from '../js_TP/tpb.js';  
+import { proj, DEFAULTS, getOriginZ, getVirtKey, getSrcKey, toLonLat } from './Utils.js';
+import { TileManager } from './Tiles.js';
+import { TextManager } from './TextManager.js';
+import { initUI } from './Ui.js';
+
 /**
  * Представление карты, хранящее параметры центра, масштаба и углов обзора.
  *

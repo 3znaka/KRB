@@ -511,21 +511,19 @@ function extrudeBuilding(rings, height, minHeight = 0, eps) {
     };
 }
 
-function createPolylines(rings, closeRings = false) {
-    const polylines = [];
+function createLinePositions(rings, closeRings = false) {
+    const pts = [];
     for (const ring of rings) {
         if (!ring || ring.length < 2) continue;
-        const pts = [];
-        for (const pt of ring) {
-            pts.push(pt.x, 0, pt.z);
+        // Количество сегментов: если closeRings, то добавляем замыкающий сегмент
+        const segments = closeRings ? ring.length : ring.length - 1;
+        for (let i = 0; i < segments; i++) {
+            const p0 = ring[i];
+            const p1 = ring[(i + 1) % ring.length];
+            pts.push(p0.x, 0, p0.z, p1.x, 0, p1.z);
         }
-        if (closeRings && ring.length > 2) {
-            // Добавляем первую точку ещё раз для замыкания контура
-            pts.push(ring[0].x, 0, ring[0].z);
-        }
-        if (pts.length >= 6) polylines.push(new Float32Array(pts));
     }
-    return polylines;
+    return pts.length >= 6 ? new Float32Array(pts) : null;
 }
 
 function mergePolygonGeometries(geos) {
@@ -726,12 +724,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     }
 
     for (const [key, lineGroup] of linesMap) {
-        const polylines = createPolylines(lineGroup.rings.map(r => r.ring));
-        if (polylines.length === 0) continue;
+        const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
+        if (!positions) continue;
         const parts = key.split(':');
         const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
         result.lines.push({
-            polylines,
+            positions,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
@@ -741,12 +739,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     }
 
     for (const [key, strokeGroup] of strokesMap) {
-        const polylines = createPolylines(strokeGroup.map(s => s.ring), true);
-        if (polylines.length === 0) continue;
+        const positions = createLinePositions(strokeGroup.map(s => s.ring), true);
+        if (!positions) continue;
         const parts = key.split(':');
         const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
         result.strokes.push({
-            polylines,
+            positions,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
@@ -1000,28 +998,22 @@ export class VectorTileLayer {
 
         for (const line of result.lines) {
             const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
-            // Для каждой полилинии создаём отдельный Line2
-            for (const polyline of line.polylines) {
-                const lGeo = new LineGeometry();
-                lGeo.setPositions(polyline); // Float32Array без NaN
-                const lineObj = new Line2(lGeo, mat);
-                lineObj.renderOrder = line.renderOrder;
-                lineObj.frustumCulled = false;
-                group.add(lineObj);
-            }
+            const lGeo = new LineGeometry();
+            lGeo.setPositions(line.positions); // Float32Array напрямую
+            const lineObj = new Line2(lGeo, mat);
+            lineObj.renderOrder = line.renderOrder;
+            lineObj.frustumCulled = false; // исправление проблемы с NaN
+            group.add(lineObj);
         }
 
         for (const stroke of result.strokes) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
-            // Для каждой полилинии обводки создаём отдельный Line2
-            for (const polyline of stroke.polylines) {
-                const lGeo = new LineGeometry();
-                lGeo.setPositions(polyline);
-                const lineObj = new Line2(lGeo, mat);
-                lineObj.renderOrder = stroke.renderOrder;
-                lineObj.frustumCulled = false;
-                group.add(lineObj);
-            }
+            const lGeo = new LineGeometry();
+            lGeo.setPositions(stroke.positions);
+            const lineObj = new Line2(lGeo, mat);
+            lineObj.renderOrder = stroke.renderOrder;
+            lineObj.frustumCulled = false;
+            group.add(lineObj);
         }
 
         for (const pt of result.points) {
@@ -1424,21 +1416,21 @@ export class VectorTileLayer {
     // Кеширование материалов
     // -------------------------------------------------------------------------
     _getFillMaterial(styleKey) {
-        if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const opacity = parseFloat(parts[3]) * this.fillOpacity;
-        const mat = new THREE.MeshBasicMaterial({
-            color,
-            side: THREE.DoubleSide,
-            transparent: opacity < 1,
-            opacity,
-            depthTest: true,    // читаем глубину (её пишут здания)
-            depthWrite: false   // но сами НЕ пишем — плоские слои не конфликтуют
-        });
-        this._fillMaterialCache.set(styleKey, mat);
-        return mat;
-    }
+    if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
+    const parts = styleKey.split(':');
+    const color = parseInt(parts[2], 16);
+    const opacity = parseFloat(parts[3]) * this.fillOpacity;
+    const mat = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.DoubleSide,
+        transparent: opacity < 1,
+        opacity,
+        depthTest: true,    // читаем глубину (её пишут здания)
+        depthWrite: false   // но сами НЕ пишем — плоские слои не конфликтуют
+    });
+    this._fillMaterialCache.set(styleKey, mat);
+    return mat;
+}
 
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
@@ -1452,8 +1444,8 @@ export class VectorTileLayer {
                 this._map.renderer.domElement.width,
                 this._map.renderer.domElement.height
             ),
-            depthTest: true,
-            depthWrite: false
+            depthTest: true,   
+        depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;

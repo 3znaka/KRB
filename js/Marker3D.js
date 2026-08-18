@@ -193,6 +193,7 @@ export class Marker3D {
         /** @private */ this._originalModelPosition = null; // Vector3
         /** @private */ this._isModel = !!this._modelUrl;               // флаг, что используется GLB-модель
         /** @private */ this._modelAnchorOffset = new THREE.Vector3(); // смещение для anchor point модели
+        /** @private */ this._sizeAnimation = null; // объект анимации: { startSize, endSize, startTime, duration, easing }
     }
 
     /**
@@ -506,6 +507,44 @@ _applyModelSizeAndAnchor(model) {
         return this;
     }
 
+/**
+ * Плавно изменяет размер объекта в течение заданного времени.
+ * Поддерживает как GLB-модели, так и примитивы.
+ *
+ * @param {number|Array<number>} newSize - Новый размер (см. документацию конструктора).
+ * @param {number} [duration=1000] - Длительность анимации в миллисекундах.
+ * @param {string} [easing='linear'] - Тип анимации: 'linear', 'easeIn', 'easeOut', 'easeInOut'.
+ * @returns {Marker3D} this для цепочки вызовов.
+ */
+animateSize(newSize, duration = 1000, easing = 'linear') {
+    // Определяем начальный размер
+    let startSize = this._size;
+
+    if (startSize === null) {
+        if (this._isModel && this._originalModelSize) {
+            // Для GLB-моделей используем максимальный габарит исходной модели
+            startSize = Math.max(
+                this._originalModelSize.x,
+                this._originalModelSize.y,
+                this._originalModelSize.z
+            );
+        } else {
+            // Для примитивов (или если модель ещё не загружена) — размер по умолчанию
+            startSize = [100, 100, 100];
+        }
+    }
+
+    this._sizeAnimation = {
+        startSize,
+        endSize: newSize,
+        startTime: performance.now(),
+        duration,
+        easing
+    };
+
+    return this;
+}
+
     /**
      * Возвращает текущий размер объекта.
      *
@@ -787,6 +826,78 @@ _applyModelSizeAndAnchor(model) {
         this._localBox = null;
     }
 
+
+/**
+ * Обновляет анимацию размера, если она активна.
+ * Вызывается в _update.
+ *
+ * @param {number} now - Текущее время performance.now().
+ * @private
+ */
+_updateSizeAnimation(now) {
+    if (!this._sizeAnimation) return;
+
+    const anim = this._sizeAnimation;
+    const elapsed = now - anim.startTime;
+    const t = Math.min(elapsed / anim.duration, 1);
+
+    // Применяем easing
+    let progress;
+    switch (anim.easing) {
+        case 'easeIn':
+            progress = t * t;
+            break;
+        case 'easeOut':
+            progress = 1 - Math.pow(1 - t, 2);
+            break;
+        case 'easeInOut':
+            progress = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+            break;
+        case 'linear':
+        default:
+            progress = t;
+            break;
+    }
+
+    // Интерполируем размер
+    const currentSize = this._lerpSize(anim.startSize, anim.endSize, progress);
+    this.setSize(currentSize);
+
+    // Если анимация завершена, очищаем
+    if (t >= 1) {
+        this._sizeAnimation = null;
+        this.setSize(anim.endSize); // гарантируем точное конечное значение
+    }
+}
+
+/**
+ * Линейная интерполяция между двумя значениями size (число или массив).
+ *
+ * @param {number|Array<number>} start - Начальный размер.
+ * @param {number|Array<number>} end - Конечный размер.
+ * @param {number} t - Коэффициент прогресса (0..1).
+ * @returns {number|Array<number>} Промежуточный размер.
+ * @private
+ */
+_lerpSize(start, end, t) {
+    if (typeof start === 'number' && typeof end === 'number') {
+        return start + (end - start) * t;
+    }
+
+    if (Array.isArray(start) && Array.isArray(end)) {
+        const len = Math.min(start.length, end.length);
+        const result = [];
+        for (let i = 0; i < len; i++) {
+            result.push(start[i] + (end[i] - start[i]) * t);
+        }
+        return result;
+    }
+
+    // Если типы не совпадают, просто возвращаем конечное значение
+    return end;
+}
+
+
     /**
      * Обновляет позицию и видимость 3D-маркера. Вызывается картой каждый кадр.
      *
@@ -809,6 +920,8 @@ _applyModelSizeAndAnchor(model) {
             this._isVisible = false;
             return;
         }
+
+this._updateSizeAnimation(performance.now());
 
         // Абсолютные координаты в проекции Меркатора
         const [absWorldX, absWorldZ] = proj.fromLonLat([this._lon, this._lat]);

@@ -332,7 +332,7 @@ export class Marker3D {
         if (this._modelPromise) return this._modelPromise;
         this._modelPromise = (async () => {
             try {
-                const gltfModule = await import('https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
+                const gltfModule = await import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
                 const GLTFLoader = gltfModule.GLTFLoader;
                 const loader = new GLTFLoader();
                 const gltf = await loader.loadAsync(this._modelUrl);

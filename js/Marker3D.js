@@ -191,6 +191,8 @@ export class Marker3D {
         /** @private */ this._originalModelSize = null; // Vector3
         /** @private */ this._originalModelScale = null; // Vector3
         /** @private */ this._originalModelPosition = null; // Vector3
+        /** @private */ this._isModel = !!this._modelUrl;               // флаг, что используется GLB-модель
+        /** @private */ this._modelAnchorOffset = new THREE.Vector3(); // смещение для anchor point модели
     }
 
     /**
@@ -379,43 +381,43 @@ export class Marker3D {
         return this._modelPromise;
     }
 
-    /**
-     * Применяет масштабирование и anchor к модели на основе this._size и this._anchor.
-     * Пересчитывает this._localBox и this._height.
-     *
-     * @param {THREE.Object3D} model - Корневой объект модели.
-     * @private
-     */
-    _applyModelSizeAndAnchor(model) {
-        // Сбрасываем к исходному состоянию
-        model.scale.copy(this._originalModelScale);
-        model.position.copy(this._originalModelPosition);
+/**
+ * Применяет масштабирование и anchor к модели на основе this._size и this._anchor.
+ * Пересчитывает this._height и сохраняет смещение anchor в this._modelAnchorOffset.
+ * Не изменяет позицию модели напрямую — смещение будет применяться в _update.
+ *
+ * @param {THREE.Object3D} model - Корневой объект модели.
+ * @private
+ */
+_applyModelSizeAndAnchor(model) {
+    // Сбрасываем к исходному состоянию
+    model.scale.copy(this._originalModelScale);
+    model.position.copy(this._originalModelPosition);
 
-        // Применяем масштаб, если задан size
-        if (this._size) {
-            const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
-            model.scale.copy(scaleFactors);
-        }
-
-        // Вычисляем bounding box после масштабирования (без учёта позиции)
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        this._height = size.y;
-
-        // Применяем anchor: смещаем модель так, чтобы указанная точка совпала с началом координат
-        if (this._anchor) {
-            const anchorPoint = new THREE.Vector3(
-                box.min.x + this._anchor[0] * size.x,
-                box.min.y + this._anchor[1] * size.y,
-                box.min.z + this._anchor[2] * size.z
-            );
-            model.position.sub(anchorPoint);
-        }
-
-        // Сохраняем локальный bounding box (после масштабирования, но до смещения позиции)
-        this._localBox = box.clone();
+    // Применяем масштаб, если задан size
+    if (this._size) {
+        const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
+        model.scale.copy(scaleFactors);
     }
 
+    // Вычисляем bounding box после масштабирования (без учёта позиции)
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    this._height = size.y;
+
+    // Вычисляем точку anchor внутри bounding box и сохраняем её как смещение
+    if (this._anchor) {
+        const anchorPoint = new THREE.Vector3(
+            box.min.x + this._anchor[0] * size.x,
+            box.min.y + this._anchor[1] * size.y,
+            box.min.z + this._anchor[2] * size.z
+        );
+        this._modelAnchorOffset.copy(anchorPoint);
+    } else {
+        this._modelAnchorOffset.set(0, 0, 0);
+    }
+
+}
     /**
      * Вычисляет коэффициенты масштабирования модели на основе size и исходных размеров.
      *
@@ -831,9 +833,17 @@ export class Marker3D {
             worldY = this._altitude;
         }
 
-        // Объект является ребёнком worldGroup, поэтому позиция задаётся
-        // в локальных координатах относительно worldGroup (без wgPos.x/z).
-        this._object3D.position.set(absWorldX, worldY, absWorldZ);
+        if (this._isModel && this._modelAnchorOffset) {
+    // Для моделей добавляем смещение anchor, чтобы точка привязки совпадала с координатой
+    this._object3D.position.set(
+        absWorldX + this._modelAnchorOffset.x,
+        worldY + this._modelAnchorOffset.y,
+        absWorldZ + this._modelAnchorOffset.z
+    );
+} else {
+    // Для примитивов смещение уже учтено в геометрии
+    this._object3D.position.set(absWorldX, worldY, absWorldZ);
+}
 
         // Сохраняем мировую позицию для расчёта дальности, тултипа, подписи
         this._worldPosition.set(worldX, worldY, worldZ);
@@ -848,29 +858,42 @@ export class Marker3D {
             }
         }
 
-        // Проверка видимости bounding box объекта в камере.
-        // Объект скрывается только если его bounding box полностью вне frustum.
-        if (this._localBox) {
-            // Обновляем мировую матрицу объекта (без обновления потомков, для скорости)
-            this._object3D.updateWorldMatrix(true, false);
 
-            // Вычисляем мировой bounding box
-            const worldBox = this._localBox.clone().applyMatrix4(this._object3D.matrixWorld);
+// Проверка видимости bounding box объекта в камере.
+if (this._isModel) {
+    // Для GLB-моделей используем точный мировой bounding box
+    const worldBox = new THREE.Box3().setFromObject(this._object3D);
 
-            // Создаём frustum из матриц камеры
-            const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
-                mapInstance.camera.projectionMatrix,
-                mapInstance.camera.matrixWorldInverse
-            );
-            const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
+    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+        mapInstance.camera.projectionMatrix,
+        mapInstance.camera.matrixWorldInverse
+    );
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
 
-            // Если bounding box не пересекается с frustum — скрываем объект
-            if (!frustum.intersectsBox(worldBox)) {
-                this._object3D.visible = false;
-                this._isVisible = false;
-                return;
-            }
-        }
+    if (!frustum.intersectsBox(worldBox)) {
+        this._object3D.visible = false;
+        this._isVisible = false;
+        return;
+    }
+} else if (this._localBox) {
+    // Для примитивов сохраняем прежнюю оптимизированную проверку
+    this._object3D.updateWorldMatrix(true, false);
+    const worldBox = this._localBox.clone().applyMatrix4(this._object3D.matrixWorld);
+
+    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+        mapInstance.camera.projectionMatrix,
+        mapInstance.camera.matrixWorldInverse
+    );
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(projScreenMatrix);
+
+    if (!frustum.intersectsBox(worldBox)) {
+        this._object3D.visible = false;
+        this._isVisible = false;
+        return;
+    }
+}
+
+
 
         this._object3D.visible = true;
         this._isVisible = true;
@@ -938,91 +961,70 @@ export class Marker3D {
      * @returns {{x: number, y: number}|null} Позиция на экране для подписи или null, если маркер не видим.
      */
     getScreenPosition() {
-        if (!this._isVisible || !this._object3D) return null;
+    if (!this._isVisible || !this._object3D) return null;
 
-        // Если локальный bounding box ещё не определён (например, модель ещё грузится),
-        // используем fallback: верхняя точка объекта по высоте и якорю.
-        if (!this._localBox) {
-            const localTop = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
-            this._object3D.updateWorldMatrix(false, false);
-            const worldTop = localTop.clone().applyMatrix4(this._object3D.matrixWorld);
-            const screenPos = worldTop.clone().project(this._map.camera);
-            const canvas = this._map.renderer.domElement;
+    const canvas = this._map.renderer.domElement;
+    let box;
 
-            if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-                return null;
-            }
-
-            return {
-                x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-                y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
-            };
-        }
-
-        // Обновляем мировую матрицу объекта, чтобы bounding box был в мировых координатах
+    if (this._isModel) {
+        // Для модели используем актуальный bounding box
+        box = new THREE.Box3().setFromObject(this._object3D);
+    } else if (this._localBox) {
+        // Для примитива применяем локальный box к мировой матрице
         this._object3D.updateWorldMatrix(true, false);
-
-        // Получаем экранные координаты всех 8 углов локального bounding box
-        const corners = [];
-        const { min, max } = this._localBox;
-        const canvas = this._map.renderer.domElement;
-
-        for (let i = 0; i < 8; i++) {
-            const corner = new THREE.Vector3(
-                (i & 1) ? max.x : min.x,
-                (i & 2) ? max.y : min.y,
-                (i & 4) ? max.z : min.z
-            );
-            // Преобразуем в мировые координаты, затем проецируем
-            corner.applyMatrix4(this._object3D.matrixWorld);
-            corner.project(this._map.camera);
-
-            // Игнорируем точки позади камеры
-            if (corner.z > 1 || corner.z < -1) continue;
-
-            const x = (corner.x * 0.5 + 0.5) * canvas.clientWidth;
-            const y = (-corner.y * 0.5 + 0.5) * canvas.clientHeight;
-            corners.push({ x, y });
-        }
-
-        if (corners.length === 0) return null; // объект полностью позади камеры
-
-        // Находим min/max экранные координаты
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (const c of corners) {
-            if (c.x < minX) minX = c.x;
-            if (c.x > maxX) maxX = c.x;
-            if (c.y < minY) minY = c.y;
-            if (c.y > maxY) maxY = c.y;
-        }
-
-        const centerX = (minX + maxX) / 2;
-        const centerY = (minY + maxY) / 2;
-
-        // Выбираем точку привязки в зависимости от titlePlacement
-        let x, y;
-        switch (this._titlePlacement) {
-            case 'bottom':
-                x = centerX;
-                y = maxY;
-                break;
-            case 'left':
-                x = minX;
-                y = centerY;
-                break;
-            case 'right':
-                x = maxX;
-                y = centerY;
-                break;
-            case 'top':
-            default:
-                x = centerX;
-                y = minY;
-                break;
-        }
-
-        return { x, y };
+        box = this._localBox.clone().applyMatrix4(this._object3D.matrixWorld);
+    } else {
+        // Fallback, если ничего нет
+        const localTop = new THREE.Vector3(0, this._height * (1 - this._anchor[1]), 0);
+        this._object3D.updateWorldMatrix(false, false);
+        const worldTop = localTop.clone().applyMatrix4(this._object3D.matrixWorld);
+        const screenPos = worldTop.clone().project(this._map.camera);
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) return null;
+        return {
+            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+        };
     }
+
+    // Проецируем 8 углов bounding box
+    const corners = [];
+    const { min, max } = box;
+    for (let i = 0; i < 8; i++) {
+        const corner = new THREE.Vector3(
+            (i & 1) ? max.x : min.x,
+            (i & 2) ? max.y : min.y,
+            (i & 4) ? max.z : min.z
+        );
+        corner.project(this._map.camera);
+        if (corner.z > 1 || corner.z < -1) continue;
+        corners.push({
+            x: (corner.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-corner.y * 0.5 + 0.5) * canvas.clientHeight
+        });
+    }
+    if (corners.length === 0) return null;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const c of corners) {
+        if (c.x < minX) minX = c.x;
+        if (c.x > maxX) maxX = c.x;
+        if (c.y < minY) minY = c.y;
+        if (c.y > maxY) maxY = c.y;
+    }
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    let x, y;
+    switch (this._titlePlacement) {
+        case 'bottom': x = centerX; y = maxY; break;
+        case 'left':   x = minX;   y = centerY; break;
+        case 'right':  x = maxX;   y = centerY; break;
+        case 'top':
+        default:       x = centerX; y = minY;   break;
+    }
+    return { x, y };
+}
 
     /**
      * Возвращает выравнивание подписи.

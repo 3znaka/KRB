@@ -228,11 +228,134 @@ export class KrbMap {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);
 
-        this.scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-        const sun = new THREE.DirectionalLight(0xffffff, 1.3);
-        sun.position.set(1, -1, 1);
-        this.scene.add(sun);
+        // Создаём освещение по умолчанию и сохраняем ссылки
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        this.scene.add(this.ambientLight);
+
+        this.sunLight = new THREE.DirectionalLight(0xffffff, 1.3);
+        this.sunLight.position.set(1, -1, 1);
+        this.scene.add(this.sunLight);
     }
+
+    /* ================================================================
+       Управление освещением (публичные методы)
+       ================================================================ */
+
+    /**
+     * Устанавливает параметры окружающего (ambient) света.
+     *
+     * @param {number|string} color - Цвет света в формате числа (0xffffff) или CSS-строки.
+     * @param {number} [intensity] - Интенсивность света (по умолчанию 0.8).
+     * @returns {void}
+     *
+     * @example
+     * map.setAmbientLight(0x404040, 0.5);
+     */
+    setAmbientLight(color, intensity = 0.8) {
+        if (!this.ambientLight) {
+            console.warn('Ambient light is not initialized.');
+            return;
+        }
+        this.ambientLight.color.set(color);
+        this.ambientLight.intensity = intensity;
+    }
+
+    /**
+     * Устанавливает параметры направленного солнечного света.
+     *
+     * @param {number|string} color - Цвет света.
+     * @param {number} [intensity] - Интенсивность света (по умолчанию 1.3).
+     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [position] - Позиция источника света (направление).
+     * @returns {void}
+     *
+     * @example
+     * map.setSunLight(0xffeedd, 1.5, { x: 1, y: -1, z: 1 });
+     */
+    setSunLight(color, intensity = 1.3, position = null) {
+        if (!this.sunLight) {
+            console.warn('Directional (sun) light is not initialized.');
+            return;
+        }
+        this.sunLight.color.set(color);
+        this.sunLight.intensity = intensity;
+        if (position) {
+            if (position instanceof THREE.Vector3) {
+                this.sunLight.position.copy(position);
+            } else if (Array.isArray(position) && position.length >= 3) {
+                this.sunLight.position.set(position[0], position[1], position[2]);
+            } else if (typeof position === 'object' && 'x' in position && 'y' in position && 'z' in position) {
+                this.sunLight.position.set(position.x, position.y, position.z);
+            } else {
+                console.warn('Invalid position argument for setSunLight.');
+            }
+        }
+    }
+
+    /**
+     * Устанавливает оба источника света одновременно.
+     *
+     * @param {Object} params - Параметры освещения.
+     * @param {number|string} [params.ambientColor] - Цвет окружающего света.
+     * @param {number} [params.ambientIntensity] - Интенсивность окружающего света.
+     * @param {number|string} [params.sunColor] - Цвет солнечного света.
+     * @param {number} [params.sunIntensity] - Интенсивность солнечного света.
+     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [params.sunPosition] - Позиция солнечного света.
+     * @returns {void}
+     *
+     * @example
+     * map.setLighting({
+     *     ambientColor: 0xffffff,
+     *     ambientIntensity: 0.6,
+     *     sunColor: 0xfff5e6,
+     *     sunIntensity: 1.2,
+     *     sunPosition: [1, -1, 1]
+     * });
+     */
+    setLighting({
+        ambientColor,
+        ambientIntensity,
+        sunColor,
+        sunIntensity,
+        sunPosition
+    } = {}) {
+        if (ambientColor !== undefined) {
+            this.setAmbientLight(ambientColor, ambientIntensity);
+        } else if (ambientIntensity !== undefined) {
+            this.setAmbientLight(this.ambientLight ? this.ambientLight.color.getHex() : 0xffffff, ambientIntensity);
+        }
+
+        if (sunColor !== undefined) {
+            this.setSunLight(sunColor, sunIntensity, sunPosition);
+        } else {
+            if (sunIntensity !== undefined) {
+                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, sunIntensity, sunPosition);
+            } else if (sunPosition !== undefined) {
+                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, this.sunLight ? this.sunLight.intensity : 1.3, sunPosition);
+            }
+        }
+    }
+
+    /**
+     * Возвращает объект окружающего света для прямого доступа.
+     *
+     * @returns {THREE.AmbientLight|null} Объект ambient-света или null, если не создан.
+     */
+    getAmbientLight() {
+        return this.ambientLight || null;
+    }
+
+    /**
+     * Возвращает объект направленного солнечного света для прямого доступа.
+     *
+     * @returns {THREE.DirectionalLight|null} Объект directional-света или null, если не создан.
+     */
+    getSunLight() {
+        return this.sunLight || null;
+    }
+
+    /* ================================================================
+       Остальные методы (камера, тайлы, взаимодействие)
+       ================================================================ */
 
     /**
      * Инициализирует и настраивает управление камерой.

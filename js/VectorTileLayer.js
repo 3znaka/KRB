@@ -894,6 +894,11 @@ export class VectorTileLayer {
 
         this._lastCanvasSize = { width: 0, height: 0 };
 
+        // Для отслеживания необходимости пересоздания подписей
+this._lastLabelUpdateTarget = new THREE.Vector3();
+this._lastLabelUpdateZoom = -1;
+this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
+
         const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
         this._workerScriptUrls = rawScripts.map(s => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
@@ -1365,6 +1370,23 @@ export class VectorTileLayer {
                 this._pendingLoads.delete(key);
             }
         }
+
+        // Пересоздание подписей при значительном смещении камеры или изменении зума
+const target = map.controls.target;
+const discreteZoom = map.currentDiscreteZoom;
+
+const distanceMovedSq = this._lastLabelUpdateTarget.distanceToSquared(target);
+const zoomChanged = Math.abs(this._lastLabelUpdateZoom - discreteZoom) > 0.01;
+
+if (distanceMovedSq > this._labelUpdateThreshold * this._labelUpdateThreshold || zoomChanged) {
+    this._lastLabelUpdateTarget.copy(target);
+    this._lastLabelUpdateZoom = discreteZoom;
+
+    // Пересоздаём подписи для всех активных тайлов
+    this._tileCache.forEach(group => {
+        this._createTextLabelsForGroup(group);
+    });
+}
 
         const maxMerc = map.MAX_MERCATOR;
         const target = map.controls.target;

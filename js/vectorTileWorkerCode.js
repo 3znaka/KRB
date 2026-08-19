@@ -424,11 +424,33 @@ function extrudeBuilding(rings, height, minHeight = 0, eps) {
     if (cleaned.length === 0) return null;
 
     const polygons = [];
-    for (const ring of cleaned) {
-        if (ringArea(ring) > 0) polygons.push({ outer: ring, holes: [] });
-        else if (polygons.length > 0) polygons[polygons.length - 1].holes.push(ring);
+let outerSign = null;
+
+for (const ring of cleaned) {
+    const area = ringArea(ring);
+
+    // Почти вырожденные кольца пропускаем
+    if (Math.abs(area) < 1e-9) continue;
+
+    if (outerSign === null) {
+        // Первое нормальное кольцо считаем внешним
+        outerSign = Math.sign(area);
     }
-    if (polygons.length === 0) return null;
+
+    const isOuter = Math.sign(area) === outerSign;
+
+    if (isOuter) {
+        polygons.push({ outer: ring, holes: [] });
+    } else if (polygons.length > 0) {
+        polygons[polygons.length - 1].holes.push(ring);
+    } else {
+        // Защитный случай: если дырка встретилась раньше внешнего кольца,
+        // не теряем её, а считаем внешним кольцом.
+        polygons.push({ outer: ring, holes: [] });
+    }
+}
+
+if (polygons.length === 0) return null;
 
     const positions = [];
     const normals = [];

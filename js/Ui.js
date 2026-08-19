@@ -161,8 +161,9 @@ leftBottom.appendChild(link);
 
     const barLengthPx = 100;
 
-    // НОВЫЙ расчёт реального расстояния для 100 px на экране
-    const distance = getGroundDistanceForPixels(map, barLengthPx);
+    const planeDistance = getGroundDistanceForPixels(map, barLengthPx);
+// Переводим в реальное расстояние с учётом широты (Web Mercator)
+const distance = planeDistance * Math.cos(lat * Math.PI / 180);
 
     if (distance > 0) {
         const nice = niceDistance(distance);

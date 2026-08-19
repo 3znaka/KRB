@@ -672,14 +672,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         minHeight = isNaN(minHeight) ? 0 : minHeight;
                         if (height > minHeight) {
                             const isPart = props['building:part'] === 'yes';
-const isSimpleBuilding = props['building:part'] === undefined;
-
-// Считаем внешние кольца (площадь > 0)
-const outerRings = rings.filter(r => r.length >= 3 && ringArea(r) > 0).length;
-// MultiPolygon без building:part — агрегированная фича, не выдавливаем её целиком
-const isAggregatedFootprint = isSimpleBuilding && outerRings > 1;
-
-if (is3d && (isPart || (isSimpleBuilding && !isAggregatedFootprint))) {
+                            const isSimpleBuilding = props['building:part'] === undefined;
+                            if (is3d && (isPart || isSimpleBuilding)) {
                                 const geo = extrudeBuilding(rings, height, minHeight, eps);
                                 if (geo) {
                                     buildings.push({

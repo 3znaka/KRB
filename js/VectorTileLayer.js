@@ -1393,10 +1393,11 @@ _refreshTextLabelsForVisibleTiles() {
             }
         }
 
-                // Пересоздание подписей, если мир перемещался
+               // Пересоздание подписей, если мир перемещался
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
-        const periodicUpdateDue = labelNow - this._lastLabelUpdateTime > 1000; // раз в секунду при движении
+        const isMoving = timeSinceLastMove < 1000; // движение было в последнюю секунду
+        const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000); // раз в секунду при движении
         const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime; // после остановки (движение было)
 
         if ((settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {

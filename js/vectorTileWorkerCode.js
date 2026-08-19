@@ -398,6 +398,26 @@ function triangulatePolygon(outer, holes, eps) {
     return { vertices, indices };
 }
 
+function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz) {
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+
+    const crx = uy * vz - uz * vy;
+    const cry = uz * vx - ux * vz;
+    const crz = ux * vy - uy * vx;
+
+    // если порядок вершин не совпадает с нужной нормалью — меняем b и c местами
+    if (crx * nx + cry * ny + crz * nz < 0) {
+        positions.push(ax, ay, az, cx, cy, cz, bx, by, bz);
+    } else {
+        positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    }
+
+    for (let i = 0; i < 3; i++) {
+        normals.push(nx, ny, nz);
+    }
+}
+
 function extrudeBuilding(rings, height, minHeight = 0, eps) {
     if (!rings || rings.length === 0 || height <= 0) return null;
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
@@ -423,52 +443,90 @@ function extrudeBuilding(rings, height, minHeight = 0, eps) {
         const { vertices, indices } = triData;
 
         for (let i = 0; i < indices.length; i += 3) {
-            const a = indices[i], b = indices[i+1], c = indices[i+2];
-            positions.push(
-                vertices[a*2], height, vertices[a*2+1],
-                vertices[b*2], height, vertices[b*2+1],
-                vertices[c*2], height, vertices[c*2+1]
-            );
-            normals.push(0,1,0, 0,1,0, 0,1,0);
-        }
-        if (minHeight > 0) {
-            for (let i = 0; i < indices.length; i += 3) {
-                const a = indices[i], b = indices[i+1], c = indices[i+2];
-                positions.push(
-                    vertices[a*2], minHeight, vertices[a*2+1],
-                    vertices[c*2], minHeight, vertices[c*2+1],
-                    vertices[b*2], minHeight, vertices[b*2+1]
-                );
-                normals.push(0,-1,0, 0,-1,0, 0,-1,0);
-            }
-        }
+    const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+
+    const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+    const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+    const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+
+    pushTriangle(
+        positions, normals,
+        ax, height, az,
+        bx, height, bz,
+        cx, height, cz,
+        0, 1, 0
+    );
+}
+       if (minHeight > 0) {
+    for (let i = 0; i < indices.length; i += 3) {
+        const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+
+        const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+        const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+        const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+
+        pushTriangle(
+            positions, normals,
+            ax, minHeight, az,
+            bx, minHeight, bz,
+            cx, minHeight, cz,
+            0, -1, 0
+        );
+    }
+}
 
         for (const ring of [outer, ...holes]) {
-            const n = ring.length;
-            for (let i = 0; i < n; i++) {
-                const p0 = ring[i], p1 = ring[(i + 1) % n];
-                const dx = p1.x - p0.x, dz = p1.z - p0.z;
-                const len = Math.hypot(dx, dz);
-                if (len < eps) continue;
-                const nx = dz / len, nz = -dx / len;
+    const n = ring.length;
 
-                positions.push(
-                    p0.x, minHeight, p0.z,  p1.x, minHeight, p1.z,  p1.x, height, p1.z,
-                    p0.x, minHeight, p0.z,  p1.x, height, p1.z,    p0.x, height, p0.z
-                );
-                for (let k = 0; k < 6; k++) normals.push(nx, 0, nz);
+    for (let i = 0; i < n; i++) {
+        const p0 = ring[i];
+        const p1 = ring[(i + 1) % n];
 
-                edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-                if (minHeight > 0) edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+        const dx = p1.x - p0.x;
+        const dz = p1.z - p0.z;
+        const len = Math.hypot(dx, dz);
+        if (len < eps) continue;
 
-                const p2 = ring[(i + 2) % n];
-                const dx2 = p2.x - p1.x, dz2 = p2.z - p1.z;
-                const len2 = Math.hypot(dx2, dz2);
-                if (len2 > eps && (dx * dx2 + dz * dz2) / (len * len2) < cornerCos) {
-                    edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
-                }
-            }
+        const nx = dz / len;
+        const nz = -dx / len;
+
+        // Первый треугольник стенки
+        pushTriangle(
+            positions, normals,
+            p0.x, minHeight, p0.z,
+            p1.x, minHeight, p1.z,
+            p1.x, height, p1.z,
+            nx, 0, nz
+        );
+
+        // Второй треугольник стенки
+        pushTriangle(
+            positions, normals,
+            p0.x, minHeight, p0.z,
+            p1.x, height, p1.z,
+            p0.x, height, p0.z,
+            nx, 0, nz
+        );
+
+        // Рёбра оставляем без изменений
+        edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
+        if (minHeight > 0) {
+            edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
         }
+
+        const p2 = ring[(i + 2) % n];
+        const dx2 = p2.x - p1.x;
+        const dz2 = p2.z - p1.z;
+        const len2 = Math.hypot(dx2, dz2);
+
+        if (
+            len2 > eps &&
+            (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
+        ) {
+            edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+        }
+    }
+}
     }
 
     if (positions.length === 0) return null;

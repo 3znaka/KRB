@@ -878,20 +878,22 @@ export class VectorTileLayer {
     }
 
     _getBuildingMaterial(color) {
-        const key = 'bld:' + color;
-        if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
-        const mat = new THREE.MeshLambertMaterial({
-            color,
-            side: THREE.DoubleSide,
-            depthTest: true,
-            depthWrite: true,
-            polygonOffset: true,
-            polygonOffsetFactor: 1,
-            polygonOffsetUnits: 1
-        });
-        this._fillMaterialCache.set(key, mat);
-        return mat;
-    }
+    const key = 'bld:' + color;
+    if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
+
+    const mat = new THREE.MeshLambertMaterial({
+        color,
+        side: THREE.FrontSide, // вместо THREE.DoubleSide
+        depthTest: true,
+        depthWrite: true,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
+    });
+
+    this._fillMaterialCache.set(key, mat);
+    return mat;
+}
 
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;

@@ -1390,11 +1390,11 @@ _refreshTextLabelsForVisibleTiles() {
 
                 // Пересоздание подписей при панорамировании
         const isPanning = this._map.isDragging || this._map.touchDragActive;
-        const now = performance.now();
+        const panCheckTime = performance.now();
 
         // Во время панорамирования обновляем подписи раз в секунду
-        if (isPanning && (now - this._lastLabelPanUpdateTime > 1000)) {
-            this._lastLabelPanUpdateTime = now;
+        if (isPanning && (panCheckTime - this._lastLabelPanUpdateTime > 1000)) {
+            this._lastLabelPanUpdateTime = panCheckTime;
             this._refreshTextLabelsForVisibleTiles();
         }
 

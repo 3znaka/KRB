@@ -158,21 +158,53 @@ leftBottom.appendChild(link);
         coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
 
         const R = map.R ?? DEFAULTS.R;
-        const tileSize = 256;
-        const resolutionAtEquator = (2 * Math.PI * R) / (tileSize * Math.pow(2, zoom));
-        const resolution = resolutionAtEquator * Math.cos(lat * Math.PI / 180);
 
-        const barLengthPx = 100;
-        let distance = resolution * barLengthPx * 0.623 * 1.5;
+    const barLengthPx = 100;
 
+    // НОВЫЙ расчёт реального расстояния для 100 px на экране
+    const distance = getGroundDistanceForPixels(map, barLengthPx);
+
+    if (distance > 0) {
         const nice = niceDistance(distance);
         const ratio = nice / distance;
         scaleBar.style.width = (barLengthPx * ratio) + 'px';
         scaleLabel.textContent = formatDistance(nice);
-
-        zoomLabel.childNodes[1]?.remove();
-        zoomLabel.appendChild(document.createTextNode(` (${map.currentDiscreteZoom})`));
     }
+
+    zoomLabel.childNodes[1]?.remove();
+    zoomLabel.appendChild(document.createTextNode(` (${map.currentDiscreteZoom})`));
+}
+
+/**
+ * Возвращает расстояние в мировых единицах для указанного числа
+ * горизонтальных CSS-пикселей в центре экрана.
+ *
+ * @param {Object} map - Экземпляр карты.
+ * @param {number} pixelLength - Количество CSS-пикселей.
+ * @returns {number} Расстояние в метрах.
+ */
+function getGroundDistanceForPixels(map, pixelLength) {
+    const rect = map.renderer.domElement.getBoundingClientRect();
+
+    if (!rect.width || !rect.height) return 0;
+
+    const plane = map.groundPlane || new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const raycaster = new THREE.Raycaster();
+
+    const p1 = new THREE.Vector3();
+    const p2 = new THREE.Vector3();
+
+    // Центр экрана
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), map.camera);
+    if (!raycaster.ray.intersectPlane(plane, p1)) return 0;
+
+    // Точка на pixelLength правее центра экрана
+    const ndcOffsetX = (2 * pixelLength) / rect.width;
+    raycaster.setFromCamera(new THREE.Vector2(ndcOffsetX, 0), map.camera);
+    if (!raycaster.ray.intersectPlane(plane, p2)) return 0;
+
+    return p1.distanceTo(p2);
+}
 
     /**
      * Приводит расстояние к "красивому" круглому значению для отображения на линейке.

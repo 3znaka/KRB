@@ -1096,14 +1096,7 @@ export class VectorTileLayer {
             const sx = (ndc.x * 0.5 + 0.5) * rect.width;
             const sy = (-ndc.y * 0.5 + 0.5) * rect.height;
 
-            if (
-                sx < -cullMargin ||
-                sx > rect.width + cullMargin ||
-                sy < -cullMargin ||
-                sy > rect.height + cullMargin
-            ) {
-                continue;
-            }
+            if (ndc.z > 1 || ndc.z < -1) continue;
 
             candidates.push({
                 pt,

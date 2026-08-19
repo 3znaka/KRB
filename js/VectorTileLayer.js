@@ -146,14 +146,14 @@ const DEFAULT_STYLES = {
         _default: { 
             color: 0xcccccc, radius: 4,
             textColor: '#555555', fontSize: '11px', fontWeight: 'normal',
-            textOffset: [0, -8], textZoomMin: 13, textZoomMax: 24 // поднят с 10 до 13
+            textOffset: [0, -8], textZoomMin: 13, textZoomMax: 24
         }
     },
     housenumber: {
         _default: { 
             color: 0xffffff, radius: 2,
             textColor: '#333333', fontSize: '10px', fontWeight: 'normal',
-            textOffset: [0, -4], textZoomMin: 16, textZoomMax: 24 // поднят с 15 до 16
+            textOffset: [0, -4], textZoomMin: 16, textZoomMax: 24
         }
     },
     mountain_peak: {
@@ -182,7 +182,7 @@ const LAYER_RENDER_ORDER = {
     transportation: 15,
     transportation_name: 16,
     poi: 20,
-    housenumber: 21, // добавлен для подписей
+    housenumber: 21,
     mountain_peak: 20,
 };
 
@@ -220,17 +220,13 @@ function onMessage(e) {
     if (msg.type === 'process') {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
-            visibleLayers, buildings3dMinZoom,
-            targetX, targetZ,
-            labelDistanceSortZoom,
-            maxWorkerTextPointsPerTile,
+            visibleLayers, buildings3dMinZoom
         } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = processTile(
                 tile, z, x, y, tileSize, maxMerc, is3d,
-                visibleLayers, buildings3dMinZoom,
-                { targetX, targetZ, labelDistanceSortZoom, maxWorkerTextPointsPerTile }
+                visibleLayers, buildings3dMinZoom
             );
             const transferList = [];
             const payload = { id, result };
@@ -285,7 +281,6 @@ function getFeatureStyle(feature, layerName, styles) {
     if (!result.type) result.type = 'fill';
     if (result.stroke && !result.width) result.type = 'fill';
 
-    // Копируем все остальные поля (например, текстовые стили)
     for (const [key, value] of Object.entries(styleConfig)) {
         if (!(key in result)) result[key] = value;
     }
@@ -512,27 +507,17 @@ function computePointScale(z) {
     return 1.0 + (z - 14) * 0.25;
 }
 
-function processTile(
-    tile, z, x, y, tileSize, maxMerc, is3d,
-    visibleLayers, buildings3dMinZoom,
-    labelOptions
-) {
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
-
-    const targetX = labelOptions?.targetX ?? 0;
-    const targetZ = labelOptions?.targetZ ?? 0;
-    const labelDistanceSortZoom = labelOptions?.labelDistanceSortZoom ?? 17;
-    const maxWorkerTextPointsPerTile = labelOptions?.maxWorkerTextPointsPerTile ?? 200;
 
     const fillsMap = new Map();
     const linesMap = new Map();
     const strokesMap = new Map();
     const buildings = [];
     const points = [];
-    const textPoints = []; // текстовые подписи для poi, place, housenumber
+    const textPoints = [];
 
-    // Слои, которые должны отображаться как текст
     const textLayers = ['place', 'poi', 'housenumber'];
 
     const layerOrder = ['water', 'landcover', 'landuse', 'park', 'transportation', 'building', 'boundary', 'place'];
@@ -561,17 +546,11 @@ function processTile(
                 const worldX = originX + (pt.x / 4095) * tileSize;
                 const worldZ = originZ + (pt.y / 4095) * tileSize;
 
-                // Если слой текстовый и есть текст - добавляем в textPoints
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 
                         ? (props.housenumber || '')
                         : (props.name || '');
-                    if (!text) continue; // пропускаем безымянные точки
-
-                    // Расстояние до цели камеры
-                    const dx = worldX - targetX;
-                    const dz = worldZ - targetZ;
-                    const distSq = dx * dx + dz * dz;
+                    if (!text) continue;
 
                     textPoints.push({
                         x: worldX,
@@ -590,13 +569,11 @@ function processTile(
                         zoomBounds: {
                             min: style.textZoomMin !== undefined ? style.textZoomMin : 0,
                             max: style.textZoomMax !== undefined ? style.textZoomMax : 24
-                        },
-                        distSq,
+                        }
                     });
                     continue;
                 }
 
-                // Для остальных точечных слоёв (например mountain_peak) оставляем кружки
                 const radius = (style.radius || 3) * pointScale;
                 points.push({
                     x: worldX,
@@ -713,19 +690,9 @@ function processTile(
         if (!layerOrder.includes(name)) processLayer(name);
     }
 
-    // Ограничение количества текстовых подписей на тайл с учётом расстояния до камеры
-    if (textPoints.length > 0) {
-        if (z >= labelDistanceSortZoom) {
-            // на близких зумах — в первую очередь ближайшие к камере
-            textPoints.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
-        } else {
-            // на дальних зумах — сохраняем приоритет слоёв
-            textPoints.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
-        }
-
-        if (textPoints.length > maxWorkerTextPointsPerTile) {
-            textPoints.length = maxWorkerTextPointsPerTile;
-        }
+    // Ограничиваем количество текстовых точек, чтобы не передавать слишком много
+    if (textPoints.length > 300) {
+        textPoints.length = 300;
     }
 
     const result = {
@@ -809,13 +776,6 @@ function _stringToBase64(str) {
 // Класс источника подписи для точечных объектов векторных тайлов
 // -----------------------------------------------------------------------------
 class VectorPointLabelSource {
-    /**
-     * @param {Object} map - экземпляр карты (KrbMap)
-     * @param {number} worldX - мировая координата X
-     * @param {number} worldZ - мировая координата Z
-     * @param {string} text - текст подписи
-     * @param {Object} options - параметры стиля и поведения
-     */
     constructor(map, worldX, worldZ, text, options = {}) {
         this.map = map;
         this.worldPos = new THREE.Vector3(worldX, 0, worldZ);
@@ -832,7 +792,6 @@ class VectorPointLabelSource {
     }
 
     getScreenPosition() {
-        // Учитываем смещение worldGroup
         const local = this.worldPos.clone().add(this.map.worldGroup.position);
         local.project(this.map.camera);
         const rect = this.map.renderer.domElement.getBoundingClientRect();
@@ -895,12 +854,11 @@ export class VectorTileLayer {
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
 
         // Оптимизация подписей
-        this.maxTextLabels = options.maxTextLabels ?? 500;        // глобальный лимит подписей
-        this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50; // подписей на тайл
-        this.maxWorkerTextPointsPerTile = options.maxWorkerTextPointsPerTile ?? 200; // кандидатов из воркера
-        this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;   // с какого зума сортируем по расстоянию
-        this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;    // финальный лимит на близких зумах
-        this.labelCullMargin = options.labelCullMargin ?? 50;              // запас в пикселях для отсечения
+        this.maxTextLabels = options.maxTextLabels ?? 500;
+        this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50;
+        this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
+        this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
+        this.labelCullMargin = options.labelCullMargin ?? 50;
 
         this._debug = options.debug ?? false;
         this._discoveredClasses = new Map();
@@ -1007,7 +965,6 @@ export class VectorTileLayer {
     }
 
     _buildGroupFromWorkerResult(group, result) {
-        // Удаляем старые label'ы, если есть
         this._removeTextLabelsForGroup(group);
 
         while (group.children.length) {
@@ -1020,7 +977,6 @@ export class VectorTileLayer {
             group.remove(child);
         }
 
-        // Заливки
         for (const fill of result.fills) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
             const geom = new THREE.BufferGeometry();
@@ -1031,7 +987,6 @@ export class VectorTileLayer {
             group.add(mesh);
         }
 
-        // Здания
         if (result.buildings.length > 0) {
             const byColor = new Map();
             for (const b of result.buildings) {
@@ -1060,7 +1015,6 @@ export class VectorTileLayer {
             }
         }
 
-        // Линии
         for (const line of result.lines) {
             const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
             const lGeo = new LineGeometry();
@@ -1071,7 +1025,6 @@ export class VectorTileLayer {
             group.add(lineObj);
         }
 
-        // Обводки
         for (const stroke of result.strokes) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
             const lGeo = new LineGeometry();
@@ -1082,7 +1035,6 @@ export class VectorTileLayer {
             group.add(lineObj);
         }
 
-        // Точки-кружки (например mountain_peak)
         for (const pt of result.points) {
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;
             const mat = this._getFillMaterial(fillKey);
@@ -1093,7 +1045,6 @@ export class VectorTileLayer {
             group.add(mesh);
         }
 
-        // Сохраняем данные текстовых точек и создаём label'ы
         group.userData.textPointsData = result.textPoints || [];
         this._createTextLabelsForGroup(group);
 
@@ -1108,8 +1059,8 @@ export class VectorTileLayer {
         }
         group.userData.textLabels = [];
 
-        const textManager = this._map.textManager;
         const map = this._map;
+        const textManager = map.textManager;
         const data = group.userData.textPointsData || [];
 
         if (!data.length) return;
@@ -1117,14 +1068,12 @@ export class VectorTileLayer {
         const continuousZoom = map.continuousZoom;
         const discreteZoom = map.currentDiscreteZoom;
         const camera = map.camera;
-        const target = map.controls.target;
+        const targetWorld = map.controls.target.clone();
         const worldOffset = map.worldGroup.position;
         const rect = map.renderer.domElement.getBoundingClientRect();
         const cullMargin = this.labelCullMargin ?? 50;
 
-        // Цель камеры в локальных координатах worldGroup
-        const targetLocalX = target.x - worldOffset.x;
-        const targetLocalZ = target.z - worldOffset.z;
+        const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
 
         const candidates = [];
 
@@ -1132,16 +1081,16 @@ export class VectorTileLayer {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
-            // Расстояние до цели камеры
-            const dx = pt.x - targetLocalX;
-            const dz = pt.z - targetLocalZ;
-            const distSq = pt.distSq ?? (dx * dx + dz * dz);
+            const worldX = pt.x + worldOffset.x;
+            const worldZ = pt.z + worldOffset.z;
 
-            // Отсечение по фрустуму/экрану
-            const world = new THREE.Vector3(pt.x, 0, pt.z).add(worldOffset);
-            const ndc = world.clone().project(camera);
+            const dx = worldX - targetWorld.x;
+            const dz = worldZ - targetWorld.z;
+            const distSq = dx * dx + dz * dz;
 
-            // Точка за камерой или вне NDC
+            const worldPos = new THREE.Vector3(worldX, 0, worldZ);
+            const ndc = worldPos.clone().project(camera);
+
             if (ndc.z > 1 || ndc.z < -1) continue;
 
             const sx = (ndc.x * 0.5 + 0.5) * rect.width;
@@ -1156,16 +1105,16 @@ export class VectorTileLayer {
                 continue;
             }
 
-            candidates.push({ pt, distSq, priority: pt.priority });
+            candidates.push({
+                pt,
+                distSq,
+                priority: pt.priority || 0,
+            });
         }
 
-        const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
-
         if (isClose) {
-            // Ближайшие к камере — первыми
             candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
         } else {
-            // На дальних зумах сохраняем привычный приоритет
             candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
         }
 
@@ -1173,24 +1122,17 @@ export class VectorTileLayer {
             ? Math.min(this.maxTextPointsPerTile, this.labelMaxPerTileClose ?? 20)
             : this.maxTextPointsPerTile;
 
-        const limited = candidates.slice(0, maxPerTile);
-
-        let finalData = limited;
+        let finalData = candidates.slice(0, maxPerTile);
 
         if (textManager.labels && textManager.maxLabels !== undefined) {
             const currentCount = textManager.labels.length;
             const remaining = Math.max(0, this.maxTextLabels - currentCount);
-
-            if (remaining <= 0) {
-                return;
-            }
-
-            finalData = limited.slice(0, Math.min(limited.length, remaining));
+            if (remaining <= 0) return;
+            finalData = finalData.slice(0, Math.min(finalData.length, remaining));
         }
 
         for (const cand of finalData) {
             const pt = cand.pt;
-
             const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
@@ -1203,7 +1145,6 @@ export class VectorTileLayer {
                 priority: pt.priority,
                 zoomBounds: pt.zoomBounds,
             });
-
             const label = textManager.addLabel(source);
             group.userData.textLabels.push(label);
         }
@@ -1261,7 +1202,6 @@ export class VectorTileLayer {
         map.worldGroup.add(this._rootGroup);
         if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
 
-        // Передаём глобальный лимит подписей в TextManager, если он поддерживает
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
         }
@@ -1336,7 +1276,6 @@ export class VectorTileLayer {
         this._rootGroup.remove(group);
         this._tileCache.delete(key);
         if (!this._groupCache.has(key)) {
-            // Удаляем label'ы перед помещением в кэш
             this._removeTextLabelsForGroup(group);
             this._groupCache.set(key, group);
             if (this._groupCache.size > this._groupCacheMaxSize) {
@@ -1497,7 +1436,6 @@ export class VectorTileLayer {
                 }
                 this._disposeTile(group);
             } else {
-                // Просто возвращаем группу на сцену, label'ы уже удалены, создаём заново
                 this._rootGroup.add(group);
                 this._tileCache.set(key, group);
                 this._createTextLabelsForGroup(group);
@@ -1544,7 +1482,6 @@ export class VectorTileLayer {
             const id = ++this._requestId;
             const tileSize = this._map.WORLD_SIZE / (1 << z);
             const maxMerc = this._map.MAX_MERCATOR;
-            const worldOffset = this._map.worldGroup.position;
 
             const msg = {
                 type: 'process',
@@ -1555,13 +1492,7 @@ export class VectorTileLayer {
                 maxMerc,
                 is3d,
                 visibleLayers: this.visibleLayers,
-                buildings3dMinZoom: this.buildings3dMinZoom,
-
-                // новые поля для отбора подписей
-                targetX: this._map.controls.target.x - worldOffset.x,
-                targetZ: this._map.controls.target.z - worldOffset.z,
-                labelDistanceSortZoom: this.labelDistanceSortZoom,
-                maxWorkerTextPointsPerTile: this.maxWorkerTextPointsPerTile,
+                buildings3dMinZoom: this.buildings3dMinZoom
             };
 
             this._pendingWorkerRequests.set(id, {

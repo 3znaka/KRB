@@ -146,14 +146,14 @@ const DEFAULT_STYLES = {
         _default: { 
             color: 0xcccccc, radius: 4,
             textColor: '#555555', fontSize: '11px', fontWeight: 'normal',
-            textOffset: [0, -8], textZoomMin: 10, textZoomMax: 24
+            textOffset: [0, -8], textZoomMin: 13, textZoomMax: 24 // поднят с 10 до 13
         }
     },
     housenumber: {
         _default: { 
             color: 0xffffff, radius: 2,
             textColor: '#333333', fontSize: '10px', fontWeight: 'normal',
-            textOffset: [0, -4], textZoomMin: 15, textZoomMax: 24
+            textOffset: [0, -4], textZoomMin: 16, textZoomMax: 24 // поднят с 15 до 16
         }
     },
     mountain_peak: {
@@ -236,6 +236,9 @@ function onMessage(e) {
 const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLES)};
 const LAYER_RENDER_ORDER = ${JSON.stringify(LAYER_RENDER_ORDER)};
 let workerStyles = DEFAULT_STYLES;
+
+// Максимальное количество текстовых подписей на один тайл
+const MAX_TEXT_POINTS_PER_TILE = 50;
 
 function collectTransferables(obj, list) {
     if (obj instanceof ArrayBuffer) {
@@ -688,6 +691,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         if (!layerOrder.includes(name)) processLayer(name);
     }
 
+    // Ограничение количества текстовых подписей на тайл
+    if (textPoints.length > MAX_TEXT_POINTS_PER_TILE) {
+        textPoints.sort((a, b) => b.priority - a.priority);
+        textPoints.length = MAX_TEXT_POINTS_PER_TILE;
+    }
+
     const result = {
         fills: [],
         lines: [],
@@ -853,6 +862,10 @@ export class VectorTileLayer {
 
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
+
+        // Оптимизация подписей
+        this.maxTextLabels = options.maxTextLabels ?? 500;        // глобальный лимит подписей
+        this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50; // подписей на тайл
 
         this._debug = options.debug ?? false;
         this._discoveredClasses = new Map();
@@ -1058,8 +1071,36 @@ export class VectorTileLayer {
             this._removeTextLabelsForGroup(group);
         }
         group.userData.textLabels = [];
+
+        const textManager = this._map.textManager;
+        const currentZoom = this._map.continuousZoom;
         const data = group.userData.textPointsData || [];
-        for (const pt of data) {
+
+        // Фильтрация по зуму
+        const zoomFiltered = data.filter(pt => {
+            const zb = pt.zoomBounds || { min: 0, max: 24 };
+            return currentZoom >= zb.min && currentZoom <= zb.max;
+        });
+
+        // Сортировка по приоритету (по убыванию)
+        zoomFiltered.sort((a, b) => b.priority - a.priority);
+
+        // Ограничение на тайл
+        const limitedData = zoomFiltered.slice(0, this.maxTextPointsPerTile);
+
+        // Глобальный лимит подписей, если TextManager предоставляет такую возможность
+        let finalData = limitedData;
+        if (textManager.labels && textManager.maxLabels !== undefined) {
+            const currentCount = textManager.labels.length;
+            const remaining = Math.max(0, this.maxTextLabels - currentCount);
+            if (remaining <= 0) {
+                // Не создаём новые подписи, если лимит исчерпан
+                return;
+            }
+            finalData = limitedData.slice(0, Math.min(limitedData.length, remaining));
+        }
+
+        for (const pt of finalData) {
             const source = new VectorPointLabelSource(this._map, pt.x, pt.z, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
@@ -1072,7 +1113,7 @@ export class VectorTileLayer {
                 priority: pt.priority,
                 zoomBounds: pt.zoomBounds
             });
-            const label = this._map.textManager.addLabel(source);
+            const label = textManager.addLabel(source);
             group.userData.textLabels.push(label);
         }
     }
@@ -1128,6 +1169,12 @@ export class VectorTileLayer {
         this._map = map;
         map.worldGroup.add(this._rootGroup);
         if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
+
+        // Передаём глобальный лимит подписей в TextManager, если он поддерживает
+        if (map.textManager && map.textManager.setMaxLabels) {
+            map.textManager.setMaxLabels(this.maxTextLabels);
+        }
+
         return this;
     }
 

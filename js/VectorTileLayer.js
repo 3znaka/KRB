@@ -801,15 +801,14 @@ class VectorPointLabelSource {
     }
 
     getScreenPosition() {
-        // Учитываем смещение worldGroup
-        const local = this.worldPos.clone().sub(this.map.worldGroup.position);
-        local.project(this.map.camera);
-        const rect = this.map.renderer.domElement.getBoundingClientRect();
-        return {
-            x: (local.x * 0.5 + 0.5) * rect.width,
-            y: (-local.y * 0.5 + 0.5) * rect.height
-        };
-    }
+    const world = this.worldPos.clone();
+    world.project(this.map.camera);
+    const rect = this.map.renderer.domElement.getBoundingClientRect();
+    return {
+        x: (world.x * 0.5 + 0.5) * rect.width,
+        y: (-world.y * 0.5 + 0.5) * rect.height
+    };
+}
 
     getTextStyle() {
         return {

@@ -183,6 +183,8 @@ export class KrbMap {
         this.worldGroup.position.set(0, 0, 0);
         this.scene.add(this.worldGroup);
         this._cameraAnimation = null;
+        this._cameraAnimations = { pitch: null, bearing: null };
+this._cameraAnimFrame = null;
         this._controlsDampingWasEnabled = true;
         this._dynamicLayers = [];
         this.textManager = new TextManager(this);
@@ -425,73 +427,27 @@ this.scene.add(this.sunLight);
      * @returns {void}
      */
     setPitch(pitchDeg, duration = 0.3) {
-        if (this._cameraAnimation) return;
+    const pitchRad = pitchDeg * Math.PI / 180;
+    const maxPolarRad = this.controls.maxPolarAngle;
+    const clampedRad = Math.max(0.001, Math.min(pitchRad, maxPolarRad));
 
-        const pitchRad = pitchDeg * Math.PI / 180;
-        const maxPolarRad = this.controls.maxPolarAngle;
-        const clampedRad = Math.max(0.001, Math.min(pitchRad, maxPolarRad));
+    const target = this.controls.target.clone();
+    const currentPos = this.camera.position.clone();
+    const dir = new THREE.Vector3().subVectors(currentPos, target);
+    const currentDistance = dir.length();
+    if (currentDistance < 1) return;
 
-        const target = this.controls.target.clone();
-        const currentPos = this.camera.position.clone();
-        const dir = new THREE.Vector3().subVectors(currentPos, target);
-        const currentDistance = dir.length();
-        if (currentDistance < 1) return;
+    const currentPitchRad = Math.acos(dir.y / currentDistance);
 
-        const currentPitchRad = Math.acos(dir.y / currentDistance);
-        const azimuth = Math.atan2(-dir.x, dir.z);
-        const endDistance = currentDistance;
+    this._cameraAnimations.pitch = {
+        start: currentPitchRad,
+        end: clampedRad,
+        startTime: performance.now(),
+        duration
+    };
 
-        this._controlsDampingWasEnabled = this.controls.enableDamping;
-        this.controls.enableDamping = false;
-
-        const startTime = performance.now();
-        this._cameraAnimation = {
-            startTarget: target.clone(),
-            startPitch: currentPitchRad,
-            startDistance: currentDistance,
-            azimuth,
-            endPitch: clampedRad,
-            endDistance,
-            duration,
-            startTime
-        };
-
-        const animateStep = (now) => {
-            if (!this._cameraAnimation) return;
-            const a = this._cameraAnimation;
-            let t = (now - a.startTime) / (a.duration * 1000);
-            t = Math.min(t, 1.0);
-            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-            const currentPitch = a.startPitch + (a.endPitch - a.startPitch) * eased;
-            const currentDist = a.startDistance + (a.endDistance - a.startDistance) * eased;
-
-            const sinP = Math.sin(currentPitch);
-            const cosP = Math.cos(currentPitch);
-            this.camera.position.set(
-                a.startTarget.x - currentDist * sinP * Math.sin(a.azimuth),
-                a.startTarget.y + currentDist * cosP,
-                a.startTarget.z + currentDist * sinP * Math.cos(a.azimuth)
-            );
-            this.controls.target.copy(a.startTarget);
-            this.controls.update();
-
-            if (Math.floor(t * 10) !== Math.floor((t - 1/60) * 10)) {
-                this.maybeUpdateVisibleTiles();
-            }
-
-            if (t >= 1.0) {
-                this._cameraAnimation = null;
-                this.controls.enableDamping = this._controlsDampingWasEnabled;
-                this.controls.target.copy(a.startTarget);
-                this.controls.update();
-                this.maybeUpdateVisibleTiles();
-                return;
-            }
-            requestAnimationFrame(animateStep);
-        };
-        requestAnimationFrame(animateStep);
-    }
+    this._startCameraAnimationLoopIfNeeded();
+}
 
     /**
      * Устанавливает поворот камеры с анимацией.
@@ -501,74 +457,116 @@ this.scene.add(this.sunLight);
      * @returns {void}
      */
     setBearing(bearingDeg, duration = 0.3) {
-        if (this._cameraAnimation) return;
+    const bearingRad = bearingDeg * Math.PI / 180;
+    const target = this.controls.target.clone();
+    const currentPos = this.camera.position.clone();
+    const dir = new THREE.Vector3().subVectors(currentPos, target);
+    const currentDistance = dir.length();
+    if (currentDistance < 1) return;
 
-        const bearingRad = bearingDeg * Math.PI / 180;
+    const currentAzimuth = Math.atan2(-dir.x, dir.z);
+    let delta = bearingRad - currentAzimuth;
+    while (delta > Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+    const endAzimuth = currentAzimuth + delta;
+
+    this._cameraAnimations.bearing = {
+        start: currentAzimuth,
+        end: endAzimuth,
+        startTime: performance.now(),
+        duration
+    };
+
+    this._startCameraAnimationLoopIfNeeded();
+}
+
+
+_startCameraAnimationLoopIfNeeded() {
+    if (this._cameraAnimation || this._cameraAnimFrame) return;
+
+    this._cameraAnimation = { custom: true }; // блокируем другие анимации и зум
+    this._controlsDampingWasEnabled = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+
+    const animateStep = (now) => {
+        let anyActive = false;
         const target = this.controls.target.clone();
         const currentPos = this.camera.position.clone();
         const dir = new THREE.Vector3().subVectors(currentPos, target);
-        const currentDistance = dir.length();
-        if (currentDistance < 1) return;
+        let currentDistance = dir.length();
+        if (currentDistance < 1) {
+            this._cameraAnimation = null;
+            this._cameraAnimFrame = null;
+            this.controls.enableDamping = this._controlsDampingWasEnabled;
+            return;
+        }
 
-        const currentAzimuth = Math.atan2(-dir.x, dir.z);
-        const pitch = Math.acos(dir.y / currentDistance);
-        let delta = bearingRad - currentAzimuth;
-        while (delta > Math.PI) delta -= 2 * Math.PI;
-        while (delta < -Math.PI) delta += 2 * Math.PI;
-        const endAzimuth = currentAzimuth + delta;
-        const endDistance = currentDistance;
+        let currentPitch = Math.acos(dir.y / currentDistance);
+        let currentAzimuth = Math.atan2(-dir.x, dir.z);
 
-        this._controlsDampingWasEnabled = this.controls.enableDamping;
-        this.controls.enableDamping = false;
-
-        const startTime = performance.now();
-        this._cameraAnimation = {
-            startTarget: target.clone(),
-            startAzimuth: currentAzimuth,
-            startDistance: currentDistance,
-            pitch,
-            endAzimuth,
-            endDistance,
-            duration,
-            startTime
-        };
-
-        const animateStep = (now) => {
-            if (!this._cameraAnimation) return;
-            const a = this._cameraAnimation;
-            let t = (now - a.startTime) / (a.duration * 1000);
+        // Обработка pitch
+        if (this._cameraAnimations.pitch) {
+            const anim = this._cameraAnimations.pitch;
+            let t = (now - anim.startTime) / (anim.duration * 1000);
             t = Math.min(t, 1.0);
             const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-            const currentAzimuth = a.startAzimuth + (a.endAzimuth - a.startAzimuth) * eased;
-            const currentDist = a.startDistance + (a.endDistance - a.startDistance) * eased;
-
-            const sinP = Math.sin(a.pitch);
-            const cosP = Math.cos(a.pitch);
-            this.camera.position.set(
-                a.startTarget.x - currentDist * sinP * Math.sin(currentAzimuth),
-                a.startTarget.y + currentDist * cosP,
-                a.startTarget.z + currentDist * sinP * Math.cos(currentAzimuth)
-            );
-            this.controls.target.copy(a.startTarget);
-            this.controls.update();
-
-            if (Math.floor(t * 10) !== Math.floor((t - 1/60) * 10)) {
-                this.maybeUpdateVisibleTiles();
-            }
-
+            currentPitch = anim.start + (anim.end - anim.start) * eased;
             if (t >= 1.0) {
-                this._cameraAnimation = null;
-                this.controls.enableDamping = this._controlsDampingWasEnabled;
-                this.controls.target.copy(a.startTarget);
-                this.controls.update();
-                this.maybeUpdateVisibleTiles();
-                return;
+                this._cameraAnimations.pitch = null;
+            } else {
+                anyActive = true;
             }
-            requestAnimationFrame(animateStep);
-        };
-        requestAnimationFrame(animateStep);
-    }
+        }
+
+        // Обработка bearing
+        if (this._cameraAnimations.bearing) {
+            const anim = this._cameraAnimations.bearing;
+            let t = (now - anim.startTime) / (anim.duration * 1000);
+            t = Math.min(t, 1.0);
+            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+            currentAzimuth = anim.start + (anim.end - anim.start) * eased;
+            if (t >= 1.0) {
+                this._cameraAnimations.bearing = null;
+            } else {
+                anyActive = true;
+            }
+        }
+
+        // Применяем новые параметры
+        const sinP = Math.sin(currentPitch);
+        const cosP = Math.cos(currentPitch);
+        this.camera.position.set(
+            target.x - currentDistance * sinP * Math.sin(currentAzimuth),
+            target.y + currentDistance * cosP,
+            target.z + currentDistance * sinP * Math.cos(currentAzimuth)
+        );
+        this.controls.target.copy(target);
+        this.controls.update();
+
+        // Обновление тайлов (по желанию можно чаще)
+        if (Math.floor((now - this.lastVisibleUpdateTime) / this.VISIBLE_UPDATE_THROTTLE) > 0) {
+            this.maybeUpdateVisibleTiles();
+        }
+
+        if (!anyActive) {
+            // Все анимации завершены
+            this._cameraAnimation = null;
+            this._cameraAnimFrame = null;
+            this.controls.enableDamping = this._controlsDampingWasEnabled;
+            this.controls.target.copy(target);
+            this.controls.update();
+            this.maybeUpdateVisibleTiles();
+            return;
+        }
+
+        this._cameraAnimFrame = requestAnimationFrame(animateStep);
+    };
+
+    this._cameraAnimFrame = requestAnimationFrame(animateStep);
+}
+
+
+
 
     /**
      * Сбрасывает поворот камеры к северу.

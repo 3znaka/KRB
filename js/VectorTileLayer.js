@@ -893,6 +893,9 @@ export class VectorTileLayer {
         this._pointGeometryCache = new Map();
 
         this._lastCanvasSize = { width: 0, height: 0 };
+        // Для отслеживания панорамирования и периодического обновления подписей
+this._lastLabelPanUpdateTime = 0;
+this._wasPanning = false;
 
         // Для отслеживания необходимости пересоздания подписей
 this._lastLabelUpdateTarget = new THREE.Vector3();
@@ -1056,6 +1059,18 @@ this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
         group.userData.is3d = result.is3d;
     }
 
+
+/**
+ * Пересоздаёт текстовые подписи для всех видимых тайлов из кэша.
+ * Используется при панорамировании, чтобы обновить подписи без перестройки геометрии.
+ */
+_refreshTextLabelsForVisibleTiles() {
+    if (!this._map || !this._map.textManager) return;
+    this._tileCache.forEach(group => {
+        this._createTextLabelsForGroup(group);
+    });
+}
+
     _createTextLabelsForGroup(group) {
         if (!this._map || !this._map.textManager) return;
 
@@ -1154,6 +1169,8 @@ this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
             group.userData.textLabels.push(label);
         }
     }
+
+
 
     _removeTextLabelsForGroup(group) {
         if (group.userData.textLabels && this._map && this._map.textManager) {
@@ -1370,6 +1387,23 @@ this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
                 this._pendingLoads.delete(key);
             }
         }
+
+                // Пересоздание подписей при панорамировании
+        const isPanning = this._map.isDragging || this._map.touchDragActive;
+        const now = performance.now();
+
+        // Во время панорамирования обновляем подписи раз в секунду
+        if (isPanning && (now - this._lastLabelPanUpdateTime > 1000)) {
+            this._lastLabelPanUpdateTime = now;
+            this._refreshTextLabelsForVisibleTiles();
+        }
+
+        // При завершении панорамирования обновляем немедленно
+        if (!isPanning && this._wasPanning) {
+            this._refreshTextLabelsForVisibleTiles();
+        }
+
+        this._wasPanning = isPanning;
 
         // Пересоздание подписей при значительном смещении камеры или изменении зума
         const distanceMovedSq = this._lastLabelUpdateTarget.distanceToSquared(map.controls.target);

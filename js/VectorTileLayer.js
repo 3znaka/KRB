@@ -893,14 +893,11 @@ export class VectorTileLayer {
         this._pointGeometryCache = new Map();
 
         this._lastCanvasSize = { width: 0, height: 0 };
-        // Для отслеживания панорамирования и периодического обновления подписей
-this._lastLabelPanUpdateTime = 0;
-this._wasPanning = false;
+        // Отслеживание перемещения мира для обновления подписей
+this._lastWorldPos = new THREE.Vector3();
+this._lastMovementTime = 0;
+this._lastLabelUpdateTime = 0;
 
-        // Для отслеживания необходимости пересоздания подписей
-this._lastLabelUpdateTarget = new THREE.Vector3();
-this._lastLabelUpdateZoom = -1;
-this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
 
         const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
         this._workerScriptUrls = rawScripts.map(s => {
@@ -1323,6 +1320,14 @@ _refreshTextLabelsForVisibleTiles() {
 
     _postUpdate(map) {
         if (!this._map) return;
+
+        // Обновляем информацию о перемещении мира (легковесная проверка каждый кадр)
+        const worldPos = map.worldGroup.position;
+        if (this._lastWorldPos.distanceToSquared(worldPos) > 1) { // порог 1 метр
+            this._lastWorldPos.copy(worldPos);
+            this._lastMovementTime = performance.now();
+        }
+
         const now = performance.now();
         if (now - this._lastUpdateTime < this._throttle) {
             this._processQueue();
@@ -1388,36 +1393,17 @@ _refreshTextLabelsForVisibleTiles() {
             }
         }
 
-                // Пересоздание подписей при панорамировании
-        const isPanning = this._map.isDragging || this._map.touchDragActive;
-        const panCheckTime = performance.now();
+                // Пересоздание подписей, если мир перемещался
+        const labelNow = performance.now();
+        const timeSinceLastMove = labelNow - this._lastMovementTime;
+        const periodicUpdateDue = labelNow - this._lastLabelUpdateTime > 1000; // раз в секунду при движении
+        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime; // после остановки (движение было)
 
-        // Во время панорамирования обновляем подписи раз в секунду
-        if (isPanning && (panCheckTime - this._lastLabelPanUpdateTime > 1000)) {
-            this._lastLabelPanUpdateTime = panCheckTime;
+        if ((settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
+            this._lastLabelUpdateTime = labelNow;
             this._refreshTextLabelsForVisibleTiles();
         }
-
-        // При завершении панорамирования обновляем немедленно
-        if (!isPanning && this._wasPanning) {
-            this._refreshTextLabelsForVisibleTiles();
-        }
-
-        this._wasPanning = isPanning;
-
-        // Пересоздание подписей при значительном смещении камеры или изменении зума
-        const distanceMovedSq = this._lastLabelUpdateTarget.distanceToSquared(map.controls.target);
-        const zoomChanged = Math.abs(this._lastLabelUpdateZoom - discreteZoom) > 0.01;
-
-        if (distanceMovedSq > this._labelUpdateThreshold * this._labelUpdateThreshold || zoomChanged) {
-            this._lastLabelUpdateTarget.copy(map.controls.target);
-            this._lastLabelUpdateZoom = discreteZoom;
-
-            // Пересоздаём подписи для всех активных тайлов
-            this._tileCache.forEach(group => {
-                this._createTextLabelsForGroup(group);
-            });
-        }
+ 
 
         const maxMerc = map.MAX_MERCATOR;
         const target = map.controls.target;

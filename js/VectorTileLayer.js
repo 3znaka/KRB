@@ -1372,21 +1372,18 @@ this._labelUpdateThreshold = options.labelUpdateThreshold ?? 80; // метров
         }
 
         // Пересоздание подписей при значительном смещении камеры или изменении зума
-const target = map.controls.target;
-const discreteZoom = map.currentDiscreteZoom;
+        const distanceMovedSq = this._lastLabelUpdateTarget.distanceToSquared(map.controls.target);
+        const zoomChanged = Math.abs(this._lastLabelUpdateZoom - discreteZoom) > 0.01;
 
-const distanceMovedSq = this._lastLabelUpdateTarget.distanceToSquared(target);
-const zoomChanged = Math.abs(this._lastLabelUpdateZoom - discreteZoom) > 0.01;
+        if (distanceMovedSq > this._labelUpdateThreshold * this._labelUpdateThreshold || zoomChanged) {
+            this._lastLabelUpdateTarget.copy(map.controls.target);
+            this._lastLabelUpdateZoom = discreteZoom;
 
-if (distanceMovedSq > this._labelUpdateThreshold * this._labelUpdateThreshold || zoomChanged) {
-    this._lastLabelUpdateTarget.copy(target);
-    this._lastLabelUpdateZoom = discreteZoom;
-
-    // Пересоздаём подписи для всех активных тайлов
-    this._tileCache.forEach(group => {
-        this._createTextLabelsForGroup(group);
-    });
-}
+            // Пересоздаём подписи для всех активных тайлов
+            this._tileCache.forEach(group => {
+                this._createTextLabelsForGroup(group);
+            });
+        }
 
         const maxMerc = map.MAX_MERCATOR;
         const target = map.controls.target;

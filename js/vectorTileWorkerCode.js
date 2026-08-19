@@ -224,15 +224,15 @@ function onMessage(e) {
     }
     if (msg.type === 'process') {
         const {
-            id, buffer, z, x, y, tileSize, maxMerc, is3d,
-            visibleLayers, buildings3dMinZoom
-        } = msg;
+    id, buffer, z, x, y, tileSize, maxMerc, is3d,
+    visibleLayers, buildings3dMinZoom, buildingEdges
+} = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = processTile(
-                tile, z, x, y, tileSize, maxMerc, is3d,
-                visibleLayers, buildings3dMinZoom
-            );
+    tile, z, x, y, tileSize, maxMerc, is3d,
+    visibleLayers, buildings3dMinZoom, buildingEdges
+);
             const transferList = [];
             const payload = { id, result };
             collectTransferables(payload, transferList);
@@ -418,7 +418,7 @@ function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx
     }
 }
 
-function extrudeBuilding(rings, height, minHeight = 0, eps) {
+function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true) {
     if (!rings || rings.length === 0 || height <= 0) return null;
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
     if (cleaned.length === 0) return null;
@@ -530,32 +530,37 @@ if (polygons.length === 0) return null;
             nx, 0, nz
         );
 
-        // Рёбра оставляем без изменений
-        edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-        if (minHeight > 0) {
-            edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+        
+        if (includeEdges) {
+            // Рёбра оставляем без изменений
+            edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
+            if (minHeight > 0) {
+                edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+            }
+
+            const p2 = ring[(i + 2) % n];
+            const dx2 = p2.x - p1.x;
+            const dz2 = p2.z - p1.z;
+            const len2 = Math.hypot(dx2, dz2);
+
+            if (
+                len2 > eps &&
+                (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
+            ) {
+                edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+            }
         }
 
-        const p2 = ring[(i + 2) % n];
-        const dx2 = p2.x - p1.x;
-        const dz2 = p2.z - p1.z;
-        const len2 = Math.hypot(dx2, dz2);
 
-        if (
-            len2 > eps &&
-            (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
-        ) {
-            edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
-        }
     }
 }
     }
 
     if (positions.length === 0) return null;
-    return {
+        return {
         positions: new Float32Array(positions),
         normals: new Float32Array(normals),
-        edgePositions: edges.length ? new Float32Array(edges) : null
+        edgePositions: (includeEdges && edges.length) ? new Float32Array(edges) : null
     };
 }
 
@@ -592,7 +597,7 @@ function computePointScale(z) {
     return 1.0 + (z - 14) * 0.25;
 }
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom) {
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
 
@@ -696,7 +701,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             const isPart = props['building:part'] === 'yes';
                             const isSimpleBuilding = props['building:part'] === undefined;
                             if (is3d && (isPart || isSimpleBuilding)) {
-                                const geo = extrudeBuilding(rings, height, minHeight, eps);
+                                const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges);
                                 if (geo) {
                                     buildings.push({
                                         positions: geo.positions,

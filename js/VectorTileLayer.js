@@ -95,6 +95,7 @@ export class VectorTileLayer {
 
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
+        this.buildingEdges = options.buildingEdges ?? true;
 
         // Оптимизация подписей
         this.maxTextLabels = options.maxTextLabels ?? 500;
@@ -252,13 +253,13 @@ export class VectorTileLayer {
                 mesh.renderOrder = 50;
                 group.add(mesh);
 
-                if (g.edg.length) {
-                    const eGeom = new THREE.BufferGeometry();
-                    eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
-                    const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
-                    lines.renderOrder = 51;
-                    group.add(lines);
-                }
+                if (this.buildingEdges && g.edg.length) {
+  const eGeom = new THREE.BufferGeometry();
+  eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
+  const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
+  lines.renderOrder = 51;
+  group.add(lines);
+}
             }
         }
 
@@ -770,7 +771,8 @@ export class VectorTileLayer {
                 maxMerc,
                 is3d,
                 visibleLayers: this.visibleLayers,
-                buildings3dMinZoom: this.buildings3dMinZoom
+                buildings3dMinZoom: this.buildings3dMinZoom,
+                buildingEdges: this.buildingEdges
             };
 
             this._pendingWorkerRequests.set(id, {

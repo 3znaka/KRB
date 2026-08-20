@@ -12,7 +12,7 @@
  * @module Marker3D
  */
 
-import { THREE, GLTFLoader } from '../js_TP/tpb.js';
+import { THREE } from '../js_TP/tpb.js';
 import { proj } from './Utils.js';
 import { Layer } from './Layers.js';
 
@@ -340,7 +340,8 @@ export class Marker3D {
         if (this._modelPromise) return this._modelPromise;
         this._modelPromise = (async () => {
             try {
-                
+                const gltfModule = await import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
+                const GLTFLoader = gltfModule.GLTFLoader;
                 const loader = new GLTFLoader();
                 const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;

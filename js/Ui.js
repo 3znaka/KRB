@@ -152,7 +152,7 @@ leftBottom.appendChild(link);
         const pitchRad = dist > 1e-6 ? Math.acos(dir.y / dist) : 0;
         const bearingRad = dist > 1e-6 ? Math.atan2(dir.x, -dir.z) : 0;
         const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-        const bearingDeg = (bearingRad * 180 / Math.PI).toFixed(1) - 180;
+        const bearingDeg = ((bearingRad * 180 / Math.PI) + 180).toFixed(1) ;
 
         // Формируем строку с координатами и углами
         coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;

@@ -136,30 +136,6 @@ class VectorPointLabelSource {
  *     ]
  * });
  *
- * const fakeMap = {
- *     worldGroup: new THREE.Group(),
- *     _dynamicLayers: [],
- *     textManager: {
- *         labels: [],
- *         maxLabels: 500,
- *         setMaxLabels: function(max) { this.maxLabels = max; },
- *         addLabel: function(source) { const label = { source }; this.labels.push(label); return label; },
- *         removeLabel: function(label) { const idx = this.labels.indexOf(label); if (idx !== -1) this.labels.splice(idx, 1); }
- *     },
- *     camera: new THREE.PerspectiveCamera(),
- *     renderer: { domElement: document.createElement('canvas') },
- *     controls: { target: new THREE.Vector3() },
- *     continuousZoom: 17,
- *     currentDiscreteZoom: 17,
- *     WORLD_SIZE: 40075016.68557849,
- *     MAX_MERCATOR: 20037508.342789244
- * };
- *
- * try {
- *     layer.addTo(fakeMap);
- * } catch (error) {
- *     console.error(error);
- * }
  * layer.printDiscoveredClasses();
  * layer.removeFromMap();
  */

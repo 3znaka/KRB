@@ -1,10 +1,35 @@
 /**
- * Модуль стилей и порядка отрисовки векторных тайлов по умолчанию.
- * Используется как в основном потоке (VectorTileLayer), так и внутри воркера.
+ * Модуль стилей и порядка отрисовки векторных тайлов по умолчанию. Используется как в основном потоке (VectorTileLayer), так и внутри воркера.
  */
 
 /**
  * Стили по умолчанию для различных типов объектов, сгруппированные по слоям.
+ *
+ * @property {Object} water - Стили водных объектов (озера, реки, пруды, бассейны, доки).
+ * @property {Object} waterway - Стиль водных путей.
+ * @property {Object} building - Стиль зданий.
+ * @property {Object} landcover - Стили растительного покрова (лес, трава, парк и т.д.).
+ * @property {Object} landuse - Стили землепользования (жилые, промышленные, коммерческие и т.д.).
+ * @property {Object} park - Стили парков и охраняемых территорий.
+ * @property {Object} transportation - Стили транспортной сети (дороги, железные дороги, паромы и т.д.).
+ * @property {Object} transportation_name - Стили подписей транспортной сети.
+ * @property {Object} aeroway - Стили аэропортовой инфраструктуры.
+ * @property {Object} place - Стили населенных пунктов (город, поселок, деревня и т.д.).
+ * @property {Object} poi - Стили точек интереса.
+ * @property {Object} housenumber - Стили номеров домов.
+ * @property {Object} mountain_peak - Стили горных вершин.
+ * @property {Object} boundary - Стиль границ.
+ * @property {Object} water_name - Стили подписей водных объектов.
+ *
+ * @example
+ * const waterLakeStyle = DEFAULT_STYLES.water.lake;
+ * const riverStyle = DEFAULT_STYLES.water.river;
+ * const motorwayStyle = DEFAULT_STYLES.transportation.motorway;
+ * const cityStyle = DEFAULT_STYLES.place.city;
+ * console.log(waterLakeStyle.color, waterLakeStyle.opacity);
+ * console.log(riverStyle.color, riverStyle.opacity);
+ * console.log(motorwayStyle.color, motorwayStyle.width, motorwayStyle.dash);
+ * console.log(cityStyle.radius, cityStyle.textColor, cityStyle.fontSize);
  */
 export const DEFAULT_STYLES = {
     water: {
@@ -158,7 +183,28 @@ export const DEFAULT_STYLES = {
 };
 
 /**
- * Порядок отрисовки слоёв.
+ * Порядок отрисовки слоёв. Чем больше число, тем выше слой.
+ *
+ * @property {number} water - Порядок отрисовки слоя водных объектов.
+ * @property {number} waterway - Порядок отрисовки слоя водных путей.
+ * @property {number} water_name - Порядок отрисовки подписей водных объектов.
+ * @property {number} landuse - Порядок отрисовки слоя землепользования.
+ * @property {number} landcover - Порядок отрисовки слоя растительного покрова.
+ * @property {number} park - Порядок отрисовки слоя парков.
+ * @property {number} building - Порядок отрисовки слоя зданий.
+ * @property {number} place - Порядок отрисовки слоя населенных пунктов.
+ * @property {number} boundary - Порядок отрисовки слоя границ.
+ * @property {number} aeroway - Порядок отрисовки слоя аэропортовой инфраструктуры.
+ * @property {number} transportation - Порядок отрисовки слоя транспортной сети.
+ * @property {number} transportation_name - Порядок отрисовки подписей транспортной сети.
+ * @property {number} poi - Порядок отрисовки слоя точек интереса.
+ * @property {number} housenumber - Порядок отрисовки слоя номеров домов.
+ * @property {number} mountain_peak - Порядок отрисовки слоя горных вершин.
+ *
+ * @example
+ * const waterOrder = LAYER_RENDER_ORDER.water;
+ * const buildingOrder = LAYER_RENDER_ORDER.building;
+ * console.log(waterOrder, buildingOrder);
  */
 export const LAYER_RENDER_ORDER = {
     water: 1,

@@ -9,15 +9,18 @@ import {
   LineMaterial,
   LineGeometry,
 } from '../js_TP/tpb.js';
-import {
-  DEFAULT_STYLES,
-  stringToBase64,
-  createWorkerCode,
-} from './vectorTileWorkerCode.js';
+import { DEFAULT_STYLES } from './vectorTileDefaults.js';
+import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
 // -----------------------------------------------------------------------------
+/**
+ * Источник подписи для точечных объектов векторных тайлов.
+ * Используется для создания текстовых подписей через TextManager.
+ *
+ * @private
+ */
 class VectorPointLabelSource {
     constructor(map, worldX, worldZ, text, options = {}) {
         this.map = map;
@@ -82,6 +85,84 @@ class VectorPointLabelSource {
 // -----------------------------------------------------------------------------
 // Основной класс
 // -----------------------------------------------------------------------------
+/**
+ * Класс слоя векторных тайлов с поддержкой 3D-зданий и выделением острых рёбер.
+ * Управляет загрузкой, кешированием и отображением тайлов, материалов и подписей.
+ *
+ * @param {Object} options - Объект с настройками слоя.
+ * @property {string} options.url - URL шаблона тайлов с плейсхолдерами {z}, {x}, {y}.
+ * @property {number} [options.minZoom=0] - Минимальный зум, при котором слой видим.
+ * @property {number} [options.maxZoom=Infinity] - Максимальный зум, при котором слой видим.
+ * @property {number} [options.maxSourceZoom=14] - Максимальный исходный зум тайлов.
+ * @property {number} [options.lineWidthMultiplier=1.0] - Множитель ширины линий.
+ * @property {number} [options.fillOpacity=1.0] - Общая непрозрачность заливки.
+ * @property {boolean} [options.depthTest=false] - Включить тест глубины.
+ * @property {Array.<string>|null} [options.visibleLayers=null] - Список видимых слоёв или null.
+ * @property {boolean} [options.buildings3d=true] - Включить 3D-здания.
+ * @property {number} [options.buildings3dMinZoom=17] - Минимальный зум для отображения 3D-зданий.
+ * @property {boolean} [options.buildingEdges=true] - Выделять острые рёбра зданий.
+ * @property {number} [options.maxTextLabels=500] - Максимальное общее количество текстовых подписей.
+ * @property {number} [options.maxTextPointsPerTile=50] - Максимум подписей на тайл.
+ * @property {number} [options.labelDistanceSortZoom=17] - Зум, начиная с которого сортировка по расстоянию.
+ * @property {number} [options.labelMaxPerTileClose=20] - Максимум подписей на тайл при близком зуме.
+ * @property {number} [options.labelCullMargin=50] - Отступ за границами экрана для отсечения подписей.
+ * @property {boolean} [options.debug=false] - Режим отладки.
+ * @property {Object} [options.styles={}] - Пользовательские стили, объединяются с DEFAULT_STYLES.
+ * @property {Array.<string>} [options.workerScripts=['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js']] - Массив из двух URL скриптов для воркера.
+ *
+ * @example
+ * const layer = new VectorTileLayer({
+ *     url: 'https://example.com/tiles/{z}/{x}/{y}.pbf',
+ *     minZoom: 0,
+ *     maxZoom: 22,
+ *     maxSourceZoom: 14,
+ *     lineWidthMultiplier: 1.2,
+ *     fillOpacity: 0.9,
+ *     depthTest: false,
+ *     visibleLayers: ['buildings', 'roads'],
+ *     buildings3d: true,
+ *     buildings3dMinZoom: 17,
+ *     buildingEdges: true,
+ *     maxTextLabels: 500,
+ *     maxTextPointsPerTile: 50,
+ *     labelDistanceSortZoom: 17,
+ *     labelMaxPerTileClose: 20,
+ *     labelCullMargin: 50,
+ *     debug: false,
+ *     styles: { buildings: { fill: '#ff0000' } },
+ *     workerScripts: [
+ *         'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
+ *         'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'
+ *     ]
+ * });
+ *
+ * const fakeMap = {
+ *     worldGroup: new THREE.Group(),
+ *     _dynamicLayers: [],
+ *     textManager: {
+ *         labels: [],
+ *         maxLabels: 500,
+ *         setMaxLabels: function(max) { this.maxLabels = max; },
+ *         addLabel: function(source) { const label = { source }; this.labels.push(label); return label; },
+ *         removeLabel: function(label) { const idx = this.labels.indexOf(label); if (idx !== -1) this.labels.splice(idx, 1); }
+ *     },
+ *     camera: new THREE.PerspectiveCamera(),
+ *     renderer: { domElement: document.createElement('canvas') },
+ *     controls: { target: new THREE.Vector3() },
+ *     continuousZoom: 17,
+ *     currentDiscreteZoom: 17,
+ *     WORLD_SIZE: 40075016.68557849,
+ *     MAX_MERCATOR: 20037508.342789244
+ * };
+ *
+ * try {
+ *     layer.addTo(fakeMap);
+ * } catch (error) {
+ *     console.error(error);
+ * }
+ * layer.printDiscoveredClasses();
+ * layer.removeFromMap();
+ */
 export class VectorTileLayer {
     constructor(options = {}) {
         this.url = options.url;
@@ -302,6 +383,8 @@ export class VectorTileLayer {
     /**
      * Пересоздаёт текстовые подписи для всех видимых тайлов из кэша.
      * Используется при панорамировании, чтобы обновить подписи без перестройки геометрии.
+     *
+     * @private
      */
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
@@ -432,6 +515,11 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
     // Публичные методы
     // -------------------------------------------------------------------------
+    /**
+     * Выводит в консоль список обнаруженных классов по слоям.
+     *
+     * @returns {void} Ничего не возвращает.
+     */
     printDiscoveredClasses() {
         if (this._discoveredClasses.size === 0) {
             console.log('[VectorTileLayer] No classes discovered yet.');
@@ -455,6 +543,13 @@ export class VectorTileLayer {
         return merged;
     }
 
+    /**
+     * Добавляет слой на карту и подписывается на обновления.
+     *
+     * @param {Object} map - Объект карты, к которой добавляется слой.
+     * @returns {VectorTileLayer} Текущий экземпляр слоя для цепочки вызовов.
+     * @throws {Error} Если карта не содержит необходимых методов или свойств.
+     */
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
@@ -468,6 +563,11 @@ export class VectorTileLayer {
         return this;
     }
 
+    /**
+     * Удаляет слой с карты и освобождает все занятые ресурсы.
+     *
+     * @returns {void} Ничего не возвращает.
+     */
     removeFromMap() {
         if (!this._map) return;
         this._clearAllTiles();

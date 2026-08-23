@@ -1,4 +1,4 @@
-# KOROBOK (KRB) Cartographic Library
+# KOROBOK (KRB) Map Engine
 
 KRB is a high-performance, feature-rich cartographic library designed for rendering interactive 2D and 3D maps. It provides a comprehensive set of tools for terrain visualization, vector data rendering, and spatial data management, suitable for complex geographic information systems and custom mapping solutions.
 

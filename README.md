@@ -52,10 +52,7 @@ const map = new KRB.KrbMap({
     ]
 });
 
-// 3. (Optional) Initialize the default user interface
-KRB.initUI(map);
-
-// 4. Add a sample marker
+// 3. Add a sample marker
 const marker = new KRB.Marker({
     position: [37.6173, 55.7558],
     tooltip: '<b>Sample Location</b>',

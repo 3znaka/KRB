@@ -130,7 +130,7 @@ class VectorPointLabelSource {
  *     labelMaxPerTileClose: 20,
  *     labelCullMargin: 50,
  *     debug: false,
- *     styles: { buildings: { fill: '#ff0000' } },
+ *     styles: { building: { color: 0xff0000, stroke: 'black' } },
  *     workerScripts: [
  *         'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
  *         'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'

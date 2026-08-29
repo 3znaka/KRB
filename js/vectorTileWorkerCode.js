@@ -120,14 +120,15 @@ function getFeatureStyle(feature, layerName, styles) {
 }
 
 function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
-    // Локальные координаты относительно левого нижнего угла тайла
+    const originZ = -maxMerc + ySlippy * tileSize;
+    const originX = xSlippy * tileSize - maxMerc;
     const geom = feature.loadGeometry();
     return geom
         .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
         .filter(ring => ring.length >= 3)
         .map(ring => ring.map(p => ({
-            x: (p.x / 4095) * tileSize,
-            z: (p.y / 4095) * tileSize
+            x: originX + (p.x / 4095) * tileSize,
+            z: originZ + (p.y / 4095) * tileSize
         })));
 }
 
@@ -456,8 +457,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (ring.length === 0) continue;
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
- const worldX = (pt.x / 4095) * tileSize;
-const worldZ = (pt.y / 4095) * tileSize;
+                const originX = x * tileSize - maxMerc;
+                const originZ = -maxMerc + y * tileSize;
+                const worldX = originX + (pt.x / 4095) * tileSize;
+                const worldZ = originZ + (pt.y / 4095) * tileSize;
 
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 

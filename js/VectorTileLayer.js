@@ -260,26 +260,13 @@ export class VectorTileLayer {
         this._pendingWorkerRequests.delete(data.id);
 
         const result = data.result;
-const group = pending.group || new THREE.Group();
-const key = pending.key || `${z},${x},${y}`;
-const [z, x, y] = key.split(',').map(Number);
-const tileSize = this._map.WORLD_SIZE / (1 << z);
-const originX = x * tileSize - this._map.MAX_MERCATOR;
-const originZ = -this._map.MAX_MERCATOR + y * tileSize;
-
-group.position.set(
-    originX - this._map.worldGroup.position.x,
-    0,
-    originZ - this._map.worldGroup.position.z
-);
-group.userData.tileOrigin = { x: originX, z: originZ };
-group.userData.tileKey = key;
-
-this._buildGroupFromWorkerResult(group, result);
-if (!pending.group) {
-    this._rootGroup.add(group);
-    this._tileCache.set(key, group);
-}
+        const group = pending.group || new THREE.Group();
+        this._buildGroupFromWorkerResult(group, result);
+        if (!pending.group) {
+            this._rootGroup.add(group);
+            const key = pending.key;
+            this._tileCache.set(key, group);
+        }
         pending.resolve(group);
     }
 
@@ -413,10 +400,8 @@ if (!pending.group) {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
-            const origin = group.userData.tileOrigin;
-if (!origin) return;
-const worldX = origin.x + pt.x;
-const worldZ = origin.z + pt.z;
+            const worldX = pt.x + worldOffset.x;
+            const worldZ = pt.z + worldOffset.z;
 
             const dx = worldX - targetWorld.x;
             const dz = worldZ - targetWorld.z;
@@ -650,19 +635,6 @@ const worldZ = origin.z + pt.z;
         }, delay);
     }
 
-    _updateTileGroupPositions() {
-    const worldOffset = this._map.worldGroup.position;
-    this._tileCache.forEach(group => {
-        if (group.userData.tileOrigin) {
-            group.position.set(
-                group.userData.tileOrigin.x - worldOffset.x,
-                0,
-                group.userData.tileOrigin.z - worldOffset.z
-            );
-        }
-    });
-}
-
     _postUpdate(map) {
         if (!this._map) return;
 
@@ -671,7 +643,6 @@ const worldZ = origin.z + pt.z;
         if (this._lastWorldPos.distanceToSquared(worldPos) > 1) { // порог 1 метр
             this._lastWorldPos.copy(worldPos);
             this._lastMovementTime = performance.now();
-             this._updateTileGroupPositions();
         }
 
         const now = performance.now();
@@ -799,16 +770,8 @@ const worldZ = origin.z + pt.z;
         if (this._pendingLoads.has(key) || this._tileCache.has(key)) return;
 
         if (this._groupCache.has(key)) {
-    const group = this._groupCache.get(key);
-    this._groupCache.delete(key);
-    // Обновляем позицию группы под текущий worldGroup.position
-    if (group.userData.tileOrigin) {
-        group.position.set(
-            group.userData.tileOrigin.x - this._map.worldGroup.position.x,
-            0,
-            group.userData.tileOrigin.z - this._map.worldGroup.position.z
-        );
-    }
+            const group = this._groupCache.get(key);
+            this._groupCache.delete(key);
             const is3dNow = this.buildings3d && (this._map?.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             if (group.userData.is3d !== is3dNow) {
                 const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;

@@ -469,25 +469,24 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (!text) continue;
 
                     textPoints.push({
-    x: worldX,
-    z: worldZ,
-    text,
-    layerName: name,
-    textColor: style.textColor || '#333333',
-    fontSize: style.fontSize || '12px',
-    fontFamily: style.fontFamily || 'sans-serif',
-    fontWeight: style.fontWeight || 'normal',
-    textShadow: style.textShadow || '',
-    textOffset: style.textOffset || [0, 0],
-    textAlign: style.textAlign || 'center',
-    textVerticalAlign: style.textVerticalAlign || 'center',
-    priority: (style.textPriority !== undefined ? style.textPriority : (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
-    zoomBounds: {
-        min: style.textZoomMin !== undefined ? style.textZoomMin : 0,
-        max: style.textZoomMax !== undefined ? style.textZoomMax : 24
-    },
-    maxLabelWidth: style.maxLabelWidth || '200px'   // ← добавили
-});
+                        x: worldX,
+                        z: worldZ,
+                        text,
+                        layerName: name,
+                        textColor: style.textColor || '#333333',
+                        fontSize: style.fontSize || '12px',
+                        fontFamily: style.fontFamily || 'sans-serif',
+                        fontWeight: style.fontWeight || 'normal',
+                        textShadow: style.textShadow || '',
+                        textOffset: style.textOffset || [0, 0],
+                        textAlign: style.textAlign || 'center',
+                        textVerticalAlign: style.textVerticalAlign || 'center',
+                        priority: (style.textPriority !== undefined ? style.textPriority : (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
+                        zoomBounds: {
+                            min: style.textZoomMin !== undefined ? style.textZoomMin : 0,
+                            max: style.textZoomMax !== undefined ? style.textZoomMax : 24
+                        }
+                    });
                     continue;
                 }
 

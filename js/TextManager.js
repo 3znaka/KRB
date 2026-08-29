@@ -71,9 +71,122 @@ export class TextManager {
          * @private
          */
         this._lastZoom = null;
+        this._measureCanvas = document.createElement('canvas');
+this._measureCtx = this._measureCanvas.getContext('2d');
 
         this._initPane();
     }
+
+
+
+/**
+ * Генерирует все комбинации выбора k элементов из 0..n-1.
+ * Используется для перебора возможных точек переноса строк.
+ * @private
+ */
+_getBreakCombinations(n, k) {
+    if (k === 0) return [[]];
+    if (n < k) return [];
+    const result = [];
+    const comb = (start, depth, current) => {
+        if (depth === k) {
+            result.push(current.slice());
+            return;
+        }
+        for (let i = start; i <= n - (k - depth); i++) {
+            current.push(i);
+            comb(i + 1, depth + 1, current);
+            current.pop();
+        }
+    };
+    comb(0, 0, []);
+    return result;
+}
+
+/**
+ * Оптимизирует текст точечной подписи: разбивает на строки так,
+ * чтобы форма блока была как можно ближе к квадратной.
+ * @private
+ */
+_optimizeLabelText(label) {
+    const source = label.source;
+    if (source.getLabelType() !== 'point') return;
+
+    const text = source.getText();
+    const words = text.split(/\s+/).filter(w => w.length > 0);
+    if (words.length <= 1) {
+        // Одно слово — нечего переносить
+        label.element.textContent = text;
+        label.element.style.whiteSpace = 'pre-line';
+        this._measureLabel(label);
+        return;
+    }
+
+    // Стили шрифта
+    const style = window.getComputedStyle(label.element);
+    const fontSize = parseFloat(style.fontSize) || 12;
+    const fontFamily = style.fontFamily || 'sans-serif';
+    const fontWeight = style.fontWeight || 'normal';
+    const lineHeight = parseFloat(style.lineHeight) || 1.2;
+
+    // Настройка canvas
+    this._measureCtx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    const wordWidths = words.map(w => this._measureCtx.measureText(w).width);
+    const spaceWidth = this._measureCtx.measureText(' ').width;
+
+    // Максимальная ширина из источника (если есть)
+    const maxWidthStr = source.getMaxLabelWidth ? source.getMaxLabelWidth() : null;
+    const maxWidth = maxWidthStr ? parseFloat(maxWidthStr) : null;
+
+    const maxLines = 4; // ограничение на количество строк
+
+    let bestText = text;
+    let bestScore = Infinity;
+
+    // Перебираем количество строк от 1 до maxLines
+    for (let k = 1; k <= Math.min(words.length, maxLines); k++) {
+        const combinations = this._getBreakCombinations(words.length - 1, k - 1);
+        for (const breaks of combinations) {
+            const lines = [];
+            let start = 0;
+            for (const br of breaks) {
+                lines.push(words.slice(start, br + 1).join(' '));
+                start = br + 1;
+            }
+            lines.push(words.slice(start).join(' '));
+
+            // Вычисляем ширину самой длинной строки
+            let maxLineWidth = 0;
+            for (const line of lines) {
+                const lineWords = line.split(' ');
+                let w = 0;
+                for (let i = 0; i < lineWords.length; i++) {
+                    // Неэффективно, но для простоты можно оставить
+                    const idx = words.indexOf(lineWords[i]);
+                    w += wordWidths[idx] || 0;
+                    if (i < lineWords.length - 1) w += spaceWidth;
+                }
+                if (w > maxLineWidth) maxLineWidth = w;
+            }
+
+            // Отбрасываем варианты с превышением максимальной ширины
+            if (maxWidth && maxLineWidth > maxWidth) continue;
+
+            const height = lines.length * fontSize * lineHeight;
+            const score = Math.abs(maxLineWidth - height); // близость к квадрату
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestText = lines.join('\n');
+            }
+        }
+    }
+
+    // Применяем лучший вариант
+    label.element.textContent = bestText;
+    label.element.style.whiteSpace = 'pre-line';
+    this._measureLabel(label);
+}
 
     /**
      * Инициализирует DOM-контейнер для подписей.
@@ -128,55 +241,45 @@ export class TextManager {
     const el = document.createElement('div');
     el.className = 'krb-text-label';
     el.textContent = source.getText();
-
-    const isLine = source.getLabelType() === 'line';
-
     Object.assign(el.style, {
         position: 'absolute',
         display: 'none',
         pointerEvents: 'none',
-        // Для линий оставляем nowrap, для точек разрешаем перенос
-        whiteSpace: isLine ? 'nowrap' : 'normal',
+        whiteSpace: 'nowrap', // для линейных останется, для точек переопределим
         fontFamily: 'sans-serif',
         color: '#333',
         fontSize: '12px',
-        lineHeight: '1.2',             // чуть больше для многострочности
+        lineHeight: '1.2', // немного увеличим для многострочности
         padding: '0',
         margin: '0',
         transformOrigin: '0 0'
     });
-
-    // Применяем стили источника (могут переопределить whiteSpace)
     Object.assign(el.style, source.getTextStyle());
-
-    // Гарантируем перенос для точечных подписей и задаём максимальную ширину
-    if (!isLine) {
-        el.style.whiteSpace = 'normal';
-        // Если источник предоставляет метод getMaxLabelWidth, используем его,
-        // иначе задаём стандартное ограничение
-        const maxWidth = source.getMaxLabelWidth ? source.getMaxLabelWidth() : '200px';
-        if (!el.style.maxWidth) {
-            el.style.maxWidth = maxWidth;
-        }
-    }
-
     this.pane.appendChild(el);
 
-        const label = {
-            source,
-            element: el,
-            t: 0,
-            width: 0,
-            height: 0,
-            stuck: false,
-            hiddenByPriority: false,
-            priority: source.getPriority ? source.getPriority() : 0,
-            allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false
-        };
-        this.labels.push(label);
+    const label = {
+        source,
+        element: el,
+        t: 0,
+        width: 0,
+        height: 0,
+        stuck: false,
+        hiddenByPriority: false,
+        priority: source.getPriority ? source.getPriority() : 0,
+        allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false
+    };
+    this.labels.push(label);
+
+    // Для точечных подписей оптимизируем форму (переносы)
+    if (source.getLabelType() === 'point') {
+        this._optimizeLabelText(label);
+    } else {
+        // Для линейных измеряем как есть
         this._measureLabel(label);
-        return label;
     }
+
+    return label;
+}
 
     /**
      * Удаляет подпись из менеджера и из DOM.

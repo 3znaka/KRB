@@ -30,6 +30,11 @@ class VectorPointLabelSource {
         this.options = options;
     }
 
+    // Новый метод
+    getMaxLabelWidth() {
+        return this.options.maxLabelWidth || null; // если не задано, вернём null (без ограничения)
+    }
+
     getText() {
         return this.text;
     }
@@ -457,7 +462,7 @@ export class VectorTileLayer {
 
         for (const cand of finalData) {
             const pt = cand.pt;
-            const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
+ const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
     textColor: pt.textColor,
     fontSize: pt.fontSize,
     fontFamily: pt.fontFamily,
@@ -468,7 +473,7 @@ export class VectorTileLayer {
     textVerticalAlign: pt.textVerticalAlign,
     priority: pt.priority,
     zoomBounds: pt.zoomBounds,
-    maxLabelWidth: pt.maxLabelWidth,   // ← добавили передачу ширины
+    maxLabelWidth: pt.maxLabelWidth, // передаём, если есть
 });
             const label = textManager.addLabel(source);
             group.userData.textLabels.push(label);

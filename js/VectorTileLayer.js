@@ -169,6 +169,8 @@ export class VectorTileLayer {
 
         this._map = null;
         this._rootGroup = new THREE.Group();
+        this._rootGroup = new THREE.Group();
+this._origin = new THREE.Vector3(0, 0, 0);
 
         this._tileCache = new Map();
         this._pendingLoads = new Set();
@@ -282,6 +284,17 @@ export class VectorTileLayer {
             }
             group.remove(child);
         }
+
+         // Устанавливаем позицию группы относительно текущего origin
+    group.position.set(
+        result.originX - this._origin.x,
+        0,
+        result.originZ - this._origin.z
+    );
+
+    // сохраняем origin для возможного переиспользования из кэша
+    group.userData.originX = result.originX;
+    group.userData.originZ = result.originZ;
 
         for (const fill of result.fills) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
@@ -399,9 +412,8 @@ export class VectorTileLayer {
         for (const pt of data) {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
-
-            const worldX = pt.x + worldOffset.x;
-            const worldZ = pt.z + worldOffset.z;
+const worldX = pt.x + group.position.x + this._origin.x + worldOffset.x;
+const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
 
             const dx = worldX - targetWorld.x;
             const dz = worldZ - targetWorld.z;
@@ -594,6 +606,39 @@ export class VectorTileLayer {
         }
     }
 
+    _updateOriginIfNeeded() {
+    if (!this._map) return;
+
+    const cameraPos = this._map.camera.position;
+    const threshold = 5000; // метров, можно подобрать
+    const dx = cameraPos.x - this._origin.x;
+    const dz = cameraPos.z - this._origin.z;
+
+    if (Math.abs(dx) < threshold && Math.abs(dz) < threshold) return;
+
+    // Новый origin округляем до целых метров для стабильности
+    const newOriginX = Math.round(cameraPos.x);
+    const newOriginZ = Math.round(cameraPos.z);
+    const shiftX = newOriginX - this._origin.x;
+    const shiftZ = newOriginZ - this._origin.z;
+
+    // Сдвигаем позиции всех групп
+    this._tileCache.forEach(group => {
+        group.position.x += shiftX;
+        group.position.z += shiftZ;
+    });
+    this._groupCache.forEach(group => {
+        group.position.x += shiftX;
+        group.position.z += shiftZ;
+    });
+
+    this._origin.x = newOriginX;
+    this._origin.z = newOriginZ;
+
+    // Подписи пересоздаём, так как мировые координаты изменились
+    this._refreshTextLabelsForVisibleTiles();
+}
+
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
         while (group.children.length) {
@@ -746,6 +791,8 @@ export class VectorTileLayer {
             )
         );
         this._processQueue();
+
+this._updateOriginIfNeeded();
     }
 
     _processQueue() {
@@ -772,6 +819,13 @@ export class VectorTileLayer {
         if (this._groupCache.has(key)) {
             const group = this._groupCache.get(key);
             this._groupCache.delete(key);
+
+group.position.set(
+    group.userData.originX - this._origin.x,
+    0,
+    group.userData.originZ - this._origin.z
+);
+
             const is3dNow = this.buildings3d && (this._map?.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             if (group.userData.is3d !== is3dNow) {
                 const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;
@@ -962,7 +1016,7 @@ export class VectorTileLayer {
 
     const mat = new THREE.MeshLambertMaterial({
         color,
-        side: THREE.FrontSide, // вместо THREE.DoubleSide
+        side: THREE.FrontSide,
         depthTest: true,
         depthWrite: true,
         polygonOffset: true,

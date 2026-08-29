@@ -119,16 +119,14 @@ function getFeatureStyle(feature, layerName, styles) {
     return result;
 }
 
-function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
-    const originZ = -maxMerc + ySlippy * tileSize;
-    const originX = xSlippy * tileSize - maxMerc;
+function toWorldCoords(feature, tileSize) {
     const geom = feature.loadGeometry();
     return geom
         .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
         .filter(ring => ring.length >= 3)
         .map(ring => ring.map(p => ({
-            x: originX + (p.x / 4095) * tileSize,
-            z: originZ + (p.y / 4095) * tileSize
+            x: (p.x / 4095) * tileSize,
+            z: (p.y / 4095) * tileSize
         })));
 }
 
@@ -424,6 +422,8 @@ function computePointScale(z) {
 }
 
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges) {
+const originX = x * tileSize - maxMerc;
+    const originZ = -maxMerc + y * tileSize;
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
 
@@ -457,10 +457,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (ring.length === 0) continue;
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
-                const originX = x * tileSize - maxMerc;
-                const originZ = -maxMerc + y * tileSize;
-                const worldX = originX + (pt.x / 4095) * tileSize;
-                const worldZ = originZ + (pt.y / 4095) * tileSize;
+const localX = (pt.x / 4095) * tileSize;
+const localZ = (pt.y / 4095) * tileSize;
 
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 
@@ -469,8 +467,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (!text) continue;
 
                     textPoints.push({
-                        x: worldX,
-                        z: worldZ,
+                        x: localX,
+                        z: localZ,
                         text,
                         layerName: name,
                         textColor: style.textColor || '#333333',
@@ -492,8 +490,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
 
                 const radius = (style.radius || 3) * pointScale;
                 points.push({
-                    x: worldX,
-                    z: worldZ,
+                    x: localX,
+                    z: localZ,
                     radius,
                     color: style.color,
                     opacity: style.opacity ?? 1,
@@ -502,7 +500,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 continue;
             }
 
-            const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
+            const rings = toWorldCoords(feature, tileSize);
 
             if (geomType === 3) {
                 if (name === 'building') {
@@ -674,6 +672,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     }));
 
     result.is3d = is3d;
+    result.originX = originX;
+result.originZ = originZ;
     return result;
 }
 `;

@@ -393,23 +393,24 @@ if (polygons.length === 0) return null;
     };
 }
 
-function createLinePositions(rings) {
-    const pts = [];
+function createLineSegments(rings) {
+    const segments = [];
     for (const ring of rings) {
         if (!ring || ring.length < 2) continue;
         let valid = true;
+        const positions = [];
         for (const pt of ring) {
-            if (!Number.isFinite(pt.x) || !Number.isFinite(pt.z)) {
+            if (typeof pt.x !== 'number' || typeof pt.z !== 'number' || !Number.isFinite(pt.x) || !Number.isFinite(pt.z)) {
                 valid = false;
                 break;
             }
+            positions.push(pt.x, 0, pt.z);
         }
-        if (!valid) continue; // пропускаем кольцо с невалидными координатами
-        for (const pt of ring) pts.push(pt.x, 0, pt.z);
-        pts.push(NaN, NaN, NaN);
+        if (valid && positions.length >= 6) {
+            segments.push(new Float32Array(positions));
+        }
     }
-    while (pts.length > 0 && isNaN(pts[pts.length - 1])) pts.pop();
-    return pts.length >= 6 ? new Float32Array(pts) : null;
+    return segments.length > 0 ? segments : null;
 }
 
 function mergePolygonGeometries(geos) {
@@ -651,7 +652,7 @@ const localZ = (pt.y / 4095) * tileSize;
         const parts = key.split(':');
         const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
         result.lines.push({
-            positions,
+            segments,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
@@ -666,7 +667,7 @@ const localZ = (pt.y / 4095) * tileSize;
         const parts = key.split(':');
         const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
         result.strokes.push({
-            positions,
+            segments,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),

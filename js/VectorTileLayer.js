@@ -335,24 +335,28 @@ this._origin = new THREE.Vector3(0, 0, 0);
         }
 
         for (const line of result.lines) {
-            const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
-            const lGeo = new LineGeometry();
-            lGeo.setPositions(line.positions);
-            const lineObj = new Line2(lGeo, mat);
-            lineObj.renderOrder = line.renderOrder;
-            lineObj.frustumCulled = false;
-            group.add(lineObj);
-        }
+    const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
+    for (const segPositions of line.segments) {
+        const lGeo = new LineGeometry();
+        lGeo.setPositions(Array.from(segPositions)); // setPositions принимает обычный массив или Float32Array
+        const lineObj = new Line2(lGeo, mat);
+        lineObj.renderOrder = line.renderOrder;
+        lineObj.frustumCulled = false;
+        group.add(lineObj);
+    }
+}
 
         for (const stroke of result.strokes) {
-            const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
-            const lGeo = new LineGeometry();
-            lGeo.setPositions(stroke.positions);
-            const lineObj = new Line2(lGeo, mat);
-            lineObj.renderOrder = stroke.renderOrder;
-            lineObj.frustumCulled = false;
-            group.add(lineObj);
-        }
+    const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
+    for (const segPositions of stroke.segments) {
+        const lGeo = new LineGeometry();
+        lGeo.setPositions(Array.from(segPositions));
+        const lineObj = new Line2(lGeo, mat);
+        lineObj.renderOrder = stroke.renderOrder;
+        lineObj.frustumCulled = false;
+        group.add(lineObj);
+    }
+}
 
         for (const pt of result.points) {
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;

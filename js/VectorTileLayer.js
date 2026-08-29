@@ -30,11 +30,6 @@ class VectorPointLabelSource {
         this.options = options;
     }
 
-    // Новый метод
-    getMaxLabelWidth() {
-        return this.options.maxLabelWidth || null; // если не задано, вернём null (без ограничения)
-    }
-
     getText() {
         return this.text;
     }
@@ -457,21 +452,6 @@ export class VectorTileLayer {
 
         for (const cand of finalData) {
             const pt = cand.pt;
-<<<<<<< HEAD
- const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
-    textColor: pt.textColor,
-    fontSize: pt.fontSize,
-    fontFamily: pt.fontFamily,
-    fontWeight: pt.fontWeight,
-    textShadow: pt.textShadow,
-    textOffset: pt.textOffset,
-    textAlign: pt.textAlign,
-    textVerticalAlign: pt.textVerticalAlign,
-    priority: pt.priority,
-    zoomBounds: pt.zoomBounds,
-    maxLabelWidth: pt.maxLabelWidth, // передаём, если есть
-});
-=======
             const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
@@ -484,7 +464,6 @@ export class VectorTileLayer {
                 priority: pt.priority,
                 zoomBounds: pt.zoomBounds,
             });
->>>>>>> parent of b385f45 (оптимизация подписей)
             const label = textManager.addLabel(source);
             group.userData.textLabels.push(label);
         }

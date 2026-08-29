@@ -171,7 +171,12 @@ function clipRingToTile(ring, size) {
 function intersect(p1, p2, edge) {
     const axis = edge.axis, val = edge.val;
     const other = axis === 'x' ? 'y' : 'x';
-    const t = (val - p1[axis]) / (p2[axis] - p1[axis]);
+    const denom = p2[axis] - p1[axis];
+    if (denom === 0) {
+        // Возвращаем любую из точек, чтобы избежать NaN
+        return { x: p1.x, y: p1.y };
+    }
+    const t = (val - p1[axis]) / denom;
     const pt = { x: 0, y: 0 };
     pt[axis] = val;
     pt[other] = p1[other] + t * (p2[other] - p1[other]);
@@ -392,6 +397,14 @@ function createLinePositions(rings) {
     const pts = [];
     for (const ring of rings) {
         if (!ring || ring.length < 2) continue;
+        let valid = true;
+        for (const pt of ring) {
+            if (!Number.isFinite(pt.x) || !Number.isFinite(pt.z)) {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) continue; // пропускаем кольцо с невалидными координатами
         for (const pt of ring) pts.push(pt.x, 0, pt.z);
         pts.push(NaN, NaN, NaN);
     }

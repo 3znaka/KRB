@@ -168,7 +168,7 @@ export class VectorTileLayer {
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
         this._map = null;
-        this._rootGroup = new THREE.Group();
+
         this._rootGroup = new THREE.Group();
 this._origin = new THREE.Vector3(0, 0, 0);
 
@@ -464,7 +464,7 @@ const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
 
         for (const cand of finalData) {
             const pt = cand.pt;
-            const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
+            const source = new VectorPointLabelSource(map, worldX, worldZ, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
                 fontFamily: pt.fontFamily,

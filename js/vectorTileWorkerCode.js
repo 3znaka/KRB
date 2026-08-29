@@ -119,14 +119,16 @@ function getFeatureStyle(feature, layerName, styles) {
     return result;
 }
 
-function toWorldCoords(feature, tileSize) {
+function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
+    const originZ = -maxMerc + ySlippy * tileSize;
+    const originX = xSlippy * tileSize - maxMerc;
     const geom = feature.loadGeometry();
     return geom
         .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
         .filter(ring => ring.length >= 3)
         .map(ring => ring.map(p => ({
-            x: (p.x / 4095) * tileSize,
-            z: (p.y / 4095) * tileSize
+            x: originX + (p.x / 4095) * tileSize,
+            z: originZ + (p.y / 4095) * tileSize
         })));
 }
 
@@ -171,12 +173,7 @@ function clipRingToTile(ring, size) {
 function intersect(p1, p2, edge) {
     const axis = edge.axis, val = edge.val;
     const other = axis === 'x' ? 'y' : 'x';
-    const denom = p2[axis] - p1[axis];
-    if (denom === 0) {
-        // Возвращаем любую из точек, чтобы избежать NaN
-        return { x: p1.x, y: p1.y };
-    }
-    const t = (val - p1[axis]) / denom;
+    const t = (val - p1[axis]) / (p2[axis] - p1[axis]);
     const pt = { x: 0, y: 0 };
     pt[axis] = val;
     pt[other] = p1[other] + t * (p2[other] - p1[other]);
@@ -393,24 +390,15 @@ if (polygons.length === 0) return null;
     };
 }
 
-function createLineSegments(rings) {
-    const segments = [];
+function createLinePositions(rings) {
+    const pts = [];
     for (const ring of rings) {
         if (!ring || ring.length < 2) continue;
-        let valid = true;
-        const positions = [];
-        for (const pt of ring) {
-            if (typeof pt.x !== 'number' || typeof pt.z !== 'number' || !Number.isFinite(pt.x) || !Number.isFinite(pt.z)) {
-                valid = false;
-                break;
-            }
-            positions.push(pt.x, 0, pt.z);
-        }
-        if (valid && positions.length >= 6) {
-            segments.push(new Float32Array(positions));
-        }
+        for (const pt of ring) pts.push(pt.x, 0, pt.z);
+        pts.push(NaN, NaN, NaN);
     }
-    return segments.length > 0 ? segments : null;
+    while (pts.length > 0 && isNaN(pts[pts.length - 1])) pts.pop();
+    return pts.length >= 6 ? new Float32Array(pts) : null;
 }
 
 function mergePolygonGeometries(geos) {
@@ -436,8 +424,6 @@ function computePointScale(z) {
 }
 
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges) {
-const originX = x * tileSize - maxMerc;
-    const originZ = -maxMerc + y * tileSize;
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
 
@@ -471,8 +457,10 @@ const originX = x * tileSize - maxMerc;
                 if (ring.length === 0) continue;
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
-const localX = (pt.x / 4095) * tileSize;
-const localZ = (pt.y / 4095) * tileSize;
+                const originX = x * tileSize - maxMerc;
+                const originZ = -maxMerc + y * tileSize;
+                const worldX = originX + (pt.x / 4095) * tileSize;
+                const worldZ = originZ + (pt.y / 4095) * tileSize;
 
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 
@@ -481,8 +469,8 @@ const localZ = (pt.y / 4095) * tileSize;
                     if (!text) continue;
 
                     textPoints.push({
-                        x: localX,
-                        z: localZ,
+                        x: worldX,
+                        z: worldZ,
                         text,
                         layerName: name,
                         textColor: style.textColor || '#333333',
@@ -504,8 +492,8 @@ const localZ = (pt.y / 4095) * tileSize;
 
                 const radius = (style.radius || 3) * pointScale;
                 points.push({
-                    x: localX,
-                    z: localZ,
+                    x: worldX,
+                    z: worldZ,
                     radius,
                     color: style.color,
                     opacity: style.opacity ?? 1,
@@ -514,7 +502,7 @@ const localZ = (pt.y / 4095) * tileSize;
                 continue;
             }
 
-            const rings = toWorldCoords(feature, tileSize);
+            const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
 
             if (geomType === 3) {
                 if (name === 'building') {
@@ -652,7 +640,7 @@ const localZ = (pt.y / 4095) * tileSize;
         const parts = key.split(':');
         const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
         result.lines.push({
-            segments,
+            positions,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
@@ -667,7 +655,7 @@ const localZ = (pt.y / 4095) * tileSize;
         const parts = key.split(':');
         const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
         result.strokes.push({
-            segments,
+            positions,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
@@ -686,8 +674,6 @@ const localZ = (pt.y / 4095) * tileSize;
     }));
 
     result.is3d = is3d;
-    result.originX = originX;
-result.originZ = originZ;
     return result;
 }
 `;

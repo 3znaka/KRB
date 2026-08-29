@@ -1,3 +1,5 @@
+// TextManager.js
+
 import {
   THREE,
 } from '../js_TP/tpb.js';  
@@ -123,24 +125,42 @@ export class TextManager {
      * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
     addLabel(source) {
-        const el = document.createElement('div');
-        el.className = 'krb-text-label';
-        el.textContent = source.getText();
-        Object.assign(el.style, {
-            position: 'absolute',
-            display: 'none',
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            lineHeight: '1',
-            padding: '0',
-            margin: '0',
-            transformOrigin: '0 0'
-        });
-        Object.assign(el.style, source.getTextStyle());
-        this.pane.appendChild(el);
+    const el = document.createElement('div');
+    el.className = 'krb-text-label';
+    el.textContent = source.getText();
+
+    const isLine = source.getLabelType() === 'line';
+
+    Object.assign(el.style, {
+        position: 'absolute',
+        display: 'none',
+        pointerEvents: 'none',
+        // Для линий оставляем nowrap, для точек разрешаем перенос
+        whiteSpace: isLine ? 'nowrap' : 'normal',
+        fontFamily: 'sans-serif',
+        color: '#333',
+        fontSize: '12px',
+        lineHeight: '1.2',             // чуть больше для многострочности
+        padding: '0',
+        margin: '0',
+        transformOrigin: '0 0'
+    });
+
+    // Применяем стили источника (могут переопределить whiteSpace)
+    Object.assign(el.style, source.getTextStyle());
+
+    // Гарантируем перенос для точечных подписей и задаём максимальную ширину
+    if (!isLine) {
+        el.style.whiteSpace = 'normal';
+        // Если источник предоставляет метод getMaxLabelWidth, используем его,
+        // иначе задаём стандартное ограничение
+        const maxWidth = source.getMaxLabelWidth ? source.getMaxLabelWidth() : '200px';
+        if (!el.style.maxWidth) {
+            el.style.maxWidth = maxWidth;
+        }
+    }
+
+    this.pane.appendChild(el);
 
         const label = {
             source,

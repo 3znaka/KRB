@@ -126,23 +126,34 @@ export class TextManager {
      */
     addLabel(source) {
         const el = document.createElement('div');
-        el.className = 'krb-text-label';
-        el.textContent = source.getText();
-        Object.assign(el.style, {
-            position: 'absolute',
-            display: 'none',
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            lineHeight: '1',
-            padding: '0',
-            margin: '0',
-            transformOrigin: '0 0'
-        });
-        Object.assign(el.style, source.getTextStyle());
-        this.pane.appendChild(el);
+el.className = 'krb-text-label';
+// Начальные стили (whiteSpace будет переопределён ниже)
+Object.assign(el.style, {
+    position: 'absolute',
+    display: 'none',
+    pointerEvents: 'none',
+    whiteSpace: 'nowrap',   // для line останется nowrap
+    fontFamily: 'sans-serif',
+    color: '#333',
+    fontSize: '12px',
+    lineHeight: '1',
+    padding: '0',
+    margin: '0',
+    transformOrigin: '0 0'
+});
+Object.assign(el.style, source.getTextStyle());
+
+// Для точечных подписей включаем многострочность и применяем перенос
+if (source.getLabelType() === 'point') {
+    el.style.whiteSpace = 'pre-line';  // разрешаем перенос по \n
+    const wrapped = this._wrapPointText(source.getText(), el.style.fontSize);
+    el.textContent = wrapped;
+} else {
+    // Для линейных подписей оставляем как есть (nowrap)
+    el.textContent = source.getText();
+}
+
+this.pane.appendChild(el);
 
         const label = {
             source,
@@ -172,6 +183,79 @@ export class TextManager {
             label.element.remove();
         }
     }
+
+
+    /**
+ * Преобразует длинный текст точечной подписи в многострочный,
+ * вставляя переносы \n так, чтобы блок был близок к квадрату.
+ * Использует грубые оценки ширины символов (0.6em) и пробела (0.3em).
+ *
+ * @param {string} text - Исходный однострочный текст.
+ * @param {string} fontSize - CSS-значение font-size (например, "12px").
+ * @returns {string} Текст с переносами строк.
+ * @private
+ */
+_wrapPointText(text, fontSize) {
+    if (!text || text.indexOf(' ') === -1) return text; // нет пробелов или пусто
+
+    const words = text.split(/\s+/).filter(w => w.length > 0);
+    if (words.length <= 1) return text;
+
+    const fontPx = parseFloat(fontSize) || 12;
+    const charWidth = fontPx * 0.6;      // примерная ширина символа
+    const spaceWidth = fontPx * 0.3;     // примерная ширина пробела
+
+    const wordWidths = words.map(w => w.length * charWidth);
+    const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
+        (words.length - 1) * spaceWidth;
+
+    // Порог, при котором перенос не требуется (можно вынести в настройки)
+    const maxSingleLineWidth = 160;
+    if (totalSingleLineWidth <= maxSingleLineWidth) return text;
+
+    // Высота одной строки (примерно)
+    const lineHeight = fontPx * 1.2;
+
+    // Желаемое количество строк для квадратной формы:
+    // totalWidth / lines ≈ lines * lineHeight  =>  lines = sqrt(totalWidth / lineHeight)
+    let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
+    targetLines = Math.min(targetLines, 5); // ограничение, чтобы не делать слишком много строк
+
+    const targetLineWidth = totalSingleLineWidth / targetLines;
+
+    // Жадное заполнение строк
+    const lines = [];
+    let currentLine = [];
+    let currentWidth = 0;
+
+    for (let i = 0; i < words.length; i++) {
+        const word = words[i];
+        const w = wordWidths[i];
+
+        if (currentLine.length === 0) {
+            currentLine.push(word);
+            currentWidth = w;
+        } else {
+            const addedWidth = currentWidth + spaceWidth + w;
+            if (addedWidth <= targetLineWidth) {
+                currentLine.push(word);
+                currentWidth = addedWidth;
+            } else {
+                lines.push(currentLine.join(' '));
+                currentLine = [word];
+                currentWidth = w;
+            }
+        }
+    }
+    if (currentLine.length > 0) {
+        lines.push(currentLine.join(' '));
+    }
+
+    // Если в итоге получилась одна строка (например, из-за ограничений), возвращаем исходный текст
+    if (lines.length <= 1) return text;
+
+    return lines.join('\n');
+}
 
     /**
      * Измеряет реальные ширину и высоту DOM-элемента подписи.

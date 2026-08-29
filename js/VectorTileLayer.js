@@ -168,9 +168,7 @@ export class VectorTileLayer {
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
         this._map = null;
-
         this._rootGroup = new THREE.Group();
-this._origin = new THREE.Vector3(0, 0, 0);
 
         this._tileCache = new Map();
         this._pendingLoads = new Set();
@@ -285,17 +283,6 @@ this._origin = new THREE.Vector3(0, 0, 0);
             group.remove(child);
         }
 
-         // Устанавливаем позицию группы относительно текущего origin
-    group.position.set(
-        result.originX - this._origin.x,
-        0,
-        result.originZ - this._origin.z
-    );
-
-    // сохраняем origin для возможного переиспользования из кэша
-    group.userData.originX = result.originX;
-    group.userData.originZ = result.originZ;
-
         for (const fill of result.fills) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
             const geom = new THREE.BufferGeometry();
@@ -335,28 +322,24 @@ this._origin = new THREE.Vector3(0, 0, 0);
         }
 
         for (const line of result.lines) {
-    const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
-    for (const segPositions of line.segments) {
-        const lGeo = new LineGeometry();
-        lGeo.setPositions(Array.from(segPositions)); // setPositions принимает обычный массив или Float32Array
-        const lineObj = new Line2(lGeo, mat);
-        lineObj.renderOrder = line.renderOrder;
-        lineObj.frustumCulled = false;
-        group.add(lineObj);
-    }
-}
+            const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
+            const lGeo = new LineGeometry();
+            lGeo.setPositions(line.positions);
+            const lineObj = new Line2(lGeo, mat);
+            lineObj.renderOrder = line.renderOrder;
+            lineObj.frustumCulled = false;
+            group.add(lineObj);
+        }
 
         for (const stroke of result.strokes) {
-    const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
-    for (const segPositions of stroke.segments) {
-        const lGeo = new LineGeometry();
-        lGeo.setPositions(Array.from(segPositions));
-        const lineObj = new Line2(lGeo, mat);
-        lineObj.renderOrder = stroke.renderOrder;
-        lineObj.frustumCulled = false;
-        group.add(lineObj);
-    }
-}
+            const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
+            const lGeo = new LineGeometry();
+            lGeo.setPositions(stroke.positions);
+            const lineObj = new Line2(lGeo, mat);
+            lineObj.renderOrder = stroke.renderOrder;
+            lineObj.frustumCulled = false;
+            group.add(lineObj);
+        }
 
         for (const pt of result.points) {
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;
@@ -416,8 +399,9 @@ this._origin = new THREE.Vector3(0, 0, 0);
         for (const pt of data) {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
-const worldX = pt.x + group.position.x + this._origin.x + worldOffset.x;
-const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
+
+            const worldX = pt.x + worldOffset.x;
+            const worldZ = pt.z + worldOffset.z;
 
             const dx = worldX - targetWorld.x;
             const dz = worldZ - targetWorld.z;
@@ -468,7 +452,7 @@ const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
 
         for (const cand of finalData) {
             const pt = cand.pt;
-            const source = new VectorPointLabelSource(map, worldX, worldZ, pt.text, {
+            const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
                 fontFamily: pt.fontFamily,
@@ -609,39 +593,6 @@ const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
             this._oldTileGroups = null;
         }
     }
-
-    _updateOriginIfNeeded() {
-    if (!this._map) return;
-
-    const cameraPos = this._map.camera.position;
-    const threshold = 5000; // метров, можно подобрать
-    const dx = cameraPos.x - this._origin.x;
-    const dz = cameraPos.z - this._origin.z;
-
-    if (Math.abs(dx) < threshold && Math.abs(dz) < threshold) return;
-
-    // Новый origin округляем до целых метров для стабильности
-    const newOriginX = Math.round(cameraPos.x);
-    const newOriginZ = Math.round(cameraPos.z);
-    const shiftX = newOriginX - this._origin.x;
-    const shiftZ = newOriginZ - this._origin.z;
-
-    // Сдвигаем позиции всех групп
-    this._tileCache.forEach(group => {
-        group.position.x += shiftX;
-        group.position.z += shiftZ;
-    });
-    this._groupCache.forEach(group => {
-        group.position.x += shiftX;
-        group.position.z += shiftZ;
-    });
-
-    this._origin.x = newOriginX;
-    this._origin.z = newOriginZ;
-
-    // Подписи пересоздаём, так как мировые координаты изменились
-    this._refreshTextLabelsForVisibleTiles();
-}
 
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
@@ -795,8 +746,6 @@ const worldZ = pt.z + group.position.z + this._origin.z + worldOffset.z;
             )
         );
         this._processQueue();
-
-this._updateOriginIfNeeded();
     }
 
     _processQueue() {
@@ -823,13 +772,6 @@ this._updateOriginIfNeeded();
         if (this._groupCache.has(key)) {
             const group = this._groupCache.get(key);
             this._groupCache.delete(key);
-
-group.position.set(
-    group.userData.originX - this._origin.x,
-    0,
-    group.userData.originZ - this._origin.z
-);
-
             const is3dNow = this.buildings3d && (this._map?.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             if (group.userData.is3d !== is3dNow) {
                 const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;
@@ -1020,7 +962,7 @@ group.position.set(
 
     const mat = new THREE.MeshLambertMaterial({
         color,
-        side: THREE.FrontSide,
+        side: THREE.FrontSide, // вместо THREE.DoubleSide
         depthTest: true,
         depthWrite: true,
         polygonOffset: true,

@@ -64,6 +64,7 @@ import { proj } from './Utils.js';
  * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
  * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
  * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
+ * 
  *
  * @example
  * const layer = new GeoJSONLayer({
@@ -157,6 +158,9 @@ export class GeoJSONLayer extends Layer {
      * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
      * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
      * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
+     * @param {boolean} [options.defaultPolygonExtruded=false] - Включить экструзию полигонов по умолчанию.
+     * @param {number} [options.defaultPolygonHeight=0] - Толщина экструзии по умолчанию (в метрах).
+     * @param {number} [options.defaultPolygonMinHeight=0] - Высота нижней грани над поверхностью по умолчанию (в метрах).
      */
     constructor(options = {}) {
         super();
@@ -207,6 +211,10 @@ export class GeoJSONLayer extends Layer {
         this.defaultPolygonDepthWrite = options.defaultPolygonDepthWrite ?? false;
         this.defaultPolygonMinZoom = options.defaultPolygonMinZoom ?? -Infinity;
         this.defaultPolygonMaxZoom = options.defaultPolygonMaxZoom ?? Infinity;
+
+this.defaultPolygonExtruded = options.defaultPolygonExtruded ?? false;
+this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
+this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
 
         this._loaded = false;
     }
@@ -598,21 +606,27 @@ export class GeoJSONLayer extends Layer {
      * @returns {Object} Объект с опциями полигона.
      * @private
      */
-    _defaultPolygonOptions(feature, props) {
-        return {
-            fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
-            fillOpacity: props['fill-opacity'] ?? this.defaultFillOpacity,
-            strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
-            strokeWidth: props['stroke-width'] ?? this.defaultStrokeWidth,
-            strokeOpacity: props['stroke-opacity'] ?? this.defaultStrokeOpacity,
-            altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
-            altitudeOffset: props.altitudeOffset ?? this.defaultPolygonAltitudeOffset,
-            depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
-            depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
-            minZoom: props.minZoom ?? this.defaultPolygonMinZoom,
-            maxZoom: props.maxZoom ?? this.defaultPolygonMaxZoom,
-        };
-    }
+_defaultPolygonOptions(feature, props) {
+    return {
+        fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
+        fillOpacity: props['fill-opacity'] ?? this.defaultFillOpacity,
+        strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
+        strokeWidth: props['stroke-width'] ?? this.defaultStrokeWidth,
+        strokeOpacity: props['stroke-opacity'] ?? this.defaultStrokeOpacity,
+        altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
+        altitudeOffset: props.altitudeOffset ?? this.defaultPolygonAltitudeOffset,
+        depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
+        depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
+        minZoom: props.minZoom ?? this.defaultPolygonMinZoom,
+        maxZoom: props.maxZoom ?? this.defaultPolygonMaxZoom,
+
+        // ===== ДОБАВЛЕНО: экструзия =====
+        extruded: props.extruded ?? this.defaultPolygonExtruded,
+        height: props.height ?? this.defaultPolygonHeight,
+        minHeight: props.minHeight ?? this.defaultPolygonMinHeight,
+        // ===============================
+    };
+}
 
     /**
      * Преобразует сырое значение размера (массив или строка с запятой) в массив двух чисел.

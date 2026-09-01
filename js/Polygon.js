@@ -2,11 +2,8 @@
  * Модуль для рисования полигонов (многоугольников) на карте.
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
- * видимости по зуму и подписей через TextManager.
+ * экструзии, видимости по зуму и подписей через TextManager.
  */
-
-
-
 
 import { proj } from './Utils.js';
 import {
@@ -14,7 +11,7 @@ import {
   Line2,
   LineMaterial,
   LineGeometry,
-} from '../js_TP/tpb.js';  
+} from '../js_TP/tpb.js';
 import { Layer } from './Layers.js';
 import earcut from '../js_TP/earcut.js';
 
@@ -40,53 +37,42 @@ function pointToSegmentDistance(point, a, b) {
 
 /**
  * Класс, представляющий полигон на карте.
- * Поддерживает заливку, обводку, настройку высот, ограничения по зуму и текстовую подпись.
+ * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
+ * ограничения по зуму и текстовую подпись.
  *
  * @example
- * try {
- *   const polygon = new Polygon({
+ * // Обычный плоский полигон
+ * const flatPolygon = new Polygon({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *     fillColor: '#ff0000',
  *     fillOpacity: 0.3,
  *     strokeColor: '#000000',
  *     strokeWidth: 2,
- *     strokeOpacity: 1,
- *     altitudeMode: 'absolute',
+ *     altitudeMode: 'clampToGround',
  *     altitudeOffset: 10,
  *     depthTest: false,
- *     depthWrite: false,
  *     minZoom: 5,
  *     maxZoom: 18,
- *     title: 'Мой полигон',
- *     titleOffset: [10, -10],
- *     titleAlign: 'center',
- *     titleStyle: { fontSize: '14px' },
- *     titleMinZoom: 10,
- *     titleMaxZoom: 18,
- *     titleAllowOverflow: true,
- *     titlePriority: 1
- *   });
- *   polygon.addTo(map);
- *   polygon.getText();
- *   polygon.getTextStyle();
- *   polygon.getTextZoomBounds();
- *   polygon.getLabelType();
- *   polygon.isVisible();
- *   polygon.getScreenPosition();
- *   polygon.getTitleAlign();
- *   polygon.getTitleOffset();
- *   polygon.getTitleVerticalAlign();
- *   polygon.getAllowOverflow();
- *   polygon.getPriority();
- *   polygon.remove();
- * } catch (e) {
- *   console.error(e);
- * }
- * try {
- *   new Polygon({});
- * } catch (e) {
- *   console.error('Ошибка:', e.message);
- * }
+ *     title: 'Плоский полигон'
+ * });
+ * flatPolygon.addTo(map);
+ *
+ * // Экструдированный (объёмный) полигон
+ * const extrudedPolygon = new Polygon({
+ *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
+ *     extruded: true,
+ *     height: 500,      // толщина экструзии в метрах
+ *     minHeight: 200,   // высота нижней грани над поверхностью в метрах
+ *     fillColor: '#ff8800',
+ *     fillOpacity: 0.8,
+ *     strokeColor: '#000000',
+ *     strokeWidth: 3,
+ *     altitudeMode: 'clampToGround',
+ *     altitudeOffset: 10, // базовое смещение (добавляется к поверхности)
+ *     depthTest: true,
+ *     title: 'Объёмный полигон'
+ * });
+ * extrudedPolygon.addTo(map);
  */
 export class Polygon {
     /**
@@ -100,7 +86,10 @@ export class Polygon {
      * @param {number} [options.strokeWidth=2] - Толщина обводки в пикселях.
      * @param {number} [options.strokeOpacity=1] - Прозрачность обводки.
      * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты: 'clampToGround' (прилегать к рельефу) или 'absolute' (постоянная высота).
-     * @param {number} [options.altitudeOffset=10] - Добавочная высота над поверхностью.
+     * @param {number} [options.altitudeOffset=10] - Добавочная высота над поверхностью (или базовая высота для absolute).
+     * @param {boolean} [options.extruded=false] - Включить экструзию (объёмный полигон).
+     * @param {number} [options.height=0] - Толщина экструзии в метрах (только если extruded=true).
+     * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
      * @param {boolean} [options.depthTest=false] - Включить тест глубины.
      * @param {boolean} [options.depthWrite=false] - Включить запись в буфер глубины.
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
@@ -114,6 +103,7 @@ export class Polygon {
      * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
      * @throws {Error} Если не передан массив колец или он пуст.
+     * @throws {Error} Если extruded=true и height не положительное число.
      */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
@@ -132,6 +122,14 @@ export class Polygon {
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
 
+        // Экструзия
+        /** @private */ this._extruded = options.extruded ?? false;
+        /** @private */ this._height = options.height ?? 0;
+        /** @private */ this._minHeight = options.minHeight ?? 0;
+        if (this._extruded && (typeof this._height !== 'number' || this._height <= 0)) {
+            throw new Error('Polygon: options.height must be a positive number when extruded is true');
+        }
+
         // Подпись
         /** @private */ this._title = options.title || '';
         /** @private */ this._titleOffset = options.titleOffset || [0, 0];
@@ -140,29 +138,47 @@ export class Polygon {
         /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
 
+        // Внутренние структуры
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
         /** @private */ this._group = new THREE.Group();
+
+        // Верхняя крышка (основная)
         /** @private */ this._fillMesh = null;
-        /** @private */ this._strokeLine = null;
         /** @private */ this._fillGeometry = null;
         /** @private */ this._fillMaterial = null;
+
+        // Нижняя крышка (для экструзии)
+        /** @private */ this._bottomMesh = null;
+        /** @private */ this._bottomGeometry = null;
+        /** @private */ this._bottomMaterial = null;
+
+        // Боковые стенки (для экструзии)
+        /** @private */ this._sideMesh = null;
+        /** @private */ this._sideGeometry = null;
+        /** @private */ this._sideMaterial = null;
+        /** @private */ this._sideVertexCount = 0; // число вершин в боковой геометрии
+
+        // Обводка
+        /** @private */ this._strokeLine = null;
         /** @private */ this._strokeGeometry = null;
         /** @private */ this._strokeMaterial = null;
 
+        // Кэш высот
         /** @private */ this._cachedHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
 
+        // 2D вершины и центроид
         /** @private */ this._vertices2D = [];
         /** @private */ this._centroidLocal = new THREE.Vector2();
         /** @private */ this._cachedCentroidHeight = 0;
         /** @private */ this._lastCentroidHeightUpdateTime = 0;
 
+        // Подпись
         /** @private */ this._centroidScreenPos = null;
         /** @private */ this._textLabel = null;
-        
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
     }
@@ -220,6 +236,7 @@ export class Polygon {
 
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
+     * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -272,19 +289,20 @@ export class Polygon {
         }
         this._centroidLocal.set(cx / points2D.length, cy / points2D.length);
 
-        const geometry = new THREE.BufferGeometry();
-        const posArray = new Float32Array(points2D.length * 3);
+        // ----- Верхняя крышка (всегда) -----
+        const topGeometry = new THREE.BufferGeometry();
+        const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
-            posArray[i * 3] = pt.x;
-            posArray[i * 3 + 1] = 0;   // Y будет обновлён позже
-            posArray[i * 3 + 2] = pt.y; // Vector2.y соответствует Z
+            topPosArray[i * 3] = pt.x;
+            topPosArray[i * 3 + 1] = 0;   // Y будет обновлён позже
+            topPosArray[i * 3 + 2] = pt.y; // Vector2.y соответствует Z
         }
-        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        geometry.setIndex(indices);
-        geometry.computeVertexNormals();
+        topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
+        topGeometry.setIndex(indices);
+        topGeometry.computeVertexNormals();
 
-        const material = new THREE.MeshBasicMaterial({
+        const topMaterial = new THREE.MeshBasicMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
             transparent: this._fillOpacity < 1,
@@ -293,12 +311,95 @@ export class Polygon {
             depthWrite: this._depthWrite
         });
 
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.renderOrder = 998;
-        this._fillMesh = mesh;
-        this._fillGeometry = geometry;
-        this._fillMaterial = material;
-        this._group.add(mesh);
+        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+        topMesh.renderOrder = 998;
+        this._fillMesh = topMesh;
+        this._fillGeometry = topGeometry;
+        this._fillMaterial = topMaterial;
+        this._group.add(topMesh);
+
+        // ----- Для экструзии: нижняя крышка и боковые стенки -----
+        if (this._extruded) {
+            // Нижняя крышка (копия верхней, но Y будет смещён вниз)
+            const bottomGeometry = new THREE.BufferGeometry();
+            const bottomPosArray = new Float32Array(points2D.length * 3);
+            for (let i = 0; i < points2D.length; i++) {
+                const pt = points2D[i];
+                bottomPosArray[i * 3] = pt.x;
+                bottomPosArray[i * 3 + 1] = 0; // обновится
+                bottomPosArray[i * 3 + 2] = pt.y;
+            }
+            bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
+            bottomGeometry.setIndex(indices);
+            bottomGeometry.computeVertexNormals();
+
+            const bottomMaterial = new THREE.MeshBasicMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: this._fillOpacity < 1,
+                side: THREE.DoubleSide,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
+
+            const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+            bottomMesh.renderOrder = 998;
+            this._bottomMesh = bottomMesh;
+            this._bottomGeometry = bottomGeometry;
+            this._bottomMaterial = bottomMaterial;
+            this._group.add(bottomMesh);
+
+            // Боковые стенки: строим из внешнего кольца (points2D)
+            const sidePositions = [];
+            const sideIndices = [];
+            const n = points2D.length;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                // верхняя точка i
+                const topI = points2D[i];
+                // верхняя точка j
+                const topJ = points2D[j];
+
+                // Индексы вершин в массиве sidePositions
+                const baseIndex = sidePositions.length / 3;
+                // Добавляем 4 вершины: верх i, низ i, верх j, низ j
+                // Верх i
+                sidePositions.push(topI.x, 0, topI.y);
+                // Низ i (Y временно 0)
+                sidePositions.push(topI.x, 0, topI.y);
+                // Верх j
+                sidePositions.push(topJ.x, 0, topJ.y);
+                // Низ j
+                sidePositions.push(topJ.x, 0, topJ.y);
+
+                // Треугольник 1: верх i, низ i, верх j
+                sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+                // Треугольник 2: низ i, низ j, верх j
+                sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+            }
+
+            const sideGeometry = new THREE.BufferGeometry();
+            sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
+            sideGeometry.setIndex(sideIndices);
+            sideGeometry.computeVertexNormals();
+
+            const sideMaterial = new THREE.MeshBasicMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: this._fillOpacity < 1,
+                side: THREE.DoubleSide,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
+
+            const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
+            sideMesh.renderOrder = 998;
+            this._sideMesh = sideMesh;
+            this._sideGeometry = sideGeometry;
+            this._sideMaterial = sideMaterial;
+            this._sideVertexCount = sidePositions.length / 3;
+            this._group.add(sideMesh);
+        }
     }
 
     /**
@@ -338,12 +439,22 @@ export class Polygon {
             this._group.parent?.remove(this._group);
             this._fillGeometry?.dispose();
             this._fillMaterial?.dispose();
+            this._bottomGeometry?.dispose();
+            this._bottomMaterial?.dispose();
+            this._sideGeometry?.dispose();
+            this._sideMaterial?.dispose();
             this._strokeGeometry?.dispose();
             this._strokeMaterial?.dispose();
             this._fillMesh = null;
+            this._bottomMesh = null;
+            this._sideMesh = null;
             this._strokeLine = null;
             this._fillGeometry = null;
             this._fillMaterial = null;
+            this._bottomGeometry = null;
+            this._bottomMaterial = null;
+            this._sideGeometry = null;
+            this._sideMaterial = null;
             this._strokeGeometry = null;
             this._strokeMaterial = null;
         }
@@ -428,7 +539,7 @@ export class Polygon {
     }
 
     /**
-     * Обновляет высоты вершин заливки и обводки в соответствии с рельефом.
+     * Обновляет высоты вершин всех геометрий в соответствии с режимом высоты и экструзией.
      *
      * @returns {void}
      * @private
@@ -441,46 +552,88 @@ export class Polygon {
 
         if (needsUpdate) {
             const wgPos = map.worldGroup.position;
-            // Высоты для вершин заливки
+            // Высоты для верхней грани (и нижней, если экструдирован)
             for (let i = 0; i < this._vertices2D.length; i++) {
                 const localX = this._vertices2D[i].x;
                 const localZ = this._vertices2D[i].y;
-                let y = this._altitudeOffset;
+                let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
                     const worldX = localX + wgPos.x;
                     const worldZ = localZ + wgPos.z;
                     map.ensureTileForPoint?.(worldX, worldZ);
-                    y = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
+                    base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
                 }
-                this._cachedHeights[i] = y;
+                // Высота верхней грани
+                const upperY = base + this._minHeight + (this._extruded ? this._height : 0);
+                this._cachedHeights[i] = upperY;
             }
 
-            // Высоты для вершин обводки (могут отличаться из-за отсутствия дедупликации)
+            // Высоты для обводки (по верхнему контуру)
             const outerRing = this._rings[0];
             this._cachedStrokeHeights = new Array(outerRing.length);
             for (let i = 0; i < outerRing.length; i++) {
                 const [lon, lat] = outerRing[i];
                 const [absX, absZ] = proj.fromLonLat([lon, lat]);
-                let y = this._altitudeOffset;
+                let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
                     const worldX = absX + wgPos.x;
                     const worldZ = absZ + wgPos.z;
                     map.ensureTileForPoint?.(worldX, worldZ);
-                    y = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
+                    base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
                 }
-                this._cachedStrokeHeights[i] = y;
+                this._cachedStrokeHeights[i] = base + this._minHeight + (this._extruded ? this._height : 0);
             }
 
             this._lastHeightUpdateTime = now;
         }
 
-        // Применяем высоты к заливке
-        const pos = this._fillGeometry.attributes.position.array;
+        // Применяем высоты к верхней крышке
+        const topPos = this._fillGeometry.attributes.position.array;
         for (let i = 0; i < this._vertices2D.length; i++) {
-            pos[i * 3 + 1] = this._cachedHeights[i];
+            topPos[i * 3 + 1] = this._cachedHeights[i];
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeVertexNormals();
+
+        // Применяем высоты к нижней крышке, если есть
+        if (this._bottomGeometry) {
+            const bottomPos = this._bottomGeometry.attributes.position.array;
+            for (let i = 0; i < this._vertices2D.length; i++) {
+                bottomPos[i * 3 + 1] = this._cachedHeights[i] - this._height;
+            }
+            this._bottomGeometry.attributes.position.needsUpdate = true;
+            this._bottomGeometry.computeVertexNormals();
+        }
+
+        // Применяем высоты к боковым стенкам
+        if (this._sideGeometry) {
+            const sidePos = this._sideGeometry.attributes.position.array;
+            const n = this._vertices2D.length;
+            let idx = 0;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                // Вершины: верх i, низ i, верх j, низ j
+                const upperI = this._cachedHeights[i];
+                const upperJ = this._cachedHeights[j];
+                const lowerI = upperI - this._height;
+                const lowerJ = upperJ - this._height;
+
+                // верх i (индекс idx*3)
+                sidePos[idx * 3 + 1] = upperI;
+                idx++;
+                // низ i
+                sidePos[idx * 3 + 1] = lowerI;
+                idx++;
+                // верх j
+                sidePos[idx * 3 + 1] = upperJ;
+                idx++;
+                // низ j
+                sidePos[idx * 3 + 1] = lowerJ;
+                idx++;
+            }
+            this._sideGeometry.attributes.position.needsUpdate = true;
+            this._sideGeometry.computeVertexNormals();
+        }
     }
 
     /**
@@ -538,6 +691,8 @@ export class Polygon {
             }
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
         }
+        // Добавляем minHeight и высоту экструзии (если есть)
+        worldY += this._minHeight + (this._extruded ? this._height : 0);
 
         const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
         const screenPos = worldPos.clone().project(this._map.camera);

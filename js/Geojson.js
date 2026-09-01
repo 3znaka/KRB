@@ -66,13 +66,19 @@ import { proj } from './Utils.js';
  * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
  * 
  *
+/**
  * @example
  * const layer = new GeoJSONLayer({
  *     url: 'data.geojson',
  *     pointToOptions: (feature, props) => ({ title: props.name, iconUrl: props.icon }),
  *     point3DToOptions: (feature, props) => ({ primitiveType: props.primitiveType, altitude: props.altitude }),
  *     lineToOptions: (feature, props) => ({ color: props.stroke }),
- *     polygonToOptions: (feature, props) => ({ fillColor: props.fill }),
+ *     polygonToOptions: (feature, props) => ({
+ *         fillColor: props.fill,
+ *         extruded: props.extruded !== undefined ? props.extruded : true,
+ *         height: props.height || 300,
+ *         minHeight: props.minHeight || 0
+ *     }),
  *     filter: (feature) => feature.properties.visible !== false,
  *     onEachFeature: (feature, object) => console.log(feature, object),
  *     defaultIconUrl: 'custom-marker.png',
@@ -102,9 +108,12 @@ import { proj } from './Utils.js';
  *     defaultPolygonDepthTest: true,
  *     defaultPolygonDepthWrite: true,
  *     defaultPolygonMinZoom: 10,
- *     defaultPolygonMaxZoom: 18
+ *     defaultPolygonMaxZoom: 18,
+ *     // Новые параметры экструзии по умолчанию
+ *     defaultPolygonExtruded: false,
+ *     defaultPolygonHeight: 500,
+ *     defaultPolygonMinHeight: 200
  * });
- * const map = new Map();
  * layer.addTo(map);
  * layer.reload();
  */

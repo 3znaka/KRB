@@ -3,7 +3,8 @@
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * экструзии, видимости по зуму и подписей через TextManager.
- * Добавлена поддержка событий onHover и onClick через raycasting.
+ * Добавлена поддержка событий onHover и onClick через raycasting,
+ * а также возможность привязки HTML-тултипа.
  */
 
 import { proj } from './Utils.js';
@@ -41,9 +42,12 @@ function pointToSegmentDistance(point, a, b) {
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
  * ограничения по зуму, текстовую подпись, а также обработчики событий
  * наведения (onHover) и клика (onClick).
+ * Дополнительно может привязывать HTML-тултип, который автоматически
+ * позиционируется относительно центроида полигона.
  *
  * @example
- * // Обычный плоский полигон
+ * // Обычный плоский полигон с тултипом
+ * const tooltipEl = document.getElementById('tooltip');
  * const flatPolygon = new Polygon({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *     fillColor: '#ff0000',
@@ -56,6 +60,7 @@ function pointToSegmentDistance(point, a, b) {
  *     minZoom: 5,
  *     maxZoom: 18,
  *     title: 'Плоский полигон',
+ *     tooltip: tooltipEl,
  *     onClick: (event, polygon) => console.log('Клик по полигону'),
  *     onHover: (hovered) => console.log('Наведение:', hovered)
  * });
@@ -108,6 +113,7 @@ export class Polygon {
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
      * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
+     * @param {string|HTMLElement} [options.tooltip] - HTML-элемент (или селектор), который будет автоматически позиционироваться относительно центроида полигона.
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
      */
@@ -149,6 +155,16 @@ export class Polygon {
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
         /** @private */ this._boundHandlers = null; // { mousedown, mousemove, click }
+
+        // HTML-тултип
+        /** @private */ this._tooltipElement = null;
+        if (options.tooltip) {
+            if (typeof options.tooltip === 'string') {
+                this._tooltipElement = document.querySelector(options.tooltip);
+            } else if (options.tooltip instanceof HTMLElement) {
+                this._tooltipElement = options.tooltip;
+            }
+        }
 
         // Внутренние структуры
         /** @private */ this._map = null;
@@ -603,12 +619,17 @@ export class Polygon {
 
     /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
-     * Также отвязывает обработчики событий мыши.
+     * Также отвязывает обработчики событий мыши и скрывает тултип.
      *
      * @returns {void}
      */
     remove() {
         this._unbindEventHandlers();
+
+        // Скрываем тултип, если он был привязан
+        if (this._tooltipElement) {
+            this._tooltipElement.style.display = 'none';
+        }
 
         if (this._group) {
             this._group.parent?.remove(this._group);
@@ -841,7 +862,8 @@ export class Polygon {
     }
 
     /**
-     * Пересчитывает экранную позицию центроида полигона для подписи.
+     * Пересчитывает экранную позицию центроида полигона для подписи
+     * и обновляет позицию HTML-тултипа, если он привязан.
      *
      * @returns {void}
      * @private
@@ -849,6 +871,7 @@ export class Polygon {
     _updateCentroidScreenPos() {
         if (!this._map || !this._centroidWorld) {
             this._centroidScreenPos = null;
+            this._updateTooltipPosition();
             return;
         }
         const wgPos = this._map.worldGroup.position;
@@ -871,13 +894,33 @@ export class Polygon {
         const screenPos = worldPos.clone().project(this._map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;
-            return;
+        } else {
+            const canvas = this._map.renderer.domElement;
+            this._centroidScreenPos = {
+                x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+                y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+            };
         }
-        const canvas = this._map.renderer.domElement;
-        this._centroidScreenPos = {
-            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
-        };
+        // Обновляем позицию тултипа
+        this._updateTooltipPosition();
+    }
+
+    /**
+     * Обновляет позицию HTML-тултипа на основе экранной позиции центроида.
+     * Скрывает тултип, если полигон невидим или центроид вне экрана.
+     *
+     * @returns {void}
+     * @private
+     */
+    _updateTooltipPosition() {
+        if (!this._tooltipElement || !this._map) return;
+        const screenPos = this._centroidScreenPos;
+        const isVisible = this._group.visible && screenPos !== null;
+        this._tooltipElement.style.display = isVisible ? 'block' : 'none';
+        if (isVisible) {
+            this._tooltipElement.style.left = screenPos.x + 'px';
+            this._tooltipElement.style.top = screenPos.y + 'px';
+        }
     }
 
     // ---------- Интерфейс для TextManager ----------

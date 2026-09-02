@@ -273,6 +273,11 @@ export class VectorTileLayer {
     _buildGroupFromWorkerResult(group, result) {
         this._removeTextLabelsForGroup(group);
 
+        // Устанавливаем позицию группы в абсолютный центр тайла
+        if (result.centerX !== undefined && result.centerZ !== undefined) {
+            group.position.set(result.centerX, 0, result.centerZ);
+        }
+
         while (group.children.length) {
             const child = group.children[0];
             if (child.geometry) child.geometry.dispose();
@@ -400,8 +405,10 @@ export class VectorTileLayer {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
-            const worldX = pt.x + worldOffset.x;
-            const worldZ = pt.z + worldOffset.z;
+            // pt.x, pt.z теперь локальные относительно центра тайла,
+            // добавляем позицию группы тайла и сдвиг мира
+            const worldX = pt.x + group.position.x + worldOffset.x;
+            const worldZ = pt.z + group.position.z + worldOffset.z;
 
             const dx = worldX - targetWorld.x;
             const dz = worldZ - targetWorld.z;
@@ -452,7 +459,10 @@ export class VectorTileLayer {
 
         for (const cand of finalData) {
             const pt = cand.pt;
-            const source = new VectorPointLabelSource(map, pt.x, pt.z, pt.text, {
+
+            const localWorldX = pt.x + group.position.x;
+            const localWorldZ = pt.z + group.position.z;
+            const source = new VectorPointLabelSource(map, localWorldX, localWorldZ, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
                 fontFamily: pt.fontFamily,

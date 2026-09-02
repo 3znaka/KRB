@@ -122,13 +122,15 @@ function getFeatureStyle(feature, layerName, styles) {
 function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
     const originZ = -maxMerc + ySlippy * tileSize;
     const originX = xSlippy * tileSize - maxMerc;
+    const centerX = originX + tileSize / 2;
+    const centerZ = originZ + tileSize / 2;
     const geom = feature.loadGeometry();
     return geom
         .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
         .filter(ring => ring.length >= 3)
         .map(ring => ring.map(p => ({
-            x: originX + (p.x / 4095) * tileSize,
-            z: originZ + (p.y / 4095) * tileSize
+            x: originX + (p.x / 4095) * tileSize - centerX,
+            z: originZ + (p.y / 4095) * tileSize - centerZ
         })));
 }
 
@@ -459,8 +461,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
                 const originX = x * tileSize - maxMerc;
                 const originZ = -maxMerc + y * tileSize;
-                const worldX = originX + (pt.x / 4095) * tileSize;
-                const worldZ = originZ + (pt.y / 4095) * tileSize;
+                const centerX = originX + tileSize / 2;
+                const centerZ = originZ + tileSize / 2;
+                const worldX = originX + (pt.x / 4095) * tileSize - centerX;
+                const worldZ = originZ + (pt.y / 4095) * tileSize - centerZ;
 
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 
@@ -487,6 +491,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             max: style.textZoomMax !== undefined ? style.textZoomMax : 24
                         }
                     });
+
                     continue;
                 }
 
@@ -500,7 +505,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
                 });
                 continue;
-            }
 
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
 
@@ -611,13 +615,18 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         textPoints.length = 300;
     }
 
+    const centerX = x * tileSize - maxMerc + tileSize / 2;
+    const centerZ = -maxMerc + y * tileSize + tileSize / 2;
+
     const result = {
         fills: [],
         lines: [],
         strokes: [],
         buildings: [],
         points: points,
-        textPoints: textPoints
+        textPoints: textPoints,
+        centerX: centerX,
+        centerZ: centerZ
     };
 
     for (const [key, triGroup] of fillsMap) {

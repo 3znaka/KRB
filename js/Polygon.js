@@ -563,7 +563,7 @@ _buildFillGeometry(map) {
                     v2.y + this._group.position.z + wgPos.z
                 );
             });
-            
+
             // Замыкаем кольцо для проверки всех рёбер
             if (points3D.length > 0) {
                 points3D.push(points3D[0].clone());
@@ -727,40 +727,40 @@ _buildFillGeometry(map) {
      * @returns {void}
      * @private
      */
-    _updateCentroidScreenPos() {
-        if (!this._map || !this._centroidLocal) {
-            this._centroidScreenPos = null;
-            return;
-        }
-        const wgPos = this._map.worldGroup.position;
-        const worldX = this._centroidLocal.x + wgPos.x;
-        const worldZ = this._centroidLocal.y + wgPos.z;
-
-        let worldY = this._altitudeOffset;
-        if (this._altitudeMode === 'clampToGround') {
-            const now = performance.now();
-            if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
-                this._map.ensureTileForPoint(worldX, worldZ);
-                this._cachedCentroidHeight = this._map.getSurfaceHeightAt(worldX, worldZ);
-                this._lastCentroidHeightUpdateTime = now;
-            }
-            worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
-        }
-        // Добавляем minHeight и высоту экструзии (если есть)
-        worldY += this._minHeight + (this._extruded ? this._height : 0);
-
-        const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
-        const screenPos = worldPos.clone().project(this._map.camera);
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-            this._centroidScreenPos = null;
-            return;
-        }
-        const canvas = this._map.renderer.domElement;
-        this._centroidScreenPos = {
-            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
-        };
+_updateCentroidScreenPos() {
+    if (!this._map || !this._centroidWorld) {
+        this._centroidScreenPos = null;
+        return;
     }
+    const wgPos = this._map.worldGroup.position;
+    const worldX = this._centroidWorld.x + wgPos.x;
+    const worldZ = this._centroidWorld.z + wgPos.z; // центроид хранится в x и z
+
+    let worldY = this._altitudeOffset;
+    if (this._altitudeMode === 'clampToGround') {
+        const now = performance.now();
+        if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
+            this._map.ensureTileForPoint(worldX, worldZ);
+            this._cachedCentroidHeight = this._map.getSurfaceHeightAt(worldX, worldZ);
+            this._lastCentroidHeightUpdateTime = now;
+        }
+        worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
+    }
+    // Добавляем minHeight и высоту экструзии (если есть)
+    worldY += this._minHeight + (this._extruded ? this._height : 0);
+
+    const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
+    const screenPos = worldPos.clone().project(this._map.camera);
+    if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
+        this._centroidScreenPos = null;
+        return;
+    }
+    const canvas = this._map.renderer.domElement;
+    this._centroidScreenPos = {
+        x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+        y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+    };
+}
 
     // ---------- Интерфейс для TextManager ----------
 

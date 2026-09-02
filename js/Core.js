@@ -189,7 +189,6 @@ this._cameraAnimFrame = null;
         this._controlsDampingWasEnabled = true;
         this._dynamicLayers = [];
         this.textManager = new TextManager(this);
-        this.textManager.start();
 
         this.popupManager = new PopupManager(this);
 
@@ -1341,9 +1340,9 @@ _startCameraAnimationLoopIfNeeded() {
             this.applyZoomDistance();
         }
 
-        this.maybeUpdateVisibleTiles();
-        this.textManager.update();
-        this.renderer.render(this.scene, this.camera);
+this.maybeUpdateVisibleTiles();
+this.renderer.render(this.scene, this.camera);
+this.textManager.update();
 
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);

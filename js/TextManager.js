@@ -39,21 +39,8 @@ export class TextManager {
          */
         this.pane = null;
 
-        /**
-         * Флаг, указывающий, запущен ли цикл анимации.
-         *
-         * @type {boolean}
-         * @private
-         */
-        this._isRunning = false;
 
-        /**
-         * Идентификатор текущего animation frame или null.
-         *
-         * @type {number|null}
-         * @private
-         */
-        this._animationId = null;
+
 
         /**
          * Набор идентификаторов источников подписей, видимых в предыдущем кадре.
@@ -132,14 +119,17 @@ Object.assign(el.style, {
     position: 'absolute',
     display: 'none',
     pointerEvents: 'none',
-    whiteSpace: 'nowrap',   // для line останется nowrap
+    whiteSpace: 'nowrap',
     fontFamily: 'sans-serif',
     color: '#333',
     fontSize: '12px',
     lineHeight: '1',
     padding: '0',
     margin: '0',
-    transformOrigin: '0 0'
+    transformOrigin: '0 0',
+    left: '0',            // обязательно для transform-позиционирования
+    top: '0',             // обязательно для transform-позиционирования
+    willChange: 'transform' // подсказка браузеру для GPU-ускорения
 });
 Object.assign(el.style, source.getTextStyle());
 
@@ -277,37 +267,7 @@ _wrapPointText(text, fontSize) {
         el.style.visibility = prevVisibility;
     }
 
-    /**
-     * Запускает непрерывный цикл обновления подписей.
-     * Если цикл уже запущен, вызов игнорируется.
-     */
-    start() {
-        if (this._isRunning) return;
-        this._isRunning = true;
-        this._animate();
-    }
 
-    /**
-     * Останавливает цикл обновления подписей.
-     */
-    stop() {
-        this._isRunning = false;
-        if (this._animationId) {
-            cancelAnimationFrame(this._animationId);
-            this._animationId = null;
-        }
-    }
-
-    /**
-     * Внутренний рекурсивный метод, вызывающий update() на каждом animation frame.
-     *
-     * @private
-     */
-    _animate() {
-        if (!this._isRunning) return;
-        this.update();
-        this._animationId = requestAnimationFrame(() => this._animate());
-    }
 
     /**
      * Вычисляет экранные координаты четырёх углов прямоугольника подписи
@@ -715,11 +675,11 @@ _wrapPointText(text, fontSize) {
             }
 
             el.style.display = 'block';
-            el.style.left = (screenX + dx + offX) + 'px';
-            el.style.top  = top + 'px';
-            el.style.transform = (src.getLabelType() === 'line' && src.getPlacement() === 'along')
-                ? `rotate(${rotation}deg)`
-                : 'none';
+            let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
+if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
+    transform += ` rotate(${rotation}deg)`;
+}
+el.style.transform = transform;
         }
     }
 }

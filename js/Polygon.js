@@ -242,67 +242,125 @@ export class Polygon {
      * @returns {void}
      * @private
      */
-    _buildFillGeometry(map) {
-        const outerRing = this._rings[0];
-        if (outerRing.length < 3) {
-            console.warn('Polygon: outer ring must have at least 3 points');
-            return;
+_buildFillGeometry(map) {
+    const rings = this._rings;
+    if (!rings || !rings.length || rings[0].length < 3) {
+        console.warn('Polygon: rings[0] must have at least 3 points');
+        return;
+    }
+
+    // Общий массив координат (плоский [x,z]) и массив точек Vector2
+    const coords = [];
+    const points2D = [];
+    const holeIndices = [];   // индексы начала каждого внутреннего кольца
+    const ringStartIndices = []; // индексы начала каждого кольца в points2D
+
+    for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+        const ring = rings[ringIdx];
+        if (ring.length < 3) {
+            console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
+            continue; // пропускаем некорректное кольцо
         }
 
-        const coords = [];
-        const points2D = [];
-        for (const [lon, lat] of outerRing) {
+        // Запоминаем индекс начала кольца в общем массиве vertices
+        ringStartIndices.push(points2D.length);
+
+        // Для всех колец, кроме первого, добавляем индекс в holeIndices
+        if (ringIdx > 0) {
+            holeIndices.push(coords.length / 2); // количество уже добавленных координат
+        }
+
+        // Добавляем вершины кольца, пропуская замыкающую точку, если она совпадает с первой
+        let firstPoint = null;
+        let lastPoint = null;
+        for (let i = 0; i < ring.length; i++) {
+            const [lon, lat] = ring[i];
             const [absX, absZ] = proj.fromLonLat([lon, lat]);
+            if (i === 0) {
+                firstPoint = [absX, absZ];
+            }
+            // Проверяем, не совпадает ли текущая точка с первой (если мы уже добавили хотя бы одну)
+            if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) {
+                // Это замыкающая точка, пропускаем её
+                continue;
+            }
             coords.push(absX, absZ);
             points2D.push(new THREE.Vector2(absX, absZ));
+            lastPoint = [absX, absZ];
         }
+        // Если последняя точка совпадает с первой (дублирование), то мы её пропустили в цикле,
+        // так что здесь ничего дополнительно делать не нужно.
+    }
 
-        // Убираем замыкающую точку, если она совпадает с первой
-        if (coords.length >= 4) {
-            const n = coords.length / 2;
-            if (coords[0] === coords[(n-1)*2] && coords[1] === coords[(n-1)*2+1]) {
-                coords.length -= 2;
-                points2D.pop();
-            }
-        }
+    if (points2D.length < 3) {
+        console.warn('Polygon: after processing rings, less than 3 vertices');
+        return;
+    }
 
-        if (points2D.length < 3) {
-            console.warn('Polygon: after dedup, less than 3 vertices');
-            return;
-        }
+    // Пересоздаём массив высот для всех вершин
+    this._vertices2D = points2D;
+    this._cachedHeights = new Array(points2D.length).fill(0);
 
-        const holeIndices = [];
-        const indices = earcut(coords, holeIndices, 2);
+    // Выполняем триангуляцию с учётом отверстий
+    const indices = earcut(coords, holeIndices, 2);
+    if (indices.length === 0) {
+        console.warn('Polygon: Earcut returned no triangles');
+        return;
+    }
 
-        if (indices.length === 0) {
-            console.warn('Polygon: Earcut returned no triangles');
-            return;
-        }
+    // Центроид как среднее арифметическое всех вершин (упрощённо)
+    let cx = 0, cy = 0;
+    for (const pt of points2D) {
+        cx += pt.x;
+        cy += pt.y;
+    }
+    this._centroidLocal.set(cx / points2D.length, cy / points2D.length);
 
-        this._vertices2D = points2D;
+    // ----- Верхняя крышка (всегда) -----
+    const topGeometry = new THREE.BufferGeometry();
+    const topPosArray = new Float32Array(points2D.length * 3);
+    for (let i = 0; i < points2D.length; i++) {
+        const pt = points2D[i];
+        topPosArray[i * 3] = pt.x;
+        topPosArray[i * 3 + 1] = 0; // Y обновится позже
+        topPosArray[i * 3 + 2] = pt.y; // Vector2.y -> Z
+    }
+    topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
+    topGeometry.setIndex(indices);
+    topGeometry.computeVertexNormals();
 
-        // Центроид (среднее арифметическое вершин)
-        let cx = 0, cy = 0;
-        for (const pt of points2D) {
-            cx += pt.x;
-            cy += pt.y;
-        }
-        this._centroidLocal.set(cx / points2D.length, cy / points2D.length);
+    const topMaterial = new THREE.MeshBasicMaterial({
+        color: this._fillColor,
+        opacity: this._fillOpacity,
+        transparent: this._fillOpacity < 1,
+        side: THREE.DoubleSide,
+        depthTest: this._depthTest,
+        depthWrite: this._depthWrite
+    });
 
-        // ----- Верхняя крышка (всегда) -----
-        const topGeometry = new THREE.BufferGeometry();
-        const topPosArray = new Float32Array(points2D.length * 3);
+    const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+    topMesh.renderOrder = 998;
+    this._fillMesh = topMesh;
+    this._fillGeometry = topGeometry;
+    this._fillMaterial = topMaterial;
+    this._group.add(topMesh);
+
+    // ----- Для экструзии: нижняя крышка и боковые стенки -----
+    if (this._extruded) {
+        // Нижняя крышка (копия верхней, но Y будет смещён вниз)
+        const bottomGeometry = new THREE.BufferGeometry();
+        const bottomPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
-            topPosArray[i * 3] = pt.x;
-            topPosArray[i * 3 + 1] = 0;   // Y будет обновлён позже
-            topPosArray[i * 3 + 2] = pt.y; // Vector2.y соответствует Z
+            bottomPosArray[i * 3] = pt.x;
+            bottomPosArray[i * 3 + 1] = 0; // обновится
+            bottomPosArray[i * 3 + 2] = pt.y;
         }
-        topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-        topGeometry.setIndex(indices);
-        topGeometry.computeVertexNormals();
+        bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
+        bottomGeometry.setIndex(indices);
+        bottomGeometry.computeVertexNormals();
 
-        const topMaterial = new THREE.MeshBasicMaterial({
+        const bottomMaterial = new THREE.MeshBasicMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
             transparent: this._fillOpacity < 1,
@@ -311,96 +369,76 @@ export class Polygon {
             depthWrite: this._depthWrite
         });
 
-        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-        topMesh.renderOrder = 998;
-        this._fillMesh = topMesh;
-        this._fillGeometry = topGeometry;
-        this._fillMaterial = topMaterial;
-        this._group.add(topMesh);
+        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+        bottomMesh.renderOrder = 998;
+        this._bottomMesh = bottomMesh;
+        this._bottomGeometry = bottomGeometry;
+        this._bottomMaterial = bottomMaterial;
+        this._group.add(bottomMesh);
 
-        // ----- Для экструзии: нижняя крышка и боковые стенки -----
-        if (this._extruded) {
-            // Нижняя крышка (копия верхней, но Y будет смещён вниз)
-            const bottomGeometry = new THREE.BufferGeometry();
-            const bottomPosArray = new Float32Array(points2D.length * 3);
-            for (let i = 0; i < points2D.length; i++) {
-                const pt = points2D[i];
-                bottomPosArray[i * 3] = pt.x;
-                bottomPosArray[i * 3 + 1] = 0; // обновится
-                bottomPosArray[i * 3 + 2] = pt.y;
-            }
-            bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            bottomGeometry.setIndex(indices);
-            bottomGeometry.computeVertexNormals();
+        // Боковые стенки: строим для каждого кольца (внешнего и отверстий)
+        const sidePositions = [];
+        const sideIndices = [];
 
-            const bottomMaterial = new THREE.MeshBasicMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: this._fillOpacity < 1,
-                side: THREE.DoubleSide,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
+        // Для каждого кольца строим квады по рёбрам
+        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+            // Пропускаем кольца, которые были пропущены ранее (если кольцо некорректное)
+            if (ringStartIndices[ringIdx] === undefined) continue;
 
-            const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-            bottomMesh.renderOrder = 998;
-            this._bottomMesh = bottomMesh;
-            this._bottomGeometry = bottomGeometry;
-            this._bottomMaterial = bottomMaterial;
-            this._group.add(bottomMesh);
+            const start = ringStartIndices[ringIdx];
+            // Определяем количество вершин в этом кольце
+            const nextRingStart = (ringIdx + 1 < ringStartIndices.length) ? ringStartIndices[ringIdx + 1] : points2D.length;
+            const count = nextRingStart - start;
 
-            // Боковые стенки: строим из внешнего кольца (points2D)
-            const sidePositions = [];
-            const sideIndices = [];
-            const n = points2D.length;
-            for (let i = 0; i < n; i++) {
-                const j = (i + 1) % n;
-                // верхняя точка i
-                const topI = points2D[i];
-                // верхняя точка j
-                const topJ = points2D[j];
+            if (count < 2) continue; // невозможно построить стенку
 
-                // Индексы вершин в массиве sidePositions
+            // Обходим рёбра кольца
+            for (let i = 0; i < count; i++) {
+                const j = (i + 1) % count; // следующая вершина в этом же кольце
+                const idxI = start + i;
+                const idxJ = start + j;
+
+                const topI = points2D[idxI];
+                const topJ = points2D[idxJ];
+
+                // Базовый индекс в sidePositions
                 const baseIndex = sidePositions.length / 3;
+
                 // Добавляем 4 вершины: верх i, низ i, верх j, низ j
-                // Верх i
                 sidePositions.push(topI.x, 0, topI.y);
-                // Низ i (Y временно 0)
                 sidePositions.push(topI.x, 0, topI.y);
-                // Верх j
                 sidePositions.push(topJ.x, 0, topJ.y);
-                // Низ j
                 sidePositions.push(topJ.x, 0, topJ.y);
 
-                // Треугольник 1: верх i, низ i, верх j
+                // Два треугольника (порядок не важен из-за DoubleSide)
                 sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-                // Треугольник 2: низ i, низ j, верх j
                 sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
             }
-
-            const sideGeometry = new THREE.BufferGeometry();
-            sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
-            sideGeometry.setIndex(sideIndices);
-            sideGeometry.computeVertexNormals();
-
-            const sideMaterial = new THREE.MeshBasicMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: this._fillOpacity < 1,
-                side: THREE.DoubleSide,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
-
-            const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-            sideMesh.renderOrder = 998;
-            this._sideMesh = sideMesh;
-            this._sideGeometry = sideGeometry;
-            this._sideMaterial = sideMaterial;
-            this._sideVertexCount = sidePositions.length / 3;
-            this._group.add(sideMesh);
         }
+
+        const sideGeometry = new THREE.BufferGeometry();
+        sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
+        sideGeometry.setIndex(sideIndices);
+        sideGeometry.computeVertexNormals();
+
+        const sideMaterial = new THREE.MeshBasicMaterial({
+            color: this._fillColor,
+            opacity: this._fillOpacity,
+            transparent: this._fillOpacity < 1,
+            side: THREE.DoubleSide,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite
+        });
+
+        const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
+        sideMesh.renderOrder = 998;
+        this._sideMesh = sideMesh;
+        this._sideGeometry = sideGeometry;
+        this._sideMaterial = sideMaterial;
+        this._sideVertexCount = sidePositions.length / 3;
+        this._group.add(sideMesh);
     }
+}
 
     /**
      * Строит геометрию обводки полигона на основе Line2.

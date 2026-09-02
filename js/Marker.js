@@ -1,7 +1,7 @@
 /**
  * Модуль для создания и управления маркерами на карте.
  * Предоставляет класс {@link Marker} и вспомогательную функцию {@link _getPanes}
- * для получения DOM-панелей (слоёв) маркеров и подсказок.
+ * для получения DOM-панели маркеров.
  *
  * @module marker
  */
@@ -13,9 +13,9 @@ import {
 import { Layer } from './Layers.js';
 
 /**
- * Слабая карта для хранения привязки панелей к экземпляру карты.
+ * Слабая карта для хранения привязки панели маркеров к экземпляру карты.
  *
- * @type {WeakMap<Object, {markerPane: HTMLElement, tooltipPane: HTMLElement}>}
+ * @type {WeakMap<Object, {markerPane: HTMLElement}>}
  * @private
  */
 const _mapPanes = new WeakMap();
@@ -32,11 +32,11 @@ const _mapPanes = new WeakMap();
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
 /**
- * Возвращает (и при необходимости создаёт) DOM-панели для маркеров и подсказок,
- * связанные с конкретным экземпляром карты.
+ * Возвращает (и при необходимости создаёт) DOM-панель для маркеров,
+ * связанную с конкретным экземпляром карты.
  *
  * @param {Object} map - Экземпляр карты.
- * @returns {{markerPane: HTMLElement, tooltipPane: HTMLElement}} Объект с двумя панелями.
+ * @returns {{markerPane: HTMLElement}} Объект с панелью маркеров.
  * @private
  */
 export function _getPanes(map) {
@@ -50,16 +50,7 @@ export function _getPanes(map) {
             pointerEvents: 'none', zIndex: '600'
         });
         target.appendChild(markerPane);
-
-        const tooltipPane = document.createElement('div');
-        tooltipPane.id = 'krb-tooltip-pane';
-        Object.assign(tooltipPane.style, {
-            position: 'absolute', top: '0', left: '0', width: '100%', height: '100%',
-            pointerEvents: 'none', zIndex: '650'
-        });
-        target.appendChild(tooltipPane);
-
-        panes = { markerPane, tooltipPane };
+        panes = { markerPane };
         _mapPanes.set(map, panes);
     }
     return panes;
@@ -67,11 +58,12 @@ export function _getPanes(map) {
 
 /**
  * Класс, представляющий маркер на карте.
- * Поддерживает иконку, всплывающую подсказку, текстовую подпись (через TextManager),
- * кластеризацию и ограничения по зуму.
+ * Поддерживает иконку, текстовую подпись (через TextManager),
+ * кластеризацию, ограничения по зуму и события наведения/клика.
+ * Всплывающие подсказки обрабатываются централизованно через PopupManager
+ * (доступен как `map.popupManager`).
  *
  * @example
- * // Предполагается, что map уже создан и доступен.
  * const marker = new Marker({
  *   position: [37.662039, 55.763493],
  *   iconSize: [32, 32],
@@ -105,22 +97,9 @@ export function _getPanes(map) {
  * console.log(marker.getTitleVerticalAlign());
  * console.log(marker.getAllowOverflow());
  * console.log(marker.getPriority());
- * marker.showTooltip();
- * marker.hideTooltip();
  * marker.remove();
- * try {
- *   new Marker({}); // Бросит ошибку, так как position обязателен.
- * } catch (error) {
- *   console.error(error.message);
- * }
  */
 export class Marker {
-    /**
-     * Активный мобильный маркер.
-     *
-     * @private
-     */
-    static _activeMobileMarker = null;
     /**
      * Счётчик идентификаторов маркеров.
      *
@@ -138,7 +117,7 @@ export class Marker {
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором маркер виден.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором маркер виден.
      * @param {string} [options.altitudeMode='ground'] - Режим высоты: 'ground' (на поверхности) или 'clampToGround' (прилеплен к рельефу).
-     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML).
+     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML). Будет показан через PopupManager.
      * @param {string} [options.iconUrl=auto] - URL иконки маркера. По умолчанию — путь `./img/marker.png` относительно текущего модуля.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
      * @param {function} [options.onClick] - Callback при клике. Получает событие и экземпляр маркера.
@@ -183,7 +162,6 @@ export class Marker {
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
         /** @private */ this._element = null;
-        /** @private */ this._tooltipElement = null;
         /** @private */ this._textLabel = null;          // дескриптор TextManager
 
         /** @private */ this._isMobile = false;
@@ -214,7 +192,8 @@ export class Marker {
 
     /**
      * Внутренний метод, вызываемый слоем при добавлении маркера.
-     * Создаёт DOM-элементы, подписи и назначает обработчики событий.
+     * Создаёт DOM-элемент иконки, подпись и назначает обработчики событий.
+     * Тултип не создаётся — он будет показан через PopupManager при необходимости.
      *
      * @param {Object} map - Карта.
      * @param {Layer} layer - Слой-владелец.
@@ -234,7 +213,7 @@ export class Marker {
             this._titleOffset = [0, this._iconSize[1] / 2 + 4];
         }
 
-        const { markerPane, tooltipPane } = _getPanes(map);
+        const { markerPane } = _getPanes(map);
         const markerId = `krb-marker-${++Marker._idCounter}`;
 
         // Иконка
@@ -260,20 +239,6 @@ export class Marker {
         markerPane.appendChild(el);
         this._element = el;
 
-        // Тултип
-        if (this._tooltipText) {
-            const tip = document.createElement('div');
-            tip.className = 'krb-marker-tooltip';
-            Object.assign(tip.style, {
-                position: 'absolute', display: 'none', background: 'white', border: '1px solid #767676',
-                padding: '4px 8px', borderRadius: '4px', whiteSpace: 'normal', fontSize: '14px',
-                transform: 'translate(-50%, -100%)', pointerEvents: 'auto', boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-            });
-            tip.innerHTML = this._tooltipText;
-            tooltipPane.appendChild(tip);
-            this._tooltipElement = tip;
-        }
-
         // Регистрируем подпись в TextManager
         if (this._title && this._map.textManager) {
             this._textLabel = this._map.textManager.addLabel(this);
@@ -287,58 +252,51 @@ export class Marker {
                 else this._defaultClickAction();
             });
         } else {
+            // Наведение мыши
             if (this._onHover) {
                 el.addEventListener('pointerenter', () => this._onHover(true));
                 el.addEventListener('pointerleave', () => this._onHover(false));
             } else {
-                el.addEventListener('pointerenter', () => { if (this._tooltipElement) this._tooltipElement.style.display = 'block'; });
-                el.addEventListener('pointerleave', () => { if (this._tooltipElement) this._tooltipElement.style.display = 'none'; });
+                // Показ тултипа при наведении
+                el.addEventListener('pointerenter', () => {
+                    if (this._tooltipText && this._map?.popupManager) {
+                        this._map.popupManager.show(this, this._tooltipText);
+                    }
+                });
+                el.addEventListener('pointerleave', () => {
+                    if (this._map?.popupManager) {
+                        this._map.popupManager.hide();
+                    }
+                });
             }
+
+            // Клик
             if (this._onClick) {
-                el.addEventListener('click', (e) => { e.stopPropagation(); this._onClick(e, this); });
+                el.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this._onClick(e, this);
+                });
             } else {
-                el.addEventListener('click', (e) => { e.stopPropagation(); this._defaultClickAction(); });
+                el.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this._defaultClickAction();
+                });
             }
         }
     }
 
     /**
      * Действие по умолчанию при клике: плавное перемещение камеры к маркеру.
-     * На мобильных устройствах также показывает всплывающую подсказку.
+     * На мобильных устройствах также показывает тултип через PopupManager.
      *
      * @private
      */
     _defaultClickAction() {
         if (this._map) this._map.moveCameraToSlow(this._lon, this._lat, 0.3);
-        if (this._isMobile) {
-            this._showTooltip();
-            Marker._activeMobileMarker = this;
+        if (this._isMobile && this._tooltipText && this._map?.popupManager) {
+            this._map.popupManager.show(this, this._tooltipText);
         }
     }
-
-    /**
-     * Показывает всплывающую подсказку.
-     */
-    showTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'block'; }
-
-    /**
-     * Скрывает всплывающую подсказку.
-     */
-    hideTooltip() { if (this._tooltipElement) this._tooltipElement.style.display = 'none'; }
-
-    /**
-     * Внутренний метод для показа всплывающей подсказки.
-     *
-     * @private
-     */
-    _showTooltip() { this.showTooltip(); }
-
-    /**
-     * Внутренний метод для скрытия всплывающей подсказки.
-     *
-     * @private
-     */
-    _hideTooltip() { this.hideTooltip(); }
 
     /**
      * Удаляет маркер с карты: уничтожает DOM-элементы, удаляет подпись,
@@ -349,15 +307,10 @@ export class Marker {
             this._element.remove();
             this._element = null;
         }
-        if (this._tooltipElement) {
-            this._tooltipElement.remove();
-            this._tooltipElement = null;
-        }
         if (this._textLabel && this._map?.textManager) {
             this._map.textManager.removeLabel(this._textLabel);
             this._textLabel = null;
         }
-        if (Marker._activeMobileMarker === this) Marker._activeMobileMarker = null;
         if (this._layer) {
             this._layer._removeRef(this);
             this._layer = null;
@@ -383,7 +336,6 @@ export class Marker {
         if (this._layer && this._layer._clusterActive) {
             if (!this._layer._clusterVisibleMarkers || !this._layer._clusterVisibleMarkers.has(this)) {
                 this._element.style.display = 'none';
-                if (this._tooltipElement) this._tooltipElement.style.display = 'none';
                 this._isVisible = false;
                 return;
             }
@@ -391,14 +343,12 @@ export class Marker {
 
         if (this._layer && !this._layer.visible) {
             this._element.style.display = 'none';
-            if (this._tooltipElement) this._tooltipElement.style.display = 'none';
             this._isVisible = false;
             return;
         }
 
         if (zoom < this._minZoom || zoom > this._maxZoom) {
             this._element.style.display = 'none';
-            if (this._tooltipElement) this._tooltipElement.style.display = 'none';
             this._isVisible = false;
             return;
         }
@@ -424,7 +374,6 @@ export class Marker {
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
                 this._element.style.display = 'none';
-                if (this._tooltipElement) this._tooltipElement.style.display = 'none';
                 this._isVisible = false;
                 return;
             }
@@ -433,7 +382,6 @@ export class Marker {
         const screenPos = worldPos.clone().project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._element.style.display = 'none';
-            if (this._tooltipElement) this._tooltipElement.style.display = 'none';
             this._isVisible = false;
             return;
         }
@@ -445,13 +393,6 @@ export class Marker {
         this._element.style.display = 'block';
         this._element.style.left = x + 'px';
         this._element.style.top = y + 'px';
-
-        if (this._tooltipElement && this._tooltipElement.style.display === 'block') {
-            const effectiveHeight = this._iconSize[1];
-            const topOffset = this._isMobile ? 6 : 2;
-            this._tooltipElement.style.left = x + 'px';
-            this._tooltipElement.style.top = (y - effectiveHeight * this._anchor[1] - topOffset) + 'px';
-        }
 
         this._lastScreenPos = { x, y };
         this._isVisible = true;

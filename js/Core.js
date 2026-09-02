@@ -6,6 +6,7 @@ import { proj, DEFAULTS, getOriginZ, getVirtKey, getSrcKey, toLonLat } from './U
 import { TileManager } from './Tiles.js';
 import { TextManager } from './TextManager.js';
 import { initUI } from './Ui.js';
+import { PopupManager } from './PopupManager.js';
 
 /**
  * Представление карты, хранящее параметры центра, масштаба и углов обзора.
@@ -189,6 +190,8 @@ this._cameraAnimFrame = null;
         this._dynamicLayers = [];
         this.textManager = new TextManager(this);
         this.textManager.start();
+
+        this.popupManager = new PopupManager(this);
 
         // Менеджер тайлов нового поколения
         this.tileManager = new TileManager(this);

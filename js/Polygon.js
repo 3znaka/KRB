@@ -577,7 +577,6 @@ export class Polygon {
      */
     _onCanvasMouseDown(event, map) {
         if (!this._raycastPolygon(event, map)) return;
-        event.stopPropagation();
     }
 
     /**

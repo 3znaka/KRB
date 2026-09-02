@@ -505,6 +505,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
                 });
                 continue;
+}
 
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
 

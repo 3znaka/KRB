@@ -1,20 +1,18 @@
 // TextManager.js
 
-import { THREE } from '../js_TP/tpb.js';
+import {
+  THREE,
+} from '../js_TP/tpb.js';  
 
 /**
  * Менеджер текстовых подписей (лейблов) для карты.
  *
- * Управляет жизненным циклом спрайтовых подписей: создание, позиционирование,
+ * Управляет жизненным циклом DOM-элементов подписей: создание, позиционирование,
  * разрешение коллизий и отрисовка. Поддерживает подписи для точечных объектов
  * (Point) и линейных объектов (LineString). Для линейных подписей реализовано
  * анимированное перемещение вдоль линии с целью избежать перекрытий, а также
  * жадная приоритезация всех видимых подписей для предотвращения наложений.
  *
- * Требования к источникам подписей:
- * - Для point: метод getWorldPosition() -> THREE.Vector3 (мировая позиция)
- * - Для line: метод getWorldPositionAt(t) -> THREE.Vector3 (мировая позиция)
- * Остальные методы аналогичны предыдущей версии (getText, getPriority и т.д.)
  */
 export class TextManager {
     /**
@@ -36,14 +34,18 @@ export class TextManager {
         this.labels = [];
 
         /**
-         * Группа Three.js для всех спрайтов подписей.
-         * @type {THREE.Group}
+         * DOM-элемент-контейнер, в котором размещаются подписи.
+         * @type {HTMLElement|null}
          */
-        this.labelGroup = new THREE.Group();
-        map.scene.add(this.labelGroup);
+        this.pane = null;
+
+
+
 
         /**
          * Набор идентификаторов источников подписей, видимых в предыдущем кадре.
+         * Используется для сброса флагов stuck при изменении состава подписей.
+         *
          * @type {Set|null}
          * @private
          */
@@ -51,106 +53,116 @@ export class TextManager {
 
         /**
          * Уровень зума в предыдущем кадре.
+         *
          * @type {number|null}
          * @private
          */
         this._lastZoom = null;
+
+        this._initPane();
+    }
+
+    /**
+     * Инициализирует DOM-контейнер для подписей.
+     * Если контейнер с id="krb-label-pane" отсутствует в целевом элементе карты,
+     * создаёт новый div с абсолютным позиционированием и добавляет его в DOM.
+     *
+     * @private
+     */
+    _initPane() {
+        const target = this.map.targetElement;
+        let pane = target.querySelector('#krb-label-pane');
+        if (!pane) {
+            pane = document.createElement('div');
+            pane.id = 'krb-label-pane';
+            Object.assign(pane.style, {
+                position: 'absolute',
+                top: '0', left: '0',
+                width: '100%', height: '100%',
+                pointerEvents: 'none',
+                zIndex: '625'
+            });
+            target.appendChild(pane);
+        }
+        this.pane = pane;
     }
 
     /**
      * Добавляет новую подпись на карту на основе объекта-источника.
-     * Создаёт canvas, текстуру, материал и спрайт; добавляет спрайт в группу.
+     * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
      *
      * @param {Object} source - Объект-источник подписи.
-     * @returns {Object} Объект label, содержащий ссылки на source и спрайт, а также метаданные.
+     * @property {Function} source.getText - Возвращает текст подписи.
+     * @property {Function} source.getTextStyle - Возвращает стили текста.
+     * @property {Function} source.getPriority - Возвращает приоритет подписи.
+     * @property {Function} source.getAllowOverflow - Возвращает разрешение на переполнение интервала.
+     * @property {Function} source.getLabelType - Возвращает тип подписи ('point' или 'line').
+     * @property {Function} source.getScreenPosition - Возвращает экранную позицию точки.
+     * @property {Function} source.getScreenPositionAt - Возвращает экранную позицию линии по параметру t.
+     * @property {Function} source.getScreenAngleAt - Возвращает угол подписи по параметру t.
+     * @property {Function} source.getTitleAlign - Возвращает горизонтальное выравнивание.
+     * @property {Function} source.getTitleVerticalAlign - Возвращает вертикальное выравнивание.
+     * @property {Function} source.getTitleOffset - Возвращает смещение подписи.
+     * @property {Function} source.getTextZoomBounds - Возвращает границы видимости по зуму.
+     * @property {Function} source.isVisible - Возвращает видимость источника.
+     * @property {Function} source.getVisibleInterval - Возвращает видимый интервал линии.
+     * @property {Function} source.getLabelParameter - Возвращает текущий параметр линии.
+     * @property {Function} source.setLabelParameter - Устанавливает параметр линии.
+     * @property {Function} source.getPlacement - Возвращает режим размещения вдоль линии.
+     * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
     addLabel(source) {
-        // 1. Подготовка текста и стилей
-        const text = source.getText();
-        const style = source.getTextStyle() || {};
-        const fontSize = parseFloat(style.fontSize) || 12;
-        const fontFamily = style.fontFamily || 'sans-serif';
-        const color = style.color || '#333';
-        const lineHeight = Math.ceil(fontSize * 1.2);
+        const el = document.createElement('div');
+el.className = 'krb-text-label';
+// Начальные стили (whiteSpace будет переопределён ниже)
+Object.assign(el.style, {
+    position: 'absolute',
+    display: 'none',
+    pointerEvents: 'none',
+    whiteSpace: 'nowrap',
+    fontFamily: 'sans-serif',
+    color: '#333',
+    fontSize: '12px',
+    lineHeight: '1',
+    padding: '0',
+    margin: '0',
+    transformOrigin: '0 0',
+    left: '0',            // обязательно для transform-позиционирования
+    top: '0',             // обязательно для transform-позиционирования
+    willChange: 'transform' // подсказка браузеру для GPU-ускорения
+});
+Object.assign(el.style, source.getTextStyle());
 
-        let lines;
-        if (source.getLabelType() === 'point') {
-            // Для точечных подписей разрешаем перенос строк
-            const wrapped = this._wrapPointText(text, fontSize);
-            lines = wrapped.split('\n');
-        } else {
-            lines = [text];
-        }
+// Для точечных подписей включаем многострочность и применяем перенос
+if (source.getLabelType() === 'point') {
+    el.style.whiteSpace = 'pre-line';  // разрешаем перенос по \n
+    const wrapped = this._wrapPointText(source.getText(), el.style.fontSize);
+    el.textContent = wrapped;
+} else {
+    // Для линейных подписей оставляем как есть (nowrap)
+    el.textContent = source.getText();
+}
 
-        // 2. Измерение текста
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        ctx.font = `${fontSize}px ${fontFamily}`;
-        let maxWidth = 0;
-        for (const line of lines) {
-            const w = ctx.measureText(line).width;
-            if (w > maxWidth) maxWidth = w;
-        }
-        const textWidth = Math.ceil(maxWidth);
-        const textHeight = lineHeight * lines.length;
-
-        // 3. Создание canvas с учётом смещения (offset)
-        const [offX, offY] = source.getTitleOffset ? source.getTitleOffset() : [0, 0];
-        const totalWidth = Math.ceil(textWidth + Math.abs(offX));
-        const totalHeight = Math.ceil(textHeight + Math.abs(offY));
-
-        canvas.width = totalWidth;
-        canvas.height = totalHeight;
-
-        // Рисуем текст со смещением (если offX/offY положительные, сдвигаем вправо/вниз)
-        ctx.font = `${fontSize}px ${fontFamily}`;
-        ctx.fillStyle = color;
-        ctx.textBaseline = 'top';
-        ctx.textAlign = 'left';
-        const startX = offX > 0 ? offX : 0;
-        const startY = offY > 0 ? offY : 0;
-        lines.forEach((line, i) => {
-            ctx.fillText(line, startX, startY + i * lineHeight);
-        });
-
-        // 4. Создание текстуры и спрайта
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-
-        const material = new THREE.SpriteMaterial({
-            map: texture,
-            sizeAttenuation: false,
-            transparent: true,
-            depthTest: false,
-            depthWrite: false
-        });
-        const sprite = new THREE.Sprite(material);
-        sprite.scale.set(canvas.width, canvas.height, 1);
-        sprite.center.set(0, 0); // нижний левый угол в точке привязки
-
-        this.labelGroup.add(sprite);
+this.pane.appendChild(el);
 
         const label = {
             source,
-            sprite,
-            canvas,
-            texture,
-            material,
-            width: textWidth,   // реальная ширина текста (для коллизий)
-            height: textHeight, // реальная высота текста (для коллизий)
+            element: el,
             t: 0,
+            width: 0,
+            height: 0,
             stuck: false,
             hiddenByPriority: false,
             priority: source.getPriority ? source.getPriority() : 0,
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false
         };
         this.labels.push(label);
+        this._measureLabel(label);
         return label;
     }
 
     /**
-     * Удаляет подпись из менеджера и освобождает ресурсы.
+     * Удаляет подпись из менеджера и из DOM.
      *
      * @param {Object} label - Объект подписи, ранее возвращённый методом addLabel.
      */
@@ -158,99 +170,135 @@ export class TextManager {
         const idx = this.labels.indexOf(label);
         if (idx > -1) {
             this.labels.splice(idx, 1);
-            this.labelGroup.remove(label.sprite);
-            label.texture.dispose();
-            label.material.dispose();
+            label.element.remove();
         }
     }
+
 
     /**
-     * Преобразует длинный текст точечной подписи в многострочный,
-     * вставляя переносы \n так, чтобы блок был близок к квадрату.
-     * (Оставлена без изменений)
-     */
-    _wrapPointText(text, fontSize) {
-        if (!text || text.indexOf(' ') === -1) return text;
+ * Преобразует длинный текст точечной подписи в многострочный,
+ * вставляя переносы \n так, чтобы блок был близок к квадрату.
+ * Использует грубые оценки ширины символов (0.6em) и пробела (0.3em).
+ *
+ * @param {string} text - Исходный однострочный текст.
+ * @param {string} fontSize - CSS-значение font-size (например, "12px").
+ * @returns {string} Текст с переносами строк.
+ * @private
+ */
+_wrapPointText(text, fontSize) {
+    if (!text || text.indexOf(' ') === -1) return text; // нет пробелов или пусто
 
-        const words = text.split(/\s+/).filter(w => w.length > 0);
-        if (words.length <= 1) return text;
+    const words = text.split(/\s+/).filter(w => w.length > 0);
+    if (words.length <= 1) return text;
 
-        const fontPx = parseFloat(fontSize) || 12;
-        const charWidth = fontPx * 0.6;
-        const spaceWidth = fontPx * 0.3;
+    const fontPx = parseFloat(fontSize) || 12;
+    const charWidth = fontPx * 0.6;      // примерная ширина символа
+    const spaceWidth = fontPx * 0.3;     // примерная ширина пробела
 
-        const wordWidths = words.map(w => w.length * charWidth);
-        const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
-            (words.length - 1) * spaceWidth;
+    const wordWidths = words.map(w => w.length * charWidth);
+    const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
+        (words.length - 1) * spaceWidth;
 
-        const maxSingleLineWidth = 160;
-        if (totalSingleLineWidth <= maxSingleLineWidth) return text;
+    // Порог, при котором перенос не требуется (можно вынести в настройки)
+    const maxSingleLineWidth = 160;
+    if (totalSingleLineWidth <= maxSingleLineWidth) return text;
 
-        const lineHeight = fontPx * 1.2;
-        let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
-        targetLines = Math.min(targetLines, 5);
+    // Высота одной строки (примерно)
+    const lineHeight = fontPx * 1.2;
 
-        const targetLineWidth = totalSingleLineWidth / targetLines;
-        const lines = [];
-        let currentLine = [];
-        let currentWidth = 0;
+    // Желаемое количество строк для квадратной формы:
+    // totalWidth / lines ≈ lines * lineHeight  =>  lines = sqrt(totalWidth / lineHeight)
+    let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
+    targetLines = Math.min(targetLines, 5); // ограничение, чтобы не делать слишком много строк
 
-        for (let i = 0; i < words.length; i++) {
-            const word = words[i];
-            const w = wordWidths[i];
+    const targetLineWidth = totalSingleLineWidth / targetLines;
 
-            if (currentLine.length === 0) {
+    // Жадное заполнение строк
+    const lines = [];
+    let currentLine = [];
+    let currentWidth = 0;
+
+    for (let i = 0; i < words.length; i++) {
+        const word = words[i];
+        const w = wordWidths[i];
+
+        if (currentLine.length === 0) {
+            currentLine.push(word);
+            currentWidth = w;
+        } else {
+            const addedWidth = currentWidth + spaceWidth + w;
+            if (addedWidth <= targetLineWidth) {
                 currentLine.push(word);
-                currentWidth = w;
+                currentWidth = addedWidth;
             } else {
-                const addedWidth = currentWidth + spaceWidth + w;
-                if (addedWidth <= targetLineWidth) {
-                    currentLine.push(word);
-                    currentWidth = addedWidth;
-                } else {
-                    lines.push(currentLine.join(' '));
-                    currentLine = [word];
-                    currentWidth = w;
-                }
+                lines.push(currentLine.join(' '));
+                currentLine = [word];
+                currentWidth = w;
             }
         }
-        if (currentLine.length > 0) {
-            lines.push(currentLine.join(' '));
-        }
-
-        return lines.length > 1 ? lines.join('\n') : text;
     }
+    if (currentLine.length > 0) {
+        lines.push(currentLine.join(' '));
+    }
+
+    // Если в итоге получилась одна строка (например, из-за ограничений), возвращаем исходный текст
+    if (lines.length <= 1) return text;
+
+    return lines.join('\n');
+}
+
+    /**
+     * Измеряет реальные ширину и высоту DOM-элемента подписи.
+     * Временно делает элемент видимым (но невидимым для пользователя через visibility:hidden),
+     * считывает offsetWidth/offsetHeight и возвращает исходное состояние.
+     *
+     * @param {Object} label - Объект подписи.
+     * @private
+     */
+    _measureLabel(label) {
+        const el = label.element;
+        const prevDisplay = el.style.display;
+        const prevVisibility = el.style.visibility;
+        el.style.display = 'block';
+        el.style.visibility = 'hidden';
+        label.width = el.offsetWidth;
+        label.height = el.offsetHeight;
+        el.style.display = prevDisplay;
+        el.style.visibility = prevVisibility;
+    }
+
+
 
     /**
      * Вычисляет экранные координаты четырёх углов прямоугольника подписи
-     * с учётом выравнивания, смещения и поворота (поворот сейчас не используется).
+     * с учётом выравнивания, смещения и поворота.
      *
      * @param {Object} label - Объект подписи.
-     * @param {number|null} [tOverride=null] - Параметр t для линейной подписи.
-     * @returns {Object[]|null} Массив из четырёх точек {x, y} углов прямоугольника.
+     * @param {number|null} [tOverride=null] - Параметр t для линейной подписи (если отличается от label.t).
+     * @returns {Object[]|null} Массив из четырёх точек {x, y} углов прямоугольника или null, если позиция не определена.
      * @private
      */
     _getLabelCorners(label, tOverride = null) {
         const src = label.source;
-        const map = this.map;
-        const camera = map.camera;
-        const canvasWidth = map.targetElement.clientWidth;
-        const canvasHeight = map.targetElement.clientHeight;
+        const el = label.element;
 
-        let worldPos;
-        if (src.getLabelType() === 'line') {
+        let scrX, scrY, rotation = 0;
+        const isLine = src.getLabelType() === 'line';
+        if (isLine) {
             const t = tOverride !== null ? tOverride : label.t;
-            worldPos = src.getWorldPositionAt(t);
+            const pos = src.getScreenPositionAt(t);
+            if (!pos) return null;
+            scrX = pos.x;
+            scrY = pos.y;
+            rotation = src.getScreenAngleAt(t);
         } else {
-            worldPos = src.getWorldPosition();
+            const pos = src.getScreenPosition();
+            if (!pos) return null;
+            scrX = pos.x;
+            scrY = pos.y;
         }
-        if (!worldPos) return null;
 
-        // Проецируем мировую точку в экранные координаты
-        const screenPos = worldPos.clone().project(camera);
-        const screenX = (screenPos.x * 0.5 + 0.5) * canvasWidth;
-        const screenY = (-screenPos.y * 0.5 + 0.5) * canvasHeight;
-
+        if (!label.width || !label.height) this._measureLabel(label);
         const w = label.width;
         const h = label.height;
 
@@ -268,11 +316,21 @@ export class TextManager {
         else if (vAlign === 'bottom') anchorY = h;
         else anchorY = h / 2;
 
-        // Учитываем смещение (offX, offY) и выравнивание
-        const top = screenY - anchorY + offY;
-        const left = screenX - anchorX + offX;
+        const rad = rotation * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
 
-        // Поворот временно игнорируется (спрайты не могут вращаться в экранной плоскости)
+        const dx = -anchorX * cos + anchorY * sin;
+        const dy = -anchorX * sin - anchorY * cos;
+
+        let top = scrY + dy + offY;
+        if (isLine) {
+            const style = window.getComputedStyle(el);
+            const fontSize = parseFloat(style.fontSize) || 12;
+            top += fontSize;
+        }
+        const left = scrX + dx + offX;
+
         const corners = [
             { x: left, y: top },
             { x: left + w, y: top },
@@ -280,12 +338,27 @@ export class TextManager {
             { x: left, y: top + h }
         ];
 
+        if (rotation !== 0) {
+            const cx = left, cy = top;
+            for (const pt of corners) {
+                const rx = cx + (pt.x - cx) * cos - (pt.y - cy) * sin;
+                const ry = cy + (pt.x - cx) * sin + (pt.y - cy) * cos;
+                pt.x = rx;
+                pt.y = ry;
+            }
+        }
+
         return corners;
     }
 
     /**
      * Проецирует полигон на заданную ось и возвращает минимальную и максимальную проекции.
-     * (Без изменений)
+     * Используется в алгоритме разделяющих осей (SAT).
+     *
+     * @param {{x: number, y: number}} axis - Нормализованный вектор оси.
+     * @param {Object[]} poly - Массив точек полигона {x, y}.
+     * @returns {{min: number, max: number}} Минимальная и максимальная проекции.
+     * @private
      */
     _projectPolygon(axis, poly) {
         let min = axis.x * poly[0].x + axis.y * poly[0].y;
@@ -299,8 +372,13 @@ export class TextManager {
     }
 
     /**
-     * Проверяет пересечение двух выпуклых полигонов методом SAT.
-     * (Без изменений)
+     * Проверяет пересечение двух выпуклых полигонов (прямоугольников) методом разделяющих осей (SAT).
+     * Прямоугольники задаются массивом из четырёх углов.
+     *
+     * @param {Object[]|null} rectA - Первый прямоугольник (массив точек).
+     * @param {Object[]|null} rectB - Второй прямоугольник.
+     * @returns {boolean} True, если прямоугольники пересекаются.
+     * @private
      */
     _rectsIntersect(rectA, rectB) {
         if (!rectA || !rectB) return false;
@@ -320,12 +398,13 @@ export class TextManager {
     }
 
     /**
-     * Главный метод обновления всех подписей. Выполняет:
+     * Главный метод обновления всех подписей. Выполняет следующие шаги:
      * 1. Сбор видимых подписей с учётом zoom-границ и видимости источника.
-     * 2. Сброс stuck-состояний при изменении набора или зума.
-     * 3. Итеративное раздвижение линейных подписей.
-     * 4. Жадная приоритезация для предотвращения перекрытий.
-     * 5. Применение позиций и видимости к спрайтам.
+     * 2. Сброс stuck-состояний при изменении набора видимых подписей или зума.
+     * 3. Итеративное раздвижение линейных подписей для избежания перекрытий.
+     * 4. Жадная приоритезация всех подписей: отрисовываются подписи с высшим приоритетом
+     *    без перекрытий с уже размещёнными.
+     * 5. Применение вычисленных позиций к DOM-элементам.
      */
     update() {
         const map = this.map;
@@ -355,22 +434,24 @@ export class TextManager {
             const src = label.source;
             const zoomBounds = src.getTextZoomBounds();
             if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
-                label.sprite.visible = false;
+                label.element.style.display = 'none';
                 continue;
             }
             if (!src.isVisible()) {
-                label.sprite.visible = false;
+                label.element.style.display = 'none';
                 continue;
             }
 
             label.priority = src.getPriority ? src.getPriority() : 0;
             label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
+
+            // сбрасываем hiddenByPriority каждый кадр — будет пересчитано ниже
             label.hiddenByPriority = false;
 
             if (src.getLabelType() === 'line') {
                 const iv = src.getVisibleInterval();
                 if (!iv) {
-                    label.sprite.visible = false;
+                    label.element.style.display = 'none';
                     continue;
                 }
                 label.visibleInterval = iv;
@@ -386,11 +467,12 @@ export class TextManager {
                 label.rect = this._getLabelCorners(label);
                 if (label.rect) visibleLabels.push(label);
             } else {
-                // Для point подписей просто проверяем наличие мировой позиции
-                if (!src.getWorldPosition()) {
-                    label.sprite.visible = false;
+                const pos = src.getScreenPosition();
+                if (!pos) {
+                    label.element.style.display = 'none';
                     continue;
                 }
+                label.screenPos = pos;
                 label.rect = this._getLabelCorners(label);
                 if (label.rect) visibleLabels.push(label);
             }
@@ -422,57 +504,32 @@ export class TextManager {
 
                     if (overlapping.length === 0) continue;
 
+                    // учитываем только тех, у кого приоритет >= нашего
                     const relevant = overlapping.filter(o => o.priority >= lbl.priority);
                     if (relevant.length === 0) continue;
 
-                    // Позиция текущей линии
-                    const piWorld = lbl.source.getWorldPositionAt(lbl.t);
-                    if (!piWorld) continue;
-                    const pi = piWorld.clone().project(map.camera);
-                    const piScreen = {
-                        x: (pi.x * 0.5 + 0.5) * map.targetElement.clientWidth,
-                        y: (-pi.y * 0.5 + 0.5) * map.targetElement.clientHeight
-                    };
+                    const pi = lbl.source.getScreenPositionAt(lbl.t);
+                    if (!pi) continue;
 
                     let forceX = 0, forceY = 0;
                     for (const other of relevant) {
-                        let pjWorld;
-                        if (other.source.getLabelType() === 'line') {
-                            pjWorld = other.source.getWorldPositionAt(other.t);
-                        } else {
-                            pjWorld = other.source.getWorldPosition();
-                        }
-                        if (!pjWorld) continue;
-                        const pj = pjWorld.clone().project(map.camera);
-                        const pjScreen = {
-                            x: (pj.x * 0.5 + 0.5) * map.targetElement.clientWidth,
-                            y: (-pj.y * 0.5 + 0.5) * map.targetElement.clientHeight
-                        };
+                        const pj = (other.source.getLabelType() === 'line')
+                            ? other.source.getScreenPositionAt(other.t)
+                            : other.source.getScreenPosition();
+                        if (!pj) continue;
 
-                        const dx = piScreen.x - pjScreen.x;
-                        const dy = piScreen.y - pjScreen.y;
+                        const dx = pi.x - pj.x;
+                        const dy = pi.y - pj.y;
                         const dist2 = dx * dx + dy * dy + 1;
                         const forceMag = 1 / dist2;
                         forceX += (dx / Math.sqrt(dist2)) * forceMag;
                         forceY += (dy / Math.sqrt(dist2)) * forceMag;
                     }
 
-                    // Направление вдоль линии в экранных координатах
-                    // Вычисляем касательную по двум близким точкам (упрощённо)
-                    const tEps = 0.001;
-                    const p1 = lbl.source.getWorldPositionAt(Math.max(0, lbl.t - tEps));
-                    const p2 = lbl.source.getWorldPositionAt(Math.min(1, lbl.t + tEps));
-                    if (!p1 || !p2) continue;
-                    const s1 = p1.clone().project(map.camera);
-                    const s2 = p2.clone().project(map.camera);
-                    const tangentX = s2.x - s1.x;
-                    const tangentY = s2.y - s1.y;
-                    const len = Math.sqrt(tangentX * tangentX + tangentY * tangentY);
-                    if (len < 1e-6) continue;
-                    const normX = tangentX / len;
-                    const normY = tangentY / len;
-
-                    const dot = forceX * normX + forceY * normY;
+                    const ang = lbl.source.getScreenAngleAt(lbl.t) * Math.PI / 180;
+                    const tangentX = Math.cos(ang);
+                    const tangentY = Math.sin(ang);
+                    const dot = forceX * tangentX + forceY * tangentY;
                     const step = dot * learningRate;
 
                     const oldT = lbl.t;
@@ -496,7 +553,7 @@ export class TextManager {
                 if (!anyChanged) break;
             }
 
-            // Определение stuck
+            // определение stuck для линий
             for (const lbl of lineLabels) {
                 if (lbl.stuck) continue;
                 lbl.rect = this._getLabelCorners(lbl);
@@ -513,17 +570,17 @@ export class TextManager {
                 }
             }
 
-            // Сохраняем t для незастрявших
+            // сохраняем t в источники для незастрявших
             for (const lbl of lineLabels) {
                 if (lbl.stuck) {
-                    lbl.t = lbl.source.getLabelParameter();
+                    lbl.t = lbl.source.getLabelParameter(); // откат
                 } else {
                     lbl.source.setLabelParameter(lbl.t);
                 }
             }
         }
 
-        // 3. Жадная приоритезация
+        // 3. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aLine = a.source.getLabelType() === 'line' ? 1 : 0;
@@ -557,37 +614,72 @@ export class TextManager {
             }
         }
 
-        // 4. Применение к спрайтам
+        // 4. Рендеринг DOM-элементов
         for (const label of visibleLabels) {
             const src = label.source;
-            const sprite = label.sprite;
+            const el = label.element;
 
             if (label.hiddenByPriority) {
-                sprite.visible = false;
+                el.style.display = 'none';
                 continue;
             }
 
-            let worldPos;
+            let screenX, screenY, rotation = 0;
+
             if (src.getLabelType() === 'line') {
-                worldPos = src.getWorldPositionAt(label.t);
+                const pos = src.getScreenPositionAt(label.t);
+                if (!pos) {
+                    el.style.display = 'none';
+                    continue;
+                }
+                screenX = pos.x;
+                screenY = pos.y;
+                rotation = src.getScreenAngleAt(label.t);
             } else {
-                worldPos = src.getWorldPosition();
+                screenX = label.screenPos.x;
+                screenY = label.screenPos.y;
             }
 
-            if (!worldPos) {
-                sprite.visible = false;
-                continue;
+            if (!label.width || !label.height) this._measureLabel(label);
+            const w = label.width;
+            const h = label.height;
+
+            const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+            const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+
+            let localAnchorX;
+            if (align === 'left') localAnchorX = 0;
+            else if (align === 'right') localAnchorX = w;
+            else localAnchorX = w / 2;
+
+            let localAnchorY;
+            if (vAlign === 'top') localAnchorY = 0;
+            else if (vAlign === 'bottom') localAnchorY = h;
+            else localAnchorY = h / 2;
+
+            const rad = rotation * Math.PI / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+
+            const dx = -localAnchorX * cos + localAnchorY * sin;
+            const dy = -localAnchorX * sin - localAnchorY * cos;
+
+            const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+
+            let top = screenY + dy + offY;
+
+            if (src.getLabelType() === 'line') {
+                const style = window.getComputedStyle(el);
+                const fontSize = parseFloat(style.fontSize) || 12;
+                top += fontSize;
             }
 
-            sprite.position.copy(worldPos);
-            sprite.visible = true;
-        }
-
-        // Скрываем спрайты, не попавшие в visibleLabels
-        for (const label of this.labels) {
-            if (!visibleLabels.includes(label)) {
-                label.sprite.visible = false;
-            }
+            el.style.display = 'block';
+            let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
+if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
+    transform += ` rotate(${rotation}deg)`;
+}
+el.style.transform = transform;
         }
     }
 }

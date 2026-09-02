@@ -413,27 +413,28 @@ export class TileManager {
         const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
 
         let geometry;
-        if (!this.hasElevation && this.flatTileGeometry) {
-            geometry = this.flatTileGeometry.clone();
-            geometry.rotateX(-Math.PI / 2);
-            geometry.translate(originX + tileSize / 2, 0, originZ + tileSize / 2);
-        } else {
-            geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
-            geometry.rotateX(-Math.PI / 2);
-            geometry.translate(originX + tileSize / 2, 0, originZ + tileSize / 2);
-        }
+if (!this.hasElevation && this.flatTileGeometry) {
+    geometry = this.flatTileGeometry.clone();
+    geometry.rotateX(-Math.PI / 2);
+    // убираем translate
+} else {
+    geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
+    geometry.rotateX(-Math.PI / 2);
+    // убираем translate
+}
 
-        const mat = new THREE.MeshBasicMaterial({
-            map: texture,
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
-        });
+const mat = new THREE.MeshBasicMaterial({ ... });
+const mesh = new THREE.Mesh(geometry, mat);
 
-        const mesh = new THREE.Mesh(geometry, mat);
-        mesh.position.y = z * LEVEL_Y_STEP;
-        mesh.renderOrder = z;
-        mesh.visible = false;
-        return mesh;
+// Абсолютная позиция задаётся через позицию меша
+mesh.position.set(
+    originX + tileSize / 2,
+    z * LEVEL_Y_STEP,
+    originZ + tileSize / 2
+);
+mesh.renderOrder = z;
+mesh.visible = false;
+return mesh;
     }
 
     /**
@@ -446,18 +447,18 @@ export class TileManager {
      * @returns {THREE.Mesh} Меш фонового тайла.
      */
     createStaticTileMesh(tileSize, originX, originZ, texture) {
-        const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
-        geom.rotateX(-Math.PI / 2);
-        geom.translate(originX + tileSize / 2, -1.5, originZ + tileSize / 2);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            map: texture,
-            depthWrite: false,
-            depthTest: false
-        });
-        const mesh = new THREE.Mesh(geom, mat);
-        mesh.renderOrder = -2;
-        return mesh;
+const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
+geom.rotateX(-Math.PI / 2);
+// убираем translate
+const mat = new THREE.MeshBasicMaterial({ ... });
+const mesh = new THREE.Mesh(geom, mat);
+mesh.position.set(
+    originX + tileSize / 2,
+    -1.5,
+    originZ + tileSize / 2
+);
+mesh.renderOrder = -2;
+return mesh;
     }
 
     /* ---- текстуры ---- */

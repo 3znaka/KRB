@@ -170,11 +170,11 @@ export class Polygon {
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
 
-        // 2D вершины и центроид
-        /** @private */ this._vertices2D = [];
-        /** @private */ this._centroidLocal = new THREE.Vector2();
-        /** @private */ this._cachedCentroidHeight = 0;
-        /** @private */ this._lastCentroidHeightUpdateTime = 0;
+// 2D вершины и центроид
+/** @private */ this._vertices2D = [];
+/** @private */ this._centroidWorld = new THREE.Vector3(); // абсолютные мировые координаты центроида
+/** @private */ this._cachedCentroidHeight = 0;
+/** @private */ this._lastCentroidHeightUpdateTime = 0;
 
         // Подпись
         /** @private */ this._centroidScreenPos = null;
@@ -314,7 +314,18 @@ _buildFillGeometry(map) {
         cx += pt.x;
         cy += pt.y;
     }
-    this._centroidLocal.set(cx / points2D.length, cy / points2D.length);
+    cx /= points2D.length;
+    cy /= points2D.length;
+
+    // Сохраняем абсолютный центроид и устанавливаем позицию группы
+    this._centroidWorld.set(cx, 0, cy);
+    this._group.position.copy(this._centroidWorld);
+
+    // Преобразуем вершины в локальные координаты (вычитаем центроид)
+    for (let i = 0; i < points2D.length; i++) {
+        points2D[i].x -= cx;
+        points2D[i].y -= cy;
+    }
 
     // ----- Верхняя крышка (всегда) -----
     const topGeometry = new THREE.BufferGeometry();
@@ -546,9 +557,13 @@ _buildFillGeometry(map) {
 
             const points3D = this._vertices2D.map((v2, i) => {
                 const h = this._cachedHeights?.[i] ?? this._altitudeOffset;
-                return new THREE.Vector3(v2.x + wgPos.x, h + wgPos.y, v2.y + wgPos.z);
+                return new THREE.Vector3(
+                    v2.x + this._group.position.x + wgPos.x,
+                    h + wgPos.y,
+                    v2.y + this._group.position.z + wgPos.z
+                );
             });
-
+            
             // Замыкаем кольцо для проверки всех рёбер
             if (points3D.length > 0) {
                 points3D.push(points3D[0].clone());
@@ -589,15 +604,16 @@ _buildFillGeometry(map) {
         const needsUpdate = (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
 
         if (needsUpdate) {
-            const wgPos = map.worldGroup.position;
+                        const wgPos = map.worldGroup.position;
             // Высоты для верхней грани (и нижней, если экструдирован)
             for (let i = 0; i < this._vertices2D.length; i++) {
                 const localX = this._vertices2D[i].x;
                 const localZ = this._vertices2D[i].y;
                 let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
-                    const worldX = localX + wgPos.x;
-                    const worldZ = localZ + wgPos.z;
+                    // Мировая координата = позиция группы + локальная + сдвиг мира
+                    const worldX = this._group.position.x + localX + wgPos.x;
+                    const worldZ = this._group.position.z + localZ + wgPos.z;
                     map.ensureTileForPoint?.(worldX, worldZ);
                     base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
                 }
@@ -685,11 +701,12 @@ _buildFillGeometry(map) {
         const outerRing = this._rings[0];
         const positions = [];
 
+                const groupPos = this._group.position;
         for (let i = 0; i < outerRing.length; i++) {
             const [lon, lat] = outerRing[i];
             const [absX, absZ] = proj.fromLonLat([lon, lat]);
             const y = this._cachedStrokeHeights[i] ?? this._altitudeOffset;
-            positions.push(absX, y, absZ);
+            positions.push(absX - groupPos.x, y, absZ - groupPos.z);
         }
 
         // Замыкаем обводку
@@ -697,7 +714,7 @@ _buildFillGeometry(map) {
             const [firstLon, firstLat] = outerRing[0];
             const [fx, fz] = proj.fromLonLat([firstLon, firstLat]);
             const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
-            positions.push(fx, fy, fz);
+            positions.push(fx - groupPos.x, fy, fz - groupPos.z);
         }
 
         this._strokeGeometry.setPositions(positions);

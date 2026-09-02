@@ -430,11 +430,11 @@ createTileMesh(inst, texture) {
     });
 
     const mesh = new THREE.Mesh(geometry, mat);
-    mesh.position.set(
-        originX + tileSize / 2,
-        z * LEVEL_Y_STEP,
-        originZ + tileSize / 2
-    );
+mesh.position.set(
+  originX + tileSize / 2,
+  this.hasElevation ? z * LEVEL_Y_STEP : 0,  
+  originZ + tileSize / 2
+);
     mesh.renderOrder = z;
     mesh.visible = false;
     return mesh;

@@ -4,7 +4,7 @@
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * экструзии, видимости по зуму и подписей через TextManager.
  * Добавлена поддержка событий onHover и onClick через raycasting,
- * а также возможность привязки HTML-тултипа.
+ * а также возможность отображения HTML-тултипа через PopupManager.
  */
 
 import { proj } from './Utils.js';
@@ -42,12 +42,11 @@ function pointToSegmentDistance(point, a, b) {
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
  * ограничения по зуму, текстовую подпись, а также обработчики событий
  * наведения (onHover) и клика (onClick).
- * Дополнительно может привязывать HTML-тултип, который автоматически
- * позиционируется относительно центроида полигона.
+ * Всплывающие подсказки обрабатываются централизованно через PopupManager
+ * (доступен как `map.popupManager`).
  *
  * @example
- * // Обычный плоский полигон с тултипом
- * const tooltipEl = document.getElementById('tooltip');
+ * // Обычный плоский полигон
  * const flatPolygon = new Polygon({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *     fillColor: '#ff0000',
@@ -60,7 +59,7 @@ function pointToSegmentDistance(point, a, b) {
  *     minZoom: 5,
  *     maxZoom: 18,
  *     title: 'Плоский полигон',
- *     tooltip: tooltipEl,
+ *     tooltip: '<b>Полигон</b>',
  *     onClick: (event, polygon) => console.log('Клик по полигону'),
  *     onHover: (hovered) => console.log('Наведение:', hovered)
  * });
@@ -113,7 +112,7 @@ export class Polygon {
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
      * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
-     * @param {string|HTMLElement} [options.tooltip] - HTML-элемент (или селектор), который будет автоматически позиционироваться относительно центроида полигона.
+     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML), показывается через PopupManager при наведении или клике (если не задан onClick/onHover).
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
      */
@@ -156,15 +155,8 @@ export class Polygon {
         /** @private */ this._isHovered = false;
         /** @private */ this._boundHandlers = null; // { mousedown, mousemove, click }
 
-        // HTML-тултип
-        /** @private */ this._tooltipElement = null;
-        if (options.tooltip) {
-            if (typeof options.tooltip === 'string') {
-                this._tooltipElement = document.querySelector(options.tooltip);
-            } else if (options.tooltip instanceof HTMLElement) {
-                this._tooltipElement = options.tooltip;
-            }
-        }
+        // Тултип (HTML-текст, отображаемый через PopupManager)
+        /** @private */ this._tooltipText = options.tooltip || '';
 
         // Внутренние структуры
         /** @private */ this._map = null;
@@ -248,8 +240,8 @@ export class Polygon {
             this._textLabel = map.textManager.addLabel(this);
         }
 
-        // Привязываем обработчики событий, если заданы колбэки
-        if (this._onClick || this._onHover) {
+        // Привязываем обработчики событий, если заданы колбэки или есть tooltip
+        if (this._onClick || this._onHover || this._tooltipText) {
             this._bindEventHandlers(map);
         }
     }
@@ -501,8 +493,7 @@ export class Polygon {
     }
 
     /**
-     * Привязывает обработчики событий мыши к canvas, если заданы onClick/onHover.
-     * Использует фазу захвата, чтобы перехватывать события до основных обработчиков карты.
+     * Привязывает обработчики событий мыши к canvas, если заданы onClick/onHover или tooltip.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -581,7 +572,7 @@ export class Polygon {
 
     /**
      * Обработчик mousemove на canvas (фаза захвата).
-     * Отслеживает состояние наведения и вызывает onHover при его изменении.
+     * Отслеживает состояние наведения и вызывает onHover или показывает тултип через PopupManager.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -589,20 +580,31 @@ export class Polygon {
      * @private
      */
     _onCanvasMouseMove(event, map) {
-        if (!this._onHover) return;
         const hit = this._raycastPolygon(event, map);
-        if (hit && !this._isHovered) {
-            this._isHovered = true;
-            this._onHover(true);
-        } else if (!hit && this._isHovered) {
-            this._isHovered = false;
-            this._onHover(false);
+        if (hit) {
+            if (!this._isHovered) {
+                this._isHovered = true;
+                if (this._onHover) {
+                    this._onHover(true);
+                } else if (this._tooltipText && map.popupManager) {
+                    map.popupManager.show(this, this._tooltipText);
+                }
+            }
+        } else {
+            if (this._isHovered) {
+                this._isHovered = false;
+                if (this._onHover) {
+                    this._onHover(false);
+                } else if (this._tooltipText && map.popupManager) {
+                    map.popupManager.hide();
+                }
+            }
         }
     }
 
     /**
      * Обработчик click на canvas (фаза захвата).
-     * Если клик пришёлся по полигону, вызывает onClick.
+     * Если клик пришёлся по полигону, вызывает onClick или показывает тултип через PopupManager.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -610,25 +612,23 @@ export class Polygon {
      * @private
      */
     _onCanvasClick(event, map) {
-        if (!this._onClick) return;
-        if (this._raycastPolygon(event, map)) {
+        if (!this._raycastPolygon(event, map)) return;
+
+        if (this._onClick) {
             this._onClick(event, this);
+        } else if (this._tooltipText && map.popupManager) {
+            map.popupManager.show(this, this._tooltipText);
         }
     }
 
     /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
-     * Также отвязывает обработчики событий мыши и скрывает тултип.
+     * Также отвязывает обработчики событий мыши.
      *
      * @returns {void}
      */
     remove() {
         this._unbindEventHandlers();
-
-        // Скрываем тултип, если он был привязан
-        if (this._tooltipElement) {
-            this._tooltipElement.style.display = 'none';
-        }
 
         if (this._group) {
             this._group.parent?.remove(this._group);
@@ -861,8 +861,7 @@ export class Polygon {
     }
 
     /**
-     * Пересчитывает экранную позицию центроида полигона для подписи
-     * и обновляет позицию HTML-тултипа, если он привязан.
+     * Пересчитывает экранную позицию центроида полигона для подписи.
      *
      * @returns {void}
      * @private
@@ -870,7 +869,6 @@ export class Polygon {
     _updateCentroidScreenPos() {
         if (!this._map || !this._centroidWorld) {
             this._centroidScreenPos = null;
-            this._updateTooltipPosition();
             return;
         }
         const wgPos = this._map.worldGroup.position;
@@ -899,26 +897,6 @@ export class Polygon {
                 x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
                 y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
             };
-        }
-        // Обновляем позицию тултипа
-        this._updateTooltipPosition();
-    }
-
-    /**
-     * Обновляет позицию HTML-тултипа на основе экранной позиции центроида.
-     * Скрывает тултип, если полигон невидим или центроид вне экрана.
-     *
-     * @returns {void}
-     * @private
-     */
-    _updateTooltipPosition() {
-        if (!this._tooltipElement || !this._map) return;
-        const screenPos = this._centroidScreenPos;
-        const isVisible = this._group.visible && screenPos !== null;
-        this._tooltipElement.style.display = isVisible ? 'block' : 'none';
-        if (isVisible) {
-            this._tooltipElement.style.left = screenPos.x + 'px';
-            this._tooltipElement.style.top = screenPos.y + 'px';
         }
     }
 

@@ -3,6 +3,7 @@
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * экструзии, видимости по зуму и подписей через TextManager.
+ * Добавлена поддержка событий onHover и onClick через raycasting.
  */
 
 import { proj } from './Utils.js';
@@ -38,7 +39,8 @@ function pointToSegmentDistance(point, a, b) {
 /**
  * Класс, представляющий полигон на карте.
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
- * ограничения по зуму и текстовую подпись.
+ * ограничения по зуму, текстовую подпись, а также обработчики событий
+ * наведения (onHover) и клика (onClick).
  *
  * @example
  * // Обычный плоский полигон
@@ -53,7 +55,9 @@ function pointToSegmentDistance(point, a, b) {
  *     depthTest: false,
  *     minZoom: 5,
  *     maxZoom: 18,
- *     title: 'Плоский полигон'
+ *     title: 'Плоский полигон',
+ *     onClick: (event, polygon) => console.log('Клик по полигону'),
+ *     onHover: (hovered) => console.log('Наведение:', hovered)
  * });
  * flatPolygon.addTo(map);
  *
@@ -102,6 +106,8 @@ export class Polygon {
      * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум для отображения подписи.
      * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
      * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
+     * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
+     * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
      */
@@ -138,6 +144,12 @@ export class Polygon {
         /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
 
+        // События мыши
+        /** @private */ this._onClick = options.onClick || null;
+        /** @private */ this._onHover = options.onHover || null;
+        /** @private */ this._isHovered = false;
+        /** @private */ this._boundHandlers = null; // { mousedown, mousemove, click }
+
         // Внутренние структуры
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
@@ -170,11 +182,11 @@ export class Polygon {
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
 
-// 2D вершины и центроид
-/** @private */ this._vertices2D = [];
-/** @private */ this._centroidWorld = new THREE.Vector3(); // абсолютные мировые координаты центроида
-/** @private */ this._cachedCentroidHeight = 0;
-/** @private */ this._lastCentroidHeightUpdateTime = 0;
+        // 2D вершины и центроид
+        /** @private */ this._vertices2D = [];
+        /** @private */ this._centroidWorld = new THREE.Vector3(); // абсолютные мировые координаты центроида
+        /** @private */ this._cachedCentroidHeight = 0;
+        /** @private */ this._lastCentroidHeightUpdateTime = 0;
 
         // Подпись
         /** @private */ this._centroidScreenPos = null;
@@ -199,6 +211,7 @@ export class Polygon {
 
     /**
      * Вызывается слоем при добавлении, строит геометрию и регистрирует подпись.
+     * Также при наличии обработчиков событий навешивает слушатели на canvas.
      *
      * @param {Object} map - Экземпляр карты.
      * @param {Layer} layer - Слой-владелец.
@@ -217,6 +230,11 @@ export class Polygon {
 
         if (this._title && map.textManager) {
             this._textLabel = map.textManager.addLabel(this);
+        }
+
+        // Привязываем обработчики событий, если заданы колбэки
+        if (this._onClick || this._onHover) {
+            this._bindEventHandlers(map);
         }
     }
 
@@ -242,136 +260,100 @@ export class Polygon {
      * @returns {void}
      * @private
      */
-_buildFillGeometry(map) {
-    const rings = this._rings;
-    if (!rings || !rings.length || rings[0].length < 3) {
-        console.warn('Polygon: rings[0] must have at least 3 points');
-        return;
-    }
-
-    // Общий массив координат (плоский [x,z]) и массив точек Vector2
-    const coords = [];
-    const points2D = [];
-    const holeIndices = [];   // индексы начала каждого внутреннего кольца
-    const ringStartIndices = []; // индексы начала каждого кольца в points2D
-
-    for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-        const ring = rings[ringIdx];
-        if (ring.length < 3) {
-            console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
-            continue; // пропускаем некорректное кольцо
+    _buildFillGeometry(map) {
+        const rings = this._rings;
+        if (!rings || !rings.length || rings[0].length < 3) {
+            console.warn('Polygon: rings[0] must have at least 3 points');
+            return;
         }
 
-        // Запоминаем индекс начала кольца в общем массиве vertices
-        ringStartIndices.push(points2D.length);
+        // Общий массив координат (плоский [x,z]) и массив точек Vector2
+        const coords = [];
+        const points2D = [];
+        const holeIndices = [];   // индексы начала каждого внутреннего кольца
+        const ringStartIndices = []; // индексы начала каждого кольца в points2D
 
-        // Для всех колец, кроме первого, добавляем индекс в holeIndices
-        if (ringIdx > 0) {
-            holeIndices.push(coords.length / 2); // количество уже добавленных координат
-        }
-
-        // Добавляем вершины кольца, пропуская замыкающую точку, если она совпадает с первой
-        let firstPoint = null;
-        let lastPoint = null;
-        for (let i = 0; i < ring.length; i++) {
-            const [lon, lat] = ring[i];
-            const [absX, absZ] = proj.fromLonLat([lon, lat]);
-            if (i === 0) {
-                firstPoint = [absX, absZ];
+        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+            const ring = rings[ringIdx];
+            if (ring.length < 3) {
+                console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
+                continue; // пропускаем некорректное кольцо
             }
-            // Проверяем, не совпадает ли текущая точка с первой (если мы уже добавили хотя бы одну)
-            if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) {
-                // Это замыкающая точка, пропускаем её
-                continue;
+
+            // Запоминаем индекс начала кольца в общем массиве vertices
+            ringStartIndices.push(points2D.length);
+
+            // Для всех колец, кроме первого, добавляем индекс в holeIndices
+            if (ringIdx > 0) {
+                holeIndices.push(coords.length / 2); // количество уже добавленных координат
             }
-            coords.push(absX, absZ);
-            points2D.push(new THREE.Vector2(absX, absZ));
-            lastPoint = [absX, absZ];
+
+            // Добавляем вершины кольца, пропуская замыкающую точку, если она совпадает с первой
+            let firstPoint = null;
+            for (let i = 0; i < ring.length; i++) {
+                const [lon, lat] = ring[i];
+                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                if (i === 0) {
+                    firstPoint = [absX, absZ];
+                }
+                // Проверяем, не совпадает ли текущая точка с первой (если мы уже добавили хотя бы одну)
+                if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) {
+                    continue; // замыкающая точка
+                }
+                coords.push(absX, absZ);
+                points2D.push(new THREE.Vector2(absX, absZ));
+            }
         }
-        // Если последняя точка совпадает с первой (дублирование), то мы её пропустили в цикле,
-        // так что здесь ничего дополнительно делать не нужно.
-    }
 
-    if (points2D.length < 3) {
-        console.warn('Polygon: after processing rings, less than 3 vertices');
-        return;
-    }
+        if (points2D.length < 3) {
+            console.warn('Polygon: after processing rings, less than 3 vertices');
+            return;
+        }
 
-    // Пересоздаём массив высот для всех вершин
-    this._vertices2D = points2D;
-    this._cachedHeights = new Array(points2D.length).fill(0);
+        // Пересоздаём массив высот для всех вершин
+        this._vertices2D = points2D;
+        this._cachedHeights = new Array(points2D.length).fill(0);
 
-    // Выполняем триангуляцию с учётом отверстий
-    const indices = earcut(coords, holeIndices, 2);
-    if (indices.length === 0) {
-        console.warn('Polygon: Earcut returned no triangles');
-        return;
-    }
+        // Выполняем триангуляцию с учётом отверстий
+        const indices = earcut(coords, holeIndices, 2);
+        if (indices.length === 0) {
+            console.warn('Polygon: Earcut returned no triangles');
+            return;
+        }
 
-    // Центроид как среднее арифметическое всех вершин (упрощённо)
-    let cx = 0, cy = 0;
-    for (const pt of points2D) {
-        cx += pt.x;
-        cy += pt.y;
-    }
-    cx /= points2D.length;
-    cy /= points2D.length;
+        // Центроид как среднее арифметическое всех вершин (упрощённо)
+        let cx = 0, cy = 0;
+        for (const pt of points2D) {
+            cx += pt.x;
+            cy += pt.y;
+        }
+        cx /= points2D.length;
+        cy /= points2D.length;
 
-    // Сохраняем абсолютный центроид и устанавливаем позицию группы
-    this._centroidWorld.set(cx, 0, cy);
-    this._group.position.copy(this._centroidWorld);
+        // Сохраняем абсолютный центроид и устанавливаем позицию группы
+        this._centroidWorld.set(cx, 0, cy);
+        this._group.position.copy(this._centroidWorld);
 
-    // Преобразуем вершины в локальные координаты (вычитаем центроид)
-    for (let i = 0; i < points2D.length; i++) {
-        points2D[i].x -= cx;
-        points2D[i].y -= cy;
-    }
+        // Преобразуем вершины в локальные координаты (вычитаем центроид)
+        for (let i = 0; i < points2D.length; i++) {
+            points2D[i].x -= cx;
+            points2D[i].y -= cy;
+        }
 
-    // ----- Верхняя крышка (всегда) -----
-    const topGeometry = new THREE.BufferGeometry();
-    const topPosArray = new Float32Array(points2D.length * 3);
-    for (let i = 0; i < points2D.length; i++) {
-        const pt = points2D[i];
-        topPosArray[i * 3] = pt.x;
-        topPosArray[i * 3 + 1] = 0; // Y обновится позже
-        topPosArray[i * 3 + 2] = pt.y; // Vector2.y -> Z
-    }
-    topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-    topGeometry.setIndex(indices);
-    topGeometry.computeVertexNormals();
-
-    const topMaterial = new THREE.MeshBasicMaterial({
-        color: this._fillColor,
-        opacity: this._fillOpacity,
-        transparent: this._fillOpacity < 1,
-        side: THREE.DoubleSide,
-        depthTest: this._depthTest,
-        depthWrite: this._depthWrite
-    });
-
-    const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-    topMesh.renderOrder = 998;
-    this._fillMesh = topMesh;
-    this._fillGeometry = topGeometry;
-    this._fillMaterial = topMaterial;
-    this._group.add(topMesh);
-
-    // ----- Для экструзии: нижняя крышка и боковые стенки -----
-    if (this._extruded) {
-        // Нижняя крышка (копия верхней, но Y будет смещён вниз)
-        const bottomGeometry = new THREE.BufferGeometry();
-        const bottomPosArray = new Float32Array(points2D.length * 3);
+        // ----- Верхняя крышка (всегда) -----
+        const topGeometry = new THREE.BufferGeometry();
+        const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
-            bottomPosArray[i * 3] = pt.x;
-            bottomPosArray[i * 3 + 1] = 0; // обновится
-            bottomPosArray[i * 3 + 2] = pt.y;
+            topPosArray[i * 3] = pt.x;
+            topPosArray[i * 3 + 1] = 0; // Y обновится позже
+            topPosArray[i * 3 + 2] = pt.y; // Vector2.y -> Z
         }
-        bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-        bottomGeometry.setIndex(indices);
-        bottomGeometry.computeVertexNormals();
+        topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
+        topGeometry.setIndex(indices);
+        topGeometry.computeVertexNormals();
 
-        const bottomMaterial = new THREE.MeshBasicMaterial({
+        const topMaterial = new THREE.MeshBasicMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
             transparent: this._fillOpacity < 1,
@@ -380,76 +362,100 @@ _buildFillGeometry(map) {
             depthWrite: this._depthWrite
         });
 
-        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-        bottomMesh.renderOrder = 998;
-        this._bottomMesh = bottomMesh;
-        this._bottomGeometry = bottomGeometry;
-        this._bottomMaterial = bottomMaterial;
-        this._group.add(bottomMesh);
+        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+        topMesh.renderOrder = 998;
+        this._fillMesh = topMesh;
+        this._fillGeometry = topGeometry;
+        this._fillMaterial = topMaterial;
+        this._group.add(topMesh);
 
-        // Боковые стенки: строим для каждого кольца (внешнего и отверстий)
-        const sidePositions = [];
-        const sideIndices = [];
-
-        // Для каждого кольца строим квады по рёбрам
-        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            // Пропускаем кольца, которые были пропущены ранее (если кольцо некорректное)
-            if (ringStartIndices[ringIdx] === undefined) continue;
-
-            const start = ringStartIndices[ringIdx];
-            // Определяем количество вершин в этом кольце
-            const nextRingStart = (ringIdx + 1 < ringStartIndices.length) ? ringStartIndices[ringIdx + 1] : points2D.length;
-            const count = nextRingStart - start;
-
-            if (count < 2) continue; // невозможно построить стенку
-
-            // Обходим рёбра кольца
-            for (let i = 0; i < count; i++) {
-                const j = (i + 1) % count; // следующая вершина в этом же кольце
-                const idxI = start + i;
-                const idxJ = start + j;
-
-                const topI = points2D[idxI];
-                const topJ = points2D[idxJ];
-
-                // Базовый индекс в sidePositions
-                const baseIndex = sidePositions.length / 3;
-
-                // Добавляем 4 вершины: верх i, низ i, верх j, низ j
-                sidePositions.push(topI.x, 0, topI.y);
-                sidePositions.push(topI.x, 0, topI.y);
-                sidePositions.push(topJ.x, 0, topJ.y);
-                sidePositions.push(topJ.x, 0, topJ.y);
-
-                // Два треугольника (порядок не важен из-за DoubleSide)
-                sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-                sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+        // ----- Для экструзии: нижняя крышка и боковые стенки -----
+        if (this._extruded) {
+            // Нижняя крышка
+            const bottomGeometry = new THREE.BufferGeometry();
+            const bottomPosArray = new Float32Array(points2D.length * 3);
+            for (let i = 0; i < points2D.length; i++) {
+                const pt = points2D[i];
+                bottomPosArray[i * 3] = pt.x;
+                bottomPosArray[i * 3 + 1] = 0;
+                bottomPosArray[i * 3 + 2] = pt.y;
             }
+            bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
+            bottomGeometry.setIndex(indices);
+            bottomGeometry.computeVertexNormals();
+
+            const bottomMaterial = new THREE.MeshBasicMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: this._fillOpacity < 1,
+                side: THREE.DoubleSide,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
+
+            const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+            bottomMesh.renderOrder = 998;
+            this._bottomMesh = bottomMesh;
+            this._bottomGeometry = bottomGeometry;
+            this._bottomMaterial = bottomMaterial;
+            this._group.add(bottomMesh);
+
+            // Боковые стенки
+            const sidePositions = [];
+            const sideIndices = [];
+
+            for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+                if (ringStartIndices[ringIdx] === undefined) continue;
+
+                const start = ringStartIndices[ringIdx];
+                const nextRingStart = (ringIdx + 1 < ringStartIndices.length) ? ringStartIndices[ringIdx + 1] : points2D.length;
+                const count = nextRingStart - start;
+
+                if (count < 2) continue;
+
+                for (let i = 0; i < count; i++) {
+                    const j = (i + 1) % count;
+                    const idxI = start + i;
+                    const idxJ = start + j;
+
+                    const topI = points2D[idxI];
+                    const topJ = points2D[idxJ];
+
+                    const baseIndex = sidePositions.length / 3;
+
+                    sidePositions.push(topI.x, 0, topI.y);
+                    sidePositions.push(topI.x, 0, topI.y);
+                    sidePositions.push(topJ.x, 0, topJ.y);
+                    sidePositions.push(topJ.x, 0, topJ.y);
+
+                    sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+                    sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+                }
+            }
+
+            const sideGeometry = new THREE.BufferGeometry();
+            sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
+            sideGeometry.setIndex(sideIndices);
+            sideGeometry.computeVertexNormals();
+
+            const sideMaterial = new THREE.MeshBasicMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: this._fillOpacity < 1,
+                side: THREE.DoubleSide,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
+
+            const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
+            sideMesh.renderOrder = 998;
+            this._sideMesh = sideMesh;
+            this._sideGeometry = sideGeometry;
+            this._sideMaterial = sideMaterial;
+            this._sideVertexCount = sidePositions.length / 3;
+            this._group.add(sideMesh);
         }
-
-        const sideGeometry = new THREE.BufferGeometry();
-        sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
-        sideGeometry.setIndex(sideIndices);
-        sideGeometry.computeVertexNormals();
-
-        const sideMaterial = new THREE.MeshBasicMaterial({
-            color: this._fillColor,
-            opacity: this._fillOpacity,
-            transparent: this._fillOpacity < 1,
-            side: THREE.DoubleSide,
-            depthTest: this._depthTest,
-            depthWrite: this._depthWrite
-        });
-
-        const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-        sideMesh.renderOrder = 998;
-        this._sideMesh = sideMesh;
-        this._sideGeometry = sideGeometry;
-        this._sideMaterial = sideMaterial;
-        this._sideVertexCount = sidePositions.length / 3;
-        this._group.add(sideMesh);
     }
-}
 
     /**
      * Строит геометрию обводки полигона на основе Line2.
@@ -479,11 +485,131 @@ _buildFillGeometry(map) {
     }
 
     /**
+     * Привязывает обработчики событий мыши к canvas, если заданы onClick/onHover.
+     * Использует фазу захвата, чтобы перехватывать события до основных обработчиков карты.
+     *
+     * @param {Object} map - Экземпляр карты.
+     * @returns {void}
+     * @private
+     */
+    _bindEventHandlers(map) {
+        const canvas = map.renderer.domElement;
+        this._boundHandlers = {
+            mousedown: (e) => this._onCanvasMouseDown(e, map),
+            mousemove: (e) => this._onCanvasMouseMove(e, map),
+            click: (e) => this._onCanvasClick(e, map)
+        };
+        canvas.addEventListener('mousedown', this._boundHandlers.mousedown, true);
+        canvas.addEventListener('mousemove', this._boundHandlers.mousemove, true);
+        canvas.addEventListener('click', this._boundHandlers.click, true);
+    }
+
+    /**
+     * Удаляет привязанные обработчики событий с canvas.
+     *
+     * @returns {void}
+     * @private
+     */
+    _unbindEventHandlers() {
+        if (!this._boundHandlers || !this._map) return;
+        const canvas = this._map.renderer.domElement;
+        canvas.removeEventListener('mousedown', this._boundHandlers.mousedown, true);
+        canvas.removeEventListener('mousemove', this._boundHandlers.mousemove, true);
+        canvas.removeEventListener('click', this._boundHandlers.click, true);
+        this._boundHandlers = null;
+        this._isHovered = false;
+    }
+
+    /**
+     * Проверяет, находится ли точка экрана над геометрией полигона.
+     *
+     * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты.
+     * @returns {boolean} true, если луч пересекает хотя бы один меш полигона.
+     * @private
+     */
+    _raycastPolygon(event, map) {
+        if (!this._group.visible) return false;
+
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        const mouse = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, map.camera);
+
+        const objects = [];
+        if (this._fillMesh) objects.push(this._fillMesh);
+        if (this._sideMesh) objects.push(this._sideMesh);
+        if (this._bottomMesh) objects.push(this._bottomMesh);
+        if (objects.length === 0) return false;
+
+        const intersects = raycaster.intersectObjects(objects, false);
+        return intersects.length > 0;
+    }
+
+    /**
+     * Обработчик mousedown на canvas (фаза захвата).
+     * Если клик пришёлся по полигону, останавливает всплытие, чтобы карта не начала перетаскивание.
+     *
+     * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты.
+     * @returns {void}
+     * @private
+     */
+    _onCanvasMouseDown(event, map) {
+        if (!this._raycastPolygon(event, map)) return;
+        event.stopPropagation();
+    }
+
+    /**
+     * Обработчик mousemove на canvas (фаза захвата).
+     * Отслеживает состояние наведения и вызывает onHover при его изменении.
+     *
+     * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты.
+     * @returns {void}
+     * @private
+     */
+    _onCanvasMouseMove(event, map) {
+        if (!this._onHover) return;
+        const hit = this._raycastPolygon(event, map);
+        if (hit && !this._isHovered) {
+            this._isHovered = true;
+            this._onHover(true);
+        } else if (!hit && this._isHovered) {
+            this._isHovered = false;
+            this._onHover(false);
+        }
+    }
+
+    /**
+     * Обработчик click на canvas (фаза захвата).
+     * Если клик пришёлся по полигону, вызывает onClick.
+     *
+     * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты.
+     * @returns {void}
+     * @private
+     */
+    _onCanvasClick(event, map) {
+        if (!this._onClick) return;
+        if (this._raycastPolygon(event, map)) {
+            this._onClick(event, this);
+        }
+    }
+
+    /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
+     * Также отвязывает обработчики событий мыши.
      *
      * @returns {void}
      */
     remove() {
+        this._unbindEventHandlers();
+
         if (this._group) {
             this._group.parent?.remove(this._group);
             this._fillGeometry?.dispose();
@@ -604,25 +730,23 @@ _buildFillGeometry(map) {
         const needsUpdate = (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
 
         if (needsUpdate) {
-                        const wgPos = map.worldGroup.position;
+            const wgPos = map.worldGroup.position;
             // Высоты для верхней грани (и нижней, если экструдирован)
             for (let i = 0; i < this._vertices2D.length; i++) {
                 const localX = this._vertices2D[i].x;
                 const localZ = this._vertices2D[i].y;
                 let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
-                    // Мировая координата = позиция группы + локальная + сдвиг мира
                     const worldX = this._group.position.x + localX + wgPos.x;
                     const worldZ = this._group.position.z + localZ + wgPos.z;
                     map.ensureTileForPoint?.(worldX, worldZ);
                     base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
                 }
-                // Высота верхней грани
                 const upperY = base + this._minHeight + (this._extruded ? this._height : 0);
                 this._cachedHeights[i] = upperY;
             }
 
-            // Высоты для обводки (по верхнему контуру)
+            // Высоты для обводки
             const outerRing = this._rings[0];
             this._cachedStrokeHeights = new Array(outerRing.length);
             for (let i = 0; i < outerRing.length; i++) {
@@ -666,22 +790,17 @@ _buildFillGeometry(map) {
             let idx = 0;
             for (let i = 0; i < n; i++) {
                 const j = (i + 1) % n;
-                // Вершины: верх i, низ i, верх j, низ j
                 const upperI = this._cachedHeights[i];
                 const upperJ = this._cachedHeights[j];
                 const lowerI = upperI - this._height;
                 const lowerJ = upperJ - this._height;
 
-                // верх i (индекс idx*3)
                 sidePos[idx * 3 + 1] = upperI;
                 idx++;
-                // низ i
                 sidePos[idx * 3 + 1] = lowerI;
                 idx++;
-                // верх j
                 sidePos[idx * 3 + 1] = upperJ;
                 idx++;
-                // низ j
                 sidePos[idx * 3 + 1] = lowerJ;
                 idx++;
             }
@@ -701,7 +820,7 @@ _buildFillGeometry(map) {
         const outerRing = this._rings[0];
         const positions = [];
 
-                const groupPos = this._group.position;
+        const groupPos = this._group.position;
         for (let i = 0; i < outerRing.length; i++) {
             const [lon, lat] = outerRing[i];
             const [absX, absZ] = proj.fromLonLat([lon, lat]);
@@ -727,40 +846,39 @@ _buildFillGeometry(map) {
      * @returns {void}
      * @private
      */
-_updateCentroidScreenPos() {
-    if (!this._map || !this._centroidWorld) {
-        this._centroidScreenPos = null;
-        return;
-    }
-    const wgPos = this._map.worldGroup.position;
-    const worldX = this._centroidWorld.x + wgPos.x;
-    const worldZ = this._centroidWorld.z + wgPos.z; // центроид хранится в x и z
-
-    let worldY = this._altitudeOffset;
-    if (this._altitudeMode === 'clampToGround') {
-        const now = performance.now();
-        if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
-            this._map.ensureTileForPoint(worldX, worldZ);
-            this._cachedCentroidHeight = this._map.getSurfaceHeightAt(worldX, worldZ);
-            this._lastCentroidHeightUpdateTime = now;
+    _updateCentroidScreenPos() {
+        if (!this._map || !this._centroidWorld) {
+            this._centroidScreenPos = null;
+            return;
         }
-        worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
-    }
-    // Добавляем minHeight и высоту экструзии (если есть)
-    worldY += this._minHeight + (this._extruded ? this._height : 0);
+        const wgPos = this._map.worldGroup.position;
+        const worldX = this._centroidWorld.x + wgPos.x;
+        const worldZ = this._centroidWorld.z + wgPos.z;
 
-    const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
-    const screenPos = worldPos.clone().project(this._map.camera);
-    if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-        this._centroidScreenPos = null;
-        return;
+        let worldY = this._altitudeOffset;
+        if (this._altitudeMode === 'clampToGround') {
+            const now = performance.now();
+            if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
+                this._map.ensureTileForPoint(worldX, worldZ);
+                this._cachedCentroidHeight = this._map.getSurfaceHeightAt(worldX, worldZ);
+                this._lastCentroidHeightUpdateTime = now;
+            }
+            worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
+        }
+        worldY += this._minHeight + (this._extruded ? this._height : 0);
+
+        const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
+        const screenPos = worldPos.clone().project(this._map.camera);
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
+            this._centroidScreenPos = null;
+            return;
+        }
+        const canvas = this._map.renderer.domElement;
+        this._centroidScreenPos = {
+            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+        };
     }
-    const canvas = this._map.renderer.domElement;
-    this._centroidScreenPos = {
-        x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-        y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
-    };
-}
 
     // ---------- Интерфейс для TextManager ----------
 

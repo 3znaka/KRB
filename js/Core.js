@@ -544,6 +544,7 @@ _startCameraAnimationLoopIfNeeded() {
             target.z + currentDistance * sinP * Math.cos(currentAzimuth)
         );
         this.controls.target.copy(target);
+        this.textManager.update(); 
         this.controls.update();
 
         // Обновление тайлов (по желанию можно чаще)
@@ -831,6 +832,7 @@ _startCameraAnimationLoopIfNeeded() {
         this.raycasterDragger.setFromCamera(this.mouse, this.camera);
         if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
             this.worldGroup.position.copy(this.intersection).sub(this.dragLocalPoint);
+             this.textManager.update(); 
             this.maybeUpdateVisibleTiles();
         }
     }
@@ -939,6 +941,7 @@ _startCameraAnimationLoopIfNeeded() {
             this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
             if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
                 this.worldGroup.position.copy(this.intersection).sub(this.touchDragLocalPoint);
+                this.textManager.update(); 
                 this.maybeUpdateVisibleTiles();
             }
         } else if (this.touchState.isPinching && e.touches.length === 2) {
@@ -954,6 +957,7 @@ _startCameraAnimationLoopIfNeeded() {
                 Math.min(this.MAX_ZOOM, this.touchState.startZoom + zoomDelta)
             );
             this.controls.update();
+            this.textManager.update(); 
             this.maybeUpdateVisibleTiles();
         }
     }
@@ -1037,6 +1041,7 @@ _startCameraAnimationLoopIfNeeded() {
             target.z + dist * Math.sin(pitch) * Math.sin(azimuth)
         );
         this.camera.lookAt(target);
+        this.textManager.update();
     }
 
     /**
@@ -1196,6 +1201,7 @@ _startCameraAnimationLoopIfNeeded() {
             this.camera.position.copy(currentPos);
             this.controls.target.copy(currentTarget);
             this.controls.update();
+            this.textManager.update(); 
 
             this.continuousZoom = currentZoom;
             this.targetContinuousZoom = currentZoom;
@@ -1292,7 +1298,7 @@ _startCameraAnimationLoopIfNeeded() {
             this.camera.position.set(x, y, z);
             this.controls.target.copy(anim.startTarget);
             this.controls.update();
-
+this.textManager.update(); 
             if (Math.floor(t * 10) !== Math.floor((t - 1/60) * 10)) {
                 this.maybeUpdateVisibleTiles();
             }
@@ -1343,18 +1349,8 @@ _startCameraAnimationLoopIfNeeded() {
 
 this.maybeUpdateVisibleTiles();
 
-if (!this._pendingLabelUpdate) {
-    // Обновляем подписи и принудительно применяем layout
-    this.textManager.update();
-    void this.textManager.pane.offsetWidth;
-
-    // Откладываем рендер canvas на следующий кадр
-    this._pendingLabelUpdate = true;
-    requestAnimationFrame(() => {
-        this.renderer.render(this.scene, this.camera);
-        this._pendingLabelUpdate = false;
-    });
-}
+this.textManager.update();
+this.renderer.render(this.scene, this.camera);
 
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);

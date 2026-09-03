@@ -204,6 +204,7 @@ this._cameraAnimFrame = null;
 
         this.lastVisibleUpdateTime = 0;
         this.clock = new THREE.Clock();
+this._pendingLabelUpdate = false;
 
         this.bindEvents();
         // Первичное заполнение тайлами
@@ -1342,12 +1343,18 @@ _startCameraAnimationLoopIfNeeded() {
 
 this.maybeUpdateVisibleTiles();
 
+if (!this._pendingLabelUpdate) {
+    // Обновляем подписи и принудительно применяем layout
     this.textManager.update();
- 
-    void this.textManager.pane.offsetWidth; 
+    void this.textManager.pane.offsetWidth;
 
-    // ТЕПЕРЬ рендерим canvas
-    this.renderer.render(this.scene, this.camera);
+    // Откладываем рендер canvas на следующий кадр
+    this._pendingLabelUpdate = true;
+    requestAnimationFrame(() => {
+        this.renderer.render(this.scene, this.camera);
+        this._pendingLabelUpdate = false;
+    });
+}
 
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);

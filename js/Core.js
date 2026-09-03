@@ -1341,8 +1341,13 @@ _startCameraAnimationLoopIfNeeded() {
         }
 
 this.maybeUpdateVisibleTiles();
-this.renderer.render(this.scene, this.camera);
-this.textManager.update();
+
+    this.textManager.update();
+ 
+    void this.textManager.pane.offsetWidth; 
+
+    // ТЕПЕРЬ рендерим canvas
+    this.renderer.render(this.scene, this.camera);
 
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);

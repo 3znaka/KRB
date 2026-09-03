@@ -298,7 +298,7 @@ _wrapPointText(text, fontSize) {
             scrY = pos.y;
         }
 
-        if (!label.width || !label.height) this._measureLabel(label);
+
         const w = label.width;
         const h = label.height;
 
@@ -406,244 +406,291 @@ _wrapPointText(text, fontSize) {
      *    без перекрытий с уже размещёнными.
      * 5. Применение вычисленных позиций к DOM-элементам.
      */
-    update() {
-        const map = this.map;
-        const zoom = map.continuousZoom;
+update() {
+    const map = this.map;
+    const zoom = map.continuousZoom;
 
-        // Сброс stuck при изменении состава или зума
-        const currentIds = this.labels.map(l => l.source).filter(src => {
-            const zb = src.getTextZoomBounds();
-            return zoom >= zb.min && zoom <= zb.max && src.isVisible();
-        });
-        const idSet = new Set(currentIds);
-        if (!this._lastVisibleIds || !this._lastZoom ||
-            this._lastZoom !== zoom ||
-            this._lastVisibleIds.size !== idSet.size ||
-            [...this._lastVisibleIds].some(id => !idSet.has(id))) {
-            for (const lbl of this.labels) {
-                lbl.stuck = false;
-                lbl.hiddenByPriority = false;
-            }
+    // Сброс stuck при изменении состава или зума
+    const currentIds = this.labels.map(l => l.source).filter(src => {
+        const zb = src.getTextZoomBounds();
+        return zoom >= zb.min && zoom <= zb.max && src.isVisible();
+    });
+    const idSet = new Set(currentIds);
+    if (!this._lastVisibleIds || !this._lastZoom ||
+        this._lastZoom !== zoom ||
+        this._lastVisibleIds.size !== idSet.size ||
+        [...this._lastVisibleIds].some(id => !idSet.has(id))) {
+        for (const lbl of this.labels) {
+            lbl.stuck = false;
+            lbl.hiddenByPriority = false;
         }
-        this._lastVisibleIds = idSet;
-        this._lastZoom = zoom;
+    }
+    this._lastVisibleIds = idSet;
+    this._lastZoom = zoom;
 
-        // 1. Сбор видимых подписей
-        const visibleLabels = [];
-        for (const label of this.labels) {
-            const src = label.source;
-            const zoomBounds = src.getTextZoomBounds();
-            if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
+    // 1. Сбор видимых подписей
+    const visibleLabels = [];
+    for (const label of this.labels) {
+        const src = label.source;
+        const zoomBounds = src.getTextZoomBounds();
+        if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
+            label.element.style.display = 'none';
+            continue;
+        }
+        if (!src.isVisible()) {
+            label.element.style.display = 'none';
+            continue;
+        }
+
+        label.priority = src.getPriority ? src.getPriority() : 0;
+        label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
+        label.hiddenByPriority = false;
+
+        if (src.getLabelType() === 'line') {
+            const iv = src.getVisibleInterval();
+            if (!iv) {
                 label.element.style.display = 'none';
                 continue;
             }
-            if (!src.isVisible()) {
+            label.visibleInterval = iv;
+            label.t = src.getLabelParameter();
+            if (!label.allowOverflow) {
+                if (label.t < iv.min || label.t > iv.max) {
+                    label.t = Math.max(iv.min, Math.min(iv.max, label.t));
+                    src.setLabelParameter(label.t);
+                }
+            } else {
+                label.t = Math.max(0, Math.min(1, label.t));
+            }
+            label.rect = this._getLabelCorners(label);
+            if (label.rect) visibleLabels.push(label);
+        } else {
+            // Точечная подпись
+            const pos = src.getScreenPosition();
+            if (!pos) {
                 label.element.style.display = 'none';
                 continue;
             }
-
-            label.priority = src.getPriority ? src.getPriority() : 0;
-            label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
-
-            // сбрасываем hiddenByPriority каждый кадр — будет пересчитано ниже
-            label.hiddenByPriority = false;
-
-            if (src.getLabelType() === 'line') {
-                const iv = src.getVisibleInterval();
-                if (!iv) {
-                    label.element.style.display = 'none';
-                    continue;
-                }
-                label.visibleInterval = iv;
-                label.t = src.getLabelParameter();
-                if (!label.allowOverflow) {
-                    if (label.t < iv.min || label.t > iv.max) {
-                        label.t = Math.max(iv.min, Math.min(iv.max, label.t));
-                        src.setLabelParameter(label.t);
-                    }
-                } else {
-                    label.t = Math.max(0, Math.min(1, label.t));
-                }
-                label.rect = this._getLabelCorners(label);
-                if (label.rect) visibleLabels.push(label);
-            } else {
-                const pos = src.getScreenPosition();
-                if (!pos) {
-                    label.element.style.display = 'none';
-                    continue;
-                }
-                label.screenPos = pos;
-                label.rect = this._getLabelCorners(label);
-                if (label.rect) visibleLabels.push(label);
-            }
-        }
-
-        // 2. Раздвижение линейных подписей
-        const lineLabels = visibleLabels.filter(l => l.source.getLabelType() === 'line');
-        if (lineLabels.length > 0) {
-            const maxIterations = 15;
-            const learningRate = 0.4;
-            const stuckThreshold = 1e-5;
-
-            for (let iter = 0; iter < maxIterations; iter++) {
-                let anyChanged = false;
-
-                for (const lbl of lineLabels) {
-                    if (lbl.stuck) continue;
-
-                    lbl.rect = this._getLabelCorners(lbl);
-                    if (!lbl.rect) continue;
-
-                    const overlapping = [];
-                    for (const other of visibleLabels) {
-                        if (other === lbl) continue;
-                        if (other.rect && this._rectsIntersect(lbl.rect, other.rect)) {
-                            overlapping.push(other);
-                        }
-                    }
-
-                    if (overlapping.length === 0) continue;
-
-                    // учитываем только тех, у кого приоритет >= нашего
-                    const relevant = overlapping.filter(o => o.priority >= lbl.priority);
-                    if (relevant.length === 0) continue;
-
-                    const pi = lbl.source.getScreenPositionAt(lbl.t);
-                    if (!pi) continue;
-
-                    let forceX = 0, forceY = 0;
-                    for (const other of relevant) {
-                        const pj = (other.source.getLabelType() === 'line')
-                            ? other.source.getScreenPositionAt(other.t)
-                            : other.source.getScreenPosition();
-                        if (!pj) continue;
-
-                        const dx = pi.x - pj.x;
-                        const dy = pi.y - pj.y;
-                        const dist2 = dx * dx + dy * dy + 1;
-                        const forceMag = 1 / dist2;
-                        forceX += (dx / Math.sqrt(dist2)) * forceMag;
-                        forceY += (dy / Math.sqrt(dist2)) * forceMag;
-                    }
-
-                    const ang = lbl.source.getScreenAngleAt(lbl.t) * Math.PI / 180;
-                    const tangentX = Math.cos(ang);
-                    const tangentY = Math.sin(ang);
-                    const dot = forceX * tangentX + forceY * tangentY;
-                    const step = dot * learningRate;
-
-                    const oldT = lbl.t;
-                    let newT = oldT + step;
-
-                    if (lbl.allowOverflow) {
-                        newT = Math.max(0, Math.min(1, newT));
-                    } else {
-                        const iv = lbl.visibleInterval;
-                        if (iv) {
-                            newT = Math.max(iv.min, Math.min(iv.max, newT));
-                        }
-                    }
-
-                    if (Math.abs(newT - oldT) > 1e-7) {
-                        lbl.t = newT;
-                        anyChanged = true;
-                    }
-                }
-
-                if (!anyChanged) break;
-            }
-
-            // определение stuck для линий
-            for (const lbl of lineLabels) {
-                if (lbl.stuck) continue;
-                lbl.rect = this._getLabelCorners(lbl);
-                if (!lbl.rect) {
-                    lbl.stuck = true;
-                    continue;
-                }
-                const overlapping = visibleLabels.filter(o => o !== lbl && o.rect && this._rectsIntersect(lbl.rect, o.rect));
-                const oldT = lbl.source.getLabelParameter();
-                if (overlapping.length > 0 && Math.abs(lbl.t - oldT) < stuckThreshold) {
-                    lbl.stuck = true;
-                } else if (overlapping.length === 0) {
-                    lbl.stuck = false;
-                }
-            }
-
-            // сохраняем t в источники для незастрявших
-            for (const lbl of lineLabels) {
-                if (lbl.stuck) {
-                    lbl.t = lbl.source.getLabelParameter(); // откат
-                } else {
-                    lbl.source.setLabelParameter(lbl.t);
-                }
-            }
-        }
-
-        // 3. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
-        const sorted = [...visibleLabels].sort((a, b) => {
-            if (a.priority !== b.priority) return b.priority - a.priority;
-            const aLine = a.source.getLabelType() === 'line' ? 1 : 0;
-            const bLine = b.source.getLabelType() === 'line' ? 1 : 0;
-            if (aLine !== bLine) return aLine - bLine;
-            return a.source.getText().localeCompare(b.source.getText());
-        });
-
-        const placedRects = [];
-
-        for (const lbl of sorted) {
-            lbl.rect = this._getLabelCorners(lbl);
-            if (!lbl.rect) {
-                lbl.hiddenByPriority = true;
-                continue;
-            }
-
-            let overlaps = false;
-            for (const placed of placedRects) {
-                if (this._rectsIntersect(lbl.rect, placed)) {
-                    overlaps = true;
-                    break;
-                }
-            }
-
-            if (!overlaps) {
-                placedRects.push(lbl.rect);
-                lbl.hiddenByPriority = false;
-            } else {
-                lbl.hiddenByPriority = true;
-            }
-        }
-
-        // 4. Рендеринг DOM-элементов
-        for (const label of visibleLabels) {
-            const src = label.source;
-            const el = label.element;
-
-            if (label.hiddenByPriority) {
-                el.style.display = 'none';
-                continue;
-            }
-
-            let screenX, screenY, rotation = 0;
-
-            if (src.getLabelType() === 'line') {
-                const pos = src.getScreenPositionAt(label.t);
-                if (!pos) {
-                    el.style.display = 'none';
-                    continue;
-                }
-                screenX = pos.x;
-                screenY = pos.y;
-                rotation = src.getScreenAngleAt(label.t);
-            } else {
-                screenX = label.screenPos.x;
-                screenY = label.screenPos.y;
-            }
-
-            if (!label.width || !label.height) this._measureLabel(label);
+            label.screenPos = pos;
+            // Прямоугольник для коллизий (без поворота)
+            const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+            const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+            const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
             const w = label.width;
             const h = label.height;
 
+            let anchorX = 0;
+            if (align === 'center') anchorX = w / 2;
+            else if (align === 'right') anchorX = w;
+
+            let anchorY = 0;
+            if (vAlign === 'center') anchorY = h / 2;
+            else if (vAlign === 'bottom') anchorY = h;
+
+            const left = pos.x - anchorX + offX;
+            const top = pos.y - anchorY + offY;
+
+            // Сохраняем прямоугольник без использования _getLabelCorners (быстрее)
+            label.rect = [
+                { x: left, y: top },
+                { x: left + w, y: top },
+                { x: left + w, y: top + h },
+                { x: left, y: top + h }
+            ];
+            visibleLabels.push(label);
+        }
+    }
+
+    // 2. Раздвижение линейных подписей (точки в этом не участвуют, но их прямоугольники учитываются)
+    const lineLabels = visibleLabels.filter(l => l.source.getLabelType() === 'line');
+    if (lineLabels.length > 0) {
+        const maxIterations = 15;
+        const learningRate = 0.4;
+        const stuckThreshold = 1e-5;
+
+        for (let iter = 0; iter < maxIterations; iter++) {
+            let anyChanged = false;
+
+            for (const lbl of lineLabels) {
+                if (lbl.stuck) continue;
+
+                lbl.rect = this._getLabelCorners(lbl);
+                if (!lbl.rect) continue;
+
+                const overlapping = [];
+                for (const other of visibleLabels) {
+                    if (other === lbl) continue;
+                    if (other.rect && this._rectsIntersect(lbl.rect, other.rect)) {
+                        overlapping.push(other);
+                    }
+                }
+
+                if (overlapping.length === 0) continue;
+
+                const relevant = overlapping.filter(o => o.priority >= lbl.priority);
+                if (relevant.length === 0) continue;
+
+                const pi = lbl.source.getScreenPositionAt(lbl.t);
+                if (!pi) continue;
+
+                let forceX = 0, forceY = 0;
+                for (const other of relevant) {
+                    const pj = (other.source.getLabelType() === 'line')
+                        ? other.source.getScreenPositionAt(other.t)
+                        : other.source.getScreenPosition();
+                    if (!pj) continue;
+
+                    const dx = pi.x - pj.x;
+                    const dy = pi.y - pj.y;
+                    const dist2 = dx * dx + dy * dy + 1;
+                    const forceMag = 1 / dist2;
+                    forceX += (dx / Math.sqrt(dist2)) * forceMag;
+                    forceY += (dy / Math.sqrt(dist2)) * forceMag;
+                }
+
+                const ang = lbl.source.getScreenAngleAt(lbl.t) * Math.PI / 180;
+                const tangentX = Math.cos(ang);
+                const tangentY = Math.sin(ang);
+                const dot = forceX * tangentX + forceY * tangentY;
+                const step = dot * learningRate;
+
+                const oldT = lbl.t;
+                let newT = oldT + step;
+
+                if (lbl.allowOverflow) {
+                    newT = Math.max(0, Math.min(1, newT));
+                } else {
+                    const iv = lbl.visibleInterval;
+                    if (iv) {
+                        newT = Math.max(iv.min, Math.min(iv.max, newT));
+                    }
+                }
+
+                if (Math.abs(newT - oldT) > 1e-7) {
+                    lbl.t = newT;
+                    anyChanged = true;
+                }
+            }
+
+            if (!anyChanged) break;
+        }
+
+        // Определение stuck для линий
+        for (const lbl of lineLabels) {
+            if (lbl.stuck) continue;
+            lbl.rect = this._getLabelCorners(lbl);
+            if (!lbl.rect) {
+                lbl.stuck = true;
+                continue;
+            }
+            const overlapping = visibleLabels.filter(o => o !== lbl && o.rect && this._rectsIntersect(lbl.rect, o.rect));
+            const oldT = lbl.source.getLabelParameter();
+            if (overlapping.length > 0 && Math.abs(lbl.t - oldT) < stuckThreshold) {
+                lbl.stuck = true;
+            } else if (overlapping.length === 0) {
+                lbl.stuck = false;
+            }
+        }
+
+        // Сохраняем t в источники для незастрявших
+        for (const lbl of lineLabels) {
+            if (lbl.stuck) {
+                lbl.t = lbl.source.getLabelParameter();
+            } else {
+                lbl.source.setLabelParameter(lbl.t);
+            }
+        }
+    }
+
+    // 3. Жадная приоритизация для всех видимых подписей
+    const sorted = [...visibleLabels].sort((a, b) => {
+        if (a.priority !== b.priority) return b.priority - a.priority;
+        const aLine = a.source.getLabelType() === 'line' ? 1 : 0;
+        const bLine = b.source.getLabelType() === 'line' ? 1 : 0;
+        if (aLine !== bLine) return aLine - bLine;
+        return a.source.getText().localeCompare(b.source.getText());
+    });
+
+    const placedRects = [];
+
+    for (const lbl of sorted) {
+        // Для точек прямоугольник уже вычислен, для линий пересчитываем (актуально после раздвижения)
+        if (lbl.source.getLabelType() === 'line') {
+            lbl.rect = this._getLabelCorners(lbl);
+        }
+        if (!lbl.rect) {
+            lbl.hiddenByPriority = true;
+            continue;
+        }
+
+        let overlaps = false;
+        for (const placed of placedRects) {
+            if (this._rectsIntersect(lbl.rect, placed)) {
+                overlaps = true;
+                break;
+            }
+        }
+
+        if (!overlaps) {
+            placedRects.push(lbl.rect);
+            lbl.hiddenByPriority = false;
+        } else {
+            lbl.hiddenByPriority = true;
+        }
+    }
+
+    // 4. Рендеринг DOM-элементов
+    for (const label of visibleLabels) {
+        const src = label.source;
+        const el = label.element;
+
+        if (label.hiddenByPriority) {
+            el.style.display = 'none';
+            continue;
+        }
+
+        if (src.getLabelType() === 'point') {
+            // Для точечных подписей уже есть screenPos и заранее вычисленный rect, 
+            // поэтому просто применяем left/top из rect (или пересчитываем для надёжности)
+            const pos = label.screenPos;
+            if (!pos) {
+                el.style.display = 'none';
+                continue;
+            }
+            const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+            const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+            const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+            const w = label.width;
+            const h = label.height;
+
+            let anchorX = 0;
+            if (align === 'center') anchorX = w / 2;
+            else if (align === 'right') anchorX = w;
+
+            let anchorY = 0;
+            if (vAlign === 'center') anchorY = h / 2;
+            else if (vAlign === 'bottom') anchorY = h;
+
+            const left = pos.x - anchorX + offX;
+            const top = pos.y - anchorY + offY;
+
+            el.style.display = 'block';
+            el.style.left = left + 'px';
+            el.style.top = top + 'px';
+            // transform не используется для точек
+            el.style.transform = '';
+        } else {
+            // Для линий сохраняем прежний способ с transform
+            const pos = src.getScreenPositionAt(label.t);
+            if (!pos) {
+                el.style.display = 'none';
+                continue;
+            }
+            const screenX = pos.x;
+            const screenY = pos.y;
+            const rotation = src.getScreenAngleAt(label.t);
+            const w = label.width;
+            const h = label.height;
             const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
             const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
 
@@ -668,18 +715,20 @@ _wrapPointText(text, fontSize) {
 
             let top = screenY + dy + offY;
 
-            if (src.getLabelType() === 'line') {
-                const style = window.getComputedStyle(el);
-                const fontSize = parseFloat(style.fontSize) || 12;
-                top += fontSize;
-            }
+            // Используем fontSize из inline-стиля, чтобы не вызывать getComputedStyle
+            const fontSize = parseFloat(el.style.fontSize) || 12;
+            top += fontSize;
 
             el.style.display = 'block';
             let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
-if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
-    transform += ` rotate(${rotation}deg)`;
-}
-el.style.transform = transform;
+            if (src.getPlacement() === 'along') {
+                transform += ` rotate(${rotation}deg)`;
+            }
+            el.style.transform = transform;
+            // left/top сбрасываем, так как используется transform
+            el.style.left = '0';
+            el.style.top = '0';
         }
     }
+}
 }

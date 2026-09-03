@@ -1343,18 +1343,8 @@ _startCameraAnimationLoopIfNeeded() {
 
 this.maybeUpdateVisibleTiles();
 
-if (!this._pendingLabelUpdate) {
-    // Обновляем подписи и принудительно применяем layout
-    this.textManager.update();
-    void this.textManager.pane.offsetWidth;
-
-    // Откладываем рендер canvas на следующий кадр
-    this._pendingLabelUpdate = true;
-    requestAnimationFrame(() => {
-        this.renderer.render(this.scene, this.camera);
-        this._pendingLabelUpdate = false;
-    });
-}
+this.textManager.update();
+this.renderer.render(this.scene, this.camera);
 
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);

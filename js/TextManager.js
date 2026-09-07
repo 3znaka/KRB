@@ -682,4 +682,4 @@ if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
 el.style.transform = transform;
         }
     }
-}
+} 

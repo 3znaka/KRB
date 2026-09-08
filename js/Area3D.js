@@ -329,12 +329,19 @@ _applyModelTransform() {
     model.rotation.set(0, 0, 0);
     model.updateMatrixWorld(true);
 
-    // Временно убираем из родителя, чтобы получить ЛОКАЛЬНЫЙ bounding box
+    // Получаем локальный bounding box (без родительского поворота)
     if (parent) parent.remove(model);
     model.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     if (parent) parent.add(model);
+
+    const rotate = this._rotate; // 0..3
+
+    // Определяем, какие исходные оси модели после поворота rotate*90°
+    // будут соответствовать ширине и глубине полигона.
+    const widthModel = (rotate % 2 === 0) ? size.x : size.z;
+    const depthModel = (rotate % 2 === 0) ? size.z : size.x;
 
     let targetW, targetH, targetD;
     if (this._fit === 'stretch') {
@@ -344,15 +351,21 @@ _applyModelTransform() {
             const [, hFromSize] = this._normalizeSize(this._size);
             targetH = hFromSize;
         } else {
-            // Равномерный масштаб contain, затем растягиваем только по X/Z
-            const containScale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
+            // Равномерный масштаб contain на основе "повёрнутых" осей
+            const containScale = Math.min(
+                this._polygonWidth / widthModel,
+                this._polygonDepth / depthModel
+            );
             targetH = size.y * containScale;
         }
     } else if (this._fit === 'contain') {
-        const scale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
-        targetW = size.x * scale;
-        targetH = size.y * scale;
-        targetD = size.z * scale;
+        const containScale = Math.min(
+            this._polygonWidth / widthModel,
+            this._polygonDepth / depthModel
+        );
+        targetW = widthModel * containScale;
+        targetH = size.y * containScale;
+        targetD = depthModel * containScale;
     } else {
         if (this._size) {
             [targetW, targetH, targetD] = this._normalizeSize(this._size);
@@ -363,17 +376,26 @@ _applyModelTransform() {
         }
     }
 
-    const scaleX = targetW / size.x;
+    // Вычисляем масштабы с учётом rotate: при нечётном повороте
+    // оси X и Z меняются местами.
+    let scaleX, scaleZ;
+    if (rotate % 2 === 0) {
+        scaleX = targetW / size.x;
+        scaleZ = targetD / size.z;
+    } else {
+        scaleX = targetD / size.x;
+        scaleZ = targetW / size.z;
+    }
     const scaleY = targetH / size.y;
-    const scaleZ = targetD / size.z;
+
     model.scale.set(scaleX, scaleY, scaleZ);
 
-    const totalAngle = this._polygonAngle + this._rotate * Math.PI / 2;
+    const totalAngle = this._polygonAngle + rotate * Math.PI / 2;
     model.rotation.y = totalAngle;
 
     model.updateMatrixWorld(true);
 
-    // Снова временно убираем, чтобы получить локальный transformed box
+    // Временно убираем модель, чтобы получить локальный transformed box
     if (parent) parent.remove(model);
     model.updateMatrixWorld(true);
     const transformedBox = new THREE.Box3().setFromObject(model);
@@ -390,7 +412,6 @@ _applyModelTransform() {
     model.position.sub(anchorPoint);
     model.updateMatrixWorld(true);
 }
-
     _normalizeSize(size) {
         if (!size) return [100, 100, 100];
         if (typeof size === 'number') return [size, size, size];

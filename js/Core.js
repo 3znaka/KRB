@@ -1348,17 +1348,15 @@ export class KrbMap {
 
         this.maybeUpdateVisibleTiles();
 
-        // Обновляем подписи (TextManager)
-        if (this.textManager) {
-            this.textManager.update();
-        }
+for (const layer of this._dynamicLayers) {
+    if (layer._postUpdate) layer._postUpdate(this);
+}
 
-        // Обновляем динамические слои
-        for (const layer of this._dynamicLayers) {
-            if (layer._postUpdate) layer._postUpdate(this);
-        }
+if (this.textManager) {
+    this.textManager.update();
+}
 
-        // Рендерим сцену один раз
-        this.renderer.render(this.scene, this.camera);
+// Рендерим сцену
+this.renderer.render(this.scene, this.camera);
     }
 }

@@ -1,7 +1,8 @@
 // geojson.js — загрузка GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon), стилизация через свойства и коллбэки
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
-import { Marker3D } from './Marker3D.js'; // Добавлен импорт 3D-маркера
+import { Marker3D } from './Marker3D.js';
+import { Area3D } from './Area3D.js'; // Добавлен импорт Area3D
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
 import { proj } from './Utils.js';
@@ -16,6 +17,7 @@ import { proj } from './Utils.js';
  * - фильтрацию объектов (feature) перед добавлением на карту;
  * - кастомную стилизацию через коллбэки: pointToOptions, lineToOptions, polygonToOptions;
  * - добавление 3D-маркеров для точечных объектов (см. point3DToOptions и свойства 3d);
+ * - добавление 3D-объектов для площадных объектов (см. polygon3DToOptions и свойства 3d);
  * - вызов onEachFeature(feature, object) после создания каждого графического объекта.
  *
  * @param {Object} [options={}] - Объект с настройками слоя.
@@ -29,9 +31,11 @@ import { proj } from './Utils.js';
  *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polyline}.
  * @param {Function} [options.polygonToOptions] - Функция для создания опций полигона.
  *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polygon}.
+ * @param {Function} [options.polygon3DToOptions] - Функция для создания опций 3D-площадного объекта.
+ *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Area3D}.
  * @param {Function} [options.filter] - Функция фильтрации фич. Принимает feature, должна вернуть true, чтобы фича была добавлена.
  * @param {Function} [options.onEachFeature] - Функция, вызываемая после создания каждого графического объекта.
- *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline или Polygon.
+ *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline, Polygon или Area3D.
  *
  * @param {string} [options.defaultIconUrl='marker.png'] - URL иконки по умолчанию для маркеров.
  * @param {number[]} [options.defaultIconSize=[16,16]] - Размер иконки по умолчанию [ширина, высота].
@@ -64,7 +68,20 @@ import { proj } from './Utils.js';
  * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
  * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
  * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
- * 
+ * @param {boolean} [options.defaultPolygonExtruded=false] - Включить экструзию полигонов по умолчанию.
+ * @param {number} [options.defaultPolygonHeight=0] - Толщина экструзии по умолчанию (в метрах).
+ * @param {number} [options.defaultPolygonMinHeight=0] - Высота нижней грани над поверхностью по умолчанию (в метрах).
+ *
+ * @param {string} [options.defaultPolygon3DPrimitiveType='box'] - Тип примитива Area3D по умолчанию.
+ * @param {number[]} [options.defaultPolygon3DSize=null] - Размеры Area3D для примитивов (если не задан modelUrl).
+ * @param {number[]} [options.defaultPolygon3DAnchor=[0.5,0,0.5]] - Anchor point Area3D по умолчанию.
+ * @param {number} [options.defaultPolygon3DAltitude=0] - Высота Area3D по умолчанию.
+ * @param {string} [options.defaultPolygon3DAltitudeMode='clampToGround'] - Режим высоты Area3D по умолчанию.
+ * @param {string} [options.defaultPolygon3DFit='stretch'] - Режим вписывания модели в полигон ('stretch', 'contain').
+ * @param {number} [options.defaultPolygon3DRotate=0] - Поворот модели (0-3, кратно 90°).
+ * @param {string} [options.defaultPolygon3DModelUrl=null] - URL GLB-модели для Area3D по умолчанию.
+ * @param {boolean} [options.defaultPolygon3DDepthTest=true] - Включение теста глубины для Area3D.
+ * @param {boolean} [options.defaultPolygon3DDepthWrite=true] - Запись глубины для Area3D.
  *
 /**
  * @example
@@ -78,6 +95,12 @@ import { proj } from './Utils.js';
  *         extruded: props.extruded !== undefined ? props.extruded : true,
  *         height: props.height || 300,
  *         minHeight: props.minHeight || 0
+ *     }),
+ *     polygon3DToOptions: (feature, props) => ({
+ *         modelUrl: props.modelUrl,
+ *         fit: props.fit || 'stretch',
+ *         rotate: props.rotate || 0,
+ *         altitude: props.altitude || 0
  *     }),
  *     filter: (feature) => feature.properties.visible !== false,
  *     onEachFeature: (feature, object) => console.log(feature, object),
@@ -109,10 +132,19 @@ import { proj } from './Utils.js';
  *     defaultPolygonDepthWrite: true,
  *     defaultPolygonMinZoom: 10,
  *     defaultPolygonMaxZoom: 18,
- *     // Новые параметры экструзии по умолчанию
  *     defaultPolygonExtruded: false,
  *     defaultPolygonHeight: 500,
- *     defaultPolygonMinHeight: 200
+ *     defaultPolygonMinHeight: 200,
+ *     defaultPolygon3DPrimitiveType: 'box',
+ *     defaultPolygon3DSize: null,
+ *     defaultPolygon3DAnchor: [0.5, 0, 0.5],
+ *     defaultPolygon3DAltitude: 0,
+ *     defaultPolygon3DAltitudeMode: 'clampToGround',
+ *     defaultPolygon3DFit: 'stretch',
+ *     defaultPolygon3DRotate: 0,
+ *     defaultPolygon3DModelUrl: null,
+ *     defaultPolygon3DDepthTest: true,
+ *     defaultPolygon3DDepthWrite: true
  * });
  * layer.addTo(map);
  * layer.reload();
@@ -132,9 +164,11 @@ export class GeoJSONLayer extends Layer {
      *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polyline}.
      * @param {Function} [options.polygonToOptions] - Функция для создания опций полигона.
      *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polygon}.
+     * @param {Function} [options.polygon3DToOptions] - Функция для создания опций 3D-площадного объекта.
+     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Area3D}.
      * @param {Function} [options.filter] - Функция фильтрации фич. Принимает feature, должна вернуть true, чтобы фича была добавлена.
      * @param {Function} [options.onEachFeature] - Функция, вызываемая после создания каждого графического объекта.
-     *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline или Polygon.
+     *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline, Polygon или Area3D.
      *
      * @param {string} [options.defaultIconUrl='marker.png'] - URL иконки по умолчанию для маркеров.
      * @param {number[]} [options.defaultIconSize=[16,16]] - Размер иконки по умолчанию [ширина, высота].
@@ -170,6 +204,16 @@ export class GeoJSONLayer extends Layer {
      * @param {boolean} [options.defaultPolygonExtruded=false] - Включить экструзию полигонов по умолчанию.
      * @param {number} [options.defaultPolygonHeight=0] - Толщина экструзии по умолчанию (в метрах).
      * @param {number} [options.defaultPolygonMinHeight=0] - Высота нижней грани над поверхностью по умолчанию (в метрах).
+     * @param {string} [options.defaultPolygon3DPrimitiveType='box'] - Тип примитива Area3D по умолчанию.
+     * @param {number[]} [options.defaultPolygon3DSize=null] - Размеры Area3D для примитивов (если не задан modelUrl).
+     * @param {number[]} [options.defaultPolygon3DAnchor=[0.5,0,0.5]] - Anchor point Area3D по умолчанию.
+     * @param {number} [options.defaultPolygon3DAltitude=0] - Высота Area3D по умолчанию.
+     * @param {string} [options.defaultPolygon3DAltitudeMode='clampToGround'] - Режим высоты Area3D по умолчанию.
+     * @param {string} [options.defaultPolygon3DFit='stretch'] - Режим вписывания модели в полигон ('stretch', 'contain').
+     * @param {number} [options.defaultPolygon3DRotate=0] - Поворот модели (0-3, кратно 90°).
+     * @param {string} [options.defaultPolygon3DModelUrl=null] - URL GLB-модели для Area3D по умолчанию.
+     * @param {boolean} [options.defaultPolygon3DDepthTest=true] - Включение теста глубины для Area3D.
+     * @param {boolean} [options.defaultPolygon3DDepthWrite=true] - Запись глубины для Area3D.
      */
     constructor(options = {}) {
         super();
@@ -180,9 +224,10 @@ export class GeoJSONLayer extends Layer {
         this.onEachFeature = options.onEachFeature || null;
 
         this.pointToOptions = options.pointToOptions || null;
-        this.point3DToOptions = options.point3DToOptions || null; // Новый коллбэк для 3D-точек
+        this.point3DToOptions = options.point3DToOptions || null;
         this.lineToOptions = options.lineToOptions || null;
         this.polygonToOptions = options.polygonToOptions || null;
+        this.polygon3DToOptions = options.polygon3DToOptions || null; // Новый коллбэк для 3D-площадных объектов
 
         // --- Параметры по умолчанию для обычных маркеров ---
         this.defaultIconUrl = options.defaultIconUrl || 'marker.png';
@@ -195,7 +240,6 @@ export class GeoJSONLayer extends Layer {
         this.default3DAnchor = options.default3DAnchor || [0.5, 0, 0.5];
         this.default3DAltitude = options.default3DAltitude ?? 0;
         this.default3DAltitudeMode = options.default3DAltitudeMode || 'clampToGround';
-        // Возможные дополнительные дефолты: rotation, modelUrl и т.д.
 
         // --- Параметры по умолчанию для линий ---
         this.defaultLineColor = options.defaultLineColor || '#3388ff';
@@ -220,10 +264,21 @@ export class GeoJSONLayer extends Layer {
         this.defaultPolygonDepthWrite = options.defaultPolygonDepthWrite ?? false;
         this.defaultPolygonMinZoom = options.defaultPolygonMinZoom ?? -Infinity;
         this.defaultPolygonMaxZoom = options.defaultPolygonMaxZoom ?? Infinity;
+        this.defaultPolygonExtruded = options.defaultPolygonExtruded ?? false;
+        this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
+        this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
 
-this.defaultPolygonExtruded = options.defaultPolygonExtruded ?? false;
-this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
-this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
+        // --- Параметры по умолчанию для Area3D (3D-площадные объекты) ---
+        this.defaultPolygon3DPrimitiveType = options.defaultPolygon3DPrimitiveType || 'box';
+        this.defaultPolygon3DSize = options.defaultPolygon3DSize || null;
+        this.defaultPolygon3DAnchor = options.defaultPolygon3DAnchor || [0.5, 0, 0.5];
+        this.defaultPolygon3DAltitude = options.defaultPolygon3DAltitude ?? 0;
+        this.defaultPolygon3DAltitudeMode = options.defaultPolygon3DAltitudeMode || 'clampToGround';
+        this.defaultPolygon3DFit = options.defaultPolygon3DFit || 'stretch';
+        this.defaultPolygon3DRotate = options.defaultPolygon3DRotate || 0;
+        this.defaultPolygon3DModelUrl = options.defaultPolygon3DModelUrl || null;
+        this.defaultPolygon3DDepthTest = options.defaultPolygon3DDepthTest ?? true;
+        this.defaultPolygon3DDepthWrite = options.defaultPolygon3DDepthWrite ?? true;
 
         this._loaded = false;
     }
@@ -380,35 +435,30 @@ this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
                 options = this._default3DPointOptions(feature, props);
             }
 
-           const marker3DOptions = {
-    position: coords,
-    title: options.title || props.title || props.name || '',
-    tooltip: options.tooltip || props.tooltip || props.description || '',
-    primitiveType: options.primitiveType || props.primitiveType || this.default3DPrimitiveType,
-    size: options.size || this._parseSize(props.size) || this.default3DSize,
-    anchor: options.anchor || this._parseTriple(props.anchor) || this.default3DAnchor,
-    altitude: options.altitude ?? props.altitude ?? this.default3DAltitude,
-    altitudeMode: options.altitudeMode || props.altitudeMode || this.default3DAltitudeMode,
-    rotation: options.rotation || props.rotation || [0, 0, 0],
-    modelUrl: options.modelUrl || props.modelUrl,
-    minZoom: options.minZoom ?? props.minZoom ?? -Infinity,
-    maxZoom: options.maxZoom ?? props.maxZoom ?? Infinity,
-
-    // ===== ДОБАВИТЬ ЭТИ ПОЛЯ =====
-    titlePlacement: options.titlePlacement || props.titlePlacement || 'top',
-    titleAlign: options.titleAlign || props.titleAlign || undefined,
-    titleOffset: options.titleOffset || this._parsePair(props.titleOffset) || undefined,
-    titleStyle: options.titleStyle || props.titleStyle || {},
-    // ============================
-
-    titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
-    titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
-
-    onHover: options.onHover,
-    onClick: options.onClick,
-    color: options.color || props.color,
-    clusterable: options.clusterable !== undefined ? options.clusterable : false
-};
+            const marker3DOptions = {
+                position: coords,
+                title: options.title || props.title || props.name || '',
+                tooltip: options.tooltip || props.tooltip || props.description || '',
+                primitiveType: options.primitiveType || props.primitiveType || this.default3DPrimitiveType,
+                size: options.size || this._parseSize(props.size) || this.default3DSize,
+                anchor: options.anchor || this._parseTriple(props.anchor) || this.default3DAnchor,
+                altitude: options.altitude ?? props.altitude ?? this.default3DAltitude,
+                altitudeMode: options.altitudeMode || props.altitudeMode || this.default3DAltitudeMode,
+                rotation: options.rotation || props.rotation || [0, 0, 0],
+                modelUrl: options.modelUrl || props.modelUrl,
+                minZoom: options.minZoom ?? props.minZoom ?? -Infinity,
+                maxZoom: options.maxZoom ?? props.maxZoom ?? Infinity,
+                titlePlacement: options.titlePlacement || props.titlePlacement || 'top',
+                titleAlign: options.titleAlign || props.titleAlign || undefined,
+                titleOffset: options.titleOffset || this._parsePair(props.titleOffset) || undefined,
+                titleStyle: options.titleStyle || props.titleStyle || {},
+                titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
+                titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+                onHover: options.onHover,
+                onClick: options.onClick,
+                color: options.color || props.color,
+                clusterable: options.clusterable !== undefined ? options.clusterable : false
+            };
 
             const marker3D = new Marker3D(marker3DOptions);
             this.add(marker3D);
@@ -564,8 +614,9 @@ this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
     }
 
     /**
-     * Создаёт полигональные объекты (Polygon) на основе фичи с геометрией Polygon или MultiPolygon.
-     * Для MultiPolygon создаётся отдельный полигон на каждый набор колец.
+     * Создаёт полигональные объекты (Polygon или Area3D) на основе фичи с геометрией Polygon или MultiPolygon.
+     * Для MultiPolygon создаётся отдельный объект на каждый набор колец.
+     * Если фича определена как 3D (через polygon3DToOptions или свойства), создаётся Area3D, иначе обычный Polygon.
      *
      * @param {Object} feature - GeoJSON-фича с геометрией Polygon или MultiPolygon.
      * @private
@@ -580,28 +631,78 @@ this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
         for (const rings of polygonSets) {
             if (!rings.length || !rings[0].length) continue;
 
-            let options;
-            if (this.polygonToOptions) {
-                options = this.polygonToOptions(feature, props) || {};
+            // Определяем, является ли полигон 3D
+            const is3D = (this.polygon3DToOptions && this.polygon3DToOptions(feature, props))
+                || props['3d'] === true
+                || props.type === '3d'
+                || props.markerType === '3d';
+
+            if (is3D) {
+                // --- Создание 3D-площадного объекта (Area3D) ---
+                let options3D;
+                if (this.polygon3DToOptions) {
+                    options3D = this.polygon3DToOptions(feature, props) || {};
+                } else {
+                    options3D = this._defaultPolygon3DOptions(feature, props);
+                }
+
+                const areaOptions = {
+                    rings: rings,
+                    modelUrl: options3D.modelUrl || props.modelUrl || this.defaultPolygon3DModelUrl,
+                    fit: options3D.fit || props.fit || this.defaultPolygon3DFit,
+                    rotate: options3D.rotate ?? props.rotate ?? this.defaultPolygon3DRotate,
+                    primitiveType: options3D.primitiveType || props.primitiveType || this.defaultPolygon3DPrimitiveType,
+                    size: options3D.size || this._parseSize(props.size) || this.defaultPolygon3DSize,
+                    anchor: options3D.anchor || this._parseTriple(props.anchor) || this.defaultPolygon3DAnchor,
+                    altitude: options3D.altitude ?? props.altitude ?? this.defaultPolygon3DAltitude,
+                    altitudeMode: options3D.altitudeMode || props.altitudeMode || this.defaultPolygon3DAltitudeMode,
+                    color: options3D.color || props.color || 0x3388ff,
+                    depthTest: options3D.depthTest ?? props.depthTest ?? this.defaultPolygon3DDepthTest,
+                    depthWrite: options3D.depthWrite ?? props.depthWrite ?? this.defaultPolygon3DDepthWrite,
+                    minZoom: options3D.minZoom ?? props.minZoom ?? -Infinity,
+                    maxZoom: options3D.maxZoom ?? props.maxZoom ?? Infinity,
+                    title: options3D.title ?? props.title ?? props.name ?? '',
+                    titlePlacement: options3D.titlePlacement || props.titlePlacement || 'top',
+                    titleAlign: options3D.titleAlign || props.titleAlign || undefined,
+                    titleOffset: options3D.titleOffset || this._parsePair(props.titleOffset) || undefined,
+                    titleStyle: options3D.titleStyle || props.titleStyle || {},
+                    titleMinZoom: options3D.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
+                    titleMaxZoom: options3D.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+                    tooltip: options3D.tooltip || props.tooltip || props.description || '',
+                    onHover: options3D.onHover,
+                    onClick: options3D.onClick
+                };
+
+                const area = new Area3D(areaOptions);
+                this.add(area);
+                if (this.onEachFeature) {
+                    this.onEachFeature(feature, area);
+                }
             } else {
-                options = this._defaultPolygonOptions(feature, props);
-            }
+                // --- Создание обычного полигона ---
+                let options;
+                if (this.polygonToOptions) {
+                    options = this.polygonToOptions(feature, props) || {};
+                } else {
+                    options = this._defaultPolygonOptions(feature, props);
+                }
 
-            const polygonOptions = {
-                rings: rings,
-                ...options,
-                title: options.title ?? props.title ?? props.name ?? '',
-                titleOffset: options.titleOffset ?? this._parsePair(props.titleOffset),
-                titleAlign: options.titleAlign ?? props.titleAlign ?? 'center',
-                titleStyle: options.titleStyle ?? props.titleStyle ?? {},
-                titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
-                titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
-            };
+                const polygonOptions = {
+                    rings: rings,
+                    ...options,
+                    title: options.title ?? props.title ?? props.name ?? '',
+                    titleOffset: options.titleOffset ?? this._parsePair(props.titleOffset),
+                    titleAlign: options.titleAlign ?? props.titleAlign ?? 'center',
+                    titleStyle: options.titleStyle ?? props.titleStyle ?? {},
+                    titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
+                    titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+                };
 
-            const polygon = new Polygon(polygonOptions);
-            this.add(polygon);
-            if (this.onEachFeature) {
-                this.onEachFeature(feature, polygon);
+                const polygon = new Polygon(polygonOptions);
+                this.add(polygon);
+                if (this.onEachFeature) {
+                    this.onEachFeature(feature, polygon);
+                }
             }
         }
     }
@@ -615,27 +716,61 @@ this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
      * @returns {Object} Объект с опциями полигона.
      * @private
      */
-_defaultPolygonOptions(feature, props) {
-    return {
-        fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
-        fillOpacity: props['fill-opacity'] ?? this.defaultFillOpacity,
-        strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
-        strokeWidth: props['stroke-width'] ?? this.defaultStrokeWidth,
-        strokeOpacity: props['stroke-opacity'] ?? this.defaultStrokeOpacity,
-        altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
-        altitudeOffset: props.altitudeOffset ?? this.defaultPolygonAltitudeOffset,
-        depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
-        depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
-        minZoom: props.minZoom ?? this.defaultPolygonMinZoom,
-        maxZoom: props.maxZoom ?? this.defaultPolygonMaxZoom,
+    _defaultPolygonOptions(feature, props) {
+        return {
+            fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
+            fillOpacity: props['fill-opacity'] ?? this.defaultFillOpacity,
+            strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
+            strokeWidth: props['stroke-width'] ?? this.defaultStrokeWidth,
+            strokeOpacity: props['stroke-opacity'] ?? this.defaultStrokeOpacity,
+            altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
+            altitudeOffset: props.altitudeOffset ?? this.defaultPolygonAltitudeOffset,
+            depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
+            depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
+            minZoom: props.minZoom ?? this.defaultPolygonMinZoom,
+            maxZoom: props.maxZoom ?? this.defaultPolygonMaxZoom,
+            extruded: props.extruded ?? this.defaultPolygonExtruded,
+            height: props.height ?? this.defaultPolygonHeight,
+            minHeight: props.minHeight ?? this.defaultPolygonMinHeight,
+        };
+    }
 
-        // ===== ДОБАВЛЕНО: экструзия =====
-        extruded: props.extruded ?? this.defaultPolygonExtruded,
-        height: props.height ?? this.defaultPolygonHeight,
-        minHeight: props.minHeight ?? this.defaultPolygonMinHeight,
-        // ===============================
-    };
-}
+    /**
+     * Возвращает умолчательные опции для 3D-площадного объекта (Area3D), полученные из свойств фичи.
+     * Используется, когда не задан коллбэк polygon3DToOptions, но полигон определён как 3D.
+     *
+     * @param {Object} feature - GeoJSON-фича.
+     * @param {Object} props - Свойства (properties) фичи.
+     * @returns {Object} Объект с опциями Area3D.
+     * @private
+     */
+    _defaultPolygon3DOptions(feature, props) {
+        return {
+            modelUrl: props.modelUrl || this.defaultPolygon3DModelUrl,
+            fit: props.fit || this.defaultPolygon3DFit,
+            rotate: props.rotate ?? this.defaultPolygon3DRotate,
+            primitiveType: props.primitiveType || this.defaultPolygon3DPrimitiveType,
+            size: this._parseSize(props.size) || this.defaultPolygon3DSize,
+            anchor: this._parseTriple(props.anchor) || this.defaultPolygon3DAnchor,
+            altitude: props.altitude ?? this.defaultPolygon3DAltitude,
+            altitudeMode: props.altitudeMode || this.defaultPolygon3DAltitudeMode,
+            color: props.color,
+            depthTest: props.depthTest ?? this.defaultPolygon3DDepthTest,
+            depthWrite: props.depthWrite ?? this.defaultPolygon3DDepthWrite,
+            minZoom: props.minZoom,
+            maxZoom: props.maxZoom,
+            title: props.title || props.name,
+            titlePlacement: props.titlePlacement,
+            titleAlign: props.titleAlign,
+            titleOffset: this._parsePair(props.titleOffset),
+            titleStyle: props.titleStyle,
+            titleMinZoom: props.titleMinZoom,
+            titleMaxZoom: props.titleMaxZoom,
+            tooltip: props.tooltip || props.description,
+            onHover: props.onHover,
+            onClick: props.onClick
+        };
+    }
 
     /**
      * Преобразует сырое значение размера (массив или строка с запятой) в массив двух чисел.

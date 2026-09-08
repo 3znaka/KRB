@@ -57,6 +57,12 @@ export function initUI(map) {
     zoomLabel.className = 'krb-zoom-label';
     const coordLabel = document.createElement('span');
     coordLabel.className = 'krb-coord-label';
+const fpsLabel = document.createElement('span');
+fpsLabel.className = 'krb-fps-label';
+fpsLabel.textContent = 'FPS: --';
+zoomLabel.appendChild(fpsLabel);
+
+
     zoomLabel.appendChild(coordLabel);
     pane.appendChild(zoomLabel);
     scaleContainer.appendChild(scaleBar);
@@ -235,12 +241,25 @@ function getGroundDistanceForPixels(map, pixelLength) {
         return m.toFixed(0) + ' м';
     }
 
+
+let lastFpsUpdate = performance.now();
+let frames = 0;
+
     /**
      * Цикл анимации: обновляет UI и поворачивает значок компаса.
      * @private
      */
-    function animateUI() {
-        updateScaleBar();
+  function animateUI() {
+    const now = performance.now();
+    frames++;
+    if (now - lastFpsUpdate >= 500) {          // обновляем два раза в секунду
+        const fps = Math.round((frames * 1000) / (now - lastFpsUpdate));
+        fpsLabel.textContent = `FPS: ${fps}`;
+        frames = 0;
+        lastFpsUpdate = now;
+    }
+
+    updateScaleBar();
         
         const dir = new THREE.Vector3().subVectors(
             map.controls.target,

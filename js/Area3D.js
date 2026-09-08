@@ -241,19 +241,12 @@ export class Area3D {
     _createPrimitive() {
         let [w, h, d] = this._normalizeSize(this._size);
         if (this._fit === 'stretch') {
-    targetW = this._polygonWidth;
-    targetD = this._polygonDepth;
-    
-    // Если высота явно задана через size, используем её
-    if (this._size) {
-        const [, hFromSize] = this._normalizeSize(this._size);
-        targetH = hFromSize;
-    } else {
-        // Иначе высота = высота исходной модели, умноженная на равномерный масштаб contain
-        const containScale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
-        targetH = size.y * containScale;
-    }
-} else if (this._fit === 'contain') {
+            w = this._polygonWidth;
+            d = this._polygonDepth;
+            if (this._size !== null) {
+                [, h] = this._normalizeSize(this._size);
+            }
+        } else if (this._fit === 'contain') {
             const scale = Math.min(this._polygonWidth / w, this._polygonDepth / d);
             w *= scale;
             d *= scale;
@@ -324,75 +317,79 @@ export class Area3D {
         return this._modelPromise;
     }
 
-    _applyModelTransform() {
-        if (!this._object3D) return;
+_applyModelTransform() {
+    if (!this._object3D) return;
 
-        const model = this._object3D;
-        const parent = model.parent;
+    const model = this._object3D;
+    const parent = model.parent;
 
-        // Сброс трансформаций
-        model.position.set(0, 0, 0);
-        model.scale.set(1, 1, 1);
-        model.rotation.set(0, 0, 0);
-        model.updateMatrixWorld(true);
+    // Сброс трансформаций
+    model.position.set(0, 0, 0);
+    model.scale.set(1, 1, 1);
+    model.rotation.set(0, 0, 0);
+    model.updateMatrixWorld(true);
 
-        // Временно убираем из родителя, чтобы получить ЛОКАЛЬНЫЙ bounding box
-        if (parent) parent.remove(model);
-        model.updateMatrixWorld(true);
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        if (parent) parent.add(model);
+    // Временно убираем из родителя, чтобы получить ЛОКАЛЬНЫЙ bounding box
+    if (parent) parent.remove(model);
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    if (parent) parent.add(model);
 
-        let targetW, targetH, targetD;
-        if (this._fit === 'stretch') {
-            targetW = this._polygonWidth;
-            targetD = this._polygonDepth;
-            targetH = size.y;
-            if (this._size) {
-                [, targetH] = this._normalizeSize(this._size);
-            }
-        } else if (this._fit === 'contain') {
-            const scale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
-            targetW = size.x * scale;
-            targetH = size.y * scale;
-            targetD = size.z * scale;
+    let targetW, targetH, targetD;
+    if (this._fit === 'stretch') {
+        targetW = this._polygonWidth;
+        targetD = this._polygonDepth;
+        if (this._size) {
+            const [, hFromSize] = this._normalizeSize(this._size);
+            targetH = hFromSize;
         } else {
-            if (this._size) {
-                [targetW, targetH, targetD] = this._normalizeSize(this._size);
-            } else {
-                targetW = size.x;
-                targetH = size.y;
-                targetD = size.z;
-            }
+            // Равномерный масштаб contain, затем растягиваем только по X/Z
+            const containScale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
+            targetH = size.y * containScale;
         }
-
-        const scaleX = targetW / size.x;
-        const scaleY = targetH / size.y;
-        const scaleZ = targetD / size.z;
-        model.scale.set(scaleX, scaleY, scaleZ);
-
-        const totalAngle = this._polygonAngle + this._rotate * Math.PI / 2;
-        model.rotation.y = totalAngle;
-
-        model.updateMatrixWorld(true);
-
-        // Снова временно убираем, чтобы получить локальный transformed box
-        if (parent) parent.remove(model);
-        model.updateMatrixWorld(true);
-        const transformedBox = new THREE.Box3().setFromObject(model);
-        const transformedSize = transformedBox.getSize(new THREE.Vector3());
-        const transformedMin = transformedBox.min.clone();
-        if (parent) parent.add(model);
-
-        const anchorPoint = new THREE.Vector3(
-            transformedMin.x + this._anchor[0] * transformedSize.x,
-            transformedMin.y + this._anchor[1] * transformedSize.y,
-            transformedMin.z + this._anchor[2] * transformedSize.z
-        );
-
-        model.position.sub(anchorPoint);
-        model.updateMatrixWorld(true);
+    } else if (this._fit === 'contain') {
+        const scale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
+        targetW = size.x * scale;
+        targetH = size.y * scale;
+        targetD = size.z * scale;
+    } else {
+        if (this._size) {
+            [targetW, targetH, targetD] = this._normalizeSize(this._size);
+        } else {
+            targetW = size.x;
+            targetH = size.y;
+            targetD = size.z;
+        }
     }
+
+    const scaleX = targetW / size.x;
+    const scaleY = targetH / size.y;
+    const scaleZ = targetD / size.z;
+    model.scale.set(scaleX, scaleY, scaleZ);
+
+    const totalAngle = this._polygonAngle + this._rotate * Math.PI / 2;
+    model.rotation.y = totalAngle;
+
+    model.updateMatrixWorld(true);
+
+    // Снова временно убираем, чтобы получить локальный transformed box
+    if (parent) parent.remove(model);
+    model.updateMatrixWorld(true);
+    const transformedBox = new THREE.Box3().setFromObject(model);
+    const transformedSize = transformedBox.getSize(new THREE.Vector3());
+    const transformedMin = transformedBox.min.clone();
+    if (parent) parent.add(model);
+
+    const anchorPoint = new THREE.Vector3(
+        transformedMin.x + this._anchor[0] * transformedSize.x,
+        transformedMin.y + this._anchor[1] * transformedSize.y,
+        transformedMin.z + this._anchor[2] * transformedSize.z
+    );
+
+    model.position.sub(anchorPoint);
+    model.updateMatrixWorld(true);
+}
 
     _normalizeSize(size) {
         if (!size) return [100, 100, 100];

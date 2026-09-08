@@ -173,6 +173,8 @@ export class Marker {
         
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
+
+        /** @private */ this._hideTimeout = null; // таймер для fade-out
     }
 
     /**
@@ -227,7 +229,9 @@ export class Marker {
             transform: `translate(${-this._anchor[0] * 100}%, ${-this._anchor[1] * 100}%)`,
             pointerEvents: 'auto',
             cursor: 'pointer',
-            display: 'none'
+            display: 'none',
+            transition: 'opacity 0.08s linear', // fade-анимация
+            opacity: '0'
         });
         if (this._iconUrl) {
             const img = document.createElement('img');
@@ -303,6 +307,11 @@ export class Marker {
      * отсоединяет от слоя и сбрасывает состояние.
      */
     remove() {
+        // Отменяем таймер скрытия, если есть
+        if (this._hideTimeout) {
+            clearTimeout(this._hideTimeout);
+            this._hideTimeout = null;
+        }
         if (this._element) {
             this._element.remove();
             this._element = null;
@@ -321,6 +330,53 @@ export class Marker {
     }
 
     /**
+     * Плавно показывает или скрывает DOM-элемент маркера.
+     * Использует CSS transition для fade-in / fade-out (80 мс ≈ 5 кадров).
+     *
+     * @param {boolean} visible - Целевое состояние видимости.
+     * @private
+     */
+    _setVisible(visible) {
+        const el = this._element;
+        if (!el) return;
+
+        if (visible) {
+            // Отменяем таймер скрытия, если он был запланирован
+            if (this._hideTimeout) {
+                clearTimeout(this._hideTimeout);
+                this._hideTimeout = null;
+            }
+
+            // Если элемент скрыт (display: none) — делаем fade-in
+            if (el.style.display === 'none') {
+                el.style.display = 'block';
+                el.style.opacity = '0';
+                // Принудительный reflow для запуска transition
+                void el.offsetWidth;
+                el.style.opacity = '1';
+            } else {
+                // Уже видим — просто устанавливаем opacity: 1 (transition анимирует при необходимости)
+                el.style.opacity = '1';
+            }
+        } else {
+            // Если уже скрыт — ничего не делаем
+            if (el.style.display === 'none') return;
+
+            // Запускаем fade-out
+            el.style.opacity = '0';
+
+            // Планируем скрытие после завершения анимации
+            if (this._hideTimeout) clearTimeout(this._hideTimeout);
+            this._hideTimeout = setTimeout(() => {
+                if (parseFloat(el.style.opacity) === 0) {
+                    el.style.display = 'none';
+                }
+                this._hideTimeout = null;
+            }, 80);
+        }
+    }
+
+    /**
      * Обновляет позицию маркера на экране. Вызывается картой на каждом кадре.
      * Учитывает кластеризацию, видимость слоя, зум, расстояние до камеры и рельеф.
      *
@@ -335,20 +391,20 @@ export class Marker {
         // Кластеризация
         if (this._layer && this._layer._clusterActive) {
             if (!this._layer._clusterVisibleMarkers || !this._layer._clusterVisibleMarkers.has(this)) {
-                this._element.style.display = 'none';
+                this._setVisible(false);
                 this._isVisible = false;
                 return;
             }
         }
 
         if (this._layer && !this._layer.visible) {
-            this._element.style.display = 'none';
+            this._setVisible(false);
             this._isVisible = false;
             return;
         }
 
         if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._element.style.display = 'none';
+            this._setVisible(false);
             this._isVisible = false;
             return;
         }
@@ -373,7 +429,7 @@ export class Marker {
         if (map.view.objectDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
-                this._element.style.display = 'none';
+                this._setVisible(false);
                 this._isVisible = false;
                 return;
             }
@@ -381,7 +437,7 @@ export class Marker {
 
         const screenPos = worldPos.clone().project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-            this._element.style.display = 'none';
+            this._setVisible(false);
             this._isVisible = false;
             return;
         }
@@ -390,9 +446,10 @@ export class Marker {
         const x = (screenPos.x * 0.5 + 0.5) * canvas.clientWidth;
         const y = (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight;
 
-        this._element.style.display = 'block';
+        // Обновляем позицию и показываем элемент
         this._element.style.left = x + 'px';
         this._element.style.top = y + 'px';
+        this._setVisible(true);
 
         this._lastScreenPos = { x, y };
         this._isVisible = true;

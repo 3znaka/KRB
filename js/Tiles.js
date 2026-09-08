@@ -32,13 +32,6 @@ const ANCESTOR_FALLBACK = 4;
 const MAX_COVER_DEPTH = 2; // глубина поиска потомков при отдалении
 
 /**
- * Длительность fade-анимации (в миллисекундах), ≈ 5 кадров при 60 fps.
- * @type {number}
- * @private
- */
-const FADE_DURATION = 80;
-
-/**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
  *
  * @property {THREE.Texture} texture - Текстура тайла.
@@ -155,7 +148,7 @@ export class TileManager {
      */
     constructor(engine) {
         this.engine = engine;
-        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation, fadeAnim }
+        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation }
         this.textureCache = new Map(); // url -> { texture, refs }
         this.textureLoader = new THREE.TextureLoader();
         this.textureLoader.setCrossOrigin('anonymous');
@@ -248,20 +241,12 @@ export class TileManager {
             }
         }
 
-        // Переключение видимости с fade-анимацией
+        // Переключение видимости
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
-            if (show) {
-                if (inst.mesh.visible !== true || inst.mesh.material.opacity < 1) {
-                    this.fadeIn(inst);
-                }
-                inst.lastUsed = this.frame;
-            } else {
-                if (inst.mesh.visible !== false) {
-                    this.fadeOut(inst);
-                }
-            }
+            if (inst.mesh.visible !== show) inst.mesh.visible = show;
+            if (show) inst.lastUsed = this.frame;
         }
 
         this.gc(renderSet);
@@ -346,8 +331,7 @@ export class TileManager {
             lastUsed: this.frame,
             heightsApplied: false,
             elevationAppliedLevel: 0,
-            expectsElevation: false,
-            fadeAnim: null          // идентификатор requestAnimationFrame для fade
+            expectsElevation: false
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -421,42 +405,40 @@ export class TileManager {
      * @returns {THREE.Mesh} Меш тайла.
      * @private
      */
-    createTileMesh(inst, texture) {
-        const { z, virtX, y } = inst;
-        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
-        const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
-        const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
-        const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
+createTileMesh(inst, texture) {
+    const { z, virtX, y } = inst;
+    const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
+    const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
+    const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
+    const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
 
-        let geometry;
-        if (!this.hasElevation && this.flatTileGeometry) {
-            geometry = this.flatTileGeometry.clone();
-            geometry.rotateX(-Math.PI / 2);
-            // Трансляция убрана
-        } else {
-            geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
-            geometry.rotateX(-Math.PI / 2);
-            // Трансляция убрана
-        }
-
-        const mat = new THREE.MeshBasicMaterial({
-            map: texture,
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation,
-            transparent: true,      // включаем прозрачность для fade
-            opacity: 0              // начальная прозрачность (невидим)
-        });
-
-        const mesh = new THREE.Mesh(geometry, mat);
-        mesh.position.set(
-            originX + tileSize / 2,
-            this.hasElevation ? z * LEVEL_Y_STEP : 0,
-            originZ + tileSize / 2
-        );
-        mesh.renderOrder = z;
-        mesh.visible = false;       // скрыт до появления
-        return mesh;
+    let geometry;
+    if (!this.hasElevation && this.flatTileGeometry) {
+        geometry = this.flatTileGeometry.clone();
+        geometry.rotateX(-Math.PI / 2);
+        // Трансляция убрана
+    } else {
+        geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
+        geometry.rotateX(-Math.PI / 2);
+        // Трансляция убрана
     }
+
+    const mat = new THREE.MeshBasicMaterial({
+        map: texture,
+        depthWrite: this.hasElevation,
+        depthTest: this.hasElevation
+    });
+
+    const mesh = new THREE.Mesh(geometry, mat);
+mesh.position.set(
+  originX + tileSize / 2,
+  this.hasElevation ? z * LEVEL_Y_STEP : 0,  
+  originZ + tileSize / 2
+);
+    mesh.renderOrder = z;
+    mesh.visible = false;
+    return mesh;
+}
 
     /**
      * Создаёт статический фоновый меш тайла.
@@ -467,25 +449,25 @@ export class TileManager {
      * @param {THREE.Texture|null} texture - Текстура (может быть null).
      * @returns {THREE.Mesh} Меш фонового тайла.
      */
-    createStaticTileMesh(tileSize, originX, originZ, texture) {
-        const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
-        geom.rotateX(-Math.PI / 2);
-        // Трансляция убрана
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            map: texture,
-            depthWrite: false,
-            depthTest: false
-        });
-        const mesh = new THREE.Mesh(geom, mat);
-        mesh.position.set(
-            originX + tileSize / 2,
-            -1.5,
-            originZ + tileSize / 2
-        );
-        mesh.renderOrder = -2;
-        return mesh;
-    }
+createStaticTileMesh(tileSize, originX, originZ, texture) {
+    const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
+    geom.rotateX(-Math.PI / 2);
+    // Трансляция убрана
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        map: texture,
+        depthWrite: false,
+        depthTest: false
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(
+        originX + tileSize / 2,
+        -1.5,
+        originZ + tileSize / 2
+    );
+    mesh.renderOrder = -2;
+    return mesh;
+}
 
     /* ---- текстуры ---- */
     /**
@@ -859,11 +841,6 @@ export class TileManager {
      * @private
      */
     disposeTile(inst) {
-        // Отменяем анимацию, если она идёт
-        if (inst.fadeAnim) {
-            cancelAnimationFrame(inst.fadeAnim);
-            inst.fadeAnim = null;
-        }
         this.tiles.delete(this.key(inst.z, inst.virtX, inst.y));
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
@@ -871,78 +848,6 @@ export class TileManager {
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
-    }
-
-    /* ---- Fade-анимация тайлов ---- */
-    /**
-     * Запускает плавное появление тайла (fade-in).
-     *
-     * @param {Object} inst - Объект тайла.
-     * @returns {void}
-     * @private
-     */
-    fadeIn(inst) {
-        const mesh = inst.mesh;
-        if (!mesh) return;
-        mesh.visible = true;
-        this._animateOpacity(inst, 1);
-    }
-
-    /**
-     * Запускает плавное исчезновение тайла (fade-out) с последующим скрытием.
-     *
-     * @param {Object} inst - Объект тайла.
-     * @returns {void}
-     * @private
-     */
-    fadeOut(inst) {
-        this._animateOpacity(inst, 0, () => {
-            if (inst.mesh) inst.mesh.visible = false;
-        });
-    }
-
-    /**
-     * Внутренняя функция анимации прозрачности материала тайла.
-     *
-     * @param {Object} inst - Объект тайла.
-     * @param {number} targetOpacity - Целевая прозрачность (0..1).
-     * @param {Function} [onComplete] - Колбэк по завершении.
-     * @returns {void}
-     * @private
-     */
-    _animateOpacity(inst, targetOpacity, onComplete) {
-        if (!inst.mesh || !inst.mesh.material) {
-            if (onComplete) onComplete();
-            return;
-        }
-
-        // Отменяем предыдущую анимацию
-        if (inst.fadeAnim) {
-            cancelAnimationFrame(inst.fadeAnim);
-            inst.fadeAnim = null;
-        }
-
-        const material = inst.mesh.material;
-        if (!material.transparent) {
-            material.transparent = true;
-        }
-        const startOpacity = material.opacity;
-        const startTime = performance.now();
-
-        const step = (now) => {
-            const t = Math.min((now - startTime) / FADE_DURATION, 1);
-            material.opacity = startOpacity + (targetOpacity - startOpacity) * t;
-
-            if (t < 1) {
-                inst.fadeAnim = requestAnimationFrame(step);
-            } else {
-                material.opacity = targetOpacity;
-                inst.fadeAnim = null;
-                if (onComplete) onComplete();
-            }
-        };
-
-        inst.fadeAnim = requestAnimationFrame(step);
     }
 
     /* ---- Worker (без изменений) ---- */

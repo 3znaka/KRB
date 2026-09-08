@@ -23,6 +23,10 @@ import { Layer } from './Layers.js';
 const AREA3D_RENDER_ORDER = 1000;
 
 export class Area3D {
+
+
+
+    
     /** @private */ static _idCounter = 0;
     /** @private */ static _activeAreas = new Set();
     /** @private */ static _hoveredArea = null;
@@ -68,6 +72,12 @@ export class Area3D {
      * @throws {Error} Если rings отсутствует или пуст.
      */
     constructor(options = {}) {
+
+        console.log('Area3D constructor called with options:', options);
+    console.log('options.rings:', options.rings);
+    console.log('options.rings[0]:', options.rings?.[0]);
+    console.log('options.rings[0]?.length:', options.rings?.[0]?.length);
+    
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }
@@ -158,6 +168,9 @@ export class Area3D {
         }
     }
 
+
+
+    
     /* ================================================================
        Публичные методы
        ================================================================ */

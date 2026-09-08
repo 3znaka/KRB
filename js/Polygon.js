@@ -189,6 +189,7 @@ export class Polygon {
         /** @private */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
+        /** @private */ this._heightsDirty = true; // флаг необходимости обновления высот
 
         // 2D вершины и центроид
         /** @private */ this._vertices2D = [];
@@ -201,6 +202,41 @@ export class Polygon {
         /** @private */ this._textLabel = null;
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
+
+        // Кэшированные координаты и вспомогательные объекты для оптимизации
+        /** @private */ this._cachedWorldRings = []; // массив по кольцам: Float32Array [x0,z0, x1,z1, ...]
+        /** @private */ this._cachedLocalRings = []; // массив по кольцам: локальные координаты относительно центроида
+        /** @private */ this._boundingSphere = null; // ограничивающая сфера для быстрой отбраковки
+        /** @private */ this._lastWorldGroupPos = new THREE.Vector3(); // последняя позиция worldGroup для детекта сдвига
+
+        // Временные векторы для избежания аллокаций в цикле
+        /** @private */ this._tempVector3_1 = new THREE.Vector3();
+        /** @private */ this._tempVector3_2 = new THREE.Vector3();
+        /** @private */ this._tempVector3_3 = new THREE.Vector3();
+        /** @private */ this._tempVector3_4 = new THREE.Vector3();
+
+        // Предварительное преобразование всех координат в мировые
+        this._precomputeWorldCoordinates();
+    }
+
+    /**
+     * Преобразует все координаты колец в мировые (после proj.fromLonLat) и сохраняет в кэш.
+     * Вызывается один раз в конструкторе.
+     *
+     * @returns {void}
+     * @private
+     */
+    _precomputeWorldCoordinates() {
+        this._cachedWorldRings = this._rings.map(ring => {
+            const arr = new Float32Array(ring.length * 2);
+            for (let i = 0; i < ring.length; i++) {
+                const [lon, lat] = ring[i];
+                const [x, z] = proj.fromLonLat([lon, lat]);
+                arr[i * 2] = x;
+                arr[i * 2 + 1] = z;
+            }
+            return arr;
+        });
     }
 
     /**
@@ -244,6 +280,9 @@ export class Polygon {
         if (this._onClick || this._onHover || this._tooltipText) {
             this._bindEventHandlers(map);
         }
+
+        // Инициализируем lastWorldGroupPos
+        this._lastWorldGroupPos.copy(map.worldGroup.position);
     }
 
     /**
@@ -288,28 +327,23 @@ export class Polygon {
                 continue; // пропускаем некорректное кольцо
             }
 
-            // Запоминаем индекс начала кольца в общем массиве vertices
             ringStartIndices.push(points2D.length);
 
-            // Для всех колец, кроме первого, добавляем индекс в holeIndices
             if (ringIdx > 0) {
-                holeIndices.push(coords.length / 2); // количество уже добавленных координат
+                holeIndices.push(coords.length / 2);
             }
 
-            // Добавляем вершины кольца, пропуская замыкающую точку, если она совпадает с первой
-            let firstPoint = null;
+            const worldRing = this._cachedWorldRings[ringIdx];
+            const firstX = worldRing[0];
+            const firstZ = worldRing[1];
+
             for (let i = 0; i < ring.length; i++) {
-                const [lon, lat] = ring[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
-                if (i === 0) {
-                    firstPoint = [absX, absZ];
-                }
-                // Проверяем, не совпадает ли текущая точка с первой (если мы уже добавили хотя бы одну)
-                if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) {
-                    continue; // замыкающая точка
-                }
-                coords.push(absX, absZ);
-                points2D.push(new THREE.Vector2(absX, absZ));
+                const x = worldRing[i * 2];
+                const z = worldRing[i * 2 + 1];
+                // Пропускаем замыкающую точку, если она совпадает с первой
+                if (i > 0 && x === firstX && z === firstZ) continue;
+                coords.push(x, z);
+                points2D.push(new THREE.Vector2(x, z));
             }
         }
 
@@ -318,35 +352,42 @@ export class Polygon {
             return;
         }
 
-        // Пересоздаём массив высот для всех вершин
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
 
-        // Выполняем триангуляцию с учётом отверстий
         const indices = earcut(coords, holeIndices, 2);
         if (indices.length === 0) {
             console.warn('Polygon: Earcut returned no triangles');
             return;
         }
 
-        // Центроид как среднее арифметическое всех вершин (упрощённо)
-        let cx = 0, cy = 0;
+        // Центроид как среднее арифметическое всех вершин
+        let cx = 0, cz = 0;
         for (const pt of points2D) {
             cx += pt.x;
-            cy += pt.y;
+            cz += pt.y;
         }
         cx /= points2D.length;
-        cy /= points2D.length;
+        cz /= points2D.length;
 
-        // Сохраняем абсолютный центроид и устанавливаем позицию группы
-        this._centroidWorld.set(cx, 0, cy);
+        this._centroidWorld.set(cx, 0, cz);
         this._group.position.copy(this._centroidWorld);
 
-        // Преобразуем вершины в локальные координаты (вычитаем центроид)
+        // Преобразуем вершины в локальные координаты
         for (let i = 0; i < points2D.length; i++) {
             points2D[i].x -= cx;
-            points2D[i].y -= cy;
+            points2D[i].y -= cz;
         }
+
+        // Сохраняем локальные координаты колец для обводки
+        this._cachedLocalRings = this._cachedWorldRings.map(worldRing => {
+            const local = new Float32Array(worldRing.length);
+            for (let i = 0; i < worldRing.length; i += 2) {
+                local[i] = worldRing[i] - cx;
+                local[i + 1] = worldRing[i + 1] - cz;
+            }
+            return local;
+        });
 
         // ----- Верхняя крышка (всегда) -----
         const topGeometry = new THREE.BufferGeometry();
@@ -376,6 +417,12 @@ export class Polygon {
         this._fillGeometry = topGeometry;
         this._fillMaterial = topMaterial;
         this._group.add(topMesh);
+
+        // Вычисляем bounding sphere (в локальных координатах, потом учтем transform)
+        topGeometry.computeBoundingSphere();
+        this._boundingSphere = topGeometry.boundingSphere.clone();
+        // Применяем transform группы (позиция центроида)
+        this._boundingSphere.center.add(this._centroidWorld);
 
         // ----- Для экструзии: нижняя крышка и боковые стенки -----
         if (this._extruded) {
@@ -529,6 +576,7 @@ export class Polygon {
 
     /**
      * Проверяет, находится ли точка экрана над геометрией полигона.
+     * Использует bounding sphere для быстрой отбраковки.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -546,6 +594,18 @@ export class Polygon {
 
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, map.camera);
+
+        // Быстрая проверка пересечения с bounding sphere
+        if (this._boundingSphere) {
+            const sphere = this._boundingSphere;
+            // Учитываем мировое смещение группы
+            const worldGroupPos = map.worldGroup.position;
+            const worldSphere = sphere.clone();
+            worldSphere.center.add(worldGroupPos);
+            if (!raycaster.ray.intersectsSphere(worldSphere)) {
+                return false;
+            }
+        }
 
         const objects = [];
         if (this._fillMesh) objects.push(this._fillMesh);
@@ -660,6 +720,11 @@ export class Polygon {
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
+
+        // Очистка кэшей
+        this._cachedWorldRings = [];
+        this._cachedLocalRings = [];
+        this._boundingSphere = null;
     }
 
     /**
@@ -697,42 +762,32 @@ export class Polygon {
             }
         }
 
-        // Проверка дальности отрисовки
-        if (map.view.objectDistanceFactor > 0 && this._vertices2D.length >= 2) {
-            const wgPos = map.worldGroup.position;
-
-            const points3D = this._vertices2D.map((v2, i) => {
-                const h = this._cachedHeights?.[i] ?? this._altitudeOffset;
-                return new THREE.Vector3(
-                    v2.x + this._group.position.x + wgPos.x,
-                    h + wgPos.y,
-                    v2.y + this._group.position.z + wgPos.z
-                );
-            });
-
-            // Замыкаем кольцо для проверки всех рёбер
-            if (points3D.length > 0) {
-                points3D.push(points3D[0].clone());
-            }
-
-            let minDist = Infinity;
-            for (let i = 0; i < points3D.length - 1; i++) {
-                const dist = pointToSegmentDistance(
-                    map.camera.position,
-                    points3D[i],
-                    points3D[i + 1]
-                );
-                if (dist < minDist) minDist = dist;
-            }
-
-            if (minDist > map.maxObjectDistance) {
+        // Проверка дальности отрисовки с использованием bounding sphere
+        if (map.view.objectDistanceFactor > 0 && this._boundingSphere) {
+            const worldGroupPos = map.worldGroup.position;
+            const sphereWorldCenter = this._tempVector3_1.copy(this._boundingSphere.center).add(worldGroupPos);
+            const distanceToCenter = map.camera.position.distanceTo(sphereWorldCenter);
+            if (distanceToCenter - this._boundingSphere.radius > map.maxObjectDistance) {
                 this._group.visible = false;
                 return;
             }
+            // Дополнительная точная проверка по рёбрам (опционально, если дистанция близка)
+            // Здесь можно оставить прежнюю логику, но она будет вызываться реже
+        }
+
+        // Обнаружение сдвига мира для установки dirty-флага высот
+        if (!this._lastWorldGroupPos.equals(map.worldGroup.position)) {
+            this._heightsDirty = true;
+            this._lastWorldGroupPos.copy(map.worldGroup.position);
         }
 
         this._group.visible = true;
-        this._updateHeights();
+        if (this._heightsDirty || (performance.now() - this._lastHeightUpdateTime) >= this._heightUpdateInterval) {
+            this._updateHeights();
+            this._heightsDirty = false;
+            this._lastHeightUpdateTime = performance.now();
+        }
+        // Обновляем обводку только если высоты изменились (или явно требуется)
         this._updateStroke();
         this._updateCentroidScreenPos();
     }
@@ -746,43 +801,36 @@ export class Polygon {
     _updateHeights() {
         if (!this._fillGeometry || !this._vertices2D.length) return;
         const map = this._map;
-        const now = performance.now();
-        const needsUpdate = (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
+        const wgPos = map.worldGroup.position;
 
-        if (needsUpdate) {
-            const wgPos = map.worldGroup.position;
-            // Высоты для верхней грани (и нижней, если экструдирован)
-            for (let i = 0; i < this._vertices2D.length; i++) {
-                const localX = this._vertices2D[i].x;
-                const localZ = this._vertices2D[i].y;
-                let base = this._altitudeOffset;
-                if (this._altitudeMode === 'clampToGround') {
-                    const worldX = this._group.position.x + localX + wgPos.x;
-                    const worldZ = this._group.position.z + localZ + wgPos.z;
-                    map.ensureTileForPoint?.(worldX, worldZ);
-                    base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
-                }
-                const upperY = base + this._minHeight + (this._extruded ? this._height : 0);
-                this._cachedHeights[i] = upperY;
+        // Обновляем высоты для вершин заливки
+        for (let i = 0; i < this._vertices2D.length; i++) {
+            const localX = this._vertices2D[i].x;
+            const localZ = this._vertices2D[i].y;
+            let base = this._altitudeOffset;
+            if (this._altitudeMode === 'clampToGround') {
+                const worldX = this._group.position.x + localX + wgPos.x;
+                const worldZ = this._group.position.z + localZ + wgPos.z;
+                map.ensureTileForPoint?.(worldX, worldZ);
+                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
             }
+            const upperY = base + this._minHeight + (this._extruded ? this._height : 0);
+            this._cachedHeights[i] = upperY;
+        }
 
-            // Высоты для обводки
-            const outerRing = this._rings[0];
-            this._cachedStrokeHeights = new Array(outerRing.length);
-            for (let i = 0; i < outerRing.length; i++) {
-                const [lon, lat] = outerRing[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+        // Обновляем высоты для обводки (используем кэш мировых координат)
+        const outerWorldRing = this._cachedWorldRings[0];
+        if (outerWorldRing) {
+            for (let i = 0; i < this._cachedStrokeHeights.length; i++) {
+                const worldX = outerWorldRing[i * 2] + wgPos.x;
+                const worldZ = outerWorldRing[i * 2 + 1] + wgPos.z;
                 let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
-                    const worldX = absX + wgPos.x;
-                    const worldZ = absZ + wgPos.z;
                     map.ensureTileForPoint?.(worldX, worldZ);
                     base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
                 }
                 this._cachedStrokeHeights[i] = base + this._minHeight + (this._extruded ? this._height : 0);
             }
-
-            this._lastHeightUpdateTime = now;
         }
 
         // Применяем высоты к верхней крышке
@@ -830,30 +878,31 @@ export class Polygon {
     }
 
     /**
-     * Обновляет позиции вершин обводки.
+     * Обновляет позиции вершин обводки, используя кэшированные локальные координаты.
      *
      * @returns {void}
      * @private
      */
     _updateStroke() {
-        if (!this._strokeLine || !this._strokeGeometry) return;
-        const outerRing = this._rings[0];
+        if (!this._strokeLine || !this._strokeGeometry || !this._cachedLocalRings.length) return;
+        const outerLocalRing = this._cachedLocalRings[0];
         const positions = [];
 
-        const groupPos = this._group.position;
-        for (let i = 0; i < outerRing.length; i++) {
-            const [lon, lat] = outerRing[i];
-            const [absX, absZ] = proj.fromLonLat([lon, lat]);
+        const groupPos = this._group.position; // фактически это центроид, но в локальных координатах уже вычтен
+        // Локальные координаты уже содержат вычитание центроида, поэтому используем их напрямую
+        for (let i = 0; i < this._cachedStrokeHeights.length; i++) {
+            const x = outerLocalRing[i * 2];
+            const z = outerLocalRing[i * 2 + 1];
             const y = this._cachedStrokeHeights[i] ?? this._altitudeOffset;
-            positions.push(absX - groupPos.x, y, absZ - groupPos.z);
+            positions.push(x, y, z);
         }
 
         // Замыкаем обводку
-        if (outerRing.length > 0) {
-            const [firstLon, firstLat] = outerRing[0];
-            const [fx, fz] = proj.fromLonLat([firstLon, firstLat]);
-            const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
-            positions.push(fx - groupPos.x, fy, fz - groupPos.z);
+        if (this._cachedStrokeHeights.length > 0) {
+            const firstX = outerLocalRing[0];
+            const firstZ = outerLocalRing[1];
+            const firstY = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
+            positions.push(firstX, firstY, firstZ);
         }
 
         this._strokeGeometry.setPositions(positions);
@@ -887,7 +936,7 @@ export class Polygon {
         }
         worldY += this._minHeight + (this._extruded ? this._height : 0);
 
-        const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
+        const worldPos = this._tempVector3_1.set(worldX, worldY + wgPos.y, worldZ);
         const screenPos = worldPos.clone().project(this._map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;

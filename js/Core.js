@@ -1351,7 +1351,7 @@ for (const layer of this._dynamicLayers) {
 
 if (!this._pendingLabelUpdate) {
     this.textManager.update();
-    void this.textManager.pane.offsetWidth; // принудительный reflow
+    void this.textManager.pane.offsetWidth; 
 
     this._pendingLabelUpdate = true;
     requestAnimationFrame(() => {

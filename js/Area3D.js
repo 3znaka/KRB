@@ -36,6 +36,7 @@ export class Area3D {
     /** @private */ static _mapEventHandlers = new WeakMap();
     /** @private */ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
+
     /**
      * Создаёт площадной 3D-объект.
      *
@@ -77,7 +78,7 @@ export class Area3D {
     console.log('options.rings:', options.rings);
     console.log('options.rings[0]:', options.rings?.[0]);
     console.log('options.rings[0]?.length:', options.rings?.[0]?.length);
-    
+
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }
@@ -97,6 +98,7 @@ export class Area3D {
         /** @private */ this._color = options.color || 0x3388ff;
         /** @private */ this._depthTest = options.depthTest ?? true;
         /** @private */ this._depthWrite = options.depthWrite ?? true;
+    /** @private */ this._lastWorldGroupPos = new THREE.Vector3();
 
         // Подпись
         /** @private */ this._title = options.title || '';
@@ -629,58 +631,67 @@ export class Area3D {
      * @param {Object} map - Карта.
      * @private
      */
-    _update(map) {
-        if (!this._map || !this._group) return;
-        const zoom = map.continuousZoom;
+_update(map) {
+    if (!this._map || !this._group) return;
+    const zoom = map.continuousZoom;
 
-        if (this._layer && !this._layer.visible) {
+    if (this._layer && !this._layer.visible) {
+        this._group.visible = false;
+        return;
+    }
+    if (zoom < this._minZoom || zoom > this._maxZoom) {
+        this._group.visible = false;
+        return;
+    }
+
+    // Проверка дистанции (можно оставить)
+    if (map.maxObjectDistance !== Infinity && this._object3D) {
+        const worldPos = this._group.position.clone().add(map.worldGroup.position);
+        const dist = map.camera.position.distanceTo(worldPos);
+        if (dist > map.maxObjectDistance) {
             this._group.visible = false;
             return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
-            return;
-        }
-
-        // Проверка дистанции
-        if (map.maxObjectDistance !== Infinity && this._object3D) {
-            const worldPos = this._group.position.clone().add(map.worldGroup.position);
-            const dist = map.camera.position.distanceTo(worldPos);
-            if (dist > map.maxObjectDistance) {
-                this._group.visible = false;
-                return;
-            }
-        }
-
-        this._group.visible = true;
-
-        // Обновление высоты основания
-        if (this._altitudeMode === 'clampToGround') {
-            const now = performance.now();
-            if (now - this._lastHeightUpdateTime > this._heightUpdateInterval) {
-                const worldX = this._centroidWorld.x + map.worldGroup.position.x;
-                const worldZ = this._centroidWorld.z + map.worldGroup.position.z;
-                map.ensureTileForPoint?.(worldX, worldZ);
-                this._cachedSurfaceHeight = map.getSurfaceHeightAt(worldX, worldZ);
-                this._lastHeightUpdateTime = now;
-            }
-            const baseY = this._cachedSurfaceHeight + this._altitude;
-            this._group.position.y = baseY;
-        } else { // absolute
-            this._group.position.y = this._altitude;
-        }
-
-        // Обновление анимации модели
-        if (this._mixer && this._mixerClock) {
-            const delta = this._mixerClock.getDelta();
-            this._mixer.update(delta);
-        }
-
-        // Обновление подписи
-        if (this._textLabel) {
-            this._updateScreenPosition();
         }
     }
+
+    // Обновление позиции группы: XZ всегда из центроида, Y – из высоты
+    const worldGroupPos = map.worldGroup.position;
+    const baseX = this._centroidWorld.x;
+    const baseZ = this._centroidWorld.z;
+
+    let worldY = 0;
+    if (this._altitudeMode === 'clampToGround') {
+        const now = performance.now();
+        if (now - this._lastHeightUpdateTime > this._heightUpdateInterval ||
+            !this._lastWorldGroupPos.equals(worldGroupPos)) {
+            const worldX = baseX + worldGroupPos.x;
+            const worldZ = baseZ + worldGroupPos.z;
+            map.ensureTileForPoint?.(worldX, worldZ);
+            this._cachedSurfaceHeight = map.getSurfaceHeightAt(worldX, worldZ);
+            this._lastHeightUpdateTime = now;
+            this._lastWorldGroupPos.copy(worldGroupPos);
+        }
+        worldY = this._cachedSurfaceHeight + this._altitude;
+    } else {
+        worldY = this._altitude;
+    }
+
+    // Явно устанавливаем позицию группы
+    this._group.position.set(baseX, worldY, baseZ);
+
+    this._group.visible = true;
+
+    // Обновление анимации модели
+    if (this._mixer && this._mixerClock) {
+        const delta = this._mixerClock.getDelta();
+        this._mixer.update(delta);
+    }
+
+    // Обновление подписи
+    if (this._textLabel) {
+        this._updateScreenPosition();
+    }
+}
 
     /**
      * Пересчитывает экранную позицию для подписи.

@@ -275,7 +275,7 @@ export class TileManager {
      * @private
      */
     _updateFade() {
-        const fadeFactor = 0.5; // быстрое затухание, ~2-3 кадра
+        const fadeFactor = 0.1;
 
         for (const inst of this.tiles.values()) {
             if (!inst.mesh) continue;

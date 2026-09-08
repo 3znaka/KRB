@@ -39,9 +39,6 @@ export class TextManager {
          */
         this.pane = null;
 
-
-
-
         /**
          * Набор идентификаторов источников подписей, видимых в предыдущем кадре.
          * Используется для сброса флагов stuck при изменении состава подписей.
@@ -113,37 +110,40 @@ export class TextManager {
      */
     addLabel(source) {
         const el = document.createElement('div');
-el.className = 'krb-text-label';
-// Начальные стили (whiteSpace будет переопределён ниже)
-Object.assign(el.style, {
-    position: 'absolute',
-    display: 'none',
-    pointerEvents: 'none',
-    whiteSpace: 'nowrap',
-    fontFamily: 'sans-serif',
-    color: '#333',
-    fontSize: '12px',
-    lineHeight: '1',
-    padding: '0',
-    margin: '0',
-    transformOrigin: '0 0',
-    left: '0',            // обязательно для transform-позиционирования
-    top: '0',             // обязательно для transform-позиционирования
-    willChange: 'transform' // подсказка браузеру для GPU-ускорения
-});
-Object.assign(el.style, source.getTextStyle());
+        el.className = 'krb-text-label';
+        // Начальные стили (whiteSpace будет переопределён ниже)
+        Object.assign(el.style, {
+            position: 'absolute',
+            display: 'none',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            fontFamily: 'sans-serif',
+            color: '#333',
+            fontSize: '12px',
+            lineHeight: '1',
+            padding: '0',
+            margin: '0',
+            transformOrigin: '0 0',
+            left: '0',            // обязательно для transform-позиционирования
+            top: '0',             // обязательно для transform-позиционирования
+            willChange: 'transform' // подсказка браузеру для GPU-ускорения
+        });
+        Object.assign(el.style, source.getTextStyle());
+        // Добавляем transition для плавного появления/исчезновения
+        el.style.transition = 'opacity 0.08s linear';
+        el.style.opacity = '0';
 
-// Для точечных подписей включаем многострочность и применяем перенос
-if (source.getLabelType() === 'point') {
-    el.style.whiteSpace = 'pre-line';  // разрешаем перенос по \n
-    const wrapped = this._wrapPointText(source.getText(), el.style.fontSize);
-    el.textContent = wrapped;
-} else {
-    // Для линейных подписей оставляем как есть (nowrap)
-    el.textContent = source.getText();
-}
+        // Для точечных подписей включаем многострочность и применяем перенос
+        if (source.getLabelType() === 'point') {
+            el.style.whiteSpace = 'pre-line';  // разрешаем перенос по \n
+            const wrapped = this._wrapPointText(source.getText(), el.style.fontSize);
+            el.textContent = wrapped;
+        } else {
+            // Для линейных подписей оставляем как есть (nowrap)
+            el.textContent = source.getText();
+        }
 
-this.pane.appendChild(el);
+        this.pane.appendChild(el);
 
         const label = {
             source,
@@ -167,6 +167,11 @@ this.pane.appendChild(el);
      * @param {Object} label - Объект подписи, ранее возвращённый методом addLabel.
      */
     removeLabel(label) {
+        // Отменяем возможный таймер скрытия
+        if (label._hideTimeout) {
+            clearTimeout(label._hideTimeout);
+            label._hideTimeout = null;
+        }
         const idx = this.labels.indexOf(label);
         if (idx > -1) {
             this.labels.splice(idx, 1);
@@ -174,78 +179,77 @@ this.pane.appendChild(el);
         }
     }
 
-
     /**
- * Преобразует длинный текст точечной подписи в многострочный,
- * вставляя переносы \n так, чтобы блок был близок к квадрату.
- * Использует грубые оценки ширины символов (0.6em) и пробела (0.3em).
- *
- * @param {string} text - Исходный однострочный текст.
- * @param {string} fontSize - CSS-значение font-size (например, "12px").
- * @returns {string} Текст с переносами строк.
- * @private
- */
-_wrapPointText(text, fontSize) {
-    if (!text || text.indexOf(' ') === -1) return text; // нет пробелов или пусто
+     * Преобразует длинный текст точечной подписи в многострочный,
+     * вставляя переносы \n так, чтобы блок был близок к квадрату.
+     * Использует грубые оценки ширины символов (0.6em) и пробела (0.3em).
+     *
+     * @param {string} text - Исходный однострочный текст.
+     * @param {string} fontSize - CSS-значение font-size (например, "12px").
+     * @returns {string} Текст с переносами строк.
+     * @private
+     */
+    _wrapPointText(text, fontSize) {
+        if (!text || text.indexOf(' ') === -1) return text; // нет пробелов или пусто
 
-    const words = text.split(/\s+/).filter(w => w.length > 0);
-    if (words.length <= 1) return text;
+        const words = text.split(/\s+/).filter(w => w.length > 0);
+        if (words.length <= 1) return text;
 
-    const fontPx = parseFloat(fontSize) || 12;
-    const charWidth = fontPx * 0.6;      // примерная ширина символа
-    const spaceWidth = fontPx * 0.3;     // примерная ширина пробела
+        const fontPx = parseFloat(fontSize) || 12;
+        const charWidth = fontPx * 0.6;      // примерная ширина символа
+        const spaceWidth = fontPx * 0.3;     // примерная ширина пробела
 
-    const wordWidths = words.map(w => w.length * charWidth);
-    const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
-        (words.length - 1) * spaceWidth;
+        const wordWidths = words.map(w => w.length * charWidth);
+        const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
+            (words.length - 1) * spaceWidth;
 
-    // Порог, при котором перенос не требуется (можно вынести в настройки)
-    const maxSingleLineWidth = 160;
-    if (totalSingleLineWidth <= maxSingleLineWidth) return text;
+        // Порог, при котором перенос не требуется (можно вынести в настройки)
+        const maxSingleLineWidth = 160;
+        if (totalSingleLineWidth <= maxSingleLineWidth) return text;
 
-    // Высота одной строки (примерно)
-    const lineHeight = fontPx * 1.2;
+        // Высота одной строки (примерно)
+        const lineHeight = fontPx * 1.2;
 
-    // Желаемое количество строк для квадратной формы:
-    // totalWidth / lines ≈ lines * lineHeight  =>  lines = sqrt(totalWidth / lineHeight)
-    let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
-    targetLines = Math.min(targetLines, 5); // ограничение, чтобы не делать слишком много строк
+        // Желаемое количество строк для квадратной формы:
+        // totalWidth / lines ≈ lines * lineHeight  =>  lines = sqrt(totalWidth / lineHeight)
+        let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
+        targetLines = Math.min(targetLines, 5); // ограничение, чтобы не делать слишком много строк
 
-    const targetLineWidth = totalSingleLineWidth / targetLines;
+        const targetLineWidth = totalSingleLineWidth / targetLines;
 
-    // Жадное заполнение строк
-    const lines = [];
-    let currentLine = [];
-    let currentWidth = 0;
+        // Жадное заполнение строк
+        const lines = [];
+        let currentLine = [];
+        let currentWidth = 0;
 
-    for (let i = 0; i < words.length; i++) {
-        const word = words[i];
-        const w = wordWidths[i];
+        for (let i = 0; i < words.length; i++) {
+            const word = words[i];
+            const w = wordWidths[i];
 
-        if (currentLine.length === 0) {
-            currentLine.push(word);
-            currentWidth = w;
-        } else {
-            const addedWidth = currentWidth + spaceWidth + w;
-            if (addedWidth <= targetLineWidth) {
+            if (currentLine.length === 0) {
                 currentLine.push(word);
-                currentWidth = addedWidth;
-            } else {
-                lines.push(currentLine.join(' '));
-                currentLine = [word];
                 currentWidth = w;
+            } else {
+                const addedWidth = currentWidth + spaceWidth + w;
+                if (addedWidth <= targetLineWidth) {
+                    currentLine.push(word);
+                    currentWidth = addedWidth;
+                } else {
+                    lines.push(currentLine.join(' '));
+                    currentLine = [word];
+                    currentWidth = w;
+                }
             }
         }
-    }
-    if (currentLine.length > 0) {
-        lines.push(currentLine.join(' '));
-    }
+        if (currentLine.length > 0) {
+            lines.push(currentLine.join(' '));
+        }
 
-    // Если в итоге получилась одна строка (например, из-за ограничений), возвращаем исходный текст
-    if (lines.length <= 1) return text;
+        // Если в итоге получилась одна строка (например, из-за ограничений), возвращаем исходный текст
+        if (lines.length <= 1) return text;
 
-    return lines.join('\n');
-}
+        return lines.join('\n');
+    }
 
     /**
      * Измеряет реальные ширину и высоту DOM-элемента подписи.
@@ -267,7 +271,52 @@ _wrapPointText(text, fontSize) {
         el.style.visibility = prevVisibility;
     }
 
+    /**
+     * Плавно показывает или скрывает подпись с анимацией прозрачности.
+     * Использует CSS transition для fade-in / fade-out.
+     *
+     * @param {Object} label - Объект подписи.
+     * @param {boolean} visible - Целевое состояние видимости.
+     * @private
+     */
+    _setLabelVisible(label, visible) {
+        const el = label.element;
 
+        if (visible) {
+            // Если был запланирован таймер скрытия — отменяем
+            if (label._hideTimeout) {
+                clearTimeout(label._hideTimeout);
+                label._hideTimeout = null;
+            }
+
+            // Если элемент скрыт (display: none) — делаем fade-in
+            if (el.style.display === 'none') {
+                el.style.display = 'block';
+                el.style.opacity = '0';
+                // Принудительный reflow, чтобы transition сработал
+                void el.offsetWidth;
+                el.style.opacity = '1';
+            } else {
+                // Если уже видим, просто устанавливаем opacity: 1 (transition сам анимирует при необходимости)
+                el.style.opacity = '1';
+            }
+        } else {
+            // Если уже скрыт — ничего не делаем
+            if (el.style.display === 'none') return;
+
+            // Запускаем fade-out
+            el.style.opacity = '0';
+
+            // Таймер для скрытия после завершения анимации
+            if (label._hideTimeout) clearTimeout(label._hideTimeout);
+            label._hideTimeout = setTimeout(() => {
+                if (parseFloat(el.style.opacity) === 0) {
+                    el.style.display = 'none';
+                }
+                label._hideTimeout = null;
+            }, 80); // 80 мс ≈ 5 кадров при 60 fps
+        }
+    }
 
     /**
      * Вычисляет экранные координаты четырёх углов прямоугольника подписи
@@ -434,11 +483,9 @@ _wrapPointText(text, fontSize) {
             const src = label.source;
             const zoomBounds = src.getTextZoomBounds();
             if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
-                label.element.style.display = 'none';
                 continue;
             }
             if (!src.isVisible()) {
-                label.element.style.display = 'none';
                 continue;
             }
 
@@ -451,7 +498,6 @@ _wrapPointText(text, fontSize) {
             if (src.getLabelType() === 'line') {
                 const iv = src.getVisibleInterval();
                 if (!iv) {
-                    label.element.style.display = 'none';
                     continue;
                 }
                 label.visibleInterval = iv;
@@ -469,7 +515,6 @@ _wrapPointText(text, fontSize) {
             } else {
                 const pos = src.getScreenPosition();
                 if (!pos) {
-                    label.element.style.display = 'none';
                     continue;
                 }
                 label.screenPos = pos;
@@ -614,24 +659,23 @@ _wrapPointText(text, fontSize) {
             }
         }
 
-        // 4. Рендеринг DOM-элементов
+        // Применяем видимость с fade-анимацией
+        const visibleSet = new Set(visibleLabels);
+        for (const label of this.labels) {
+            const shouldBeVisible = visibleSet.has(label) && !label.hiddenByPriority;
+            this._setLabelVisible(label, shouldBeVisible);
+        }
+
+        // 4. Рендеринг DOM-элементов (только обновление transform)
         for (const label of visibleLabels) {
             const src = label.source;
             const el = label.element;
-
-            if (label.hiddenByPriority) {
-                el.style.display = 'none';
-                continue;
-            }
 
             let screenX, screenY, rotation = 0;
 
             if (src.getLabelType() === 'line') {
                 const pos = src.getScreenPositionAt(label.t);
-                if (!pos) {
-                    el.style.display = 'none';
-                    continue;
-                }
+                if (!pos) continue; // если позиция недоступна, transform не обновляем
                 screenX = pos.x;
                 screenY = pos.y;
                 rotation = src.getScreenAngleAt(label.t);
@@ -674,12 +718,11 @@ _wrapPointText(text, fontSize) {
                 top += fontSize;
             }
 
-            el.style.display = 'block';
             let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
-if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
-    transform += ` rotate(${rotation}deg)`;
-}
-el.style.transform = transform;
+            if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
+                transform += ` rotate(${rotation}deg)`;
+            }
+            el.style.transform = transform;
         }
     }
-} 
+}

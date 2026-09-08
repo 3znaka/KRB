@@ -241,17 +241,65 @@ export class TileManager {
             }
         }
 
-        // Переключение видимости
+        // Переключение видимости с поддержкой плавного появления/исчезновения
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
-            if (inst.mesh.visible !== show) inst.mesh.visible = show;
+            if (show) {
+                inst.targetOpacity = 1;
+                // Если меш скрыт, показываем и начинаем с прозрачности 0
+                if (!inst.mesh.visible) {
+                    inst.mesh.visible = true;
+                    inst.opacity = 0;
+                    inst.mesh.material.opacity = 0;
+                }
+            } else {
+                inst.targetOpacity = 0;
+            }
             if (show) inst.lastUsed = this.frame;
         }
+
+        // Обновляем прозрачность для всех тайлов
+        this._updateFade();
 
         this.gc(renderSet);
 
         return idealZ;
+    }
+
+    /**
+     * Плавно изменяет прозрачность тайлов в сторону целевого значения.
+     * Вызывается каждый кадр после определения видимых тайлов.
+     *
+     * @private
+     */
+    _updateFade() {
+        // Скорость изменения прозрачности (примерно 4-5 кадров для полного изменения)
+        const fadeSpeed = 0.25;
+
+        for (const inst of this.tiles.values()) {
+            if (!inst.mesh) continue;
+            if (inst.opacity !== inst.targetOpacity) {
+                if (inst.opacity < inst.targetOpacity) {
+                    inst.opacity = Math.min(inst.targetOpacity, inst.opacity + fadeSpeed);
+                } else {
+                    inst.opacity = Math.max(inst.targetOpacity, inst.opacity - fadeSpeed);
+                }
+
+                inst.mesh.material.opacity = inst.opacity;
+
+                // Если полностью скрылись, выключаем меш
+                if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
+                    inst.mesh.visible = false;
+                    inst.mesh.material.opacity = 0;
+                }
+                // Если стали полностью видимыми, можно опционально отключить прозрачность для производительности
+                else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
+                    inst.mesh.material.opacity = 1;
+                    // inst.mesh.material.transparent = false; // раскомментировать при необходимости
+                }
+            }
+        }
     }
 
     /**
@@ -331,7 +379,9 @@ export class TileManager {
             lastUsed: this.frame,
             heightsApplied: false,
             elevationAppliedLevel: 0,
-            expectsElevation: false
+            expectsElevation: false,
+            opacity: 0,          // текущая прозрачность
+            targetOpacity: 0     // целевая прозрачность
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -405,40 +455,42 @@ export class TileManager {
      * @returns {THREE.Mesh} Меш тайла.
      * @private
      */
-createTileMesh(inst, texture) {
-    const { z, virtX, y } = inst;
-    const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
-    const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
-    const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
-    const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
+    createTileMesh(inst, texture) {
+        const { z, virtX, y } = inst;
+        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
+        const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
+        const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
+        const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
 
-    let geometry;
-    if (!this.hasElevation && this.flatTileGeometry) {
-        geometry = this.flatTileGeometry.clone();
-        geometry.rotateX(-Math.PI / 2);
-        // Трансляция убрана
-    } else {
-        geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
-        geometry.rotateX(-Math.PI / 2);
-        // Трансляция убрана
+        let geometry;
+        if (!this.hasElevation && this.flatTileGeometry) {
+            geometry = this.flatTileGeometry.clone();
+            geometry.rotateX(-Math.PI / 2);
+            // Трансляция убрана
+        } else {
+            geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
+            geometry.rotateX(-Math.PI / 2);
+            // Трансляция убрана
+        }
+
+        const mat = new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,      // включаем прозрачность для fade-анимации
+            opacity: 0,             // начальная прозрачность — полностью прозрачный
+            depthWrite: this.hasElevation,
+            depthTest: this.hasElevation
+        });
+
+        const mesh = new THREE.Mesh(geometry, mat);
+        mesh.position.set(
+            originX + tileSize / 2,
+            this.hasElevation ? z * LEVEL_Y_STEP : 0,
+            originZ + tileSize / 2
+        );
+        mesh.renderOrder = z;
+        mesh.visible = false;        // изначально скрыт, появится через fade-in
+        return mesh;
     }
-
-    const mat = new THREE.MeshBasicMaterial({
-        map: texture,
-        depthWrite: this.hasElevation,
-        depthTest: this.hasElevation
-    });
-
-    const mesh = new THREE.Mesh(geometry, mat);
-mesh.position.set(
-  originX + tileSize / 2,
-  this.hasElevation ? z * LEVEL_Y_STEP : 0,  
-  originZ + tileSize / 2
-);
-    mesh.renderOrder = z;
-    mesh.visible = false;
-    return mesh;
-}
 
     /**
      * Создаёт статический фоновый меш тайла.
@@ -449,25 +501,25 @@ mesh.position.set(
      * @param {THREE.Texture|null} texture - Текстура (может быть null).
      * @returns {THREE.Mesh} Меш фонового тайла.
      */
-createStaticTileMesh(tileSize, originX, originZ, texture) {
-    const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
-    geom.rotateX(-Math.PI / 2);
-    // Трансляция убрана
-    const mat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        map: texture,
-        depthWrite: false,
-        depthTest: false
-    });
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.position.set(
-        originX + tileSize / 2,
-        -1.5,
-        originZ + tileSize / 2
-    );
-    mesh.renderOrder = -2;
-    return mesh;
-}
+    createStaticTileMesh(tileSize, originX, originZ, texture) {
+        const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
+        geom.rotateX(-Math.PI / 2);
+        // Трансляция убрана
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            map: texture,
+            depthWrite: false,
+            depthTest: false
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(
+            originX + tileSize / 2,
+            -1.5,
+            originZ + tileSize / 2
+        );
+        mesh.renderOrder = -2;
+        return mesh;
+    }
 
     /* ---- текстуры ---- */
     /**

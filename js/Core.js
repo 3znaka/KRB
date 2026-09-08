@@ -108,6 +108,7 @@ export class KrbMap {
      * @param {number} [options.objectRenderDistanceFactor] - Фактор дальности отрисовки объектов.
      * @param {number} [options.staticBgZoom] - Уровень зума для статического фона.
      * @param {number} [options.minCameraHeightOffset] - Минимальный отступ камеры от поверхности.
+     * @param {boolean} [options.antialias=true] - Включает сглаживание (антиалиасинг) рендерера.
      * @throws {Error} Если options не передан.
      * @throws {Error} Если целевой элемент не найден.
      * @throws {Error} Если view не передан.
@@ -144,6 +145,7 @@ export class KrbMap {
         this.BASE_DISTANCE = options.baseDistance ?? DEFAULTS.BASE_DISTANCE;
         this.objectRenderDistanceFactor = options.objectRenderDistanceFactor ?? DEFAULTS.OBJECT_RENDER_DISTANCE_FACTOR;
         this.staticBgZoom = options.staticBgZoom ?? DEFAULTS.STATIC_BG_ZOOM;
+        this.antialias = options.antialias ?? true;
 
         const elevLayer = this.layers.find(l => l.elevation);
         const effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
@@ -239,7 +241,7 @@ export class KrbMap {
             1,
             200000000
         );
-        this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance' });
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);

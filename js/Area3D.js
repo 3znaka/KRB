@@ -560,11 +560,6 @@ _applyModelTransform() {
             const delta = this._mixerClock.getDelta();
             this._mixer.update(delta);
         }
-
-        // Пересчитываем экранную позицию для подписи каждый кадр
-        if (this._textLabel) {
-            this._updateScreenPosition();
-        }
     }
 
     _updateScreenPosition() {
@@ -627,7 +622,10 @@ _applyModelTransform() {
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
     getLabelType() { return 'area3d'; }
     isVisible() { return this._group?.visible ?? false; }
-    getScreenPosition() { return this._centroidScreenPos; }
+getScreenPosition() {
+    this._updateScreenPosition();
+    return this._centroidScreenPos;
+}
     getTitleAlign() { return this._titleAlign; }
     getTitleOffset() { return this._titleOffset; }
     getTitleVerticalAlign() {

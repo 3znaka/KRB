@@ -205,7 +205,6 @@ this._cameraAnimFrame = null;
         this.lastVisibleUpdateTime = 0;
         this.clock = new THREE.Clock();
 this._pendingLabelUpdate = false;
-this._isMoving = false;   
 
         this.bindEvents();
         // Первичное заполнение тайлами
@@ -419,10 +418,6 @@ this.scene.add(this.sunLight);
         };
     }
 
-    _setMoving(moving) {
-    this._isMoving = moving;
-}
-
     /* ================================================================
        Утилиты камеры и URL
        ================================================================ */
@@ -491,8 +486,6 @@ this.scene.add(this.sunLight);
 
 _startCameraAnimationLoopIfNeeded() {
     if (this._cameraAnimation || this._cameraAnimFrame) return;
-
-this._setMoving(true)
 
     this._cameraAnimation = { custom: true }; // блокируем другие анимации и зум
     this._controlsDampingWasEnabled = this.controls.enableDamping;
@@ -573,8 +566,6 @@ this._setMoving(true)
     };
 
     this._cameraAnimFrame = requestAnimationFrame(animateStep);
-
-    this._setMoving(false)
 }
 
 
@@ -815,9 +806,6 @@ this._setMoving(true)
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
-
-this._setMoving(true);
-
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -857,7 +845,6 @@ this._setMoving(true);
         if (!this.isDragging) return;
         this.isDragging = false;
         this.syncControlsTarget();
-        this._setMoving(false);
     }
 
     /**
@@ -868,12 +855,6 @@ this._setMoving(true);
      */
     onWheel(e) {
         if (this._cameraAnimation) return;
-
-this._setMoving(true);
-clearTimeout(this._moveTimeout);
-this._moveTimeout = setTimeout(() => this._setMoving(false), 100);
-
-
         e.preventDefault();
         const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
         this.applyZoomDelta(delta);
@@ -899,7 +880,6 @@ this._moveTimeout = setTimeout(() => this._setMoving(false), 100);
      */
     onTouchStart(e) {
         if (this._cameraAnimation) return;
-        this._setMoving(true);
         if (e.touches.length === 1) {
             const rect = this.renderer.domElement.getBoundingClientRect();
             const touch = e.touches[0];
@@ -991,7 +971,6 @@ this._moveTimeout = setTimeout(() => this._setMoving(false), 100);
             this.touchDragActive = false;
             this.syncControlsTarget();
         }
-        this._setMoving(false);
     }
 
     /**
@@ -1175,7 +1154,7 @@ this._moveTimeout = setTimeout(() => this._setMoving(false), 100);
      */
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         if (this._cameraAnimation) return;
-this._setMoving(true)
+
         const startTarget = this.controls.target.clone();
         const startPos = this.camera.position.clone();
         const startZoom = this.continuousZoom;
@@ -1246,8 +1225,6 @@ this._setMoving(true)
             requestAnimationFrame(animateStep);
         };
         requestAnimationFrame(animateStep);
-
-        this._setMoving(false)
     }
 
     /**
@@ -1367,7 +1344,8 @@ this._setMoving(true)
 this.maybeUpdateVisibleTiles();
 
 if (!this._pendingLabelUpdate) {
-    this.textManager.update(this._isMoving);
+    // Обновляем подписи и принудительно применяем layout
+    this.textManager.update();
     void this.textManager.pane.offsetWidth;
 
     // Откладываем рендер canvas на следующий кадр

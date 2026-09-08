@@ -321,12 +321,20 @@ export class Area3D {
         if (!this._object3D) return;
 
         const model = this._object3D;
+        const parent = model.parent;
+
+        // Сброс трансформаций
         model.position.set(0, 0, 0);
         model.scale.set(1, 1, 1);
         model.rotation.set(0, 0, 0);
         model.updateMatrixWorld(true);
+
+        // Временно убираем из родителя, чтобы получить ЛОКАЛЬНЫЙ bounding box
+        if (parent) parent.remove(model);
+        model.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
+        if (parent) parent.add(model);
 
         let targetW, targetH, targetD;
         if (this._fit === 'stretch') {
@@ -360,9 +368,14 @@ export class Area3D {
         model.rotation.y = totalAngle;
 
         model.updateMatrixWorld(true);
+
+        // Снова временно убираем, чтобы получить локальный transformed box
+        if (parent) parent.remove(model);
+        model.updateMatrixWorld(true);
         const transformedBox = new THREE.Box3().setFromObject(model);
         const transformedSize = transformedBox.getSize(new THREE.Vector3());
-        const transformedMin = transformedBox.min;
+        const transformedMin = transformedBox.min.clone();
+        if (parent) parent.add(model);
 
         const anchorPoint = new THREE.Vector3(
             transformedMin.x + this._anchor[0] * transformedSize.x,
@@ -371,6 +384,7 @@ export class Area3D {
         );
 
         model.position.sub(anchorPoint);
+        model.updateMatrixWorld(true);
     }
 
     _normalizeSize(size) {
@@ -533,9 +547,9 @@ export class Area3D {
             this._centroidScreenPos = null;
             return;
         }
+        // Box3.setFromObject уже учитывает мировую матрицу объекта,
+        // дополнительно применять matrixWorld не нужно.
         const box = new THREE.Box3().setFromObject(this._object3D);
-        this._object3D.updateWorldMatrix(true, false);
-        box.applyMatrix4(this._object3D.matrixWorld);
         const canvas = this._map.renderer.domElement;
         const corners = [];
         const { min, max } = box;

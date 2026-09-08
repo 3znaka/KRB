@@ -10,31 +10,8 @@ import { PopupManager } from './PopupManager.js';
 
 /**
  * Представление карты, хранящее параметры центра, масштаба и углов обзора.
- *
- * @example
- * const view = new View({
- *     center: [0, 0],
- *     zoom: 3,
- *     minZoom: 1,
- *     maxZoom: 18,
- *     zoomSensitivity: 0.1,
- *     pitch: 30,
- *     bearing: 45
- * });
  */
 export class View {
-    /**
-     * Создаёт представление карты.
-     *
-     * @param {Object} options - Объект параметров представления.
-     * @param {Array.<number>} options.center - Центр карты в координатах [x, y].
-     * @param {number} options.zoom - Начальный масштаб.
-     * @param {number} [options.minZoom] - Минимальный масштаб.
-     * @param {number} [options.maxZoom] - Максимальный масштаб.
-     * @param {number} [options.zoomSensitivity] - Чувствительность зума.
-     * @param {number} [options.pitch] - Угол наклона камеры в градусах.
-     * @param {number} [options.bearing] - Угол поворота камеры в градусах.
-     */
     constructor(options) {
         this.center = options.center;
         this.zoom = options.zoom;
@@ -47,71 +24,9 @@ export class View {
 }
 
 /**
- * Основной класс карты, управляющий Three.js сценой, тайлами, камерой и взаимодействием.
- *
- * @example
- * const map = new KrbMap({
- *     target: 'map',
- *     layers: [
- *         {
- *             texture: 'https://example.com/tiles/{z}/{x}/{y}.png',
- *             elevation: 'https://example.com/elevation/{z}/{x}/{y}.png',
- *             heightScale: 1.0
- *         }
- *     ],
- *     view: new View({ center: [0, 0], zoom: 3 }),
- *     R: 6371000,
- *     segments: 32,
- *     animDuration: 0.3,
- *     minReliefZ: 0,
- *     maxReliefZ: 15,
- *     tileMargin: 0.1,
- *     tileMarginBg: 0.2,
- *     visibleUpdateThrottle: 100,
- *     maxWorkerRequests: 4,
- *     baseZoom: 0,
- *     baseDistance: 1000000,
- *     objectRenderDistanceFactor: 2,
- *     staticBgZoom: 0,
- *     minCameraHeightOffset: 200
- * });
- * map.setPitch(30, 0.5);
- * map.setBearing(90, 0.5);
- * map.moveCameraTo(37.6173, 55.7558);
- * map.moveCameraToSlow(30.0, 50.0, 1.0, 5);
- * map.rotateToNorth();
- * const height = map.getSurfaceHeightAt(1000, 2000);
- * const maxHeight = map.getSurfaceMaxHeight(1000, 2000);
- * const url = map.getTextureUrl(3, 1, 2);
- * map.ensureTileForPoint(1000, 2000);
+ * Основной класс карты.
  */
 export class KrbMap {
-    /**
-     * Создаёт экземпляр карты.
-     *
-     * @param {Object} options - Объект параметров карты.
-     * @param {string} options.target - Идентификатор DOM-элемента для вставки карты.
-     * @param {Array.<Object>} options.layers - Массив слоёв карты. Каждый слой может содержать свойства:
-     *   texture (URL текстуры), elevation (URL карты высот), heightScale (масштаб высот).
-     * @param {View} options.view - Представление карты с параметрами центра, масштаба и углов.
-     * @param {number} [options.R] - Радиус планеты.
-     * @param {number} [options.segments] - Количество сегментов сетки рельефа.
-     * @param {number} [options.animDuration] - Длительность анимации камеры в секундах.
-     * @param {number} [options.minReliefZ] - Минимальный уровень зума для рельефа.
-     * @param {number} [options.maxReliefZ] - Максимальный уровень зума для рельефа.
-     * @param {number} [options.tileMargin] - Отступ для тайлов.
-     * @param {number} [options.tileMarginBg] - Отступ для фоновых тайлов.
-     * @param {number} [options.visibleUpdateThrottle] - Минимальный интервал между обновлениями видимых тайлов в мс.
-     * @param {number} [options.maxWorkerRequests] - Максимальное количество одновременных запросов к воркерам.
-     * @param {number} [options.baseZoom] - Базовый уровень зума для расчёта дистанции.
-     * @param {number} [options.baseDistance] - Базовое расстояние камеры при базовом зуме.
-     * @param {number} [options.objectRenderDistanceFactor] - Фактор дальности отрисовки объектов.
-     * @param {number} [options.staticBgZoom] - Уровень зума для статического фона.
-     * @param {number} [options.minCameraHeightOffset] - Минимальный отступ камеры от поверхности.
-     * @throws {Error} Если options не передан.
-     * @throws {Error} Если целевой элемент не найден.
-     * @throws {Error} Если view не передан.
-     */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
 
@@ -162,6 +77,17 @@ export class KrbMap {
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
 
+        // --- Выделение временных объектов для уменьшения аллокаций ---
+        this._tempVec3a = new THREE.Vector3();
+        this._tempVec3b = new THREE.Vector3();
+        this._tempVec3c = new THREE.Vector3();
+        this._tempDir = new THREE.Vector3();
+        this._tempTarget = new THREE.Vector3();
+        this._tempPos = new THREE.Vector3();
+        this._tempRaycaster = new THREE.Raycaster();
+        this._tempMouse = new THREE.Vector2();
+        // --------------------------------------------------------------
+
         const [cx, cy] = this.view.center;
         const initialZoom = this.view.zoom;
         const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
@@ -179,23 +105,25 @@ export class KrbMap {
         );
         this.controls.update();
 
-        // ЕДИНСТВЕННАЯ группа мира на всё время жизни
         this.worldGroup = new THREE.Group();
         this.worldGroup.position.set(0, 0, 0);
         this.scene.add(this.worldGroup);
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
-this._cameraAnimFrame = null;
+        this._cameraAnimFrame = null;
         this._controlsDampingWasEnabled = true;
         this._dynamicLayers = [];
         this.textManager = new TextManager(this);
-
         this.popupManager = new PopupManager(this);
 
-        // Менеджер тайлов нового поколения
         this.tileManager = new TileManager(this);
 
-        // Статический фон (создаётся один раз, внутри worldGroup)
+        // Кэш максимальной высоты поверхности
+        this._surfaceMaxHeightCache = new Map();
+        this.tileManager.onTileHeightAppliedCallbacks.push(() => {
+            this._surfaceMaxHeightCache.clear();
+        });
+
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
         if (this.layers.length && this.layers.some(layer => layer.texture)) {
@@ -204,21 +132,14 @@ this._cameraAnimFrame = null;
 
         this.lastVisibleUpdateTime = 0;
         this.clock = new THREE.Clock();
-this._pendingLabelUpdate = false;
 
         this.bindEvents();
-        // Первичное заполнение тайлами
         this.maybeUpdateVisibleTiles(true);
 
         this.animate();
         requestAnimationFrame(() => initUI(this));
     }
 
-    /**
-     * Инициализирует Three.js сцену, камеру, рендерер и освещение.
-     *
-     * @private
-     */
     initThree() {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
@@ -233,54 +154,25 @@ this._pendingLabelUpdate = false;
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);
 
-// Создаём освещение по умолчанию и сохраняем ссылки
-this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
-this.scene.add(this.ambientLight);
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        this.scene.add(this.ambientLight);
 
-this.sunLight = new THREE.DirectionalLight(0xffffff, 3);
-this.sunLight.position.set(1, 2, 3);
-this.scene.add(this.sunLight);
+        this.sunLight = new THREE.DirectionalLight(0xffffff, 3);
+        this.sunLight.position.set(1, 2, 3);
+        this.scene.add(this.sunLight);
     }
 
     /* ================================================================
-       Управление освещением (публичные методы)
+       Управление освещением (без изменений)
        ================================================================ */
-
-    /**
-     * Устанавливает параметры окружающего (ambient) света.
-     *
-     * @param {number|string} color - Цвет света в формате числа (0xffffff) или CSS-строки.
-     * @param {number} [intensity] - Интенсивность света (по умолчанию 0.8).
-     * @returns {void}
-     *
-     * @example
-     * map.setAmbientLight(0x404040, 0.5);
-     */
     setAmbientLight(color, intensity = 0.8) {
-        if (!this.ambientLight) {
-            console.warn('Ambient light is not initialized.');
-            return;
-        }
+        if (!this.ambientLight) return;
         this.ambientLight.color.set(color);
         this.ambientLight.intensity = intensity;
     }
 
-    /**
-     * Устанавливает параметры направленного солнечного света.
-     *
-     * @param {number|string} color - Цвет света.
-     * @param {number} [intensity] - Интенсивность света (по умолчанию 1.3).
-     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [position] - Позиция источника света (направление).
-     * @returns {void}
-     *
-     * @example
-     * map.setSunLight(0xffeedd, 1.5, { x: 1, y: -1, z: 1 });
-     */
     setSunLight(color, intensity = 1.3, position = null) {
-        if (!this.sunLight) {
-            console.warn('Directional (sun) light is not initialized.');
-            return;
-        }
+        if (!this.sunLight) return;
         this.sunLight.color.set(color);
         this.sunLight.intensity = intensity;
         if (position) {
@@ -290,83 +182,27 @@ this.scene.add(this.sunLight);
                 this.sunLight.position.set(position[0], position[1], position[2]);
             } else if (typeof position === 'object' && 'x' in position && 'y' in position && 'z' in position) {
                 this.sunLight.position.set(position.x, position.y, position.z);
-            } else {
-                console.warn('Invalid position argument for setSunLight.');
             }
         }
     }
 
-    /**
-     * Устанавливает оба источника света одновременно.
-     *
-     * @param {Object} params - Параметры освещения.
-     * @param {number|string} [params.ambientColor] - Цвет окружающего света.
-     * @param {number} [params.ambientIntensity] - Интенсивность окружающего света.
-     * @param {number|string} [params.sunColor] - Цвет солнечного света.
-     * @param {number} [params.sunIntensity] - Интенсивность солнечного света.
-     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [params.sunPosition] - Позиция солнечного света.
-     * @returns {void}
-     *
-     * @example
-     * map.setLighting({
-     *     ambientColor: 0xffffff,
-     *     ambientIntensity: 0.6,
-     *     sunColor: 0xfff5e6,
-     *     sunIntensity: 1.2,
-     *     sunPosition: [1, -1, 1]
-     * });
-     */
-    setLighting({
-        ambientColor,
-        ambientIntensity,
-        sunColor,
-        sunIntensity,
-        sunPosition
-    } = {}) {
-        if (ambientColor !== undefined) {
-            this.setAmbientLight(ambientColor, ambientIntensity);
-        } else if (ambientIntensity !== undefined) {
-            this.setAmbientLight(this.ambientLight ? this.ambientLight.color.getHex() : 0xffffff, ambientIntensity);
-        }
+    setLighting({ ambientColor, ambientIntensity, sunColor, sunIntensity, sunPosition } = {}) {
+        if (ambientColor !== undefined) this.setAmbientLight(ambientColor, ambientIntensity);
+        else if (ambientIntensity !== undefined) this.setAmbientLight(this.ambientLight.color.getHex(), ambientIntensity);
 
-        if (sunColor !== undefined) {
-            this.setSunLight(sunColor, sunIntensity, sunPosition);
-        } else {
-            if (sunIntensity !== undefined) {
-                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, sunIntensity, sunPosition);
-            } else if (sunPosition !== undefined) {
-                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, this.sunLight ? this.sunLight.intensity : 1.3, sunPosition);
-            }
+        if (sunColor !== undefined) this.setSunLight(sunColor, sunIntensity, sunPosition);
+        else {
+            if (sunIntensity !== undefined) this.setSunLight(this.sunLight.color.getHex(), sunIntensity, sunPosition);
+            else if (sunPosition !== undefined) this.setSunLight(this.sunLight.color.getHex(), this.sunLight.intensity, sunPosition);
         }
     }
 
-    /**
-     * Возвращает объект окружающего света для прямого доступа.
-     *
-     * @returns {THREE.AmbientLight|null} Объект ambient-света или null, если не создан.
-     */
-    getAmbientLight() {
-        return this.ambientLight || null;
-    }
-
-    /**
-     * Возвращает объект направленного солнечного света для прямого доступа.
-     *
-     * @returns {THREE.DirectionalLight|null} Объект directional-света или null, если не создан.
-     */
-    getSunLight() {
-        return this.sunLight || null;
-    }
+    getAmbientLight() { return this.ambientLight || null; }
+    getSunLight() { return this.sunLight || null; }
 
     /* ================================================================
-       Остальные методы (камера, тайлы, взаимодействие)
+       Управление камерой и тайлами
        ================================================================ */
-
-    /**
-     * Инициализирует и настраивает управление камерой.
-     *
-     * @private
-     */
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableZoom = true;
@@ -388,11 +224,6 @@ this.scene.add(this.sunLight);
         this.renderer.domElement.removeEventListener('wheel', this.controls.onMouseWheel);
     }
 
-    /**
-     * Инициализирует инструменты перетаскивания мира.
-     *
-     * @private
-     */
     initDragTools() {
         this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         this.raycasterDragger = new THREE.Raycaster();
@@ -402,11 +233,6 @@ this.scene.add(this.sunLight);
         this.dragLocalPoint = new THREE.Vector3();
     }
 
-    /**
-     * Инициализирует состояние для обработки касаний.
-     *
-     * @private
-     */
     initTouchState() {
         this.touchState = {
             isPinching: false,
@@ -418,209 +244,144 @@ this.scene.add(this.sunLight);
         };
     }
 
-    /* ================================================================
-       Утилиты камеры и URL
-       ================================================================ */
-
-    /**
-     * Устанавливает наклон камеры с анимацией.
-     *
-     * @param {number} pitchDeg - Угол наклона в градусах.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @returns {void}
-     */
     setPitch(pitchDeg, duration = 0.3) {
-    const pitchRad = pitchDeg * Math.PI / 180;
-    const maxPolarRad = this.controls.maxPolarAngle;
-    const clampedRad = Math.max(0.001, Math.min(pitchRad, maxPolarRad));
+        const pitchRad = pitchDeg * Math.PI / 180;
+        const maxPolarRad = this.controls.maxPolarAngle;
+        const clampedRad = Math.max(0.001, Math.min(pitchRad, maxPolarRad));
 
-    const target = this.controls.target.clone();
-    const currentPos = this.camera.position.clone();
-    const dir = new THREE.Vector3().subVectors(currentPos, target);
-    const currentDistance = dir.length();
-    if (currentDistance < 1) return;
+        const target = this._tempVec3a.copy(this.controls.target);
+        const currentPos = this._tempVec3b.copy(this.camera.position);
+        const dir = this._tempDir.subVectors(currentPos, target);
+        const currentDistance = dir.length();
+        if (currentDistance < 1) return;
 
-    const currentPitchRad = Math.acos(dir.y / currentDistance);
+        const currentPitchRad = Math.acos(dir.y / currentDistance);
 
-    this._cameraAnimations.pitch = {
-        start: currentPitchRad,
-        end: clampedRad,
-        startTime: performance.now(),
-        duration
-    };
+        this._cameraAnimations.pitch = {
+            start: currentPitchRad,
+            end: clampedRad,
+            startTime: performance.now(),
+            duration
+        };
 
-    this._startCameraAnimationLoopIfNeeded();
-}
+        this._startCameraAnimationLoopIfNeeded();
+    }
 
-    /**
-     * Устанавливает поворот камеры с анимацией.
-     *
-     * @param {number} bearingDeg - Угол поворота в градусах.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @returns {void}
-     */
     setBearing(bearingDeg, duration = 0.3) {
-    const bearingRad = bearingDeg * Math.PI / 180;
-    const target = this.controls.target.clone();
-    const currentPos = this.camera.position.clone();
-    const dir = new THREE.Vector3().subVectors(currentPos, target);
-    const currentDistance = dir.length();
-    if (currentDistance < 1) return;
+        const bearingRad = bearingDeg * Math.PI / 180;
+        const target = this._tempVec3a.copy(this.controls.target);
+        const currentPos = this._tempVec3b.copy(this.camera.position);
+        const dir = this._tempDir.subVectors(currentPos, target);
+        const currentDistance = dir.length();
+        if (currentDistance < 1) return;
 
-    const currentAzimuth = Math.atan2(-dir.x, dir.z);
-    let delta = bearingRad - currentAzimuth;
-    while (delta > Math.PI) delta -= 2 * Math.PI;
-    while (delta < -Math.PI) delta += 2 * Math.PI;
-    const endAzimuth = currentAzimuth + delta;
+        const currentAzimuth = Math.atan2(-dir.x, dir.z);
+        let delta = bearingRad - currentAzimuth;
+        while (delta > Math.PI) delta -= 2 * Math.PI;
+        while (delta < -Math.PI) delta += 2 * Math.PI;
+        const endAzimuth = currentAzimuth + delta;
 
-    this._cameraAnimations.bearing = {
-        start: currentAzimuth,
-        end: endAzimuth,
-        startTime: performance.now(),
-        duration
-    };
+        this._cameraAnimations.bearing = {
+            start: currentAzimuth,
+            end: endAzimuth,
+            startTime: performance.now(),
+            duration
+        };
 
-    this._startCameraAnimationLoopIfNeeded();
-}
+        this._startCameraAnimationLoopIfNeeded();
+    }
 
+    _startCameraAnimationLoopIfNeeded() {
+        if (this._cameraAnimation || this._cameraAnimFrame) return;
 
-_startCameraAnimationLoopIfNeeded() {
-    if (this._cameraAnimation || this._cameraAnimFrame) return;
+        this._cameraAnimation = { custom: true };
+        this._controlsDampingWasEnabled = this.controls.enableDamping;
+        this.controls.enableDamping = false;
 
-    this._cameraAnimation = { custom: true }; // блокируем другие анимации и зум
-    this._controlsDampingWasEnabled = this.controls.enableDamping;
-    this.controls.enableDamping = false;
-
-    const animateStep = (now) => {
-        let anyActive = false;
-        const target = this.controls.target.clone();
-        const currentPos = this.camera.position.clone();
-        const dir = new THREE.Vector3().subVectors(currentPos, target);
-        let currentDistance = dir.length();
-        if (currentDistance < 1) {
-            this._cameraAnimation = null;
-            this._cameraAnimFrame = null;
-            this.controls.enableDamping = this._controlsDampingWasEnabled;
-            return;
-        }
-
-        let currentPitch = Math.acos(dir.y / currentDistance);
-        let currentAzimuth = Math.atan2(-dir.x, dir.z);
-
-        // Обработка pitch
-        if (this._cameraAnimations.pitch) {
-            const anim = this._cameraAnimations.pitch;
-            let t = (now - anim.startTime) / (anim.duration * 1000);
-            t = Math.min(t, 1.0);
-            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-            currentPitch = anim.start + (anim.end - anim.start) * eased;
-            if (t >= 1.0) {
-                this._cameraAnimations.pitch = null;
-            } else {
-                anyActive = true;
+        const animateStep = (now) => {
+            let anyActive = false;
+            const target = this._tempVec3a.copy(this.controls.target);
+            const currentPos = this._tempVec3b.copy(this.camera.position);
+            const dir = this._tempDir.subVectors(currentPos, target);
+            let currentDistance = dir.length();
+            if (currentDistance < 1) {
+                this._cameraAnimation = null;
+                this._cameraAnimFrame = null;
+                this.controls.enableDamping = this._controlsDampingWasEnabled;
+                return;
             }
-        }
 
-        // Обработка bearing
-        if (this._cameraAnimations.bearing) {
-            const anim = this._cameraAnimations.bearing;
-            let t = (now - anim.startTime) / (anim.duration * 1000);
-            t = Math.min(t, 1.0);
-            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-            currentAzimuth = anim.start + (anim.end - anim.start) * eased;
-            if (t >= 1.0) {
-                this._cameraAnimations.bearing = null;
-            } else {
-                anyActive = true;
+            let currentPitch = Math.acos(dir.y / currentDistance);
+            let currentAzimuth = Math.atan2(-dir.x, dir.z);
+
+            if (this._cameraAnimations.pitch) {
+                const anim = this._cameraAnimations.pitch;
+                let t = (now - anim.startTime) / (anim.duration * 1000);
+                t = Math.min(t, 1.0);
+                const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                currentPitch = anim.start + (anim.end - anim.start) * eased;
+                if (t >= 1.0) this._cameraAnimations.pitch = null;
+                else anyActive = true;
             }
-        }
 
-        // Применяем новые параметры
-        const sinP = Math.sin(currentPitch);
-        const cosP = Math.cos(currentPitch);
-        this.camera.position.set(
-            target.x - currentDistance * sinP * Math.sin(currentAzimuth),
-            target.y + currentDistance * cosP,
-            target.z + currentDistance * sinP * Math.cos(currentAzimuth)
-        );
-        this.controls.target.copy(target);
-        this.controls.update();
+            if (this._cameraAnimations.bearing) {
+                const anim = this._cameraAnimations.bearing;
+                let t = (now - anim.startTime) / (anim.duration * 1000);
+                t = Math.min(t, 1.0);
+                const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                currentAzimuth = anim.start + (anim.end - anim.start) * eased;
+                if (t >= 1.0) this._cameraAnimations.bearing = null;
+                else anyActive = true;
+            }
 
-        // Обновление тайлов (по желанию можно чаще)
-        if (Math.floor((now - this.lastVisibleUpdateTime) / this.VISIBLE_UPDATE_THROTTLE) > 0) {
-            this.maybeUpdateVisibleTiles();
-        }
-
-        if (!anyActive) {
-            // Все анимации завершены
-            this._cameraAnimation = null;
-            this._cameraAnimFrame = null;
-            this.controls.enableDamping = this._controlsDampingWasEnabled;
+            const sinP = Math.sin(currentPitch);
+            const cosP = Math.cos(currentPitch);
+            this.camera.position.set(
+                target.x - currentDistance * sinP * Math.sin(currentAzimuth),
+                target.y + currentDistance * cosP,
+                target.z + currentDistance * sinP * Math.cos(currentAzimuth)
+            );
             this.controls.target.copy(target);
             this.controls.update();
-            this.maybeUpdateVisibleTiles();
-            return;
-        }
+
+            if (Math.floor((now - this.lastVisibleUpdateTime) / this.VISIBLE_UPDATE_THROTTLE) > 0) {
+                this.maybeUpdateVisibleTiles();
+            }
+
+            if (!anyActive) {
+                this._cameraAnimation = null;
+                this._cameraAnimFrame = null;
+                this.controls.enableDamping = this._controlsDampingWasEnabled;
+                this.controls.target.copy(target);
+                this.controls.update();
+                this.maybeUpdateVisibleTiles();
+                return;
+            }
+
+            this._cameraAnimFrame = requestAnimationFrame(animateStep);
+        };
 
         this._cameraAnimFrame = requestAnimationFrame(animateStep);
-    };
+    }
 
-    this._cameraAnimFrame = requestAnimationFrame(animateStep);
-}
-
-
-
-
-    /**
-     * Сбрасывает поворот камеры к северу.
-     *
-     * @returns {void}
-     */
     resetBearing() {
         this.rotateToNorth(0.3);
     }
 
-    /**
-     * Рассчитывает дистанцию камеры до цели для заданного уровня зума.
-     *
-     * @param {number} z - Уровень зума.
-     * @returns {number} Дистанция в мировых единицах.
-     */
     getTargetDistanceForZoom(z) {
         return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
     }
 
-    /**
-     * Возвращает URL текстуры для тайла по координатам.
-     *
-     * @param {number} z - Уровень зума.
-     * @param {number} x - Координата X тайла.
-     * @param {number} y - Координата Y тайла.
-     * @returns {string|null} URL текстуры или null, если слой не задан.
-     */
     getTextureUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].texture) return null;
         return this.layers[0].texture.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /**
-     * Возвращает URL карты высот для тайла.
-     *
-     * @param {number} z - Уровень зума.
-     * @param {number} x - Координата X тайла.
-     * @param {number} y - Координата Y тайла.
-     * @returns {string|null} URL карты высот или null, если слой не задан.
-     */
     getElevationUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].elevation) return null;
         return this.layers[0].elevation.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /**
-     * Возвращает максимальное расстояние для отрисовки объектов.
-     *
-     * @returns {number} Максимальное расстояние или Infinity, если фактор не задан.
-     */
     get maxObjectDistance() {
         if (!this.objectRenderDistanceFactor) return Infinity;
         const distToTarget = this.camera.position.distanceTo(this.controls.target);
@@ -628,11 +389,8 @@ _startCameraAnimationLoopIfNeeded() {
     }
 
     /**
-     * Возвращает максимальную высоту поверхности в заданной мировой точке.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {number} Максимальная высота поверхности.
+     * Возвращает максимальную высоту поверхности в заданной точке.
+     * Теперь использует кэш; инвалидация происходит при применении высот.
      */
     getSurfaceMaxHeight(worldX, worldZ) {
         if (!this.hasElevation) return 0;
@@ -645,25 +403,25 @@ _startCameraAnimationLoopIfNeeded() {
         const y = Math.floor((localZ + this.MAX_MERCATOR) / tileSize);
         if (y < 0 || y > maxTile) return 0;
         const vk = getVirtKey(z, virtX, y);
+
+        if (this._surfaceMaxHeightCache.has(vk)) {
+            return this._surfaceMaxHeightCache.get(vk);
+        }
+
         const inst = this.tileManager.tiles.get(vk);
+        let maxY = 0;
         if (inst && inst.heightsApplied && inst.mesh) {
             const pos = inst.geometry.attributes.position.array;
-            let maxY = -Infinity;
-            for (let i = 0; i < pos.length; i += 3) {
-                if (pos[i + 1] > maxY) maxY = pos[i + 1];
+            maxY = -Infinity;
+            for (let i = 1; i < pos.length; i += 3) {
+                if (pos[i] > maxY) maxY = pos[i];
             }
-            return maxY + inst.mesh.position.y;
+            maxY += inst.mesh.position.y;
         }
-        return 0;
+        this._surfaceMaxHeightCache.set(vk, maxY);
+        return maxY;
     }
 
-    /**
-     * Возвращает интерполированную высоту поверхности в заданной мировой точке.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {number} Высота поверхности.
-     */
     getSurfaceHeightAt(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const z = this.currentDiscreteZoom;
@@ -703,13 +461,6 @@ _startCameraAnimationLoopIfNeeded() {
         return h0 + (h1 - h0) * fv + inst.mesh.position.y;
     }
 
-    /**
-     * Обеспечивает загрузку тайла для заданной мировой точки.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {void}
-     */
     ensureTileForPoint(worldX, worldZ) {
         const z = this.currentDiscreteZoom;
         const tileSize = this.WORLD_SIZE / Math.pow(2, z);
@@ -722,11 +473,6 @@ _startCameraAnimationLoopIfNeeded() {
         this.tileManager.ensureTile(z, virtX, y);
     }
 
-    /**
-     * Создаёт статический фоновый слой из текстурных тайлов.
-     *
-     * @returns {void}
-     */
     createStaticBackgroundLayer() {
         if (!this.layers.length || !this.layers.some(l => l.texture)) return;
         while (this.staticBgGroup.children.length > 0) {
@@ -765,47 +511,26 @@ _startCameraAnimationLoopIfNeeded() {
     /* ================================================================
        Перемещение мира и синхронизация контролов
        ================================================================ */
-
-    /**
-     * Сдвигает мировую группу на заданные смещения.
-     *
-     * @param {number} dx - Смещение по X.
-     * @param {number} dz - Смещение по Z.
-     * @returns {void}
-     */
     shiftWorld(dx, dz) {
         this.worldGroup.position.x -= dx;
         this.worldGroup.position.z -= dz;
     }
 
-    /**
-     * Синхронизирует цель контролов с точкой пересечения луча из центра экрана с плоскостью земли.
-     *
-     * @returns {void}
-     */
     syncControlsTarget() {
-        const rc = new THREE.Raycaster();
-        rc.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-        const tp = new THREE.Vector3();
-        if (rc.ray.intersectPlane(this.groundPlane, tp)) {
-            this.controls.target.copy(tp);
+        // Используем предварительно созданный raycaster и mouse (0,0)
+        this._tempMouse.set(0, 0);
+        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+        if (this._tempRaycaster.ray.intersectPlane(this.groundPlane, this._tempVec3a)) {
+            this.controls.target.copy(this._tempVec3a);
             this.controls.update();
         }
     }
 
     /* ================================================================
-       Ввод: мышь, колёсико, касания
+       Обработчики ввода
        ================================================================ */
-
-    /**
-     * Обрабатывает нажатие кнопки мыши.
-     *
-     * @param {MouseEvent} e - Событие мыши.
-     * @returns {void}
-     */
     onMouseDown(e) {
-        if (this._cameraAnimation) return;
-        if (e.button !== 0) return;
+        if (this._cameraAnimation || e.button !== 0) return;
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -816,15 +541,8 @@ _startCameraAnimationLoopIfNeeded() {
         }
     }
 
-    /**
-     * Обрабатывает перемещение мыши.
-     *
-     * @param {MouseEvent} e - Событие мыши.
-     * @returns {void}
-     */
     onMouseMove(e) {
-        if (this._cameraAnimation) return;
-        if (!this.isDragging) return;
+        if (this._cameraAnimation || !this.isDragging) return;
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -835,24 +553,12 @@ _startCameraAnimationLoopIfNeeded() {
         }
     }
 
-    /**
-     * Обрабатывает отпускание кнопки мыши.
-     *
-     * @returns {void}
-     */
     onMouseUp() {
-        if (this._cameraAnimation) return;
-        if (!this.isDragging) return;
+        if (this._cameraAnimation || !this.isDragging) return;
         this.isDragging = false;
         this.syncControlsTarget();
     }
 
-    /**
-     * Обрабатывает прокрутку колеса мыши.
-     *
-     * @param {WheelEvent} e - Событие колеса.
-     * @returns {void}
-     */
     onWheel(e) {
         if (this._cameraAnimation) return;
         e.preventDefault();
@@ -860,24 +566,12 @@ _startCameraAnimationLoopIfNeeded() {
         this.applyZoomDelta(delta);
     }
 
-    /**
-     * Вычисляет расстояние между двумя касаниями.
-     *
-     * @param {TouchList} touches - Список касаний.
-     * @returns {number} Расстояние в пикселях.
-     */
     getTouchDistance(touches) {
         const dx = touches[0].clientX - touches[1].clientX;
         const dy = touches[0].clientY - touches[1].clientY;
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    /**
-     * Обрабатывает начало касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
     onTouchStart(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length === 1) {
@@ -908,13 +602,6 @@ _startCameraAnimationLoopIfNeeded() {
         }
     }
 
-    /**
-     * Находит касание по идентификатору.
-     *
-     * @param {TouchList} touches - Список касаний.
-     * @param {number} id - Идентификатор касания.
-     * @returns {Touch|null} Найденное касание или null.
-     */
     findTouchById(touches, id) {
         for (let i = 0; i < touches.length; i++) {
             if (touches[i].identifier === id) return touches[i];
@@ -922,12 +609,6 @@ _startCameraAnimationLoopIfNeeded() {
         return null;
     }
 
-    /**
-     * Обрабатывает перемещение касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
     onTouchMove(e) {
         if (this._cameraAnimation) return;
         if (this.touchDragActive && e.touches.length === 1) {
@@ -958,12 +639,6 @@ _startCameraAnimationLoopIfNeeded() {
         }
     }
 
-    /**
-     * Обрабатывает окончание касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
     onTouchEnd(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length < 2) this.touchState.isPinching = false;
@@ -973,11 +648,6 @@ _startCameraAnimationLoopIfNeeded() {
         }
     }
 
-    /**
-     * Обрабатывает изменение размера элемента.
-     *
-     * @returns {void}
-     */
     onResize() {
         const w = this.targetElement.clientWidth;
         const h = this.targetElement.clientHeight;
@@ -987,11 +657,6 @@ _startCameraAnimationLoopIfNeeded() {
         this.maybeUpdateVisibleTiles();
     }
 
-    /**
-     * Привязывает обработчики событий к элементам.
-     *
-     * @returns {void}
-     */
     bindEvents() {
         this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
         window.addEventListener('mousemove', (e) => this.onMouseMove(e));
@@ -1007,18 +672,10 @@ _startCameraAnimationLoopIfNeeded() {
     /* ================================================================
        Механика зума и видимости
        ================================================================ */
-
-    /**
-     * Применяет дистанцию камеры в соответствии с текущим непрерывным зумом.
-     *
-     * @returns {void}
-     */
     applyZoomDistance() {
         if (this._cameraAnimation) return;
-        const target = this.controls.target;
-        const currentDir = new THREE.Vector3()
-            .subVectors(this.camera.position, target)
-            .normalize();
+        const target = this._tempTarget.copy(this.controls.target);
+        const currentDir = this._tempDir.subVectors(this.camera.position, target).normalize();
         const pitch = Math.acos(currentDir.y);
 
         let minDist = 0;
@@ -1039,28 +696,16 @@ _startCameraAnimationLoopIfNeeded() {
         this.camera.lookAt(target);
     }
 
-    /**
-     * Применяет изменение зума на заданную величину.
-     *
-     * @param {number} delta - Величина изменения зума.
-     * @returns {void}
-     */
     applyZoomDelta(delta) {
         this.targetContinuousZoom += delta;
         this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
         if (this.targetContinuousZoom > this.MAX_RELIEF_Z) {
-            const futureCenter = this.controls.target.clone();
+            const futureCenter = this._tempVec3a.copy(this.controls.target);
             const neededParentZ = Math.min(Math.floor(this.targetContinuousZoom) - 1, this.MAX_RELIEF_Z);
             this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
         }
     }
 
-    /**
-     * Возвращает идеальный дискретный уровень зума на основе непрерывного с учётом гистерезиса.
-     *
-     * @param {number} continuousZoom - Непрерывный уровень зума.
-     * @returns {number} Дискретный уровень зума.
-     */
     peekIdealZoom(continuousZoom) {
         const prev = this.currentDiscreteZoom;
         let idealZ = prev;
@@ -1069,12 +714,6 @@ _startCameraAnimationLoopIfNeeded() {
         return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, idealZ));
     }
 
-    /**
-     * Обновляет видимые тайлы, если прошло достаточно времени или принудительно.
-     *
-     * @param {boolean} [force] - Принудительное обновление.
-     * @returns {void}
-     */
     maybeUpdateVisibleTiles(force = false) {
         const now = performance.now();
         if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
@@ -1091,13 +730,6 @@ _startCameraAnimationLoopIfNeeded() {
         );
     }
 
-    /**
-     * Перемещает камеру к указанным географическим координатам.
-     *
-     * @param {number} lon - Долгота.
-     * @param {number} lat - Широта.
-     * @returns {void}
-     */
     moveCameraTo(lon, lat) {
         const [cx, cy] = proj.fromLonLat([lon, lat]);
         const z = this.currentDiscreteZoom;
@@ -1114,11 +746,6 @@ _startCameraAnimationLoopIfNeeded() {
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /**
-     * Корректирует мировую позицию при пересечении антимеридиана.
-     *
-     * @private
-     */
     _wrapLongitudeIfNeeded() {
         const now = performance.now();
         if (now - (this._lastWrapCheck || 0) < 1000) return;
@@ -1130,11 +757,8 @@ _startCameraAnimationLoopIfNeeded() {
         const [lon, lat] = toLonLat([centerX, centerZ]);
 
         let newLon = lon;
-        if (lon < -180) {
-            newLon = lon + 360;
-        } else if (lon > 180) {
-            newLon = lon - 360;
-        }
+        if (lon < -180) newLon = lon + 360;
+        else if (lon > 180) newLon = lon - 360;
         if (newLon === lon) return;
 
         const [newCenterX, newCenterZ] = proj.fromLonLat([newLon, lat]);
@@ -1143,34 +767,26 @@ _startCameraAnimationLoopIfNeeded() {
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /**
-     * Плавно перемещает камеру к указанным географическим координатам с анимацией.
-     *
-     * @param {number} lon - Долгота.
-     * @param {number} lat - Широта.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @param {number|null} [targetZoom] - Целевой уровень зума или null для сохранения текущего.
-     * @returns {void}
-     */
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         if (this._cameraAnimation) return;
 
-        const startTarget = this.controls.target.clone();
-        const startPos = this.camera.position.clone();
+        const startTarget = this._tempVec3a.copy(this.controls.target);
+        const startPos = this._tempVec3b.copy(this.camera.position);
         const startZoom = this.continuousZoom;
 
         const [cx, cy] = proj.fromLonLat([lon, lat]);
         const worldOffset = this.worldGroup.position;
-        const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cy + worldOffset.z);
+        const endTarget = this._tempVec3c.set(cx + worldOffset.x, 0, cy + worldOffset.z);
 
-        const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
+        const currentDir = this._tempDir.subVectors(startPos, startTarget).normalize();
         const endZoom = targetZoom !== null ? targetZoom : startZoom;
 
         const startTime = performance.now();
         this._cameraAnimation = {
             startTarget, startPos, endTarget,
             startZoom, endZoom,
-            duration, startTime
+            duration, startTime,
+            dir: currentDir.clone()
         };
 
         this._controlsDampingWasEnabled = this.controls.enableDamping;
@@ -1178,20 +794,20 @@ _startCameraAnimationLoopIfNeeded() {
 
         const animateStep = (now) => {
             if (!this._cameraAnimation) return;
-            const { startTarget, startPos, endTarget, startZoom, endZoom, duration, startTime } = this._cameraAnimation;
-            let t = (now - startTime) / (duration * 1000);
+            const anim = this._cameraAnimation;
+            let t = (now - anim.startTime) / (anim.duration * 1000);
             t = Math.min(t, 1.0);
             const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
-            const currentZoom = startZoom + (endZoom - startZoom) * eased;
-            const currentTarget = new THREE.Vector3().lerpVectors(startTarget, endTarget, eased);
+            const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
+            const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
 
-            const maxHeight = this.hasElevation ? this.getSurfaceMaxHeight(endTarget.x, endTarget.z) : 0;
+            const maxHeight = this.hasElevation ? this.getSurfaceMaxHeight(anim.endTarget.x, anim.endTarget.z) : 0;
             const minDist = this.hasElevation ? (maxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) : 0;
             const desiredDist = this.getTargetDistanceForZoom(currentZoom);
             const finalDist = Math.max(desiredDist, minDist);
 
-            const currentPos = currentTarget.clone().addScaledVector(currentDir, finalDist);
+            const currentPos = this._tempVec3b.copy(currentTarget).addScaledVector(anim.dir, finalDist);
 
             this.camera.position.copy(currentPos);
             this.controls.target.copy(currentTarget);
@@ -1208,17 +824,16 @@ _startCameraAnimationLoopIfNeeded() {
                 this._cameraAnimation = null;
                 this.controls.enableDamping = this._controlsDampingWasEnabled;
 
-                this.controls.target.copy(endTarget);
-                const finalMaxHeight = this.hasElevation ? this.getSurfaceMaxHeight(endTarget.x, endTarget.z) : 0;
-                const finalMinDist = this.hasElevation ? (finalMaxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) / Math.cos(pitch) : 0;
-                const finalDesiredDist = this.getTargetDistanceForZoom(endZoom);
+                const finalMaxHeight = this.hasElevation ? this.getSurfaceMaxHeight(anim.endTarget.x, anim.endTarget.z) : 0;
+                const finalMinDist = this.hasElevation ? (finalMaxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) : 0;
+                const finalDesiredDist = this.getTargetDistanceForZoom(anim.endZoom);
                 this.camera.position.copy(
-                    endTarget.clone().addScaledVector(currentDir, Math.max(finalDesiredDist, finalMinDist))
+                    this._tempVec3b.copy(anim.endTarget).addScaledVector(anim.dir, Math.max(finalDesiredDist, finalMinDist))
                 );
                 this.controls.update();
 
-                this.continuousZoom = endZoom;
-                this.targetContinuousZoom = endZoom;
+                this.continuousZoom = anim.endZoom;
+                this.targetContinuousZoom = anim.endZoom;
                 this.maybeUpdateVisibleTiles(true);
                 return;
             }
@@ -1227,19 +842,12 @@ _startCameraAnimationLoopIfNeeded() {
         requestAnimationFrame(animateStep);
     }
 
-    /**
-     * Поворачивает камеру к северу и, при необходимости, сбрасывает наклон.
-     *
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @param {boolean} [resetPitch] - Сбросить ли наклон камеры.
-     * @returns {void}
-     */
     rotateToNorth(duration = 0.3, resetPitch = true) {
         if (this._cameraAnimation) return;
 
-        const startTarget = this.controls.target.clone();
-        const startPos = this.camera.position.clone();
-        const dir = new THREE.Vector3().subVectors(startPos, startTarget);
+        const startTarget = this._tempVec3a.copy(this.controls.target);
+        const startPos = this._tempVec3b.copy(this.camera.position);
+        const dir = this._tempDir.subVectors(startPos, startTarget);
         const startDistance = dir.length();
         if (startDistance < 1) return;
 
@@ -1314,12 +922,6 @@ _startCameraAnimationLoopIfNeeded() {
     /* ================================================================
        Главный цикл анимации
        ================================================================ */
-
-    /**
-     * Главный цикл анимации, обновляющий камеру, тайлы и рендеринг.
-     *
-     * @private
-     */
     animate() {
         requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
@@ -1341,27 +943,14 @@ _startCameraAnimationLoopIfNeeded() {
             this.applyZoomDistance();
         }
 
-this.maybeUpdateVisibleTiles();
+        this.maybeUpdateVisibleTiles();
 
-
-for (const layer of this._dynamicLayers) {
-    if (layer._postUpdate) layer._postUpdate(this);
-}
-
-
-if (!this._pendingLabelUpdate) {
-    this.textManager.update();
-    void this.textManager.pane.offsetWidth; 
-
-    this._pendingLabelUpdate = true;
-    requestAnimationFrame(() => {
-        this.renderer.render(this.scene, this.camera);
-        this._pendingLabelUpdate = false;
-    });
-}
-
+        // Обновляем динамические слои только один раз
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);
         }
+
+        // Рендерим сцену немедленно
+        this.renderer.render(this.scene, this.camera);
     }
 }

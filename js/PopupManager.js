@@ -67,12 +67,11 @@ export class PopupManager {
             boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
             padding: '8px 12px',
             fontSize: '14px',
-            pointerEvents: 'none',      // важно: клики проходят сквозь тултип
+            pointerEvents: 'none',     
             transform: 'translate(-50%, -100%)',
             display: 'none',
             zIndex: '1200',
-            maxWidth: '300px',
-            whiteSpace: 'nowrap'
+            maxWidth: '300px'
         });
         this._map.targetElement.appendChild(el);
         this._tooltipElement = el;

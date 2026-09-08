@@ -204,7 +204,7 @@ export class Polygon {
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
 
         // Кэшированные координаты и вспомогательные объекты для оптимизации
-        /** @private */ this._cachedWorldRings = []; // массив по кольцам: Float32Array [x0,z0, x1,z1, ...]
+        /** @private */ this._cachedWorldRings = []; // массив по кольцам: Float32Array [x0,z0, x1,z1, ...] (или null, если кольцо невалидно)
         /** @private */ this._cachedLocalRings = []; // массив по кольцам: локальные координаты относительно центроида
         /** @private */ this._boundingSphere = null; // ограничивающая сфера для быстрой отбраковки
         /** @private */ this._lastWorldGroupPos = new THREE.Vector3(); // последняя позиция worldGroup для детекта сдвига
@@ -222,15 +222,24 @@ export class Polygon {
     /**
      * Преобразует все координаты колец в мировые (после proj.fromLonLat) и сохраняет в кэш.
      * Вызывается один раз в конструкторе.
+     * Невалидные кольца (менее 3 точек) сохраняются как null.
      *
      * @returns {void}
      * @private
      */
     _precomputeWorldCoordinates() {
         this._cachedWorldRings = this._rings.map(ring => {
+            if (!Array.isArray(ring) || ring.length < 3) {
+                return null; // пометим как невалидное
+            }
             const arr = new Float32Array(ring.length * 2);
             for (let i = 0; i < ring.length; i++) {
-                const [lon, lat] = ring[i];
+                const point = ring[i];
+                if (!Array.isArray(point) || point.length < 2) {
+                    // если координата точки некорректна, пропускаем всё кольцо
+                    return null;
+                }
+                const [lon, lat] = point;
                 const [x, z] = proj.fromLonLat([lon, lat]);
                 arr[i * 2] = x;
                 arr[i * 2 + 1] = z;
@@ -322,18 +331,24 @@ export class Polygon {
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
             const ring = rings[ringIdx];
-            if (ring.length < 3) {
-                console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
-                continue; // пропускаем некорректное кольцо
+            const worldRing = this._cachedWorldRings[ringIdx];
+
+            // Пропускаем кольцо, если оно невалидно или мировые координаты отсутствуют
+            if (!Array.isArray(ring) || ring.length < 3 || !worldRing) {
+                if (ringIdx === 0) {
+                    // внешнее кольцо обязательно
+                    console.warn('Polygon: outer ring is invalid');
+                    return;
+                }
+                console.warn(`Polygon: hole ring ${ringIdx} is invalid and will be skipped`);
+                continue;
             }
 
             ringStartIndices.push(points2D.length);
-
             if (ringIdx > 0) {
                 holeIndices.push(coords.length / 2);
             }
 
-            const worldRing = this._cachedWorldRings[ringIdx];
             const firstX = worldRing[0];
             const firstZ = worldRing[1];
 
@@ -379,8 +394,9 @@ export class Polygon {
             points2D[i].y -= cz;
         }
 
-        // Сохраняем локальные координаты колец для обводки
+        // Сохраняем локальные координаты колец для обводки (только валидные кольца)
         this._cachedLocalRings = this._cachedWorldRings.map(worldRing => {
+            if (!worldRing) return null;
             const local = new Float32Array(worldRing.length);
             for (let i = 0; i < worldRing.length; i += 2) {
                 local[i] = worldRing[i] - cx;
@@ -771,8 +787,6 @@ export class Polygon {
                 this._group.visible = false;
                 return;
             }
-            // Дополнительная точная проверка по рёбрам (опционально, если дистанция близка)
-            // Здесь можно оставить прежнюю логику, но она будет вызываться реже
         }
 
         // Обнаружение сдвига мира для установки dirty-флага высот
@@ -787,7 +801,6 @@ export class Polygon {
             this._heightsDirty = false;
             this._lastHeightUpdateTime = performance.now();
         }
-        // Обновляем обводку только если высоты изменились (или явно требуется)
         this._updateStroke();
         this._updateCentroidScreenPos();
     }
@@ -886,6 +899,7 @@ export class Polygon {
     _updateStroke() {
         if (!this._strokeLine || !this._strokeGeometry || !this._cachedLocalRings.length) return;
         const outerLocalRing = this._cachedLocalRings[0];
+        if (!outerLocalRing) return;
         const positions = [];
 
         const groupPos = this._group.position; // фактически это центроид, но в локальных координатах уже вычтен

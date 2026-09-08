@@ -273,34 +273,41 @@ export class TileManager {
      *
      * @private
      */
-    _updateFade() {
-        // Скорость изменения прозрачности (примерно 4-5 кадров для полного изменения)
-        const fadeSpeed = 0.25;
+_updateFade() {
+    const fadeFactor = 0.5; // быстрое затухание, ~2-3 кадра
 
-        for (const inst of this.tiles.values()) {
-            if (!inst.mesh) continue;
-            if (inst.opacity !== inst.targetOpacity) {
-                if (inst.opacity < inst.targetOpacity) {
-                    inst.opacity = Math.min(inst.targetOpacity, inst.opacity + fadeSpeed);
-                } else {
-                    inst.opacity = Math.max(inst.targetOpacity, inst.opacity - fadeSpeed);
-                }
+    for (const inst of this.tiles.values()) {
+        if (!inst.mesh) continue;
+        if (inst.opacity !== inst.targetOpacity) {
+            // Если материал не прозрачен, но нам нужна анимация, включаем transparent
+            if (!inst.mesh.material.transparent && inst.opacity < 1) {
+                inst.mesh.material.transparent = true;
+            }
 
-                inst.mesh.material.opacity = inst.opacity;
+            // Экспоненциальное приближение к цели — плавно и быстро
+            inst.opacity += (inst.targetOpacity - inst.opacity) * fadeFactor;
 
-                // Если полностью скрылись, выключаем меш
-                if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
-                    inst.mesh.visible = false;
-                    inst.mesh.material.opacity = 0;
-                }
-                // Если стали полностью видимыми, можно опционально отключить прозрачность для производительности
-                else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
-                    inst.mesh.material.opacity = 1;
-                    // inst.mesh.material.transparent = false; // раскомментировать при необходимости
-                }
+            // Приближаемся к точным значениям, чтобы избежать вечных колебаний
+            if (Math.abs(inst.targetOpacity - inst.opacity) < 0.001) {
+                inst.opacity = inst.targetOpacity;
+            }
+
+            inst.mesh.material.opacity = inst.opacity;
+
+            // Полностью скрыли
+            if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
+                inst.mesh.visible = false;
+                inst.mesh.material.opacity = 0;
+                inst.mesh.material.transparent = false; // отключаем прозрачность
+            }
+            // Полностью показали
+            else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
+                inst.mesh.material.opacity = 1;
+                inst.mesh.material.transparent = false; // отключаем прозрачность
             }
         }
     }
+}
 
     /**
      * Рекурсивно собирает готовых потомков тайла в renderSet.
@@ -474,12 +481,31 @@ export class TileManager {
         }
 
         const mat = new THREE.MeshBasicMaterial({
-            map: texture,
-            transparent: true,      // включаем прозрачность для fade-анимации
-            opacity: 0,             // начальная прозрачность — полностью прозрачный
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
-        });
+    map: texture,
+    transparent: false,        // прозрачность включается только на время анимации
+    opacity: 0,                // начальное значение не важно, будет переопределено
+    depthWrite: this.hasElevation,
+    depthTest: this.hasElevation
+});
+
+// В методе update (блок переключения видимости)
+for (const [k, inst] of this.tiles) {
+    if (!inst.mesh) continue;
+    const show = renderSet.has(k);
+    if (show) {
+        inst.targetOpacity = 1;
+        // Если меш был скрыт, включаем его и запускаем fade-in
+        if (!inst.mesh.visible) {
+            inst.mesh.visible = true;
+            inst.opacity = 0;
+            inst.mesh.material.transparent = true;  // включаем прозрачность для анимации
+            inst.mesh.material.opacity = 0;
+        }
+    } else {
+        inst.targetOpacity = 0;
+    }
+    if (show) inst.lastUsed = this.frame;
+}
 
         const mesh = new THREE.Mesh(geometry, mat);
         mesh.position.set(

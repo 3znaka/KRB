@@ -166,7 +166,7 @@ export class Marker3D {
         if (this._title && this._map.textManager) {
             this._textLabel = this._map.textManager.addLabel(this);
         }
-        // Тултип больше не создаётся — он управляется PopupManager
+
     }
 
     _createPrimitive() {

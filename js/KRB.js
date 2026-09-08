@@ -10,3 +10,4 @@ export { Polygon } from './Polygon.js';
 export { VectorTileLayer } from './VectorTileLayer.js';
 export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
+export { Area3D } from './Area3D.js';

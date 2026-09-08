@@ -53,18 +53,26 @@ export function initUI(map) {
     scaleBar.className = 'krb-scale-bar';
     const scaleLabel = document.createElement('div');
     scaleLabel.className = 'krb-scale-label';
-    const zoomLabel = document.createElement('div');
-    zoomLabel.className = 'krb-zoom-label';
-    const coordLabel = document.createElement('span');
-    coordLabel.className = 'krb-coord-label';
+    
+const zoomLabel = document.createElement('div');
+zoomLabel.className = 'krb-zoom-label';
+
+const coordLabel = document.createElement('span');
+coordLabel.className = 'krb-coord-label';
+zoomLabel.appendChild(coordLabel);
+
 const fpsLabel = document.createElement('span');
 fpsLabel.className = 'krb-fps-label';
 fpsLabel.textContent = 'FPS: --';
 zoomLabel.appendChild(fpsLabel);
 
+const zoomValueLabel = document.createElement('span');
+zoomValueLabel.className = 'krb-zoom-value';
+zoomLabel.appendChild(zoomValueLabel);
 
-    zoomLabel.appendChild(coordLabel);
-    pane.appendChild(zoomLabel);
+pane.appendChild(zoomLabel);
+
+
     scaleContainer.appendChild(scaleBar);
     scaleBar.appendChild(scaleLabel);
     leftBottom.appendChild(scaleContainer);
@@ -178,8 +186,7 @@ const distance = planeDistance * Math.cos(lat * Math.PI / 180);
         scaleLabel.textContent = formatDistance(nice);
     }
 
-    zoomLabel.childNodes[1]?.remove();
-    zoomLabel.appendChild(document.createTextNode(` (${map.currentDiscreteZoom})`));
+zoomValueLabel.textContent = ` (${map.currentDiscreteZoom})`;
 }
 
 /**

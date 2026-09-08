@@ -39,7 +39,8 @@ export class TextManager {
          */
         this.pane = null;
 
-
+this._frameCounter = 0;
+this._fullUpdateInterval = 20;  
 
 
         /**
@@ -406,78 +407,113 @@ _wrapPointText(text, fontSize) {
      *    без перекрытий с уже размещёнными.
      * 5. Применение вычисленных позиций к DOM-элементам.
      */
-    update() {
-        const map = this.map;
-        const zoom = map.continuousZoom;
+update(isMoving = false) {
+    const map = this.map;
+    const zoom = map.continuousZoom;
 
-        // Сброс stuck при изменении состава или зума
-        const currentIds = this.labels.map(l => l.source).filter(src => {
-            const zb = src.getTextZoomBounds();
-            return zoom >= zb.min && zoom <= zb.max && src.isVisible();
-        });
-        const idSet = new Set(currentIds);
-        if (!this._lastVisibleIds || !this._lastZoom ||
-            this._lastZoom !== zoom ||
-            this._lastVisibleIds.size !== idSet.size ||
-            [...this._lastVisibleIds].some(id => !idSet.has(id))) {
-            for (const lbl of this.labels) {
-                lbl.stuck = false;
-                lbl.hiddenByPriority = false;
-            }
+    // Увеличиваем счётчик кадров
+    this._frameCounter++;
+    const needFullUpdate = !isMoving || (this._frameCounter % this._fullUpdateInterval === 0);
+
+    // Сброс stuck при изменении состава или зума (выполняется всегда, так как это дёшево)
+    const currentIds = this.labels.map(l => l.source).filter(src => {
+        const zb = src.getTextZoomBounds();
+        return zoom >= zb.min && zoom <= zb.max && src.isVisible();
+    });
+    const idSet = new Set(currentIds);
+    if (!this._lastVisibleIds || !this._lastZoom ||
+        this._lastZoom !== zoom ||
+        this._lastVisibleIds.size !== idSet.size ||
+        [...this._lastVisibleIds].some(id => !idSet.has(id))) {
+        for (const lbl of this.labels) {
+            lbl.stuck = false;
+            lbl.hiddenByPriority = false;
         }
-        this._lastVisibleIds = idSet;
-        this._lastZoom = zoom;
+    }
+    this._lastVisibleIds = idSet;
+    this._lastZoom = zoom;
 
-        // 1. Сбор видимых подписей
-        const visibleLabels = [];
-        for (const label of this.labels) {
-            const src = label.source;
-            const zoomBounds = src.getTextZoomBounds();
-            if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
+    // Сбор видимых подписей (всегда выполняется)
+    const visibleLabels = [];
+    for (const label of this.labels) {
+        const src = label.source;
+        const zoomBounds = src.getTextZoomBounds();
+        if (zoom < zoomBounds.min || zoom > zoomBounds.max) {
+            label.element.style.display = 'none';
+            continue;
+        }
+        if (!src.isVisible()) {
+            label.element.style.display = 'none';
+            continue;
+        }
+
+        label.priority = src.getPriority ? src.getPriority() : 0;
+        label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
+        label.hiddenByPriority = false; // сбрасываем на каждом кадре, но в быстром режиме не пересчитываем
+
+        if (src.getLabelType() === 'line') {
+            const iv = src.getVisibleInterval();
+            if (!iv) {
                 label.element.style.display = 'none';
                 continue;
             }
-            if (!src.isVisible()) {
-                label.element.style.display = 'none';
-                continue;
+            label.visibleInterval = iv;
+            label.t = src.getLabelParameter();
+            if (!label.allowOverflow) {
+                if (label.t < iv.min || label.t > iv.max) {
+                    label.t = Math.max(iv.min, Math.min(iv.max, label.t));
+                    src.setLabelParameter(label.t);
+                }
+            } else {
+                label.t = Math.max(0, Math.min(1, label.t));
             }
-
-            label.priority = src.getPriority ? src.getPriority() : 0;
-            label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
-
-            // сбрасываем hiddenByPriority каждый кадр — будет пересчитано ниже
-            label.hiddenByPriority = false;
-
-            if (src.getLabelType() === 'line') {
-                const iv = src.getVisibleInterval();
-                if (!iv) {
-                    label.element.style.display = 'none';
-                    continue;
-                }
-                label.visibleInterval = iv;
-                label.t = src.getLabelParameter();
-                if (!label.allowOverflow) {
-                    if (label.t < iv.min || label.t > iv.max) {
-                        label.t = Math.max(iv.min, Math.min(iv.max, label.t));
-                        src.setLabelParameter(label.t);
-                    }
-                } else {
-                    label.t = Math.max(0, Math.min(1, label.t));
-                }
+            if (needFullUpdate) {
                 label.rect = this._getLabelCorners(label);
                 if (label.rect) visibleLabels.push(label);
             } else {
-                const pos = src.getScreenPosition();
-                if (!pos) {
-                    label.element.style.display = 'none';
-                    continue;
-                }
-                label.screenPos = pos;
-                label.rect = this._getLabelCorners(label);
-                if (label.rect) visibleLabels.push(label);
+                // в быстром режиме просто добавляем без расчёта rect
+                visibleLabels.push(label);
             }
-        }
+        } else {
+            // Точечная подпись
+            const pos = src.getScreenPosition();
+            if (!pos) {
+                label.element.style.display = 'none';
+                continue;
+            }
+            label.screenPos = pos;
+            if (needFullUpdate) {
+                // Вычисляем прямоугольник для коллизий (без _measureLabel, размеры уже есть)
+                const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+                const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+                const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+                const w = label.width;
+                const h = label.height;
 
+                let anchorX = 0;
+                if (align === 'center') anchorX = w / 2;
+                else if (align === 'right') anchorX = w;
+
+                let anchorY = 0;
+                if (vAlign === 'center') anchorY = h / 2;
+                else if (vAlign === 'bottom') anchorY = h;
+
+                const left = pos.x - anchorX + offX;
+                const top = pos.y - anchorY + offY;
+
+                label.rect = [
+                    { x: left, y: top },
+                    { x: left + w, y: top },
+                    { x: left + w, y: top + h },
+                    { x: left, y: top + h }
+                ];
+            }
+            visibleLabels.push(label);
+        }
+    }
+
+    // Если нужно полное обновление, выполняем сложную логику
+    if (needFullUpdate) {
         // 2. Раздвижение линейных подписей
         const lineLabels = visibleLabels.filter(l => l.source.getLabelType() === 'line');
         if (lineLabels.length > 0) {
@@ -504,7 +540,6 @@ _wrapPointText(text, fontSize) {
 
                     if (overlapping.length === 0) continue;
 
-                    // учитываем только тех, у кого приоритет >= нашего
                     const relevant = overlapping.filter(o => o.priority >= lbl.priority);
                     if (relevant.length === 0) continue;
 
@@ -573,14 +608,14 @@ _wrapPointText(text, fontSize) {
             // сохраняем t в источники для незастрявших
             for (const lbl of lineLabels) {
                 if (lbl.stuck) {
-                    lbl.t = lbl.source.getLabelParameter(); // откат
+                    lbl.t = lbl.source.getLabelParameter();
                 } else {
                     lbl.source.setLabelParameter(lbl.t);
                 }
             }
         }
 
-        // 3. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
+        // 3. Жадная приоритизация
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aLine = a.source.getLabelType() === 'line' ? 1 : 0;
@@ -592,7 +627,10 @@ _wrapPointText(text, fontSize) {
         const placedRects = [];
 
         for (const lbl of sorted) {
-            lbl.rect = this._getLabelCorners(lbl);
+            // Для линий пересчитываем rect, для точек уже есть
+            if (lbl.source.getLabelType() === 'line') {
+                lbl.rect = this._getLabelCorners(lbl);
+            }
             if (!lbl.rect) {
                 lbl.hiddenByPriority = true;
                 continue;
@@ -613,37 +651,59 @@ _wrapPointText(text, fontSize) {
                 lbl.hiddenByPriority = true;
             }
         }
+    } // конец полного обновления
 
-        // 4. Рендеринг DOM-элементов
-        for (const label of visibleLabels) {
-            const src = label.source;
-            const el = label.element;
+    // 4. Рендеринг DOM-элементов (выполняется всегда)
+    for (const label of visibleLabels) {
+        const src = label.source;
+        const el = label.element;
 
-            if (label.hiddenByPriority) {
+        // Если подпись скрыта по приоритету (только если было полное обновление или сохраняем прежнее состояние)
+        if (label.hiddenByPriority) {
+            el.style.display = 'none';
+            continue;
+        }
+
+        if (src.getLabelType() === 'point') {
+            // Быстрое позиционирование через left/top
+            const pos = label.screenPos;
+            if (!pos) {
                 el.style.display = 'none';
                 continue;
             }
-
-            let screenX, screenY, rotation = 0;
-
-            if (src.getLabelType() === 'line') {
-                const pos = src.getScreenPositionAt(label.t);
-                if (!pos) {
-                    el.style.display = 'none';
-                    continue;
-                }
-                screenX = pos.x;
-                screenY = pos.y;
-                rotation = src.getScreenAngleAt(label.t);
-            } else {
-                screenX = label.screenPos.x;
-                screenY = label.screenPos.y;
-            }
-
-            if (!label.width || !label.height) this._measureLabel(label);
+            const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+            const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+            const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
             const w = label.width;
             const h = label.height;
 
+            let anchorX = 0;
+            if (align === 'center') anchorX = w / 2;
+            else if (align === 'right') anchorX = w;
+
+            let anchorY = 0;
+            if (vAlign === 'center') anchorY = h / 2;
+            else if (vAlign === 'bottom') anchorY = h;
+
+            const left = pos.x - anchorX + offX;
+            const top = pos.y - anchorY + offY;
+
+            el.style.display = 'block';
+            el.style.left = left + 'px';
+            el.style.top = top + 'px';
+            el.style.transform = '';
+        } else {
+            // Линейная подпись
+            const pos = src.getScreenPositionAt(label.t);
+            if (!pos) {
+                el.style.display = 'none';
+                continue;
+            }
+            const screenX = pos.x;
+            const screenY = pos.y;
+            const rotation = src.getScreenAngleAt(label.t);
+            const w = label.width;
+            const h = label.height;
             const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
             const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
 
@@ -668,18 +728,19 @@ _wrapPointText(text, fontSize) {
 
             let top = screenY + dy + offY;
 
-            if (src.getLabelType() === 'line') {
-                const style = window.getComputedStyle(el);
-                const fontSize = parseFloat(style.fontSize) || 12;
-                top += fontSize;
-            }
+            // Берём font-size из inline-стиля
+            const fontSize = parseFloat(el.style.fontSize) || 12;
+            top += fontSize;
 
             el.style.display = 'block';
             let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
-if (src.getLabelType() === 'line' && src.getPlacement() === 'along') {
-    transform += ` rotate(${rotation}deg)`;
-}
-el.style.transform = transform;
+            if (src.getPlacement() === 'along') {
+                transform += ` rotate(${rotation}deg)`;
+            }
+            el.style.transform = transform;
+            el.style.left = '0';
+            el.style.top = '0';
         }
     }
+}
 } 

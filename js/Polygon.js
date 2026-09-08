@@ -30,7 +30,7 @@ function pointToSegmentDistance(point, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
     const ap = new THREE.Vector3().subVectors(point, a);
     const abLenSq = ab.lengthSq();
-    if (abLenSq === 0) return point.distanceTo(a); // вырожденный отрезок
+    if (abLenSq === 0) return point.distanceTo(a);
     let t = ap.dot(ab) / abLenSq;
     t = Math.max(0, Math.min(1, t));
     const closest = new THREE.Vector3().copy(a).addScaledVector(ab, t);
@@ -76,7 +76,7 @@ function pointToSegmentDistance(point, a, b) {
  *     strokeColor: '#000000',
  *     strokeWidth: 3,
  *     altitudeMode: 'clampToGround',
- *     altitudeOffset: 10, // базовое смещение (добавляется к поверхности)
+ *     altitudeOffset: 10,
  *     depthTest: true,
  *     title: 'Объёмный полигон'
  * });
@@ -87,32 +87,32 @@ export class Polygon {
      * Инициализирует новый экземпляр полигона с заданными настройками.
      *
      * @param {Object} options - Настройки полигона.
-     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец. Первое кольцо – внешний контур, остальные (опционально) – отверстия. Каждое кольцо – массив точек [долгота, широта].
+     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец.
      * @param {string} [options.fillColor='#3388ff'] - Цвет заливки (CSS).
      * @param {number} [options.fillOpacity=0.5] - Прозрачность заливки (0..1).
      * @param {string} [options.strokeColor='#000000'] - Цвет обводки.
      * @param {number} [options.strokeWidth=2] - Толщина обводки в пикселях.
      * @param {number} [options.strokeOpacity=1] - Прозрачность обводки.
-     * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты: 'clampToGround' (прилегать к рельефу) или 'absolute' (постоянная высота).
-     * @param {number} [options.altitudeOffset=10] - Добавочная высота над поверхностью (или базовая высота для absolute).
-     * @param {boolean} [options.extruded=false] - Включить экструзию (объёмный полигон).
-     * @param {number} [options.height=0] - Толщина экструзии в метрах (только если extruded=true).
-     * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
-     * @param {boolean} [options.depthTest=false] - Включить тест глубины.
-     * @param {boolean} [options.depthWrite=false] - Включить запись в буфер глубины.
-     * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
-     * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором полигон виден.
-     * @param {string} [options.title=''] - Текст постоянной подписи.
-     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи в пикселях.
-     * @param {string} [options.titleAlign='center'] - Горизонтальное выравнивание подписи ('left', 'center', 'right').
+     * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты.
+     * @param {number} [options.altitudeOffset=10] - Добавочная высота.
+     * @param {boolean} [options.extruded=false] - Включить экструзию.
+     * @param {number} [options.height=0] - Толщина экструзии в метрах.
+     * @param {number} [options.minHeight=0] - Высота нижней грани.
+     * @param {boolean} [options.depthTest=false] - Тест глубины.
+     * @param {boolean} [options.depthWrite=false] - Запись глубины.
+     * @param {number} [options.minZoom=-Infinity] - Минимальный зум.
+     * @param {number} [options.maxZoom=Infinity] - Максимальный зум.
+     * @param {string} [options.title=''] - Текст подписи.
+     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи.
+     * @param {string} [options.titleAlign='center'] - Выравнивание подписи.
      * @param {Object} [options.titleStyle={}] - CSS-стили подписи.
-     * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум для отображения подписи.
-     * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум для отображения подписи.
-     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
-     * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
-     * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
-     * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
-     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML), показывается через PopupManager при наведении или клике (если не задан onClick/onHover).
+     * @param {number} [options.titleMinZoom=-Infinity] - Мин. зум для подписи.
+     * @param {number} [options.titleMaxZoom=Infinity] - Макс. зум для подписи.
+     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи.
+     * @param {number} [options.titlePriority=0] - Приоритет подписи.
+     * @param {function} [options.onClick] - Колбэк клика.
+     * @param {function} [options.onHover] - Колбэк наведения.
+     * @param {string} [options.tooltip=''] - HTML-тултип.
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
      */
@@ -153,9 +153,9 @@ export class Polygon {
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
-        /** @private */ this._boundHandlers = null; // { mousedown, mousemove, click }
+        /** @private */ this._boundHandlers = null;
 
-        // Тултип (HTML-текст, отображаемый через PopupManager)
+        // Тултип
         /** @private */ this._tooltipText = options.tooltip || '';
 
         // Внутренние структуры
@@ -163,23 +163,17 @@ export class Polygon {
         /** @private */ this._layer = null;
         /** @private */ this._group = new THREE.Group();
 
-        // Верхняя крышка (основная)
+        // Геометрии
         /** @private */ this._fillMesh = null;
         /** @private */ this._fillGeometry = null;
         /** @private */ this._fillMaterial = null;
-
-        // Нижняя крышка (для экструзии)
         /** @private */ this._bottomMesh = null;
         /** @private */ this._bottomGeometry = null;
         /** @private */ this._bottomMaterial = null;
-
-        // Боковые стенки (для экструзии)
         /** @private */ this._sideMesh = null;
         /** @private */ this._sideGeometry = null;
         /** @private */ this._sideMaterial = null;
-        /** @private */ this._sideVertexCount = 0; // число вершин в боковой геометрии
-
-        // Обводка
+        /** @private */ this._sideVertexCount = 0;
         /** @private */ this._strokeLine = null;
         /** @private */ this._strokeGeometry = null;
         /** @private */ this._strokeMaterial = null;
@@ -189,11 +183,11 @@ export class Polygon {
         /** @private */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
-        /** @private */ this._heightsDirty = true; // флаг необходимости обновления высот
+        /** @private */ this._heightsDirty = true;
 
         // 2D вершины и центроид
         /** @private */ this._vertices2D = [];
-        /** @private */ this._centroidWorld = new THREE.Vector3(); // абсолютные мировые координаты центроида
+        /** @private */ this._centroidWorld = new THREE.Vector3();
         /** @private */ this._cachedCentroidHeight = 0;
         /** @private */ this._lastCentroidHeightUpdateTime = 0;
 
@@ -203,42 +197,35 @@ export class Polygon {
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
 
-        // Кэшированные координаты и вспомогательные объекты для оптимизации
-        /** @private */ this._cachedWorldRings = []; // массив по кольцам: Float32Array [x0,z0, x1,z1, ...] (или null, если кольцо невалидно)
-        /** @private */ this._cachedLocalRings = []; // массив по кольцам: локальные координаты относительно центроида
-        /** @private */ this._boundingSphere = null; // ограничивающая сфера для быстрой отбраковки
-        /** @private */ this._lastWorldGroupPos = new THREE.Vector3(); // последняя позиция worldGroup для детекта сдвига
+        // Кэш координат (не очищается при remove)
+        /** @private */ this._cachedWorldRings = null; // будет заполнен ниже
+        /** @private */ this._cachedLocalRings = null;
+        /** @private */ this._boundingSphere = null;
+        /** @private */ this._lastWorldGroupPos = new THREE.Vector3();
 
-        // Временные векторы для избежания аллокаций в цикле
+        // Временные векторы
         /** @private */ this._tempVector3_1 = new THREE.Vector3();
         /** @private */ this._tempVector3_2 = new THREE.Vector3();
         /** @private */ this._tempVector3_3 = new THREE.Vector3();
         /** @private */ this._tempVector3_4 = new THREE.Vector3();
 
-        // Предварительное преобразование всех координат в мировые
         this._precomputeWorldCoordinates();
     }
 
     /**
-     * Преобразует все координаты колец в мировые (после proj.fromLonLat) и сохраняет в кэш.
-     * Вызывается один раз в конструкторе.
-     * Невалидные кольца (менее 3 точек) сохраняются как null.
+     * Преобразует все координаты колец в мировые и сохраняет в кэш.
+     * Если кольцо невалидно, сохраняется null.
      *
      * @returns {void}
      * @private
      */
     _precomputeWorldCoordinates() {
         this._cachedWorldRings = this._rings.map(ring => {
-            if (!Array.isArray(ring) || ring.length < 3) {
-                return null; // пометим как невалидное
-            }
+            if (!Array.isArray(ring) || ring.length < 3) return null;
             const arr = new Float32Array(ring.length * 2);
             for (let i = 0; i < ring.length; i++) {
                 const point = ring[i];
-                if (!Array.isArray(point) || point.length < 2) {
-                    // если координата точки некорректна, пропускаем всё кольцо
-                    return null;
-                }
+                if (!Array.isArray(point) || point.length < 2) return null;
                 const [lon, lat] = point;
                 const [x, z] = proj.fromLonLat([lon, lat]);
                 arr[i * 2] = x;
@@ -264,7 +251,6 @@ export class Polygon {
 
     /**
      * Вызывается слоем при добавлении, строит геометрию и регистрирует подпись.
-     * Также при наличии обработчиков событий навешивает слушатели на canvas.
      *
      * @param {Object} map - Экземпляр карты.
      * @param {Layer} layer - Слой-владелец.
@@ -277,6 +263,11 @@ export class Polygon {
         this._map = map;
         this._layer = layer;
 
+        // Если кэш координат отсутствует (например, после удаления), пересчитаем
+        if (!this._cachedWorldRings) {
+            this._precomputeWorldCoordinates();
+        }
+
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
@@ -285,17 +276,16 @@ export class Polygon {
             this._textLabel = map.textManager.addLabel(this);
         }
 
-        // Привязываем обработчики событий, если заданы колбэки или есть tooltip
         if (this._onClick || this._onHover || this._tooltipText) {
             this._bindEventHandlers(map);
         }
 
-        // Инициализируем lastWorldGroupPos
         this._lastWorldGroupPos.copy(map.worldGroup.position);
+        this._heightsDirty = true;
     }
 
     /**
-     * Возвращает CSS-трансформацию для подписи в зависимости от выравнивания.
+     * Возвращает CSS-трансформацию для подписи.
      *
      * @returns {string} CSS-трансформация.
      * @private
@@ -310,7 +300,6 @@ export class Polygon {
 
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
-     * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -323,31 +312,39 @@ export class Polygon {
             return;
         }
 
-        // Общий массив координат (плоский [x,z]) и массив точек Vector2
+        // Используем кэшированные мировые координаты (если есть), иначе пересчитываем на лету
+        const worldRings = this._cachedWorldRings || this._rings.map(ring => {
+            if (!Array.isArray(ring) || ring.length < 3) return null;
+            const arr = new Float32Array(ring.length * 2);
+            for (let i = 0; i < ring.length; i++) {
+                const [lon, lat] = ring[i];
+                const [x, z] = proj.fromLonLat([lon, lat]);
+                arr[i * 2] = x;
+                arr[i * 2 + 1] = z;
+            }
+            return arr;
+        });
+
         const coords = [];
         const points2D = [];
-        const holeIndices = [];   // индексы начала каждого внутреннего кольца
-        const ringStartIndices = []; // индексы начала каждого кольца в points2D
+        const holeIndices = [];
+        const ringStartIndices = [];
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
             const ring = rings[ringIdx];
-            const worldRing = this._cachedWorldRings[ringIdx];
+            const worldRing = worldRings[ringIdx];
 
-            // Пропускаем кольцо, если оно невалидно или мировые координаты отсутствуют
-            if (!Array.isArray(ring) || ring.length < 3 || !worldRing) {
+            // Пропускаем невалидные кольца (кроме первого, которое обязательно)
+            if (!ring || ring.length < 3 || !worldRing) {
                 if (ringIdx === 0) {
-                    // внешнее кольцо обязательно
                     console.warn('Polygon: outer ring is invalid');
                     return;
                 }
-                console.warn(`Polygon: hole ring ${ringIdx} is invalid and will be skipped`);
                 continue;
             }
 
             ringStartIndices.push(points2D.length);
-            if (ringIdx > 0) {
-                holeIndices.push(coords.length / 2);
-            }
+            if (ringIdx > 0) holeIndices.push(coords.length / 2);
 
             const firstX = worldRing[0];
             const firstZ = worldRing[1];
@@ -355,7 +352,6 @@ export class Polygon {
             for (let i = 0; i < ring.length; i++) {
                 const x = worldRing[i * 2];
                 const z = worldRing[i * 2 + 1];
-                // Пропускаем замыкающую точку, если она совпадает с первой
                 if (i > 0 && x === firstX && z === firstZ) continue;
                 coords.push(x, z);
                 points2D.push(new THREE.Vector2(x, z));
@@ -376,7 +372,7 @@ export class Polygon {
             return;
         }
 
-        // Центроид как среднее арифметическое всех вершин
+        // Центроид
         let cx = 0, cz = 0;
         for (const pt of points2D) {
             cx += pt.x;
@@ -388,14 +384,14 @@ export class Polygon {
         this._centroidWorld.set(cx, 0, cz);
         this._group.position.copy(this._centroidWorld);
 
-        // Преобразуем вершины в локальные координаты
+        // Локальные координаты
         for (let i = 0; i < points2D.length; i++) {
             points2D[i].x -= cx;
             points2D[i].y -= cz;
         }
 
-        // Сохраняем локальные координаты колец для обводки (только валидные кольца)
-        this._cachedLocalRings = this._cachedWorldRings.map(worldRing => {
+        // Сохраняем локальные координаты колец для обводки
+        this._cachedLocalRings = worldRings.map(worldRing => {
             if (!worldRing) return null;
             const local = new Float32Array(worldRing.length);
             for (let i = 0; i < worldRing.length; i += 2) {
@@ -405,14 +401,14 @@ export class Polygon {
             return local;
         });
 
-        // ----- Верхняя крышка (всегда) -----
+        // ----- Верхняя крышка -----
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
             topPosArray[i * 3] = pt.x;
-            topPosArray[i * 3 + 1] = 0; // Y обновится позже
-            topPosArray[i * 3 + 2] = pt.y; // Vector2.y -> Z
+            topPosArray[i * 3 + 1] = 0;
+            topPosArray[i * 3 + 2] = pt.y;
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
         topGeometry.setIndex(indices);
@@ -434,13 +430,12 @@ export class Polygon {
         this._fillMaterial = topMaterial;
         this._group.add(topMesh);
 
-        // Вычисляем bounding sphere (в локальных координатах, потом учтем transform)
+        // Bounding sphere
         topGeometry.computeBoundingSphere();
         this._boundingSphere = topGeometry.boundingSphere.clone();
-        // Применяем transform группы (позиция центроида)
         this._boundingSphere.center.add(this._centroidWorld);
 
-        // ----- Для экструзии: нижняя крышка и боковые стенки -----
+        // ----- Экструзия -----
         if (this._extruded) {
             // Нижняя крышка
             const bottomGeometry = new THREE.BufferGeometry();
@@ -477,23 +472,19 @@ export class Polygon {
 
             for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
                 if (ringStartIndices[ringIdx] === undefined) continue;
-
                 const start = ringStartIndices[ringIdx];
                 const nextRingStart = (ringIdx + 1 < ringStartIndices.length) ? ringStartIndices[ringIdx + 1] : points2D.length;
                 const count = nextRingStart - start;
-
                 if (count < 2) continue;
 
                 for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
                     const idxI = start + i;
                     const idxJ = start + j;
-
                     const topI = points2D[idxI];
                     const topJ = points2D[idxJ];
 
                     const baseIndex = sidePositions.length / 3;
-
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
@@ -556,7 +547,7 @@ export class Polygon {
     }
 
     /**
-     * Привязывает обработчики событий мыши к canvas, если заданы onClick/onHover или tooltip.
+     * Привязывает обработчики событий мыши к canvas.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -592,7 +583,6 @@ export class Polygon {
 
     /**
      * Проверяет, находится ли точка экрана над геометрией полигона.
-     * Использует bounding sphere для быстрой отбраковки.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -611,16 +601,11 @@ export class Polygon {
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, map.camera);
 
-        // Быстрая проверка пересечения с bounding sphere
         if (this._boundingSphere) {
-            const sphere = this._boundingSphere;
-            // Учитываем мировое смещение группы
             const worldGroupPos = map.worldGroup.position;
-            const worldSphere = sphere.clone();
+            const worldSphere = this._boundingSphere.clone();
             worldSphere.center.add(worldGroupPos);
-            if (!raycaster.ray.intersectsSphere(worldSphere)) {
-                return false;
-            }
+            if (!raycaster.ray.intersectsSphere(worldSphere)) return false;
         }
 
         const objects = [];
@@ -634,8 +619,7 @@ export class Polygon {
     }
 
     /**
-     * Обработчик mousedown на canvas (фаза захвата).
-     * Если клик пришёлся по полигону, останавливает всплытие, чтобы карта не начала перетаскивание.
+     * Обработчик mousedown на canvas.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -647,8 +631,7 @@ export class Polygon {
     }
 
     /**
-     * Обработчик mousemove на canvas (фаза захвата).
-     * Отслеживает состояние наведения и вызывает onHover или показывает тултип через PopupManager.
+     * Обработчик mousemove на canvas.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -679,8 +662,7 @@ export class Polygon {
     }
 
     /**
-     * Обработчик click на canvas (фаза захвата).
-     * Если клик пришёлся по полигону, вызывает onClick или показывает тултип через PopupManager.
+     * Обработчик click на canvas.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -736,11 +718,7 @@ export class Polygon {
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
-
-        // Очистка кэшей
-        this._cachedWorldRings = [];
-        this._cachedLocalRings = [];
-        this._boundingSphere = null;
+        // Не очищаем _cachedWorldRings и _cachedLocalRings, чтобы можно было повторно добавить
     }
 
     /**
@@ -763,13 +741,11 @@ export class Polygon {
             return;
         }
 
-        // Убедимся, что группа находится в правильной ветке сцены
         if (this._group.parent !== this._map.worldGroup) {
             this._group.parent?.remove(this._group);
             this._map.worldGroup.add(this._group);
         }
 
-        // Актуализация разрешения материала обводки
         if (this._strokeMaterial) {
             const canvas = this._map.renderer.domElement;
             const res = this._strokeMaterial.resolution;
@@ -778,7 +754,7 @@ export class Polygon {
             }
         }
 
-        // Проверка дальности отрисовки с использованием bounding sphere
+        // Проверка дальности отрисовки с помощью bounding sphere
         if (map.view.objectDistanceFactor > 0 && this._boundingSphere) {
             const worldGroupPos = map.worldGroup.position;
             const sphereWorldCenter = this._tempVector3_1.copy(this._boundingSphere.center).add(worldGroupPos);
@@ -831,12 +807,12 @@ export class Polygon {
             this._cachedHeights[i] = upperY;
         }
 
-        // Обновляем высоты для обводки (используем кэш мировых координат)
-        const outerWorldRing = this._cachedWorldRings[0];
+        // Обновляем высоты для обводки
+        const outerWorldRing = this._cachedWorldRings?.[0] || this._rings[0];
         if (outerWorldRing) {
             for (let i = 0; i < this._cachedStrokeHeights.length; i++) {
-                const worldX = outerWorldRing[i * 2] + wgPos.x;
-                const worldZ = outerWorldRing[i * 2 + 1] + wgPos.z;
+                const worldX = Array.isArray(outerWorldRing[i * 2]) ? outerWorldRing[i * 2][0] : outerWorldRing[i * 2];
+                const worldZ = Array.isArray(outerWorldRing[i * 2 + 1]) ? outerWorldRing[i * 2 + 1][1] : outerWorldRing[i * 2 + 1];
                 let base = this._altitudeOffset;
                 if (this._altitudeMode === 'clampToGround') {
                     map.ensureTileForPoint?.(worldX, worldZ);
@@ -854,7 +830,7 @@ export class Polygon {
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeVertexNormals();
 
-        // Применяем высоты к нижней крышке, если есть
+        // Нижняя крышка
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
             for (let i = 0; i < this._vertices2D.length; i++) {
@@ -864,7 +840,7 @@ export class Polygon {
             this._bottomGeometry.computeVertexNormals();
         }
 
-        // Применяем высоты к боковым стенкам
+        // Боковые стенки
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
             const n = this._vertices2D.length;
@@ -891,19 +867,17 @@ export class Polygon {
     }
 
     /**
-     * Обновляет позиции вершин обводки, используя кэшированные локальные координаты.
+     * Обновляет позиции вершин обводки.
      *
      * @returns {void}
      * @private
      */
     _updateStroke() {
-        if (!this._strokeLine || !this._strokeGeometry || !this._cachedLocalRings.length) return;
+        if (!this._strokeLine || !this._strokeGeometry || !this._cachedLocalRings) return;
         const outerLocalRing = this._cachedLocalRings[0];
         if (!outerLocalRing) return;
         const positions = [];
 
-        const groupPos = this._group.position; // фактически это центроид, но в локальных координатах уже вычтен
-        // Локальные координаты уже содержат вычитание центроида, поэтому используем их напрямую
         for (let i = 0; i < this._cachedStrokeHeights.length; i++) {
             const x = outerLocalRing[i * 2];
             const z = outerLocalRing[i * 2 + 1];
@@ -911,7 +885,6 @@ export class Polygon {
             positions.push(x, y, z);
         }
 
-        // Замыкаем обводку
         if (this._cachedStrokeHeights.length > 0) {
             const firstX = outerLocalRing[0];
             const firstZ = outerLocalRing[1];

@@ -241,12 +241,19 @@ export class Area3D {
     _createPrimitive() {
         let [w, h, d] = this._normalizeSize(this._size);
         if (this._fit === 'stretch') {
-            w = this._polygonWidth;
-            d = this._polygonDepth;
-            if (this._size !== null) {
-                [, h] = this._normalizeSize(this._size);
-            }
-        } else if (this._fit === 'contain') {
+    targetW = this._polygonWidth;
+    targetD = this._polygonDepth;
+    
+    // Если высота явно задана через size, используем её
+    if (this._size) {
+        const [, hFromSize] = this._normalizeSize(this._size);
+        targetH = hFromSize;
+    } else {
+        // Иначе высота = высота исходной модели, умноженная на равномерный масштаб contain
+        const containScale = Math.min(this._polygonWidth / size.x, this._polygonDepth / size.z);
+        targetH = size.y * containScale;
+    }
+} else if (this._fit === 'contain') {
             const scale = Math.min(this._polygonWidth / w, this._polygonDepth / d);
             w *= scale;
             d *= scale;

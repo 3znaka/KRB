@@ -247,10 +247,11 @@ export class TileManager {
             const show = renderSet.has(k);
             if (show) {
                 inst.targetOpacity = 1;
-                // Если меш скрыт, показываем и начинаем с прозрачности 0
+                // Если меш был скрыт, включаем его и запускаем fade-in
                 if (!inst.mesh.visible) {
                     inst.mesh.visible = true;
                     inst.opacity = 0;
+                    inst.mesh.material.transparent = true;  // включаем прозрачность для анимации
                     inst.mesh.material.opacity = 0;
                 }
             } else {
@@ -273,41 +274,41 @@ export class TileManager {
      *
      * @private
      */
-_updateFade() {
-    const fadeFactor = 0.5; // быстрое затухание, ~2-3 кадра
+    _updateFade() {
+        const fadeFactor = 0.5; // быстрое затухание, ~2-3 кадра
 
-    for (const inst of this.tiles.values()) {
-        if (!inst.mesh) continue;
-        if (inst.opacity !== inst.targetOpacity) {
-            // Если материал не прозрачен, но нам нужна анимация, включаем transparent
-            if (!inst.mesh.material.transparent && inst.opacity < 1) {
-                inst.mesh.material.transparent = true;
-            }
+        for (const inst of this.tiles.values()) {
+            if (!inst.mesh) continue;
+            if (inst.opacity !== inst.targetOpacity) {
+                // Если материал не прозрачен, но нам нужна анимация, включаем transparent
+                if (!inst.mesh.material.transparent && inst.opacity < 1) {
+                    inst.mesh.material.transparent = true;
+                }
 
-            // Экспоненциальное приближение к цели — плавно и быстро
-            inst.opacity += (inst.targetOpacity - inst.opacity) * fadeFactor;
+                // Экспоненциальное приближение к цели — плавно и быстро
+                inst.opacity += (inst.targetOpacity - inst.opacity) * fadeFactor;
 
-            // Приближаемся к точным значениям, чтобы избежать вечных колебаний
-            if (Math.abs(inst.targetOpacity - inst.opacity) < 0.001) {
-                inst.opacity = inst.targetOpacity;
-            }
+                // Приближаемся к точным значениям, чтобы избежать вечных колебаний
+                if (Math.abs(inst.targetOpacity - inst.opacity) < 0.001) {
+                    inst.opacity = inst.targetOpacity;
+                }
 
-            inst.mesh.material.opacity = inst.opacity;
+                inst.mesh.material.opacity = inst.opacity;
 
-            // Полностью скрыли
-            if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
-                inst.mesh.visible = false;
-                inst.mesh.material.opacity = 0;
-                inst.mesh.material.transparent = false; // отключаем прозрачность
-            }
-            // Полностью показали
-            else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
-                inst.mesh.material.opacity = 1;
-                inst.mesh.material.transparent = false; // отключаем прозрачность
+                // Полностью скрыли
+                if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
+                    inst.mesh.visible = false;
+                    inst.mesh.material.opacity = 0;
+                    inst.mesh.material.transparent = false; // отключаем прозрачность
+                }
+                // Полностью показали
+                else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
+                    inst.mesh.material.opacity = 1;
+                    inst.mesh.material.transparent = false; // отключаем прозрачность
+                }
             }
         }
     }
-}
 
     /**
      * Рекурсивно собирает готовых потомков тайла в renderSet.
@@ -473,39 +474,18 @@ _updateFade() {
         if (!this.hasElevation && this.flatTileGeometry) {
             geometry = this.flatTileGeometry.clone();
             geometry.rotateX(-Math.PI / 2);
-            // Трансляция убрана
         } else {
             geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
             geometry.rotateX(-Math.PI / 2);
-            // Трансляция убрана
         }
 
         const mat = new THREE.MeshBasicMaterial({
-    map: texture,
-    transparent: false,        // прозрачность включается только на время анимации
-    opacity: 0,                // начальное значение не важно, будет переопределено
-    depthWrite: this.hasElevation,
-    depthTest: this.hasElevation
-});
-
-// В методе update (блок переключения видимости)
-for (const [k, inst] of this.tiles) {
-    if (!inst.mesh) continue;
-    const show = renderSet.has(k);
-    if (show) {
-        inst.targetOpacity = 1;
-        // Если меш был скрыт, включаем его и запускаем fade-in
-        if (!inst.mesh.visible) {
-            inst.mesh.visible = true;
-            inst.opacity = 0;
-            inst.mesh.material.transparent = true;  // включаем прозрачность для анимации
-            inst.mesh.material.opacity = 0;
-        }
-    } else {
-        inst.targetOpacity = 0;
-    }
-    if (show) inst.lastUsed = this.frame;
-}
+            map: texture,
+            transparent: false,
+            opacity: 0,
+            depthWrite: this.hasElevation,
+            depthTest: this.hasElevation
+        });
 
         const mesh = new THREE.Mesh(geometry, mat);
         mesh.position.set(
@@ -514,7 +494,7 @@ for (const [k, inst] of this.tiles) {
             originZ + tileSize / 2
         );
         mesh.renderOrder = z;
-        mesh.visible = false;        // изначально скрыт, появится через fade-in
+        mesh.visible = false; // появится через fade-in
         return mesh;
     }
 
@@ -530,7 +510,6 @@ for (const [k, inst] of this.tiles) {
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
-        // Трансляция убрана
         const mat = new THREE.MeshBasicMaterial({
             color: 0xffffff,
             map: texture,

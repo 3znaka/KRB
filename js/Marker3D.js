@@ -52,6 +52,7 @@ export class Marker3D {
      * @param {Function} [options.onClick] - Обработчик клика по объекту (получает событие и маркер).
      * @param {Function} [options.onHover] - Обработчик наведения (получает true/false).
      * @param {boolean} [options.clusterable=false] - 3D-маркеры по умолчанию не участвуют в кластеризации.
+     * @param {boolean} [options.playAnimation=true] - Воспроизводить ли встроенные анимации GLB-модели (если есть).
      * @throws {Error} Если options.position отсутствует или имеет неверный формат.
      */
     constructor(options = {}) {
@@ -70,6 +71,7 @@ export class Marker3D {
         /** @private */ this._anchor = options.anchor || [0.5, 0, 0.5];
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private */ this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
 
         // Подпись
         /** @private */ this._title = options.title || '';
@@ -128,6 +130,10 @@ export class Marker3D {
         /** @private */ this._isModel = !!this._modelUrl;
         /** @private */ this._modelAnchorOffset = new THREE.Vector3();
         /** @private */ this._sizeAnimation = null;
+
+        // Новые поля для анимаций
+        /** @private */ this._mixer = null;          // AnimationMixer для GLB-модели
+        /** @private */ this._mixerClock = null;     // THREE.Clock для расчёта delta
     }
 
     addTo(map) {
@@ -210,6 +216,18 @@ export class Marker3D {
                 const loader = new GLTFLoader();
                 const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
+
+                // --- Настройка анимаций (если включены и есть в модели) ---
+                if (this._playAnimation && gltf.animations && gltf.animations.length > 0) {
+                    this._mixer = new THREE.AnimationMixer(model);
+                    for (const clip of gltf.animations) {
+                        const action = this._mixer.clipAction(clip);
+                        action.play();  // запускаем все анимации
+                    }
+                    this._mixerClock = new THREE.Clock();
+                }
+                // ---------------------------------------------------------
+
                 const originalBox = new THREE.Box3().setFromObject(model);
                 this._originalModelSize = originalBox.getSize(new THREE.Vector3());
                 this._originalModelScale = model.scale.clone();
@@ -473,6 +491,13 @@ export class Marker3D {
     }
 
     remove() {
+        // Останавливаем и очищаем анимации
+        if (this._mixer) {
+            this._mixer.stopAllAction();
+            this._mixer = null;
+            this._mixerClock = null;
+        }
+
         if (this._object3D) {
             if (this._object3D.parent) this._object3D.parent.remove(this._object3D);
             if (this._geometry) this._geometry.dispose();
@@ -550,6 +575,13 @@ export class Marker3D {
             return;
         }
         this._updateSizeAnimation(performance.now());
+
+        // Обновляем анимацию, если mixer существует
+        if (this._mixer && this._mixerClock) {
+            const delta = this._mixerClock.getDelta();
+            this._mixer.update(delta);
+        }
+
         const [absWorldX, absWorldZ] = proj.fromLonLat([this._lon, this._lat]);
         const wgPos = mapInstance.worldGroup.position;
         const worldX = absWorldX + wgPos.x;

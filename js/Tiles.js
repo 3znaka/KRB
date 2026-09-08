@@ -32,6 +32,13 @@ const ANCESTOR_FALLBACK = 4;
 const MAX_COVER_DEPTH = 2; // глубина поиска потомков при отдалении
 
 /**
+ * Длительность fade-анимации (в миллисекундах), ≈ 5 кадров при 60 fps.
+ * @type {number}
+ * @private
+ */
+const FADE_DURATION = 80;
+
+/**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
  *
  * @property {THREE.Texture} texture - Текстура тайла.
@@ -148,7 +155,7 @@ export class TileManager {
      */
     constructor(engine) {
         this.engine = engine;
-        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation }
+        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation, fadeAnim }
         this.textureCache = new Map(); // url -> { texture, refs }
         this.textureLoader = new THREE.TextureLoader();
         this.textureLoader.setCrossOrigin('anonymous');
@@ -241,73 +248,25 @@ export class TileManager {
             }
         }
 
-        // Переключение видимости с поддержкой плавного появления/исчезновения
+        // Переключение видимости с fade-анимацией
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
             if (show) {
-                inst.targetOpacity = 1;
-                // Если меш был скрыт, включаем его и запускаем fade-in
-                if (!inst.mesh.visible) {
-                    inst.mesh.visible = true;
-                    inst.opacity = 0;
-                    inst.mesh.material.transparent = true;  // включаем прозрачность для анимации
-                    inst.mesh.material.opacity = 0;
+                if (inst.mesh.visible !== true || inst.mesh.material.opacity < 1) {
+                    this.fadeIn(inst);
                 }
+                inst.lastUsed = this.frame;
             } else {
-                inst.targetOpacity = 0;
+                if (inst.mesh.visible !== false) {
+                    this.fadeOut(inst);
+                }
             }
-            if (show) inst.lastUsed = this.frame;
         }
-
-        // Обновляем прозрачность для всех тайлов
-        this._updateFade();
 
         this.gc(renderSet);
 
         return idealZ;
-    }
-
-    /**
-     * Плавно изменяет прозрачность тайлов в сторону целевого значения.
-     * Вызывается каждый кадр после определения видимых тайлов.
-     *
-     * @private
-     */
-    _updateFade() {
-        const fadeFactor = 0.1;
-
-        for (const inst of this.tiles.values()) {
-            if (!inst.mesh) continue;
-            if (inst.opacity !== inst.targetOpacity) {
-                // Если материал не прозрачен, но нам нужна анимация, включаем transparent
-                if (!inst.mesh.material.transparent && inst.opacity < 1) {
-                    inst.mesh.material.transparent = true;
-                }
-
-                // Экспоненциальное приближение к цели — плавно и быстро
-                inst.opacity += (inst.targetOpacity - inst.opacity) * fadeFactor;
-
-                // Приближаемся к точным значениям, чтобы избежать вечных колебаний
-                if (Math.abs(inst.targetOpacity - inst.opacity) < 0.001) {
-                    inst.opacity = inst.targetOpacity;
-                }
-
-                inst.mesh.material.opacity = inst.opacity;
-
-                // Полностью скрыли
-                if (inst.opacity <= 0.001 && inst.targetOpacity === 0) {
-                    inst.mesh.visible = false;
-                    inst.mesh.material.opacity = 0;
-                    inst.mesh.material.transparent = false; // отключаем прозрачность
-                }
-                // Полностью показали
-                else if (inst.opacity >= 0.999 && inst.targetOpacity === 1) {
-                    inst.mesh.material.opacity = 1;
-                    inst.mesh.material.transparent = false; // отключаем прозрачность
-                }
-            }
-        }
     }
 
     /**
@@ -388,8 +347,7 @@ export class TileManager {
             heightsApplied: false,
             elevationAppliedLevel: 0,
             expectsElevation: false,
-            opacity: 0,          // текущая прозрачность
-            targetOpacity: 0     // целевая прозрачность
+            fadeAnim: null          // идентификатор requestAnimationFrame для fade
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -474,17 +432,19 @@ export class TileManager {
         if (!this.hasElevation && this.flatTileGeometry) {
             geometry = this.flatTileGeometry.clone();
             geometry.rotateX(-Math.PI / 2);
+            // Трансляция убрана
         } else {
             geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
             geometry.rotateX(-Math.PI / 2);
+            // Трансляция убрана
         }
 
         const mat = new THREE.MeshBasicMaterial({
             map: texture,
-            transparent: false,
-            opacity: 0,
             depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
+            depthTest: this.hasElevation,
+            transparent: true,      // включаем прозрачность для fade
+            opacity: 0              // начальная прозрачность (невидим)
         });
 
         const mesh = new THREE.Mesh(geometry, mat);
@@ -494,7 +454,7 @@ export class TileManager {
             originZ + tileSize / 2
         );
         mesh.renderOrder = z;
-        mesh.visible = false; // появится через fade-in
+        mesh.visible = false;       // скрыт до появления
         return mesh;
     }
 
@@ -510,6 +470,7 @@ export class TileManager {
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
+        // Трансляция убрана
         const mat = new THREE.MeshBasicMaterial({
             color: 0xffffff,
             map: texture,
@@ -898,6 +859,11 @@ export class TileManager {
      * @private
      */
     disposeTile(inst) {
+        // Отменяем анимацию, если она идёт
+        if (inst.fadeAnim) {
+            cancelAnimationFrame(inst.fadeAnim);
+            inst.fadeAnim = null;
+        }
         this.tiles.delete(this.key(inst.z, inst.virtX, inst.y));
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
@@ -905,6 +871,78 @@ export class TileManager {
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
+    }
+
+    /* ---- Fade-анимация тайлов ---- */
+    /**
+     * Запускает плавное появление тайла (fade-in).
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {void}
+     * @private
+     */
+    fadeIn(inst) {
+        const mesh = inst.mesh;
+        if (!mesh) return;
+        mesh.visible = true;
+        this._animateOpacity(inst, 1);
+    }
+
+    /**
+     * Запускает плавное исчезновение тайла (fade-out) с последующим скрытием.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @returns {void}
+     * @private
+     */
+    fadeOut(inst) {
+        this._animateOpacity(inst, 0, () => {
+            if (inst.mesh) inst.mesh.visible = false;
+        });
+    }
+
+    /**
+     * Внутренняя функция анимации прозрачности материала тайла.
+     *
+     * @param {Object} inst - Объект тайла.
+     * @param {number} targetOpacity - Целевая прозрачность (0..1).
+     * @param {Function} [onComplete] - Колбэк по завершении.
+     * @returns {void}
+     * @private
+     */
+    _animateOpacity(inst, targetOpacity, onComplete) {
+        if (!inst.mesh || !inst.mesh.material) {
+            if (onComplete) onComplete();
+            return;
+        }
+
+        // Отменяем предыдущую анимацию
+        if (inst.fadeAnim) {
+            cancelAnimationFrame(inst.fadeAnim);
+            inst.fadeAnim = null;
+        }
+
+        const material = inst.mesh.material;
+        if (!material.transparent) {
+            material.transparent = true;
+        }
+        const startOpacity = material.opacity;
+        const startTime = performance.now();
+
+        const step = (now) => {
+            const t = Math.min((now - startTime) / FADE_DURATION, 1);
+            material.opacity = startOpacity + (targetOpacity - startOpacity) * t;
+
+            if (t < 1) {
+                inst.fadeAnim = requestAnimationFrame(step);
+            } else {
+                material.opacity = targetOpacity;
+                inst.fadeAnim = null;
+                if (onComplete) onComplete();
+            }
+        };
+
+        inst.fadeAnim = requestAnimationFrame(step);
     }
 
     /* ---- Worker (без изменений) ---- */

@@ -552,8 +552,10 @@ _applyModelTransform() {
                 this._lastWorldGroupPos.copy(map.worldGroup.position);
             }
             this._group.position.y = this._cachedSurfaceHeight + this._altitude;
+            this._group.updateMatrixWorld(true);
         } else {
             this._group.position.y = this._altitude;
+            this._group.updateMatrixWorld(true);
         }
 
         if (this._mixer && this._mixerClock) {
@@ -567,8 +569,7 @@ _applyModelTransform() {
             this._centroidScreenPos = null;
             return;
         }
-        // Box3.setFromObject уже учитывает мировую матрицу объекта,
-        // дополнительно применять matrixWorld не нужно.
+this._object3D.updateWorldMatrix(true, true);
         const box = new THREE.Box3().setFromObject(this._object3D);
         const canvas = this._map.renderer.domElement;
         const corners = [];

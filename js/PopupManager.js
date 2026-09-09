@@ -9,27 +9,6 @@
 
 import { THREE } from '../js_TP/tpb.js';
 
-/**
- * Менеджер всплывающих подсказок.
- * Создаёт единый HTML-элемент тултипа, добавляет его в DOM карты и
- * автоматически обновляет его позицию на каждом кадре для активного объекта.
- * Активный объект должен предоставлять метод `getScreenPosition()`, возвращающий
- * экранные координаты ({x, y}) или null, если объект невидим.
- *
- * Реализует два стандартных поведения:
- * 1. Скрытие тултипа при клике (или касании) вне его области.
- * 2. Автоматическое скрытие, если переданный HTML не содержит видимого содержимого.
- *
- * @example
- * // В конструкторе карты:
- * this.popupManager = new PopupManager(this);
- *
- * // При клике на объект:
- * map.popupManager.show(polygon, '<b>Комната 101</b><br>Площадь: 50 м²');
- *
- * // Скрыть:
- * map.popupManager.hide();
- */
 export class PopupManager {
     /**
      * Создаёт экземпляр PopupManager.
@@ -37,14 +16,13 @@ export class PopupManager {
      * @param {Object} map - Экземпляр карты (KrbMap).
      */
     constructor(map) {
-        /** @private */ this._map = map;
-        /** @private */ this._activeObject = null;   // объект, к которому привязан текущий тултип
-        /** @private */ this._animationFrameId = null; // id requestAnimationFrame
-        /** @private */ this._tooltipElement = null;
+        this._map = map;
+        this._activeObject = null;
+        this._animationFrameId = null;
+        this._tooltipElement = null;
 
         // Привязанные обработчики для возможности удаления
-        /** @private */ this._onDocumentMouseDown = null;
-        /** @private */ this._onDocumentTouchStart = null;
+        this._onDocumentPointerDown = null; // единый обработчик pointerdown
 
         this._createTooltipElement();
         this._startUpdateLoop();
@@ -53,7 +31,6 @@ export class PopupManager {
 
     /**
      * Создаёт DOM-элемент тултипа и добавляет его в контейнер карты.
-     *
      * @private
      */
     _createTooltipElement() {
@@ -67,7 +44,7 @@ export class PopupManager {
             boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
             padding: '8px 12px',
             fontSize: '14px',
-            pointerEvents: 'none',     
+            pointerEvents: 'none',
             transform: 'translate(-50%, -100%)',
             display: 'none',
             zIndex: '1200',
@@ -79,8 +56,6 @@ export class PopupManager {
 
     /**
      * Запускает цикл обновления позиции тултипа.
-     * Каждый кадр проверяет активный объект и обновляет координаты.
-     *
      * @private
      */
     _startUpdateLoop() {
@@ -94,27 +69,24 @@ export class PopupManager {
     }
 
     /**
-     * Привязывает обработчики событий документа для скрытия тултипа
-     * при клике/касании вне его области.
-     *
+     * Привязывает обработчик события pointerdown на документе.
+     * Использование pointerdown вместо отдельно mousedown и touchstart
+     * позволяет избежать повторного скрытия тултипа на мобильных устройствах
+     * из-за синтетического mousedown после touchend.
      * @private
      */
     _bindOutsideClickHandlers() {
-        this._onDocumentMouseDown = (event) => this._handleDocumentMouseDown(event);
-        this._onDocumentTouchStart = (event) => this._handleDocumentTouchStart(event);
-
-        document.addEventListener('mousedown', this._onDocumentMouseDown);
-        document.addEventListener('touchstart', this._onDocumentTouchStart, { passive: true });
+        this._onDocumentPointerDown = (event) => this._handleDocumentPointerDown(event);
+        document.addEventListener('pointerdown', this._onDocumentPointerDown);
     }
 
     /**
-     * Обработчик mousedown на документе.
-     * Если тултип активен и клик был вне его прямоугольника, скрывает тултип.
-     *
-     * @param {MouseEvent} event - Событие мыши.
+     * Обработчик pointerdown на документе.
+     * Если тултип активен и касание/клик произошло вне его прямоугольника, скрывает тултип.
+     * @param {PointerEvent} event - Событие pointerdown.
      * @private
      */
-    _handleDocumentMouseDown(event) {
+    _handleDocumentPointerDown(event) {
         if (!this._activeObject || !this._tooltipElement) return;
 
         const rect = this._tooltipElement.getBoundingClientRect();
@@ -132,36 +104,7 @@ export class PopupManager {
     }
 
     /**
-     * Обработчик touchstart на документе (мобильные устройства).
-     * Аналогично mousedown, но использует координаты первого касания.
-     *
-     * @param {TouchEvent} event - Событие касания.
-     * @private
-     */
-    _handleDocumentTouchStart(event) {
-        if (!this._activeObject || !this._tooltipElement) return;
-
-        const touch = event.touches[0];
-        if (!touch) return;
-
-        const rect = this._tooltipElement.getBoundingClientRect();
-        const { clientX, clientY } = touch;
-
-        const isInside =
-            clientX >= rect.left &&
-            clientX <= rect.right &&
-            clientY >= rect.top &&
-            clientY <= rect.bottom;
-
-        if (!isInside) {
-            this.hide();
-        }
-    }
-
-    /**
      * Обновляет позицию тултипа на основе экранных координат активного объекта.
-     * Если объект невидим или координаты недоступны, скрывает тултип (но не сбрасывает активный объект).
-     *
      * @private
      */
     _updatePosition() {
@@ -180,13 +123,9 @@ export class PopupManager {
     }
 
     /**
-     * Показывает тултип с заданным HTML-содержимым, привязанный к указанному объекту.
-     * Если HTML пустой или после установки не содержит видимого текста,
-     * тултип не отображается.
-     *
-     * @param {Object} object - Объект карты (маркер, полигон), реализующий getScreenPosition().
+     * Показывает тултип с заданным HTML-содержимым.
+     * @param {Object} object - Объект карты, реализующий getScreenPosition().
      * @param {string} html - HTML-строка с содержимым тултипа.
-     * @returns {void}
      */
     show(object, html) {
         if (!object || !html) {
@@ -197,22 +136,17 @@ export class PopupManager {
         this._activeObject = object;
         this._tooltipElement.innerHTML = html;
 
-        // Проверяем, есть ли видимое содержимое после установки innerHTML.
-        // Если нет (например, пустая строка или только пробелы), скрываем тултип.
         if (!this._tooltipElement.textContent || this._tooltipElement.textContent.trim() === '') {
             this.hide();
             return;
         }
 
         this._tooltipElement.style.display = 'block';
-        // Немедленно обновляем позицию, чтобы не ждать следующего кадра
         this._updatePosition();
     }
 
     /**
      * Скрывает тултип и сбрасывает активный объект.
-     *
-     * @returns {void}
      */
     hide() {
         this._activeObject = null;
@@ -221,7 +155,6 @@ export class PopupManager {
 
     /**
      * Скрывает DOM-элемент тултипа (без сброса активного объекта).
-     *
      * @private
      */
     _hide() {
@@ -233,8 +166,6 @@ export class PopupManager {
     /**
      * Уничтожает менеджер: останавливает цикл, удаляет обработчики,
      * удаляет DOM-элемент и очищает ссылки.
-     *
-     * @returns {void}
      */
     destroy() {
         if (this._animationFrameId) {
@@ -242,14 +173,9 @@ export class PopupManager {
             this._animationFrameId = null;
         }
 
-        // Удаляем обработчики, если они были установлены
-        if (this._onDocumentMouseDown) {
-            document.removeEventListener('mousedown', this._onDocumentMouseDown);
-            this._onDocumentMouseDown = null;
-        }
-        if (this._onDocumentTouchStart) {
-            document.removeEventListener('touchstart', this._onDocumentTouchStart);
-            this._onDocumentTouchStart = null;
+        if (this._onDocumentPointerDown) {
+            document.removeEventListener('pointerdown', this._onDocumentPointerDown);
+            this._onDocumentPointerDown = null;
         }
 
         if (this._tooltipElement) {

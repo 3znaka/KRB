@@ -9,6 +9,37 @@
 import { THREE, GLTFExporter } from '../js_TP/tpb.js';
 
 /**
+ * Извлекает мировую позицию объекта.
+ * Приоритет: _centroidWorld (готовое свойство), затем среднее _worldPositions,
+ * затем стандартный getWorldPosition.
+ *
+ * @param {Object} obj - Исходный объект (например, KRB.Image).
+ * @param {THREE.Object3D} mesh - Three.js меш объекта.
+ * @returns {THREE.Vector3} Мировая позиция объекта.
+ * @private
+ */
+function getObjectWorldPosition(obj, mesh) {
+    if (obj._centroidWorld && obj._centroidWorld.isVector3) {
+        return obj._centroidWorld.clone();
+    }
+    if (Array.isArray(obj._worldPositions) && obj._worldPositions.length > 0) {
+        const sum = new THREE.Vector3();
+        for (const p of obj._worldPositions) {
+            if (p && p.isVector3) {
+                sum.add(p);
+            }
+        }
+        if (sum.lengthSq() > 0) {
+            sum.divideScalar(obj._worldPositions.length);
+            return sum;
+        }
+    }
+    const worldPos = new THREE.Vector3();
+    mesh.getWorldPosition(worldPos);
+    return worldPos;
+}
+
+/**
  * Нормализует позиции объектов, сдвигая их так, чтобы центроид оказался в начале координат.
  * Возвращает новые позиции в виде массива Vector3.
  *
@@ -29,7 +60,7 @@ function computeNormalizedPositions(items) {
 }
 
 /**
- * Экспортирует переданные объекты в GLB-файл.
+ * Экспортирует переданные объекты в GLB-файл и автоматически скачивает его.
  *
  * @param {Array<Object>} objects - Массив объектов карты (например, KRB.Image),
  *                                  у которых есть свойство `_mesh` (Three.js Mesh).
@@ -41,7 +72,7 @@ function computeNormalizedPositions(items) {
  * @param {Function} [options.onProgress] - Колбэк прогресса экспорта.
  * @param {Function} [options.onSuccess] - Колбэк при успешном экспорте (получает Blob).
  * @param {Function} [options.onError] - Колбэк при ошибке (получает Error).
- * @returns {Promise<void>} Промис, который разрешается после запуска экспорта.
+ * @returns {Promise<Blob>} Промис, который разрешается Blob'ом после успешного экспорта.
  *
  * @example
  * import { exportToGLB } from './Exporter.js';
@@ -68,7 +99,7 @@ export async function exportToGLB(objects, options = {}) {
         throw error;
     }
 
-    // 1. Собираем меши и мировые позиции
+    // 1. Собираем меши и корректные мировые позиции
     const items = [];
     for (const obj of objects) {
         const mesh = obj._mesh || (obj.getObject3D && obj.getObject3D());
@@ -77,8 +108,7 @@ export async function exportToGLB(objects, options = {}) {
             continue;
         }
 
-        const worldPos = new THREE.Vector3();
-        mesh.getWorldPosition(worldPos);
+        const worldPos = getObjectWorldPosition(obj, mesh);
         items.push({ mesh, worldPos });
     }
 
@@ -130,23 +160,21 @@ export async function exportToGLB(objects, options = {}) {
             );
         });
 
-        // 5. Создание Blob и скачивание / передача в колбэк
+        // 5. Создание Blob, скачивание и вызов onSuccess
         const blob = new Blob([result], { type: binary ? 'model/gltf-binary' : 'model/gltf+json' });
+
+        // Всегда скачиваем файл
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
 
         if (onSuccess) {
             onSuccess(blob);
-        }
-
-        // Автоматическое скачивание, если не переопределён onSuccess
-        if (!onSuccess) {
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
         }
 
         console.log(`exportToGLB: успешно экспортировано ${exportedCount} объектов`);

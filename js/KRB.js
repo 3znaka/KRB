@@ -1,11 +1,10 @@
-import { THREE, GLTFExporter } from '../js_TP/tpb.js';
 export { KrbMap as Map, View } from './Core.js';
 export { Tile } from './Tiles.js';
 export { initUI } from './Ui.js';
 export { Marker } from './Marker.js';
 export { Layer, ClusterLayer } from './Layers.js';
 export { proj } from './Utils.js';
-export {GeoJSONLayer} from './Geojson.js';
+export { GeoJSONLayer } from './Geojson.js';
 export { Polyline } from './Polyline.js';
 export { Polygon } from './Polygon.js';
 export { VectorTileLayer } from './VectorTileLayer.js';
@@ -13,4 +12,4 @@ export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
 export { Area3D } from './Area3D.js';
 export { Image } from './Image.js';
-export { GLTFExporter, THREE };
+export { exportToGLB } from './Exporter.js';

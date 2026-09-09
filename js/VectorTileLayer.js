@@ -609,34 +609,40 @@ export class VectorTileLayer {
      *     }
      * }, ['building']);
      */
-    addExclusionArea(geojson, layers = ['building']) {
-        if (!geojson || !geojson.geometry || !geojson.geometry.type) {
-            console.warn('Invalid GeoJSON for exclusion area');
-            return;
-        }
+addExclusionArea(geojson, layers = ['building']) {
 
-        const geometry = geojson.geometry;
-        const polygons = [];
-        const coords = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
+    if (geojson && geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
 
-        for (const polygon of coords) {
-            const rings = polygon.map(ring =>
-                ring.map(coord => {
-                    const [x, z] = proj.fromLonLat(coord);
-                    return { x, z };
-                })
-            );
-            polygons.push(rings);
-        }
-
-        this._exclusionMasks.push({
-            polygons,
-            layers: new Set(layers)
-        });
-
-        this._applyExclusionsToAllTiles();
+        geojson.features.forEach(feature => this.addExclusionArea(feature, layers));
+        return;
     }
 
+    if (!geojson || !geojson.geometry || !geojson.geometry.type) {
+        console.warn('Invalid GeoJSON for exclusion area');
+        return;
+    }
+
+    const geometry = geojson.geometry;
+    const polygons = [];
+    const coords = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
+
+    for (const polygon of coords) {
+        const rings = polygon.map(ring =>
+            ring.map(coord => {
+                const [x, z] = proj.fromLonLat(coord);
+                return { x, z };
+            })
+        );
+        polygons.push(rings);
+    }
+
+    this._exclusionMasks.push({
+        polygons,
+        layers: new Set(layers)
+    });
+
+    this._applyExclusionsToAllTiles();
+}
     /**
      * Удаляет все области исключения.
      *

@@ -252,32 +252,38 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
     if (cleaned.length === 0) return null;
 
     const polygons = [];
-    let outerSign = null;
+let outerSign = null;
 
-    for (const ring of cleaned) {
-        const area = ringArea(ring);
-        if (Math.abs(area) < 1e-9) continue;
+for (const ring of cleaned) {
+    const area = ringArea(ring);
 
-        if (outerSign === null) {
-            outerSign = Math.sign(area);
-        }
+    // Почти вырожденные кольца пропускаем
+    if (Math.abs(area) < 1e-9) continue;
 
-        const isOuter = Math.sign(area) === outerSign;
-
-        if (isOuter) {
-            polygons.push({ outer: ring, holes: [] });
-        } else if (polygons.length > 0) {
-            polygons[polygons.length - 1].holes.push(ring);
-        } else {
-            polygons.push({ outer: ring, holes: [] });
-        }
+    if (outerSign === null) {
+        // Первое нормальное кольцо считаем внешним
+        outerSign = Math.sign(area);
     }
 
-    if (polygons.length === 0) return null;
+    const isOuter = Math.sign(area) === outerSign;
+
+    if (isOuter) {
+        polygons.push({ outer: ring, holes: [] });
+    } else if (polygons.length > 0) {
+        polygons[polygons.length - 1].holes.push(ring);
+    } else {
+        // Защитный случай: если дырка встретилась раньше внешнего кольца,
+        // не теряем её, а считаем внешним кольцом.
+        polygons.push({ outer: ring, holes: [] });
+    }
+}
+
+if (polygons.length === 0) return null;
 
     const positions = [];
     const normals = [];
     const edges = [];
+    const cornerCos = Math.cos(15 * Math.PI / 180);
 
     for (const poly of polygons) {
         const outer = orientRing(poly.outer, false);
@@ -287,61 +293,99 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
         const { vertices, indices } = triData;
 
         for (let i = 0; i < indices.length; i += 3) {
-            const a = indices[i], b = indices[i + 1], c = indices[i + 2];
-            const ax = vertices[a * 2], az = vertices[a * 2 + 1];
-            const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
-            const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+    const a = indices[i], b = indices[i + 1], c = indices[i + 2];
 
-            pushTriangle(positions, normals, ax, height, az, bx, height, bz, cx, height, cz, 0, 1, 0);
-        }
+    const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+    const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+    const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
 
-        if (minHeight > 0) {
-            for (let i = 0; i < indices.length; i += 3) {
-                const a = indices[i], b = indices[i + 1], c = indices[i + 2];
-                const ax = vertices[a * 2], az = vertices[a * 2 + 1];
-                const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
-                const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+    pushTriangle(
+        positions, normals,
+        ax, height, az,
+        bx, height, bz,
+        cx, height, cz,
+        0, 1, 0
+    );
+}
+       if (minHeight > 0) {
+    for (let i = 0; i < indices.length; i += 3) {
+        const a = indices[i], b = indices[i + 1], c = indices[i + 2];
 
-                pushTriangle(positions, normals, ax, minHeight, az, bx, minHeight, bz, cx, minHeight, cz, 0, -1, 0);
-            }
-        }
+        const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+        const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+        const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+
+        pushTriangle(
+            positions, normals,
+            ax, minHeight, az,
+            bx, minHeight, bz,
+            cx, minHeight, cz,
+            0, -1, 0
+        );
+    }
+}
 
         for (const ring of [outer, ...holes]) {
-            const n = ring.length;
-            for (let i = 0; i < n; i++) {
-                const p0 = ring[i];
-                const p1 = ring[(i + 1) % n];
-                const dx = p1.x - p0.x;
-                const dz = p1.z - p0.z;
-                const len = Math.hypot(dx, dz);
-                if (len < eps) continue;
+    const n = ring.length;
 
-                const nx = dz / len;
-                const nz = -dx / len;
+    for (let i = 0; i < n; i++) {
+        const p0 = ring[i];
+        const p1 = ring[(i + 1) % n];
 
-                pushTriangle(positions, normals, p0.x, minHeight, p0.z, p1.x, minHeight, p1.z, p1.x, height, p1.z, nx, 0, nz);
-                pushTriangle(positions, normals, p0.x, minHeight, p0.z, p1.x, height, p1.z, p0.x, height, p0.z, nx, 0, nz);
+        const dx = p1.x - p0.x;
+        const dz = p1.z - p0.z;
+        const len = Math.hypot(dx, dz);
+        if (len < eps) continue;
 
-                if (includeEdges) {
-                    edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-                    if (minHeight > 0) {
-                        edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
-                    }
+        const nx = dz / len;
+        const nz = -dx / len;
 
-                    const p2 = ring[(i + 2) % n];
-                    const dx2 = p2.x - p1.x;
-                    const dz2 = p2.z - p1.z;
-                    const len2 = Math.hypot(dx2, dz2);
-                    if (len2 > eps && (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)) {
-                        edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
-                    }
-                }
+        // Первый треугольник стенки
+        pushTriangle(
+            positions, normals,
+            p0.x, minHeight, p0.z,
+            p1.x, minHeight, p1.z,
+            p1.x, height, p1.z,
+            nx, 0, nz
+        );
+
+        // Второй треугольник стенки
+        pushTriangle(
+            positions, normals,
+            p0.x, minHeight, p0.z,
+            p1.x, height, p1.z,
+            p0.x, height, p0.z,
+            nx, 0, nz
+        );
+
+        
+        if (includeEdges) {
+            // Рёбра оставляем без изменений
+            edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
+            if (minHeight > 0) {
+                edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+            }
+
+            const p2 = ring[(i + 2) % n];
+            const dx2 = p2.x - p1.x;
+            const dz2 = p2.z - p1.z;
+            const len2 = Math.hypot(dx2, dz2);
+
+            if (
+                len2 > eps &&
+                (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
+            ) {
+                edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
             }
         }
+
+
+    }
+}
     }
 
     if (positions.length === 0) return null;
-    return {
+        return {
         positions: new Float32Array(positions),
         normals: new Float32Array(normals),
         edgePositions: (includeEdges && edges.length) ? new Float32Array(edges) : null
@@ -389,7 +433,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const linesMap = new Map();
     const strokesMap = new Map();
     const buildings = [];
-    const flatBuildings = [];
     const points = [];
     const textPoints = [];
 
@@ -410,8 +453,59 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             const sortKey = props.sort_key != null ? Number(props.sort_key) : 0;
 
             if (geomType === 1) {
-                // ... (точки, без изменений)
-            }
+                const geom = feature.loadGeometry();
+                if (geom.length === 0) continue;
+                const ring = geom[0];
+                if (ring.length === 0) continue;
+                const pt = ring[0];
+                if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
+                const originX = x * tileSize - maxMerc;
+                const originZ = -maxMerc + y * tileSize;
+                const centerX = originX + tileSize / 2;
+                const centerZ = originZ + tileSize / 2;
+                const worldX = originX + (pt.x / 4095) * tileSize - centerX;
+                const worldZ = originZ + (pt.y / 4095) * tileSize - centerZ;
+
+                if (textLayers.includes(name)) {
+                    const text = name === 'housenumber' 
+                        ? (props.housenumber || '')
+                        : (props.name || '');
+                    if (!text) continue;
+
+                    textPoints.push({
+                        x: worldX,
+                        z: worldZ,
+                        text,
+                        layerName: name,
+                        textColor: style.textColor || '#333333',
+                        fontSize: style.fontSize || '12px',
+                        fontFamily: style.fontFamily || 'sans-serif',
+                        fontWeight: style.fontWeight || 'normal',
+                        textShadow: style.textShadow || '',
+                        textOffset: style.textOffset || [0, 0],
+                        textAlign: style.textAlign || 'center',
+                        textVerticalAlign: style.textVerticalAlign || 'center',
+                        priority: (style.textPriority !== undefined ? style.textPriority : (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
+                        zoomBounds: {
+                            min: style.textZoomMin !== undefined ? style.textZoomMin : 0,
+                            max: style.textZoomMax !== undefined ? style.textZoomMax : 24
+                        }
+                    });
+
+                    continue;
+                }
+
+                const radius = (style.radius || 3) * pointScale;
+                points.push({
+                    x: worldX,
+                    z: worldZ,
+                    radius,
+                    color: style.color,
+                    opacity: style.opacity ?? 1,
+                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
+                });
+                continue;
+}
 
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
 
@@ -446,47 +540,15 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                                         edgePositions: geo.edgePositions,
                                         color: style.color,
                                         stroke: style.stroke || 0xb3b3b3,
-                                        renderOrder: (LAYER_RENDER_ORDER[name] ?? 7) + sortKey * 0.001,
-                                        vertexCount: geo.positions.length,
-                                        edgeCount: geo.edgePositions ? geo.edgePositions.length / 6 : 0
+                                        renderOrder: (LAYER_RENDER_ORDER[name] ?? 7) + sortKey * 0.001
                                     });
                                     continue;
                                 }
                             }
                         }
                     }
-
-                    // Плоское здание (не экструдировано)
-                    const flatGeom = [];
-                    for (const ring of rings) {
-                        const outer = orientRing(ring, false);
-                        const cleanedOuter = dedupRing(outer, eps);
-                        if (cleanedOuter.length < 3) continue;
-                        const t = triangulatePolygon(cleanedOuter, [], eps);
-                        if (t) {
-                            const positions = new Float32Array(t.vertices.length / 2 * 3);
-                            for (let i = 0, j = 0; i < t.vertices.length; i += 2, j += 3) {
-                                positions[j] = t.vertices[i];
-                                positions[j+1] = 0;
-                                positions[j+2] = t.vertices[i+1];
-                            }
-                            flatGeom.push({ positions, indices: new Uint32Array(t.indices) });
-                        }
-                    }
-                    if (flatGeom.length > 0) {
-                        const merged = mergePolygonGeometries(flatGeom);
-                        flatBuildings.push({
-                            positions: merged.positions,
-                            indices: merged.indices,
-                            color: style.color,
-                            opacity: style.opacity ?? 1,
-                            renderOrder: (LAYER_RENDER_ORDER[name] ?? 7) + sortKey * 0.001
-                        });
-                    }
-                    continue;
                 }
 
-                // Остальные полигоны
                 const fillKey = \`fill:\${name}:\${style.color.toString(16)}:\${(style.opacity ?? 1)}\`;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
@@ -506,16 +568,40 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         triData.push({ positions, indices: new Uint32Array(t.indices), sortKey });
                     }
                 }
-                if (triData.length > 0) fillGroup.push(...triData);
+                if (triData.length > 0) {
+                    fillGroup.push(...triData);
+                }
 
                 if (style.stroke) {
                     const strokeKey = \`stroke:\${name}:\${style.stroke.toString(16)}:\${(style.width ?? 1)}\`;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
-                    for (const ring of rings) if (ring.length >= 2) strokeGroup.push({ ring, sortKey });
+                    for (const ring of rings) {
+                        if (ring.length >= 2) strokeGroup.push({ ring, sortKey });
+                    }
                 }
             } else if (geomType === 2) {
-                // ... (линии, без изменений)
+                let dynamicOrder = LAYER_RENDER_ORDER[name] ?? 10;
+                if (name === 'transportation' || name === 'transportation_name') {
+                    const bridge = props.bridge === 'yes' ? 2 : 0;
+                    const tunnel = props.tunnel === 'yes' ? -2 : 0;
+                    const layerVal = props.layer ? parseInt(props.layer, 10) : 0;
+                    dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
+                }
+
+                const lineKey = \`line:\${name}:\${style.color.toString(16)}:\${style.width ?? 1}:\${style.dash ? style.dash.join(',') : 'none'}\`;
+                let lineGroup = linesMap.get(lineKey);
+                if (!lineGroup) {
+                    lineGroup = {
+                        rings: [],
+                        renderOrder: dynamicOrder,
+                        dash: style.dash || null
+                    };
+                    linesMap.set(lineKey, lineGroup);
+                }
+                for (const ring of rings) {
+                    if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
+                }
             }
         }
     };
@@ -525,7 +611,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         if (!layerOrder.includes(name)) processLayer(name);
     }
 
-    if (textPoints.length > 300) textPoints.length = 300;
+    // Ограничиваем количество текстовых точек, чтобы не передавать слишком много
+    if (textPoints.length > 300) {
+        textPoints.length = 300;
+    }
 
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
@@ -535,14 +624,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         lines: [],
         strokes: [],
         buildings: [],
-        flatBuildings: flatBuildings,
         points: points,
         textPoints: textPoints,
         centerX: centerX,
         centerZ: centerZ
     };
 
-    // заполняем fills
     for (const [key, triGroup] of fillsMap) {
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
@@ -557,7 +644,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         });
     }
 
-    // заполняем lines
     for (const [key, lineGroup] of linesMap) {
         const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
         if (!positions) continue;
@@ -573,7 +659,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         });
     }
 
-    // заполняем strokes
     for (const [key, strokeGroup] of strokesMap) {
         const positions = createLinePositions(strokeGroup.map(s => s.ring));
         if (!positions) continue;
@@ -588,8 +673,16 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         });
     }
 
-    // buildings уже содержат vertexCount и edgeCount
-    result.buildings = buildings;
+    result.buildings = buildings.map(b => ({
+        positions: b.positions,
+        normals: b.normals,
+        edgePositions: b.edgePositions,
+        layerName: 'building',
+        color: b.color,
+        stroke: b.stroke,
+        renderOrder: b.renderOrder
+    }));
+
     result.is3d = is3d;
     return result;
 }

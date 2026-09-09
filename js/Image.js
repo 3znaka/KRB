@@ -513,65 +513,52 @@ export class Image {
      * @returns {Array.<THREE.Vector3>} Массив из четырёх векторов в порядке [нижний левый, нижний правый, верхний левый, верхний правый].
      * @private
      */
-    _computeWorldPositionsFromAnchor() {
-        if (!this._position) return [];
+_computeWorldPositionsFromAnchor() {
+    if (!this._position) return [];
 
-        const [lon, lat, alt] = this._position;
-        const [width, height] = this._size;
-        const [ax, ay] = this._anchor; // 0..1
-        const [rx, ry, rz] = this._rotation;
+    const [lon, lat, alt] = this._position;
+    const [width, height] = this._size;
+    const [ax, ay] = this._anchor;
+    const [rx, ry, rz] = this._rotation;
 
-        const center = new THREE.Vector3(...proj.fromLonLat([lon, lat]), alt || 0);
+    const center = new THREE.Vector3(...proj.fromLonLat([lon, lat]), alt || 0);
 
-        // Векторы ширины и высоты до поворота (локальная система координат)
-        // Предполагаем, что изображение лежит в плоскости XY (Z=0), X – ширина, Y – высота
-        // Но для географической привязки удобнее использовать XZ плоскость, Y – высота.
-        // Поэтому переопределим: локальная ось X – вдоль ширины, локальная ось Z – вдоль высоты? 
-        // Чтобы избежать путаницы, будем считать, что изображение изначально находится в горизонтальной плоскости XZ (как на земле),
-        // тогда ширина идёт по X, высота – по Z. Но пользователь может захотеть вертикальное изображение, тогда поворот задаст ориентацию.
-        // Используем стандартный подход: создаём квад в плоскости XY (ширина по X, высота по Y), затем применяем повороты.
-        // После поворота переводим в мировую систему координат, где Y – вверх, X,Z – горизонталь.
-        // Это сложно, поэтому проще: создаём четыре угла в локальных координатах (x,y,0), применяем вращение, затем преобразуем в мировые:
-        // Мировая X = локальная X, мировая Z = локальная Y, мировая Y = локальная Z (0 после поворотов может стать не нулевой).
-        // Но для простоты будем считать, что изображение создаётся в плоскости XY (ширина по X, высота по Y) с центром в нуле,
-        // затем применяем повороты rx, ry, rz, и получаем координаты в локальной системе.
-        // Затем добавляем к позиции центра (в мировых координатах). Получаем мировые координаты.
+    const halfW = width / 2;
+    const halfH = height / 2;
 
-        const halfW = width / 2;
-        const halfH = height / 2;
+    // Локальные координаты углов в плоскости XZ (Y=0), центр в (0,0,0)
+    const cornersLocal = [
+        new THREE.Vector3(-halfW, 0, -halfH),
+        new THREE.Vector3( halfW, 0, -halfH),
+        new THREE.Vector3(-halfW, 0,  halfH),
+        new THREE.Vector3( halfW, 0,  halfH)
+    ];
 
-        // Локальные координаты углов (без учёта якоря): [нижний левый (-halfW,-halfH,0), нижний правый (halfW,-halfH,0), верхний левый (-halfW,halfH,0), верхний правый (halfW,halfH,0)]
-        const cornersLocal = [
-            new THREE.Vector3(-halfW, -halfH, 0),
-            new THREE.Vector3( halfW, -halfH, 0),
-            new THREE.Vector3(-halfW,  halfH, 0),
-            new THREE.Vector3( halfW,  halfH, 0)
-        ];
+    // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
+    const anchorOffset = new THREE.Vector3(
+        (0.5 - ax) * width,
+        0,
+        (0.5 - ay) * height
+    );
+    cornersLocal.forEach(c => c.add(anchorOffset));
 
-        // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
-        const anchorOffset = new THREE.Vector3(
-            (0.5 - ax) * width,
-            (0.5 - ay) * height,
-            0
+    // Применяем вращение
+    const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
+    const quaternion = new THREE.Quaternion().setFromEuler(euler);
+    const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
+
+    // Добавляем к центру в мировых координатах (без перестановки осей)
+    const worldCorners = rotatedCorners.map(local => {
+        return new THREE.Vector3(
+            center.x + local.x,
+            center.y + local.y,
+            center.z + local.z
         );
-        cornersLocal.forEach(c => c.add(anchorOffset));
+    });
 
-        // Применяем вращение
-        const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
-        const quaternion = new THREE.Quaternion().setFromEuler(euler);
-        cornersLocal.forEach(c => c.applyQuaternion(quaternion));
+    return worldCorners;
+}
 
-        // Преобразуем в мировые координаты: локальная X -> мировая X, локальная Y -> мировая Z, локальная Z -> мировая Y (инверсия из-за системы координат three.js)
-        const worldCorners = cornersLocal.map(local => {
-            return new THREE.Vector3(
-                center.x + local.x,
-                center.y + local.z, // Y вверх
-                center.z + local.y  // Z горизонталь
-            );
-        });
-
-        return worldCorners;
-    }
 
     /**
      * Строит геометрию плоскости с вершинами в мировых координатах (локально относительно центроида).

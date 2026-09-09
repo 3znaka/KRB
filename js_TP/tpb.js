@@ -32067,6 +32067,7 @@ var OrbitControls = class extends EventDispatcher {
       }
     };
     const scope = this;
+    let mapControlsState = null;
     const STATE = {
       NONE: -1,
       ROTATE: 0,
@@ -32075,7 +32076,8 @@ var OrbitControls = class extends EventDispatcher {
       TOUCH_ROTATE: 3,
       TOUCH_PAN: 4,
       TOUCH_DOLLY_PAN: 5,
-      TOUCH_DOLLY_ROTATE: 6
+      TOUCH_DOLLY_ROTATE: 6,
+      TOUCH_MAP_CONTROLS: 7
     };
     let state = STATE.NONE;
     const EPS = 1e-6;
@@ -32275,6 +32277,183 @@ var OrbitControls = class extends EventDispatcher {
         scope.update();
       }
     }
+
+function normalizeAngleDiff(angle) {
+    let a = angle;
+    while (a > Math.PI) a -= 2 * Math.PI;
+    while (a < -Math.PI) a += 2 * Math.PI;
+    return a;
+}
+
+function applyMapGestureFromStart(state, gesture, currentDist, currentAngle, currentCenterX, currentCenterY) {
+    switch (gesture) {
+        case 'zoom': {
+            const factor = currentDist / state.startDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+            break;
+        }
+        case 'rotate': {
+            const angleDiff = normalizeAngleDiff(currentAngle - state.startAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
+            break;
+        }
+        case 'tilt': {
+            const tiltAmount = 2 * Math.PI * (state.startCenterY - currentCenterY) /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
+            break;
+        }
+    }
+}
+
+function applyMapGestureIncrement(state, gesture, currentDist, currentAngle, currentCenterX, currentCenterY) {
+    switch (gesture) {
+        case 'zoom': {
+            const factor = currentDist / state.prevDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+            break;
+        }
+        case 'rotate': {
+            const angleDiff = normalizeAngleDiff(currentAngle - state.prevAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
+            break;
+        }
+        case 'tilt': {
+            const tiltDeltaY = state.prevCenterY - currentCenterY;
+            const tiltAmount = 2 * Math.PI * tiltDeltaY /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
+            break;
+        }
+    }
+}
+
+function handleTouchStartMapControls(event) {
+    if (pointers.length < 2) return;
+
+    const pos0 = pointerPositions[pointers[0]];
+    const pos1 = pointerPositions[pointers[1]];
+
+    const dx = pos1.x - pos0.x;
+    const dy = pos1.y - pos0.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx);
+    const centerX = (pos0.x + pos1.x) * 0.5;
+    const centerY = (pos0.y + pos1.y) * 0.5;
+
+    mapControlsState = {
+        startDist: dist,
+        startAngle: angle,
+        startCenterX: centerX,
+        startCenterY: centerY,
+        prevDist: dist,
+        prevAngle: angle,
+        prevCenterX: centerX,
+        prevCenterY: centerY,
+        activeGesture: null
+    };
+}
+
+function handleTouchMoveMapControls(event) {
+    if (!mapControlsState || pointers.length < 2) return;
+
+    const state = mapControlsState;
+    const pos0 = pointerPositions[pointers[0]];
+    const pos1 = pointerPositions[pointers[1]];
+
+    const dx = pos1.x - pos0.x;
+    const dy = pos1.y - pos0.y;
+    const currentDist = Math.sqrt(dx * dx + dy * dy);
+    const currentAngle = Math.atan2(dy, dx);
+    const currentCenterX = (pos0.x + pos1.x) * 0.5;
+    const currentCenterY = (pos0.y + pos1.y) * 0.5;
+
+    // Жест ещё не распознан
+    if (state.activeGesture === null) {
+        const GESTURE_THRESHOLD_PX = 10;   // минимальное смещение для фиксации жеста
+        const DOMINANCE_RATIO = 1.5;       // во сколько раз сигнал должен быть больше другого
+
+        // Сигнал zoom – изменение расстояния между пальцами
+        const zoomSignal = Math.abs(currentDist - state.startDist);
+
+        // Сигнал rotate/tilt:
+        //  - rotate: изменение угла, переведённое в пиксели дуги
+        //  - tilt: вертикальное смещение средней точки
+        const angleDiff = normalizeAngleDiff(currentAngle - state.startAngle);
+        const rotateSignalPx = Math.abs(angleDiff) * state.startDist * 0.5;
+        const tiltSignal = Math.abs(currentCenterY - state.startCenterY);
+        const rotateTiltSignal = Math.max(rotateSignalPx, tiltSignal);
+
+        const maxSignal = Math.max(zoomSignal, rotateTiltSignal);
+
+        // Ждём, пока сигнал не превысит порог
+        if (maxSignal < GESTURE_THRESHOLD_PX) {
+            state.prevDist = currentDist;
+            state.prevAngle = currentAngle;
+            state.prevCenterX = currentCenterX;
+            state.prevCenterY = currentCenterY;
+            return;
+        }
+
+        // Выбираем жест по доминированию
+        if (zoomSignal > rotateTiltSignal * DOMINANCE_RATIO) {
+            // --- ZOOM ---
+            state.activeGesture = 'zoom';
+            const factor = currentDist / state.startDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+        } else if (rotateTiltSignal > zoomSignal * DOMINANCE_RATIO) {
+            // --- ROTATE + TILT ---
+            state.activeGesture = 'rotateTilt';
+            const angleDiff = normalizeAngleDiff(currentAngle - state.startAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
+
+            const tiltAmount = 2 * Math.PI * (state.startCenterY - currentCenterY) /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
+        } else {
+            // Сигналы сопоставимы – ждём более явного движения
+            state.prevDist = currentDist;
+            state.prevAngle = currentAngle;
+            state.prevCenterX = currentCenterX;
+            state.prevCenterY = currentCenterY;
+            return;
+        }
+    } else {
+        // Жест уже зафиксирован, работаем по кадрам
+        if (state.activeGesture === 'zoom') {
+            const factor = currentDist / state.prevDist;
+            if (factor > 0 && isFinite(factor)) {
+                dollyOut(factor);
+                updateZoomParameters(currentCenterX, currentCenterY);
+            }
+        } else if (state.activeGesture === 'rotateTilt') {
+            // Применяем одновременно rotate и tilt
+            const angleDiff = normalizeAngleDiff(currentAngle - state.prevAngle);
+            sphericalDelta.theta += angleDiff * scope.rotateSpeed;
+
+            const tiltDeltaY = state.prevCenterY - currentCenterY;
+            const tiltAmount = 2 * Math.PI * tiltDeltaY /
+                               scope.domElement.clientHeight * scope.rotateSpeed;
+            sphericalDelta.phi += tiltAmount;
+        }
+    }
+
+    // Обновляем предыдущие значения
+    state.prevDist = currentDist;
+    state.prevAngle = currentAngle;
+    state.prevCenterX = currentCenterX;
+    state.prevCenterY = currentCenterY;
+}
+
     function handleTouchStartRotate(event) {
       if (pointers.length === 1) {
         rotateStart.set(event.pageX, event.pageY);
@@ -32388,6 +32567,7 @@ var OrbitControls = class extends EventDispatcher {
         scope.domElement.removeEventListener("pointermove", onPointerMove);
         scope.domElement.removeEventListener("pointerup", onPointerUp);
       }
+      mapControlsState = null;
       scope.dispatchEvent(_endEvent);
       state = STATE.NONE;
     }
@@ -32499,6 +32679,11 @@ var OrbitControls = class extends EventDispatcher {
               handleTouchStartDollyRotate(event);
               state = STATE.TOUCH_DOLLY_ROTATE;
               break;
+            case TOUCH.MAP_CONTROLS:   
+                    if (scope.enableZoom === false && scope.enableRotate === false) return;
+                    handleTouchStartMapControls(event);
+                    state = STATE.TOUCH_MAP_CONTROLS;
+                    break;
             default:
               state = STATE.NONE;
           }
@@ -32533,6 +32718,10 @@ var OrbitControls = class extends EventDispatcher {
           handleTouchMoveDollyRotate(event);
           scope.update();
           break;
+        case STATE.TOUCH_MAP_CONTROLS:   // <-- добавить
+            handleTouchMoveMapControls(event);
+            scope.update();
+            break;
         default:
           state = STATE.NONE;
       }
@@ -32572,6 +32761,7 @@ var OrbitControls = class extends EventDispatcher {
     this.update();
   }
 };
+
 
 // node_modules/three/examples/jsm/lines/LineSegmentsGeometry.js
 var _box2 = new Box3();

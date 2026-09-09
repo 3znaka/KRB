@@ -216,10 +216,10 @@ async _loadModel() {
             const loader = new GLTFLoader();
 
 
-            const dracoLoader = new DRACOLoader();
-            dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/draco/'); // путь к декодеру
-            dracoLoader.setDecoderConfig({ type: 'js' }); // или 'wasm'
-            loader.setDRACOLoader(dracoLoader);
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
+dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
+loader.setDRACOLoader(dracoLoader);
 
             const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;

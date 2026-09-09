@@ -2,6 +2,7 @@
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалами и подписями.
+ * Поддержка исключения областей для скрытия заданных слоёв.
  */
 
 import {
@@ -12,6 +13,7 @@ import {
 } from '../js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
+import { proj } from './Utils.js'; // добавлено для преобразования координат
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
@@ -89,6 +91,7 @@ class VectorPointLabelSource {
 /**
  * Класс слоя векторных тайлов с поддержкой 3D-зданий и выделением острых рёбер.
  * Управляет загрузкой, кешированием и отображением тайлов, материалов и подписей.
+ * Поддерживает добавление областей исключения для скрытия выбранных слоёв.
  *
  * @param {Object} options - Объект с настройками слоя.
  * @property {string} options.url - URL шаблона тайлов с плейсхолдерами {z}, {x}, {y}.
@@ -137,6 +140,7 @@ class VectorPointLabelSource {
  *     ]
  * });
  *
+ * layer.addExclusionArea(geojson, ['building']);
  * layer.printDiscoveredClasses();
  * layer.removeFromMap();
  */
@@ -200,6 +204,9 @@ export class VectorTileLayer {
         this._lastMovementTime = 0;
         this._lastLabelUpdateTime = 0;
 
+        // Исключения областей
+        this._exclusionMasks = [];
+
         const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
         this._workerScriptUrls = rawScripts.map(s => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
@@ -262,6 +269,8 @@ export class VectorTileLayer {
         const result = data.result;
         const group = pending.group || new THREE.Group();
         this._buildGroupFromWorkerResult(group, result);
+        this._applyExclusionsToGroup(group); // применяем исключения к обновлённой группе
+
         if (!pending.group) {
             this._rootGroup.add(group);
             const key = pending.key;
@@ -295,6 +304,7 @@ export class VectorTileLayer {
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
             mesh.renderOrder = fill.renderOrder;
+            mesh.userData.layerName = fill.layerName;
             group.add(mesh);
         }
 
@@ -314,15 +324,17 @@ export class VectorTileLayer {
                 geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
                 const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color));
                 mesh.renderOrder = 50;
+                mesh.userData.layerName = 'building';
                 group.add(mesh);
 
                 if (this.buildingEdges && g.edg.length) {
-  const eGeom = new THREE.BufferGeometry();
-  eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
-  const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
-  lines.renderOrder = 51;
-  group.add(lines);
-}
+                    const eGeom = new THREE.BufferGeometry();
+                    eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
+                    const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
+                    lines.renderOrder = 51;
+                    lines.userData.layerName = 'building';
+                    group.add(lines);
+                }
             }
         }
 
@@ -333,6 +345,7 @@ export class VectorTileLayer {
             const lineObj = new Line2(lGeo, mat);
             lineObj.renderOrder = line.renderOrder;
             lineObj.frustumCulled = false;
+            lineObj.userData.layerName = line.layerName;
             group.add(lineObj);
         }
 
@@ -343,6 +356,7 @@ export class VectorTileLayer {
             const lineObj = new Line2(lGeo, mat);
             lineObj.renderOrder = stroke.renderOrder;
             lineObj.frustumCulled = false;
+            lineObj.userData.layerName = stroke.layerName;
             group.add(lineObj);
         }
 
@@ -353,6 +367,7 @@ export class VectorTileLayer {
             const mesh = new THREE.Mesh(geometry, mat);
             mesh.position.set(pt.x, 0, pt.z);
             mesh.renderOrder = pt.renderOrder;
+            mesh.userData.layerName = pt.layerName;
             group.add(mesh);
         }
 
@@ -579,6 +594,220 @@ export class VectorTileLayer {
         }
     }
 
+    /**
+     * Добавляет область исключения: в этой области не будут отображаться указанные слои.
+     *
+     * @param {Object} geojson - GeoJSON объект с геометрией типа Polygon или MultiPolygon.
+     * @param {Array<string>} [layers=['building']] - Массив имён слоёв, которые нужно скрыть.
+     * @returns {void}
+     * @example
+     * layer.addExclusionArea({
+     *     type: 'Feature',
+     *     geometry: {
+     *         type: 'Polygon',
+     *         coordinates: [[[37.6, 55.7], [37.7, 55.7], [37.7, 55.8], [37.6, 55.8], [37.6, 55.7]]]
+     *     }
+     * }, ['building']);
+     */
+    addExclusionArea(geojson, layers = ['building']) {
+        if (!geojson || !geojson.geometry || !geojson.geometry.type) {
+            console.warn('Invalid GeoJSON for exclusion area');
+            return;
+        }
+
+        const geometry = geojson.geometry;
+        const polygons = [];
+        const coords = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
+
+        for (const polygon of coords) {
+            const rings = polygon.map(ring =>
+                ring.map(coord => {
+                    const [x, z] = proj.fromLonLat(coord);
+                    return { x, z };
+                })
+            );
+            polygons.push(rings);
+        }
+
+        this._exclusionMasks.push({
+            polygons,
+            layers: new Set(layers)
+        });
+
+        this._applyExclusionsToAllTiles();
+    }
+
+    /**
+     * Удаляет все области исключения.
+     *
+     * @returns {void}
+     */
+    clearExclusionAreas() {
+        this._exclusionMasks = [];
+        this._applyExclusionsToAllTiles();
+    }
+
+    // -------------------------------------------------------------------------
+    // Приватные методы для работы с исключениями
+    // -------------------------------------------------------------------------
+    /**
+     * Применяет все маски исключений ко всем загруженным тайлам.
+     * @private
+     */
+    _applyExclusionsToAllTiles() {
+        this._tileCache.forEach(group => this._applyExclusionsToGroup(group));
+    }
+
+    /**
+     * Применяет маски исключений к конкретной группе тайла.
+     * @param {THREE.Group} group - Группа тайла.
+     * @private
+     */
+    _applyExclusionsToGroup(group) {
+        if (!group) return;
+        group.children.forEach(child => {
+            if (!child.userData || !child.userData.layerName) {
+                child.visible = true;
+                return;
+            }
+
+            const layerName = child.userData.layerName;
+            let shouldHide = false;
+
+            for (const mask of this._exclusionMasks) {
+                if (mask.layers.has(layerName) && this._geometryIntersectsAnyPolygon(child, mask.polygons)) {
+                    shouldHide = true;
+                    break;
+                }
+            }
+
+            child.visible = !shouldHide;
+        });
+    }
+
+    /**
+     * Проверяет, пересекается ли геометрия объекта с хотя бы одним полигоном.
+     * @param {THREE.Object3D} object - Объект с геометрией.
+     * @param {Array} polygons - Массив полигонов (каждый полигон - массив колец).
+     * @returns {boolean} True, если есть пересечение.
+     * @private
+     */
+    _geometryIntersectsAnyPolygon(object, polygons) {
+        if (!object.geometry) return false;
+        const geom = object.geometry;
+        if (!geom.boundingBox) geom.computeBoundingBox();
+        const bbox = geom.boundingBox;
+        if (!bbox) return false;
+
+        for (const rings of polygons) {
+            if (this._aabbIntersectsPolygon(bbox, rings)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Проверяет пересечение AABB с полигоном (грубо).
+     * @param {THREE.Box3} aabb - Ограничивающий параллелепипед.
+     * @param {Array} rings - Массив колец полигона.
+     * @returns {boolean} True, если есть пересечение.
+     * @private
+     */
+    _aabbIntersectsPolygon(aabb, rings) {
+        const polyBBox = this._computePolygonBBox(rings);
+        if (!polyBBox) return false;
+
+        // Быстрая отсечка по общему ограничивающему прямоугольнику
+        if (aabb.max.x < polyBBox.minX || aabb.min.x > polyBBox.maxX ||
+            aabb.max.z < polyBBox.minZ || aabb.min.z > polyBBox.maxZ) {
+            return false;
+        }
+
+        // Проверяем вершины полигона внутри AABB
+        for (const ring of rings) {
+            for (const p of ring) {
+                if (p.x >= aabb.min.x && p.x <= aabb.max.x && p.z >= aabb.min.z && p.z <= aabb.max.z) {
+                    return true;
+                }
+            }
+        }
+
+        // Проверяем вершины AABB внутри полигона
+        const corners = [
+            { x: aabb.min.x, z: aabb.min.z },
+            { x: aabb.min.x, z: aabb.max.z },
+            { x: aabb.max.x, z: aabb.min.z },
+            { x: aabb.max.x, z: aabb.max.z }
+        ];
+
+        for (const corner of corners) {
+            if (this._isPointInPolygon(corner, rings)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Вычисляет ограничивающий прямоугольник полигона.
+     * @param {Array} rings - Массив колец.
+     * @returns {{minX: number, minZ: number, maxX: number, maxZ: number}|null}
+     * @private
+     */
+    _computePolygonBBox(rings) {
+        if (!rings.length || !rings[0].length) return null;
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        for (const ring of rings) {
+            for (const p of ring) {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+        }
+        return { minX, minZ, maxX, maxZ };
+    }
+
+    /**
+     * Проверяет, находится ли точка внутри полигона (с учётом дырок).
+     * @param {{x:number, z:number}} point - Точка.
+     * @param {Array} rings - Массив колец, где первое кольцо внешнее.
+     * @returns {boolean}
+     * @private
+     */
+    _isPointInPolygon(point, rings) {
+        const [outer, ...holes] = rings;
+        if (!this._isPointInRing(point, outer)) return false;
+        for (const hole of holes) {
+            if (this._isPointInRing(point, hole)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Проверяет, находится ли точка внутри кольца (алгоритм ray casting).
+     * @param {{x:number, z:number}} point - Точка.
+     * @param {Array<{x:number, z:number}>} ring - Кольцо.
+     * @returns {boolean}
+     * @private
+     */
+    _isPointInRing(point, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].x, zi = ring[i].z;
+            const xj = ring[j].x, zj = ring[j].z;
+            const intersect = ((zi > point.z) !== (zj > point.z)) &&
+                (point.x < (xj - xi) * (point.z - zi) / (zj - zi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    // -------------------------------------------------------------------------
+    // Остальные приватные методы (управление тайлами и ресурсами)
+    // -------------------------------------------------------------------------
     _clearAllTiles() {
         this._tileCache.forEach(group => this._disposeTile(group));
         this._tileCache.clear();
@@ -805,6 +1034,7 @@ export class VectorTileLayer {
                 this._rootGroup.add(group);
                 this._tileCache.set(key, group);
                 this._createTextLabelsForGroup(group);
+                this._applyExclusionsToGroup(group); // применяем исключения после добавления из кэша
                 return;
             }
         }
@@ -828,6 +1058,7 @@ export class VectorTileLayer {
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             this._rootGroup.add(group);
             this._tileCache.set(key, group);
+            // Исключения применяются внутри _onWorkerMessage, так что здесь не обязательно
         } catch (err) {
             // игнорируем ошибки загрузки
         } finally {
@@ -967,22 +1198,22 @@ export class VectorTileLayer {
     }
 
     _getBuildingMaterial(color) {
-    const key = 'bld:' + color;
-    if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
+        const key = 'bld:' + color;
+        if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
 
-    const mat = new THREE.MeshLambertMaterial({
-        color,
-        side: THREE.FrontSide, // вместо THREE.DoubleSide
-        depthTest: true,
-        depthWrite: true,
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1
-    });
+        const mat = new THREE.MeshLambertMaterial({
+            color,
+            side: THREE.FrontSide, // вместо THREE.DoubleSide
+            depthTest: true,
+            depthWrite: true,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
 
-    this._fillMaterialCache.set(key, mat);
-    return mat;
-}
+        this._fillMaterialCache.set(key, mat);
+        return mat;
+    }
 
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;

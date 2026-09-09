@@ -269,13 +269,12 @@ export class VectorTileLayer {
         const result = data.result;
         const group = pending.group || new THREE.Group();
         this._buildGroupFromWorkerResult(group, result);
+        this._applyExclusionsToGroup(group);
 
-        // Применяем исключения только после добавления группы в сцену
         if (!pending.group) {
             this._rootGroup.add(group);
             const key = pending.key;
             this._tileCache.set(key, group);
-            this._applyExclusionsToGroup(group);
         }
         pending.resolve(group);
     }
@@ -298,7 +297,6 @@ export class VectorTileLayer {
             group.remove(child);
         }
 
-        // Обычные заливки (кроме зданий)
         for (const fill of result.fills) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
             const geom = new THREE.BufferGeometry();
@@ -310,59 +308,31 @@ export class VectorTileLayer {
             group.add(mesh);
         }
 
-        // Плоские здания (если воркер их вернул отдельно)
-        if (result.flatBuildings && result.flatBuildings.length > 0) {
-            for (const b of result.flatBuildings) {
-                const mat = this._getFillMaterialFromData('building', b.color, b.opacity ?? 1);
-                const geom = new THREE.BufferGeometry();
-                geom.setAttribute('position', new THREE.BufferAttribute(b.positions, 3));
-                if (b.indices) geom.setIndex(new THREE.BufferAttribute(b.indices, 1));
-                const mesh = new THREE.Mesh(geom, mat);
-                mesh.renderOrder = b.renderOrder ?? 7;
-                mesh.userData.layerName = 'building';
-                group.add(mesh);
-            }
-        }
-
-        // 3D-здания: батчинг по цвету
         if (result.buildings.length > 0) {
             const byColor = new Map();
             for (const b of result.buildings) {
                 const key = b.color;
-                if (!byColor.has(key)) byColor.set(key, { color: b.color, stroke: b.stroke, pos: [], nrm: [], edg: [], ranges: [], edgeRanges: [] });
+                if (!byColor.has(key)) byColor.set(key, { color: b.color, stroke: b.stroke, pos: [], nrm: [], edg: [] });
                 const g = byColor.get(key);
-                const startPos = g.pos.length / 3; // количество вершин до добавления
-                const startEdge = g.edg.length / 6; // количество рёбер до добавления
                 g.pos.push(b.positions);
                 g.nrm.push(b.normals);
                 if (b.edgePositions) g.edg.push(b.edgePositions);
-                g.ranges.push([startPos, startPos + b.vertexCount / 3]); // в вершинах
-                g.edgeRanges.push([startEdge, startEdge + b.edgeCount]);
             }
-
             for (const g of byColor.values()) {
-                const positions = this._concatF32(g.pos);
-                const normals = this._concatF32(g.nrm);
-
                 const geom = new THREE.BufferGeometry();
-                geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+                geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
+                geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
                 const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color));
                 mesh.renderOrder = 50;
                 mesh.userData.layerName = 'building';
-                mesh.userData.buildingRanges = g.ranges;
-                mesh.userData.originalPositions = positions;
                 group.add(mesh);
 
-                if (this.buildingEdges && g.edg.length > 0) {
-                    const edgePositions = this._concatF32(g.edg);
+                if (this.buildingEdges && g.edg.length) {
                     const eGeom = new THREE.BufferGeometry();
-                    eGeom.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3));
+                    eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
                     const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
                     lines.renderOrder = 51;
                     lines.userData.layerName = 'building';
-                    lines.userData.edgeRanges = g.edgeRanges;
-                    lines.userData.originalEdgePositions = edgePositions;
                     group.add(lines);
                 }
             }
@@ -696,141 +666,29 @@ export class VectorTileLayer {
 
     /**
      * Применяет маски исключений к конкретной группе тайла.
-     * Для батч-мешей зданий вызывает специальную обработку по диапазонам.
      * @param {THREE.Group} group - Группа тайла.
      * @private
      */
     _applyExclusionsToGroup(group) {
         if (!group) return;
-        // Сначала обрабатываем обычные объекты (скрытие через visible)
         group.children.forEach(child => {
             if (!child.userData || !child.userData.layerName) {
                 child.visible = true;
                 return;
             }
-            if (child.userData.layerName === 'building' && child.userData.buildingRanges) {
-                // этот меш обрабатываем специально ниже
-                return;
-            }
+
             const layerName = child.userData.layerName;
             let shouldHide = false;
+
             for (const mask of this._exclusionMasks) {
                 if (mask.layers.has(layerName) && this._geometryIntersectsAnyPolygon(child, mask.polygons)) {
                     shouldHide = true;
                     break;
                 }
             }
+
             child.visible = !shouldHide;
         });
-
-        // Обрабатываем батч-меши зданий
-        group.children.forEach(child => {
-            if (child.userData && child.userData.buildingRanges) {
-                this._applyExclusionToBuildingMesh(child);
-            }
-        });
-    }
-
-    /**
-     * Пересобирает геометрию батч-меша зданий, удаляя вершины и рёбра тех зданий,
-     * которые пересекаются с полигонами исключения.
-     * @param {THREE.Mesh} mesh - Батч-меш зданий.
-     * @private
-     */
-    _applyExclusionToBuildingMesh(mesh) {
-        if (!mesh.userData.buildingRanges || !mesh.userData.originalPositions) return;
-        const ranges = mesh.userData.buildingRanges;
-        const originalPositions = mesh.userData.originalPositions;
-        const removeFlags = new Array(ranges.length).fill(false);
-
-        // проверяем каждое здание
-        for (let i = 0; i < ranges.length; i++) {
-            const [startVert, endVert] = ranges[i];
-            // вычисляем bounding box по вершинам этого здания
-            const bbox = this._computeBBoxFromPositions(originalPositions, startVert * 3, endVert * 3);
-            if (!bbox) continue;
-            const shiftedBBox = {
-                min: { x: bbox.min.x - this._map.worldGroup.position.x, z: bbox.min.z - this._map.worldGroup.position.z },
-                max: { x: bbox.max.x - this._map.worldGroup.position.x, z: bbox.max.z - this._map.worldGroup.position.z }
-            };
-            for (const mask of this._exclusionMasks) {
-                if (mask.layers.has('building')) {
-                    for (const rings of mask.polygons) {
-                        if (this._aabbIntersectsPolygon(shiftedBBox, rings)) {
-                            removeFlags[i] = true;
-                            break;
-                        }
-                    }
-                }
-                if (removeFlags[i]) break;
-            }
-        }
-
-        // если ничего не удаляем, выходим
-        if (!removeFlags.some(f => f)) {
-            // убедимся, что геометрия полная
-            mesh.geometry.setAttribute('position', new THREE.BufferAttribute(originalPositions, 3));
-            return;
-        }
-
-        // собираем новый массив позиций без удалённых диапазонов
-        const newPositions = [];
-        for (let i = 0; i < ranges.length; i++) {
-            const [start, end] = ranges[i];
-            const startByte = start * 3;
-            const endByte = end * 3;
-            if (!removeFlags[i]) {
-                for (let j = startByte; j < endByte; j++) {
-                    newPositions.push(originalPositions[j]);
-                }
-            }
-        }
-        mesh.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPositions), 3));
-        mesh.geometry.computeBoundingSphere();
-        mesh.geometry.computeBoundingBox();
-
-        // обрабатываем рёбра, если есть
-        const edgeMesh = group.children.find(c => c.userData && c.userData.edgeRanges && c.parent === mesh.parent);
-        if (edgeMesh && edgeMesh.userData.edgeRanges && edgeMesh.userData.originalEdgePositions) {
-            const edgeRanges = edgeMesh.userData.edgeRanges;
-            const originalEdges = edgeMesh.userData.originalEdgePositions;
-            const newEdges = [];
-            for (let i = 0; i < edgeRanges.length; i++) {
-                const [startEdge, endEdge] = edgeRanges[i];
-                const startByte = startEdge * 6;
-                const endByte = endEdge * 6;
-                if (!removeFlags[i]) {
-                    for (let j = startByte; j < endByte; j++) {
-                        newEdges.push(originalEdges[j]);
-                    }
-                }
-            }
-            edgeMesh.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newEdges), 3));
-            edgeMesh.geometry.computeBoundingSphere();
-            edgeMesh.geometry.computeBoundingBox();
-        }
-    }
-
-    /**
-     * Вычисляет ограничивающий прямоугольник по диапазону вершин (только XZ).
-     * @param {Float32Array} positions - Массив позиций.
-     * @param {number} startByte - Начальный индекс (в числах, кратный 3).
-     * @param {number} endByte - Конечный индекс (в числах, кратный 3).
-     * @returns {{min:{x:number,z:number}, max:{x:number,z:number}}|null}
-     * @private
-     */
-    _computeBBoxFromPositions(positions, startByte, endByte) {
-        if (startByte >= endByte) return null;
-        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
-        for (let i = startByte; i < endByte; i += 3) {
-            const x = positions[i];
-            const z = positions[i + 2];
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (z < minZ) minZ = z;
-            if (z > maxZ) maxZ = z;
-        }
-        return { min: { x: minX, z: minZ }, max: { x: maxX, z: maxZ } };
     }
 
     /**
@@ -889,7 +747,7 @@ export class VectorTileLayer {
     }
 
     /**
-     * Проверяет пересечение AABB с полигоном (грубо, но с учётом пересечения рёбер).
+     * Проверяет пересечение AABB с полигоном (грубо).
      * @param {Object} aabb - Ограничивающий параллелепипед { min: {x,z}, max: {x,z} }.
      * @param {Array} rings - Массив колец полигона.
      * @returns {boolean} True, если есть пересечение.
@@ -928,72 +786,7 @@ export class VectorTileLayer {
             }
         }
 
-        // Дополнительно: проверяем пересечение рёбер AABB с рёбрами полигона
-        const aabbEdges = [
-            [{ x: aabb.min.x, z: aabb.min.z }, { x: aabb.max.x, z: aabb.min.z }],
-            [{ x: aabb.max.x, z: aabb.min.z }, { x: aabb.max.x, z: aabb.max.z }],
-            [{ x: aabb.max.x, z: aabb.max.z }, { x: aabb.min.x, z: aabb.max.z }],
-            [{ x: aabb.min.x, z: aabb.max.z }, { x: aabb.min.x, z: aabb.min.z }]
-        ];
-
-        for (const ring of rings) {
-            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-                const polyEdge1 = ring[j];
-                const polyEdge2 = ring[i];
-                for (const [a1, a2] of aabbEdges) {
-                    if (this._segmentsIntersect(a1, a2, polyEdge1, polyEdge2)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
         return false;
-    }
-
-    /**
-     * Проверяет пересечение двух отрезков (на плоскости XZ).
-     * @param {{x:number,z:number}} p1 - Начало первого отрезка.
-     * @param {{x:number,z:number}} p2 - Конец первого отрезка.
-     * @param {{x:number,z:number}} p3 - Начало второго отрезка.
-     * @param {{x:number,z:number}} p4 - Конец второго отрезка.
-     * @returns {boolean} True, если отрезки пересекаются (включая коллинеарные случаи).
-     * @private
-     */
-    _segmentsIntersect(p1, p2, p3, p4) {
-        const d1 = this._cross(p2, p3, p1);
-        const d2 = this._cross(p2, p4, p1);
-        const d3 = this._cross(p4, p1, p3);
-        const d4 = this._cross(p4, p2, p3);
-
-        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-            return true;
-        }
-
-        // Коллинеарные случаи
-        if (d1 === 0 && this._onSegment(p3, p1, p2)) return true;
-        if (d2 === 0 && this._onSegment(p4, p1, p2)) return true;
-        if (d3 === 0 && this._onSegment(p1, p3, p4)) return true;
-        if (d4 === 0 && this._onSegment(p2, p3, p4)) return true;
-        return false;
-    }
-
-    /**
-     * Векторное произведение для определения ориентации.
-     * @private
-     */
-    _cross(a, b, c) {
-        return (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
-    }
-
-    /**
-     * Проверяет, лежит ли точка p на отрезке ab (включая концы).
-     * @private
-     */
-    _onSegment(p, a, b) {
-        return Math.min(a.x, b.x) <= p.x && p.x <= Math.max(a.x, b.x) &&
-               Math.min(a.z, b.z) <= p.z && p.z <= Math.max(a.z, b.z);
     }
 
     /**
@@ -1268,8 +1061,6 @@ export class VectorTileLayer {
                         await this._sendToWorker(buffer.slice(0), z, xSlippy, ySlippy, is3dNow, group);
                         this._rootGroup.add(group);
                         this._tileCache.set(key, group);
-                        // Применяем исключения после добавления в сцену
-                        this._applyExclusionsToGroup(group);
                     } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
@@ -1306,8 +1097,7 @@ export class VectorTileLayer {
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             this._rootGroup.add(group);
             this._tileCache.set(key, group);
-            // Применяем исключения после добавления в сцену
-            this._applyExclusionsToGroup(group);
+            // Исключения применяются внутри _onWorkerMessage
         } catch (err) {
             // игнорируем ошибки загрузки
         } finally {

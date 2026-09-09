@@ -1,4 +1,4 @@
-//VectorTileLayer.js
+// VectorTileLayer.js
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалами и подписями.
@@ -12,6 +12,7 @@ import {
 } from '../js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
+import { proj } from './Utils.js';
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
@@ -194,6 +195,10 @@ export class VectorTileLayer {
 
         this._pointGeometryCache = new Map();
 
+        // Exclusion areas
+        this._exclusionAreas = [];
+        this._exclusionLayers = new Set();
+
         this._lastCanvasSize = { width: 0, height: 0 };
         // Отслеживание перемещения мира для обновления подписей
         this._lastWorldPos = new THREE.Vector3();
@@ -317,12 +322,12 @@ export class VectorTileLayer {
                 group.add(mesh);
 
                 if (this.buildingEdges && g.edg.length) {
-  const eGeom = new THREE.BufferGeometry();
-  eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
-  const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
-  lines.renderOrder = 51;
-  group.add(lines);
-}
+                    const eGeom = new THREE.BufferGeometry();
+                    eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
+                    const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
+                    lines.renderOrder = 51;
+                    group.add(lines);
+                }
             }
         }
 
@@ -516,6 +521,74 @@ export class VectorTileLayer {
         this._discoveredClasses.forEach((classes, layer) => {
             console.log(`  ${layer}: [${Array.from(classes).join(', ')}]`);
         });
+    }
+
+    /**
+     * Добавляет область исключения. Геометрия указанных слоёв, пересекающаяся с этой областью,
+     * не будет отображаться.
+     *
+     * @param {Object} collection - GeoJSON (FeatureCollection, Feature или Geometry).
+     * @param {Array<string>} layers - Список имён слоёв, к которым применяется исключение.
+     * @returns {VectorTileLayer} Текущий экземпляр слоя.
+     * @throws {Error} Если передан некорректный GeoJSON.
+     */
+    addExclusionArea(collection, layers) {
+        // Извлекаем полигоны из GeoJSON
+        const geometries = [];
+        if (collection.type === 'FeatureCollection') {
+            for (const feature of collection.features) geometries.push(feature.geometry);
+        } else if (collection.type === 'Feature') {
+            geometries.push(collection.geometry);
+        } else if (collection.type) {
+            geometries.push(collection);
+        } else {
+            throw new Error('addExclusionArea: invalid GeoJSON object');
+        }
+
+        const worldPolygons = [];
+        for (const geom of geometries) {
+            if (!geom) continue;
+            let rings = [];
+            if (geom.type === 'Polygon') {
+                rings = [geom.coordinates[0]]; // внешнее кольцо
+            } else if (geom.type === 'MultiPolygon') {
+                rings = geom.coordinates.map(poly => poly[0]);
+            } else {
+                console.warn('addExclusionArea: unsupported geometry type', geom.type);
+                continue;
+            }
+
+            for (const ring of rings) {
+                const worldRing = ring.map(([lon, lat]) => {
+                    const [x, z] = proj.fromLonLat([lon, lat]);
+                    return { x, z };
+                });
+                worldPolygons.push(worldRing);
+            }
+        }
+
+        this._exclusionAreas = worldPolygons;
+        this._exclusionLayers = new Set(layers);
+
+        // Принудительно пересоздаём все тайлы
+        this._invalidateAllTiles();
+
+        return this;
+    }
+
+    /**
+     * Полностью сбрасывает кэш тайлов и состояния, принуждая к пересозданию всех тайлов.
+     * @private
+     */
+    _invalidateAllTiles() {
+        this._clearAllTiles();
+        this._groupCache.clear();
+        this._tileDataCache.clear();
+        this._lastSourceZoom = -1;
+        this._lastDiscreteZoom = -1;
+        this._pendingLoads.clear();
+        this._sortedLoadQueue = [];
+        this._activeLoads = 0;
     }
 
     _mergeStyles(base, overrides) {
@@ -859,7 +932,9 @@ export class VectorTileLayer {
                 is3d,
                 visibleLayers: this.visibleLayers,
                 buildings3dMinZoom: this.buildings3dMinZoom,
-                buildingEdges: this.buildingEdges
+                buildingEdges: this.buildingEdges,
+                exclusionPolygons: this._exclusionAreas,
+                exclusionLayers: Array.from(this._exclusionLayers)
             };
 
             this._pendingWorkerRequests.set(id, {
@@ -967,22 +1042,22 @@ export class VectorTileLayer {
     }
 
     _getBuildingMaterial(color) {
-    const key = 'bld:' + color;
-    if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
+        const key = 'bld:' + color;
+        if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
 
-    const mat = new THREE.MeshLambertMaterial({
-        color,
-        side: THREE.FrontSide, // вместо THREE.DoubleSide
-        depthTest: true,
-        depthWrite: true,
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1
-    });
+        const mat = new THREE.MeshLambertMaterial({
+            color,
+            side: THREE.FrontSide, // вместо THREE.DoubleSide
+            depthTest: true,
+            depthWrite: true,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
 
-    this._fillMaterialCache.set(key, mat);
-    return mat;
-}
+        this._fillMaterialCache.set(key, mat);
+        return mat;
+    }
 
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;

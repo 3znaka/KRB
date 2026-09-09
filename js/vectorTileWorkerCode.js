@@ -1,3 +1,4 @@
+// VectorTileWorkerCode.js
 /**
  * Модуль генерации кода воркера векторных тайлов.
  * Использует стили и порядок отрисовки из vectorTileDefaults.js.
@@ -50,15 +51,17 @@ function onMessage(e) {
     }
     if (msg.type === 'process') {
         const {
-    id, buffer, z, x, y, tileSize, maxMerc, is3d,
-    visibleLayers, buildings3dMinZoom, buildingEdges
-} = msg;
+            id, buffer, z, x, y, tileSize, maxMerc, is3d,
+            visibleLayers, buildings3dMinZoom, buildingEdges,
+            exclusionPolygons = [], exclusionLayers = []
+        } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = processTile(
-    tile, z, x, y, tileSize, maxMerc, is3d,
-    visibleLayers, buildings3dMinZoom, buildingEdges
-);
+                tile, z, x, y, tileSize, maxMerc, is3d,
+                visibleLayers, buildings3dMinZoom, buildingEdges,
+                exclusionPolygons, exclusionLayers
+            );
             const transferList = [];
             const payload = { id, result };
             collectTransferables(payload, transferList);
@@ -252,33 +255,33 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
     if (cleaned.length === 0) return null;
 
     const polygons = [];
-let outerSign = null;
+    let outerSign = null;
 
-for (const ring of cleaned) {
-    const area = ringArea(ring);
+    for (const ring of cleaned) {
+        const area = ringArea(ring);
 
-    // Почти вырожденные кольца пропускаем
-    if (Math.abs(area) < 1e-9) continue;
+        // Почти вырожденные кольца пропускаем
+        if (Math.abs(area) < 1e-9) continue;
 
-    if (outerSign === null) {
-        // Первое нормальное кольцо считаем внешним
-        outerSign = Math.sign(area);
+        if (outerSign === null) {
+            // Первое нормальное кольцо считаем внешним
+            outerSign = Math.sign(area);
+        }
+
+        const isOuter = Math.sign(area) === outerSign;
+
+        if (isOuter) {
+            polygons.push({ outer: ring, holes: [] });
+        } else if (polygons.length > 0) {
+            polygons[polygons.length - 1].holes.push(ring);
+        } else {
+            // Защитный случай: если дырка встретилась раньше внешнего кольца,
+            // не теряем её, а считаем внешним кольцом.
+            polygons.push({ outer: ring, holes: [] });
+        }
     }
 
-    const isOuter = Math.sign(area) === outerSign;
-
-    if (isOuter) {
-        polygons.push({ outer: ring, holes: [] });
-    } else if (polygons.length > 0) {
-        polygons[polygons.length - 1].holes.push(ring);
-    } else {
-        // Защитный случай: если дырка встретилась раньше внешнего кольца,
-        // не теряем её, а считаем внешним кольцом.
-        polygons.push({ outer: ring, holes: [] });
-    }
-}
-
-if (polygons.length === 0) return null;
+    if (polygons.length === 0) return null;
 
     const positions = [];
     const normals = [];
@@ -293,99 +296,96 @@ if (polygons.length === 0) return null;
         const { vertices, indices } = triData;
 
         for (let i = 0; i < indices.length; i += 3) {
-    const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+            const a = indices[i], b = indices[i + 1], c = indices[i + 2];
 
-    const ax = vertices[a * 2], az = vertices[a * 2 + 1];
-    const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
-    const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+            const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+            const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+            const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
 
-    pushTriangle(
-        positions, normals,
-        ax, height, az,
-        bx, height, bz,
-        cx, height, cz,
-        0, 1, 0
-    );
-}
-       if (minHeight > 0) {
-    for (let i = 0; i < indices.length; i += 3) {
-        const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+            pushTriangle(
+                positions, normals,
+                ax, height, az,
+                bx, height, bz,
+                cx, height, cz,
+                0, 1, 0
+            );
+        }
+        if (minHeight > 0) {
+            for (let i = 0; i < indices.length; i += 3) {
+                const a = indices[i], b = indices[i + 1], c = indices[i + 2];
 
-        const ax = vertices[a * 2], az = vertices[a * 2 + 1];
-        const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
-        const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
+                const ax = vertices[a * 2], az = vertices[a * 2 + 1];
+                const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
+                const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
 
-        pushTriangle(
-            positions, normals,
-            ax, minHeight, az,
-            bx, minHeight, bz,
-            cx, minHeight, cz,
-            0, -1, 0
-        );
-    }
-}
-
-        for (const ring of [outer, ...holes]) {
-    const n = ring.length;
-
-    for (let i = 0; i < n; i++) {
-        const p0 = ring[i];
-        const p1 = ring[(i + 1) % n];
-
-        const dx = p1.x - p0.x;
-        const dz = p1.z - p0.z;
-        const len = Math.hypot(dx, dz);
-        if (len < eps) continue;
-
-        const nx = dz / len;
-        const nz = -dx / len;
-
-        // Первый треугольник стенки
-        pushTriangle(
-            positions, normals,
-            p0.x, minHeight, p0.z,
-            p1.x, minHeight, p1.z,
-            p1.x, height, p1.z,
-            nx, 0, nz
-        );
-
-        // Второй треугольник стенки
-        pushTriangle(
-            positions, normals,
-            p0.x, minHeight, p0.z,
-            p1.x, height, p1.z,
-            p0.x, height, p0.z,
-            nx, 0, nz
-        );
-
-        
-        if (includeEdges) {
-            // Рёбра оставляем без изменений
-            edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-            if (minHeight > 0) {
-                edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
-            }
-
-            const p2 = ring[(i + 2) % n];
-            const dx2 = p2.x - p1.x;
-            const dz2 = p2.z - p1.z;
-            const len2 = Math.hypot(dx2, dz2);
-
-            if (
-                len2 > eps &&
-                (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
-            ) {
-                edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+                pushTriangle(
+                    positions, normals,
+                    ax, minHeight, az,
+                    bx, minHeight, bz,
+                    cx, minHeight, cz,
+                    0, -1, 0
+                );
             }
         }
 
+        for (const ring of [outer, ...holes]) {
+            const n = ring.length;
 
-    }
-}
+            for (let i = 0; i < n; i++) {
+                const p0 = ring[i];
+                const p1 = ring[(i + 1) % n];
+
+                const dx = p1.x - p0.x;
+                const dz = p1.z - p0.z;
+                const len = Math.hypot(dx, dz);
+                if (len < eps) continue;
+
+                const nx = dz / len;
+                const nz = -dx / len;
+
+                // Первый треугольник стенки
+                pushTriangle(
+                    positions, normals,
+                    p0.x, minHeight, p0.z,
+                    p1.x, minHeight, p1.z,
+                    p1.x, height, p1.z,
+                    nx, 0, nz
+                );
+
+                // Второй треугольник стенки
+                pushTriangle(
+                    positions, normals,
+                    p0.x, minHeight, p0.z,
+                    p1.x, height, p1.z,
+                    p0.x, height, p0.z,
+                    nx, 0, nz
+                );
+
+                if (includeEdges) {
+                    // Рёбра оставляем без изменений
+                    edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
+                    if (minHeight > 0) {
+                        edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+                    }
+
+                    const p2 = ring[(i + 2) % n];
+                    const dx2 = p2.x - p1.x;
+                    const dz2 = p2.z - p1.z;
+                    const len2 = Math.hypot(dx2, dz2);
+
+                    if (
+                        len2 > eps &&
+                        (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
+                    ) {
+                        edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+                    }
+                }
+            }
+        }
     }
 
     if (positions.length === 0) return null;
-        return {
+    return {
         positions: new Float32Array(positions),
         normals: new Float32Array(normals),
         edgePositions: (includeEdges && edges.length) ? new Float32Array(edges) : null
@@ -425,9 +425,89 @@ function computePointScale(z) {
     return 1.0 + (z - 14) * 0.25;
 }
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges) {
+// --- Функции для проверки пересечений с exclusion areas ---
+function pointInPolygon(pt, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, zi = polygon[i].z;
+        const xj = polygon[j].x, zj = polygon[j].z;
+        const intersect = ((zi > pt.z) !== (zj > pt.z)) &&
+            (pt.x < (xj - xi) * (pt.z - zi) / (zj - zi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+function segmentsIntersect(a, b, c, d) {
+    function ccw(p, q, r) {
+        return (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
+    }
+    const d1 = ccw(c, d, a);
+    const d2 = ccw(c, d, b);
+    const d3 = ccw(a, b, c);
+    const d4 = ccw(a, b, d);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+        ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+    return false;
+}
+
+function polygonIntersectsAny(rings, exclusionPolygons) {
+    for (const ring of rings) {
+        // Проверка точек
+        for (const pt of ring) {
+            for (const exPoly of exclusionPolygons) {
+                if (pointInPolygon(pt, exPoly)) return true;
+            }
+        }
+        // Проверка пересечения рёбер
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i];
+            const b = ring[(i + 1) % ring.length];
+            for (const exPoly of exclusionPolygons) {
+                for (let j = 0; j < exPoly.length; j++) {
+                    const c = exPoly[j];
+                    const d = exPoly[(j + 1) % exPoly.length];
+                    if (segmentsIntersect(a, b, c, d)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+function lineIntersectsAny(lineRings, exclusionPolygons) {
+    for (const line of lineRings) {
+        if (line.length < 2) continue;
+        for (let i = 0; i < line.length - 1; i++) {
+            const a = line[i];
+            const b = line[i + 1];
+            for (const exPoly of exclusionPolygons) {
+                for (let j = 0; j < exPoly.length; j++) {
+                    const c = exPoly[j];
+                    const d = exPoly[(j + 1) % exPoly.length];
+                    if (segmentsIntersect(a, b, c, d)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+// --- Конец функций для exclusion ---
+
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges, exclusionPolygons = [], exclusionLayers = []) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
+
+    // Вычисляем центр тайла для приведения exclusion в локальные координаты
+    const centerX = x * tileSize - maxMerc + tileSize / 2;
+    const centerZ = -maxMerc + y * tileSize + tileSize / 2;
+
+    // Преобразуем exclusion полигоны в локальные координаты тайла
+    const localExclusionPolygons = exclusionPolygons.map(poly => poly.map(p => ({
+        x: p.x - centerX,
+        z: p.z - centerZ
+    })));
+    const exclusionLayerSet = new Set(exclusionLayers);
 
     const fillsMap = new Map();
     const linesMap = new Map();
@@ -465,6 +545,19 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 const centerZ = originZ + tileSize / 2;
                 const worldX = originX + (pt.x / 4095) * tileSize - centerX;
                 const worldZ = originZ + (pt.y / 4095) * tileSize - centerZ;
+
+                // Проверка exclusion для точек
+                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                    const localPt = { x: worldX, z: worldZ };
+                    let excluded = false;
+                    for (const exPoly of localExclusionPolygons) {
+                        if (pointInPolygon(localPt, exPoly)) {
+                            excluded = true;
+                            break;
+                        }
+                    }
+                    if (excluded) continue;
+                }
 
                 if (textLayers.includes(name)) {
                     const text = name === 'housenumber' 
@@ -505,11 +598,16 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
                 });
                 continue;
-}
+            }
 
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
 
             if (geomType === 3) {
+                // Проверка exclusion для полигонов
+                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                    if (polygonIntersectsAny(rings, localExclusionPolygons)) continue;
+                }
+
                 if (name === 'building') {
                     if (props.hide_3d === true) continue;
 
@@ -581,6 +679,11 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     }
                 }
             } else if (geomType === 2) {
+                // Проверка exclusion для линий
+                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                    if (lineIntersectsAny(rings, localExclusionPolygons)) continue;
+                }
+
                 let dynamicOrder = LAYER_RENDER_ORDER[name] ?? 10;
                 if (name === 'transportation' || name === 'transportation_name') {
                     const bridge = props.bridge === 'yes' ? 2 : 0;
@@ -615,9 +718,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     if (textPoints.length > 300) {
         textPoints.length = 300;
     }
-
-    const centerX = x * tileSize - maxMerc + tileSize / 2;
-    const centerZ = -maxMerc + y * tileSize + tileSize / 2;
 
     const result = {
         fills: [],

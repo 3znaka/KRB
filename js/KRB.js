@@ -1,3 +1,4 @@
+import { GLTFExporter } from './js_TP/tpb.js';
 export { KrbMap as Map, View } from './Core.js';
 export { Tile } from './Tiles.js';
 export { initUI } from './Ui.js';
@@ -12,3 +13,4 @@ export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
 export { Area3D } from './Area3D.js';
 export { Image } from './Image.js';
+export { GLTFExporter };

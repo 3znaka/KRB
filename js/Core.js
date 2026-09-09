@@ -1,7 +1,6 @@
 import {
   THREE,
-  OrbitControls,
-    GLTFExporter
+  OrbitControls
 } from '../js_TP/tpb.js';  
 import { proj, DEFAULTS, getOriginZ, getVirtKey, getSrcKey, toLonLat } from './Utils.js';
 import { TileManager } from './Tiles.js';

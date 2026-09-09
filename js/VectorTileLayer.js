@@ -13,7 +13,7 @@ import {
 } from '../js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
-import { proj } from './Utils.js'; // добавлено для преобразования координат
+import { proj } from './Utils.js';
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
@@ -269,7 +269,7 @@ export class VectorTileLayer {
         const result = data.result;
         const group = pending.group || new THREE.Group();
         this._buildGroupFromWorkerResult(group, result);
-        this._applyExclusionsToGroup(group); // применяем исключения к обновлённой группе
+        this._applyExclusionsToGroup(group);
 
         if (!pending.group) {
             this._rootGroup.add(group);
@@ -597,7 +597,7 @@ export class VectorTileLayer {
     /**
      * Добавляет область исключения: в этой области не будут отображаться указанные слои.
      *
-     * @param {Object} geojson - GeoJSON объект с геометрией типа Polygon или MultiPolygon.
+     * @param {Object} geojson - GeoJSON объект (Feature или FeatureCollection) с геометрией типа Polygon или MultiPolygon.
      * @param {Array<string>} [layers=['building']] - Массив имён слоёв, которые нужно скрыть.
      * @returns {void}
      * @example
@@ -609,40 +609,40 @@ export class VectorTileLayer {
      *     }
      * }, ['building']);
      */
-addExclusionArea(geojson, layers = ['building']) {
+    addExclusionArea(geojson, layers = ['building']) {
+        // Если передан FeatureCollection, обрабатываем каждую фичу
+        if (geojson && geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
+            geojson.features.forEach(feature => this.addExclusionArea(feature, layers));
+            return;
+        }
 
-    if (geojson && geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
+        if (!geojson || !geojson.geometry || !geojson.geometry.type) {
+            console.warn('Invalid GeoJSON for exclusion area');
+            return;
+        }
 
-        geojson.features.forEach(feature => this.addExclusionArea(feature, layers));
-        return;
+        const geometry = geojson.geometry;
+        const polygons = [];
+        const coords = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
+
+        for (const polygon of coords) {
+            const rings = polygon.map(ring =>
+                ring.map(coord => {
+                    const [x, z] = proj.fromLonLat(coord);
+                    return { x, z };
+                })
+            );
+            polygons.push(rings);
+        }
+
+        this._exclusionMasks.push({
+            polygons,
+            layers: new Set(layers)
+        });
+
+        this._applyExclusionsToAllTiles();
     }
 
-    if (!geojson || !geojson.geometry || !geojson.geometry.type) {
-        console.warn('Invalid GeoJSON for exclusion area');
-        return;
-    }
-
-    const geometry = geojson.geometry;
-    const polygons = [];
-    const coords = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
-
-    for (const polygon of coords) {
-        const rings = polygon.map(ring =>
-            ring.map(coord => {
-                const [x, z] = proj.fromLonLat(coord);
-                return { x, z };
-            })
-        );
-        polygons.push(rings);
-    }
-
-    this._exclusionMasks.push({
-        polygons,
-        layers: new Set(layers)
-    });
-
-    this._applyExclusionsToAllTiles();
-}
     /**
      * Удаляет все области исключения.
      *
@@ -693,6 +693,7 @@ addExclusionArea(geojson, layers = ['building']) {
 
     /**
      * Проверяет, пересекается ли геометрия объекта с хотя бы одним полигоном.
+     * Учитывает сдвиг мира (worldGroup.position) и преобразует bounding box объекта в мировые координаты.
      * @param {THREE.Object3D} object - Объект с геометрией.
      * @param {Array} polygons - Массив полигонов (каждый полигон - массив колец).
      * @returns {boolean} True, если есть пересечение.
@@ -702,11 +703,43 @@ addExclusionArea(geojson, layers = ['building']) {
         if (!object.geometry) return false;
         const geom = object.geometry;
         if (!geom.boundingBox) geom.computeBoundingBox();
-        const bbox = geom.boundingBox;
-        if (!bbox) return false;
+        const localBBox = geom.boundingBox;
+        if (!localBBox) return false;
+
+        // Получаем мировую матрицу объекта
+        object.updateWorldMatrix(true, false);
+        const matrix = object.matrixWorld;
+
+        // Углы локального AABB
+        const corners = [
+            new THREE.Vector3(localBBox.min.x, localBBox.min.y, localBBox.min.z),
+            new THREE.Vector3(localBBox.min.x, localBBox.min.y, localBBox.max.z),
+            new THREE.Vector3(localBBox.min.x, localBBox.max.y, localBBox.min.z),
+            new THREE.Vector3(localBBox.min.x, localBBox.max.y, localBBox.max.z),
+            new THREE.Vector3(localBBox.max.x, localBBox.min.y, localBBox.min.z),
+            new THREE.Vector3(localBBox.max.x, localBBox.min.y, localBBox.max.z),
+            new THREE.Vector3(localBBox.max.x, localBBox.max.y, localBBox.min.z),
+            new THREE.Vector3(localBBox.max.x, localBBox.max.y, localBBox.max.z)
+        ];
+
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        for (const corner of corners) {
+            corner.applyMatrix4(matrix);
+            if (corner.x < minX) minX = corner.x;
+            if (corner.x > maxX) maxX = corner.x;
+            if (corner.z < minZ) minZ = corner.z;
+            if (corner.z > maxZ) maxZ = corner.z;
+        }
+
+        // Приводим к базовой системе координат (вычитаем сдвиг мира)
+        const worldOffset = this._map ? this._map.worldGroup.position : new THREE.Vector3();
+        const shiftedBBox = {
+            min: { x: minX - worldOffset.x, z: minZ - worldOffset.z },
+            max: { x: maxX - worldOffset.x, z: maxZ - worldOffset.z }
+        };
 
         for (const rings of polygons) {
-            if (this._aabbIntersectsPolygon(bbox, rings)) {
+            if (this._aabbIntersectsPolygon(shiftedBBox, rings)) {
                 return true;
             }
         }
@@ -715,7 +748,7 @@ addExclusionArea(geojson, layers = ['building']) {
 
     /**
      * Проверяет пересечение AABB с полигоном (грубо).
-     * @param {THREE.Box3} aabb - Ограничивающий параллелепипед.
+     * @param {Object} aabb - Ограничивающий параллелепипед { min: {x,z}, max: {x,z} }.
      * @param {Array} rings - Массив колец полигона.
      * @returns {boolean} True, если есть пересечение.
      * @private
@@ -1064,7 +1097,7 @@ addExclusionArea(geojson, layers = ['building']) {
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             this._rootGroup.add(group);
             this._tileCache.set(key, group);
-            // Исключения применяются внутри _onWorkerMessage, так что здесь не обязательно
+            // Исключения применяются внутри _onWorkerMessage
         } catch (err) {
             // игнорируем ошибки загрузки
         } finally {

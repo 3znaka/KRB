@@ -502,7 +502,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     radius,
                     color: style.color,
                     opacity: style.opacity ?? 1,
-                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
+                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001,
+                    layerName: name
                 });
                 continue;
 }

@@ -269,12 +269,13 @@ export class VectorTileLayer {
         const result = data.result;
         const group = pending.group || new THREE.Group();
         this._buildGroupFromWorkerResult(group, result);
-        this._applyExclusionsToGroup(group);
 
+        // Применяем исключения только после добавления группы в сцену
         if (!pending.group) {
             this._rootGroup.add(group);
             const key = pending.key;
             this._tileCache.set(key, group);
+            this._applyExclusionsToGroup(group);
         }
         pending.resolve(group);
     }
@@ -747,7 +748,7 @@ export class VectorTileLayer {
     }
 
     /**
-     * Проверяет пересечение AABB с полигоном (грубо).
+     * Проверяет пересечение AABB с полигоном (грубо, но с учётом пересечения рёбер).
      * @param {Object} aabb - Ограничивающий параллелепипед { min: {x,z}, max: {x,z} }.
      * @param {Array} rings - Массив колец полигона.
      * @returns {boolean} True, если есть пересечение.
@@ -786,7 +787,72 @@ export class VectorTileLayer {
             }
         }
 
+        // Дополнительно: проверяем пересечение рёбер AABB с рёбрами полигона
+        const aabbEdges = [
+            [{ x: aabb.min.x, z: aabb.min.z }, { x: aabb.max.x, z: aabb.min.z }],
+            [{ x: aabb.max.x, z: aabb.min.z }, { x: aabb.max.x, z: aabb.max.z }],
+            [{ x: aabb.max.x, z: aabb.max.z }, { x: aabb.min.x, z: aabb.max.z }],
+            [{ x: aabb.min.x, z: aabb.max.z }, { x: aabb.min.x, z: aabb.min.z }]
+        ];
+
+        for (const ring of rings) {
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const polyEdge1 = ring[j];
+                const polyEdge2 = ring[i];
+                for (const [a1, a2] of aabbEdges) {
+                    if (this._segmentsIntersect(a1, a2, polyEdge1, polyEdge2)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
         return false;
+    }
+
+    /**
+     * Проверяет пересечение двух отрезков (на плоскости XZ).
+     * @param {{x:number,z:number}} p1 - Начало первого отрезка.
+     * @param {{x:number,z:number}} p2 - Конец первого отрезка.
+     * @param {{x:number,z:number}} p3 - Начало второго отрезка.
+     * @param {{x:number,z:number}} p4 - Конец второго отрезка.
+     * @returns {boolean} True, если отрезки пересекаются (включая коллинеарные случаи).
+     * @private
+     */
+    _segmentsIntersect(p1, p2, p3, p4) {
+        const d1 = this._cross(p2, p3, p1);
+        const d2 = this._cross(p2, p4, p1);
+        const d3 = this._cross(p4, p1, p3);
+        const d4 = this._cross(p4, p2, p3);
+
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+            return true;
+        }
+
+        // Коллинеарные случаи
+        if (d1 === 0 && this._onSegment(p3, p1, p2)) return true;
+        if (d2 === 0 && this._onSegment(p4, p1, p2)) return true;
+        if (d3 === 0 && this._onSegment(p1, p3, p4)) return true;
+        if (d4 === 0 && this._onSegment(p2, p3, p4)) return true;
+        return false;
+    }
+
+    /**
+     * Векторное произведение для определения ориентации.
+     * @private
+     */
+    _cross(a, b, c) {
+        return (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
+    }
+
+    /**
+     * Проверяет, лежит ли точка p на отрезке ab (включая концы).
+     * @private
+     */
+    _onSegment(p, a, b) {
+        return Math.min(a.x, b.x) <= p.x && p.x <= Math.max(a.x, b.x) &&
+               Math.min(a.z, b.z) <= p.z && p.z <= Math.max(a.z, b.z);
     }
 
     /**
@@ -1061,6 +1127,8 @@ export class VectorTileLayer {
                         await this._sendToWorker(buffer.slice(0), z, xSlippy, ySlippy, is3dNow, group);
                         this._rootGroup.add(group);
                         this._tileCache.set(key, group);
+                        // Применяем исключения после добавления в сцену
+                        this._applyExclusionsToGroup(group);
                     } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
@@ -1097,7 +1165,8 @@ export class VectorTileLayer {
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             this._rootGroup.add(group);
             this._tileCache.set(key, group);
-            // Исключения применяются внутри _onWorkerMessage
+            // Применяем исключения после добавления в сцену
+            this._applyExclusionsToGroup(group);
         } catch (err) {
             // игнорируем ошибки загрузки
         } finally {

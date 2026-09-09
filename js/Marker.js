@@ -70,7 +70,8 @@ export function _getPanes(map) {
  *   anchor: [0.5, 1.0],
  *   minZoom: 5,
  *   maxZoom: 18,
- *   altitudeMode: 'clampToGround',
+ *   altitudeMode: 'absolute',
+ *   altitude: 150, // высота в метрах относительно 0
  *   tooltip: '<b>МИИГАиК</b>',
  *   iconUrl: './custom-marker.png',
  *   onHover: (hovered) => console.log('Hover:', hovered),
@@ -116,7 +117,8 @@ export class Marker {
      * @param {[number, number]} [options.anchor=[0.5,1.0]] - Якорь иконки (доли от размера), определяет точку привязки.
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором маркер виден.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором маркер виден.
-     * @param {string} [options.altitudeMode='ground'] - Режим высоты: 'ground' (на поверхности) или 'clampToGround' (прилеплен к рельефу).
+     * @param {string} [options.altitudeMode='ground'] - Режим высоты: 'ground' (на поверхности), 'clampToGround' (прилеплен к рельефу) или 'absolute' (произвольная высота относительно 0).
+     * @param {number} [options.altitude=0] - Высота в метрах. Используется только при altitudeMode='absolute'.
      * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML). Будет показан через PopupManager.
      * @param {string} [options.iconUrl=auto] - URL иконки маркера. По умолчанию — путь `./img/marker.png` относительно текущего модуля.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
@@ -143,6 +145,7 @@ export class Marker {
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private */ this._altitudeMode = options.altitudeMode || 'ground';
+        /** @private */ this._altitude = options.altitude || 0; // НОВОЕ: высота для абсолютного режима
         /** @private */ this._tooltipText = options.tooltip || '';
         /** @private */ this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : DEFAULT_ICON_URL;
         /** @private */ this._onHover = options.onHover || null;
@@ -413,16 +416,30 @@ export class Marker {
         const wgPos = mapInstance.worldGroup.position;
         const worldX = absWorldX + wgPos.x;
         const worldZ = absWorldZ + wgPos.z;
-        let worldY = 0;
-        if (this._altitudeMode === 'clampToGround') {
-            const now = performance.now();
-            if (now - this._lastHeightUpdateTime > 500) {
-                mapInstance.ensureTileForPoint(worldX, worldZ);
-                this._cachedWorldY = mapInstance.getSurfaceHeightAt(worldX, worldZ);
-                this._lastHeightUpdateTime = now;
-            }
-            worldY = this._cachedWorldY;
+        let worldY = 0; // значение по умолчанию для 'ground'
+
+        // Вычисляем мировую Y-координату в зависимости от режима высоты
+        switch (this._altitudeMode) {
+            case 'absolute':
+                worldY = this._altitude; // произвольная высота относительно 0
+                break;
+            case 'clampToGround':
+                {
+                    const now = performance.now();
+                    if (now - this._lastHeightUpdateTime > 500) {
+                        mapInstance.ensureTileForPoint(worldX, worldZ);
+                        this._cachedWorldY = mapInstance.getSurfaceHeightAt(worldX, worldZ);
+                        this._lastHeightUpdateTime = now;
+                    }
+                    worldY = this._cachedWorldY;
+                }
+                break;
+            case 'ground':
+            default:
+                worldY = 0;
+                break;
         }
+
         const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
 
         // Дальность отрисовки

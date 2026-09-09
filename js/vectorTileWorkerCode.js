@@ -433,6 +433,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const linesMap = new Map();
     const strokesMap = new Map();
     const buildings = [];
+    const flatBuildings = [];  // НОВОЕ: отдельный массив для плоских зданий
     const points = [];
     const textPoints = [];
 
@@ -548,8 +549,40 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             }
                         }
                     }
+
+                    // Если не экструдировано, добавляем как плоское здание отдельно
+                    // (для возможности точечного исключения)
+                    const flatGeom = [];
+                    for (const ring of rings) {
+                        const outer = orientRing(ring, false);
+                        const cleanedOuter = dedupRing(outer, eps);
+                        if (cleanedOuter.length < 3) continue;
+                        const t = triangulatePolygon(cleanedOuter, [], eps);
+                        if (t) {
+                            const positions = new Float32Array(t.vertices.length / 2 * 3);
+                            for (let i = 0, j = 0; i < t.vertices.length; i += 2, j += 3) {
+                                positions[j] = t.vertices[i];
+                                positions[j+1] = 0;
+                                positions[j+2] = t.vertices[i+1];
+                            }
+                            flatGeom.push({ positions, indices: new Uint32Array(t.indices) });
+                        }
+                    }
+                    if (flatGeom.length > 0) {
+                        // Объединяем все полигоны одного здания в один меш
+                        const merged = mergePolygonGeometries(flatGeom);
+                        flatBuildings.push({
+                            positions: merged.positions,
+                            indices: merged.indices,
+                            color: style.color,
+                            opacity: style.opacity ?? 1,
+                            renderOrder: (LAYER_RENDER_ORDER[name] ?? 7) + sortKey * 0.001
+                        });
+                    }
+                    continue; // не добавляем в общий fillsMap
                 }
 
+                // Для остальных полигонов (не зданий) – обычная логика
                 const fillKey = \`fill:\${name}:\${style.color.toString(16)}:\${(style.opacity ?? 1)}\`;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
@@ -625,6 +658,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         lines: [],
         strokes: [],
         buildings: [],
+        flatBuildings: flatBuildings,  // НОВОЕ
         points: points,
         textPoints: textPoints,
         centerX: centerX,

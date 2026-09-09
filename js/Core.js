@@ -996,6 +996,50 @@ export class KrbMap {
         this.maybeUpdateVisibleTiles();
     }
 
+// В классе KrbMap, после метода onResize() добавьте:
+
+/**
+ * Обрабатывает клик по карте с зажатой клавишей Shift.
+ * Определяет точку пересечения луча с видимыми тайлами,
+ * преобразует её в географические координаты и выводит их в консоль.
+ *
+ * @param {MouseEvent} e - Событие клика.
+ * @returns {void}
+ */
+onClick(e) {
+    if (!e.shiftKey) return; // Реагируем только на Shift+Click
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this._tempMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+
+    // Собираем все видимые меши тайлов из менеджера тайлов
+    const meshes = [];
+    for (const inst of this.tileManager.tiles.values()) {
+        if (inst.mesh && inst.mesh.visible) {
+            meshes.push(inst.mesh);
+        }
+    }
+
+    const intersects = this._tempRaycaster.intersectObjects(meshes, false);
+    if (intersects.length === 0) return;
+
+    const point = intersects[0].point;
+    const localX = point.x - this.worldGroup.position.x;
+    const localZ = point.z - this.worldGroup.position.z;
+    const [lon, lat] = toLonLat([localX, localZ]);
+
+    // Высота доступна только при наличии рельефа
+    const height = this.hasElevation ? point.y : null;
+    if (height !== null) {
+        console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
+    } else {
+        console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: N/A`);
+    }
+}
+
+
     /**
      * Привязывает обработчики событий к элементам.
      *
@@ -1011,6 +1055,7 @@ export class KrbMap {
         this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
         this.renderer.domElement.addEventListener('touchend', (e) => this.onTouchEnd(e));
         this.renderer.domElement.addEventListener('touchcancel', (e) => this.onTouchEnd(e));
+this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
     }
 
     /* ================================================================

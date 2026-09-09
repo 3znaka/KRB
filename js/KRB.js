@@ -1,4 +1,4 @@
-import { THREE, GLTFExporter } from 'js_TP/tpb.js';
+import { THREE, GLTFExporter } from '../js_TP/tpb.js';
 export { KrbMap as Map, View } from './Core.js';
 export { Tile } from './Tiles.js';
 export { initUI } from './Ui.js';

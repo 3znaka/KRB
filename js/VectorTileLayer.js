@@ -324,23 +324,45 @@ export class VectorTileLayer {
             }
         }
 
-        // 3D-здания – каждое отдельным мешем
+        // 3D-здания: батчинг по цвету
         if (result.buildings.length > 0) {
+            const byColor = new Map();
             for (const b of result.buildings) {
+                const key = b.color;
+                if (!byColor.has(key)) byColor.set(key, { color: b.color, stroke: b.stroke, pos: [], nrm: [], edg: [], ranges: [], edgeRanges: [] });
+                const g = byColor.get(key);
+                const startPos = g.pos.length / 3; // количество вершин до добавления
+                const startEdge = g.edg.length / 6; // количество рёбер до добавления
+                g.pos.push(b.positions);
+                g.nrm.push(b.normals);
+                if (b.edgePositions) g.edg.push(b.edgePositions);
+                g.ranges.push([startPos, startPos + b.vertexCount / 3]); // в вершинах
+                g.edgeRanges.push([startEdge, startEdge + b.edgeCount]);
+            }
+
+            for (const g of byColor.values()) {
+                const positions = this._concatF32(g.pos);
+                const normals = this._concatF32(g.nrm);
+
                 const geom = new THREE.BufferGeometry();
-                geom.setAttribute('position', new THREE.BufferAttribute(b.positions, 3));
-                geom.setAttribute('normal', new THREE.BufferAttribute(b.normals, 3));
-                const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(b.color));
+                geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+                const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color));
                 mesh.renderOrder = 50;
                 mesh.userData.layerName = 'building';
+                mesh.userData.buildingRanges = g.ranges;
+                mesh.userData.originalPositions = positions;
                 group.add(mesh);
 
-                if (this.buildingEdges && b.edgePositions) {
+                if (this.buildingEdges && g.edg.length > 0) {
+                    const edgePositions = this._concatF32(g.edg);
                     const eGeom = new THREE.BufferGeometry();
-                    eGeom.setAttribute('position', new THREE.BufferAttribute(b.edgePositions, 3));
-                    const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(b.stroke || 0x555555));
+                    eGeom.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3));
+                    const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
                     lines.renderOrder = 51;
                     lines.userData.layerName = 'building';
+                    lines.userData.edgeRanges = g.edgeRanges;
+                    lines.userData.originalEdgePositions = edgePositions;
                     group.add(lines);
                 }
             }
@@ -385,8 +407,6 @@ export class VectorTileLayer {
         group.userData.is3d = result.is3d;
     }
 
-    // ... (остальные методы без изменений, кроме добавленных ниже) ...
-
     /**
      * Пересоздаёт текстовые подписи для всех видимых тайлов из кэша.
      * Используется при панорамировании, чтобы обновить подписи без перестройки геометрии.
@@ -401,11 +421,116 @@ export class VectorTileLayer {
     }
 
     _createTextLabelsForGroup(group) {
-        // ... без изменений ...
+        if (!this._map || !this._map.textManager) return;
+
+        if (group.userData.textLabels) {
+            this._removeTextLabelsForGroup(group);
+        }
+        group.userData.textLabels = [];
+
+        const map = this._map;
+        const textManager = map.textManager;
+        const data = group.userData.textPointsData || [];
+
+        if (!data.length) return;
+
+        const continuousZoom = map.continuousZoom;
+        const discreteZoom = map.currentDiscreteZoom;
+        const camera = map.camera;
+        const targetWorld = map.controls.target.clone();
+        const worldOffset = map.worldGroup.position;
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        const cullMargin = this.labelCullMargin ?? 50;
+
+        const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
+
+        const candidates = [];
+
+        for (const pt of data) {
+            const zb = pt.zoomBounds || { min: 0, max: 24 };
+            if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
+
+            // pt.x, pt.z теперь локальные относительно центра тайла,
+            // добавляем позицию группы тайла и сдвиг мира
+            const worldX = pt.x + group.position.x + worldOffset.x;
+            const worldZ = pt.z + group.position.z + worldOffset.z;
+
+            const dx = worldX - targetWorld.x;
+            const dz = worldZ - targetWorld.z;
+            const distSq = dx * dx + dz * dz;
+
+            const worldPos = new THREE.Vector3(worldX, 0, worldZ);
+            const ndc = worldPos.clone().project(camera);
+
+            if (ndc.z > 1 || ndc.z < -1) continue;
+
+            const sx = (ndc.x * 0.5 + 0.5) * rect.width;
+            const sy = (-ndc.y * 0.5 + 0.5) * rect.height;
+
+            if (
+                sx < -cullMargin ||
+                sx > rect.width + cullMargin ||
+                sy < -cullMargin ||
+                sy > rect.height + cullMargin
+            ) {
+                continue;
+            }
+
+            candidates.push({
+                pt,
+                distSq,
+                priority: pt.priority || 0,
+            });
+        }
+
+        if (isClose) {
+            candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
+        } else {
+            candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
+        }
+
+        const maxPerTile = isClose
+            ? Math.min(this.maxTextPointsPerTile, this.labelMaxPerTileClose ?? 20)
+            : this.maxTextPointsPerTile;
+
+        let finalData = candidates.slice(0, maxPerTile);
+
+        if (textManager.labels && textManager.maxLabels !== undefined) {
+            const currentCount = textManager.labels.length;
+            const remaining = Math.max(0, this.maxTextLabels - currentCount);
+            if (remaining <= 0) return;
+            finalData = finalData.slice(0, Math.min(finalData.length, remaining));
+        }
+
+        for (const cand of finalData) {
+            const pt = cand.pt;
+
+            const localWorldX = pt.x + group.position.x;
+            const localWorldZ = pt.z + group.position.z;
+            const source = new VectorPointLabelSource(map, localWorldX, localWorldZ, pt.text, {
+                textColor: pt.textColor,
+                fontSize: pt.fontSize,
+                fontFamily: pt.fontFamily,
+                fontWeight: pt.fontWeight,
+                textShadow: pt.textShadow,
+                textOffset: pt.textOffset,
+                textAlign: pt.textAlign,
+                textVerticalAlign: pt.textVerticalAlign,
+                priority: pt.priority,
+                zoomBounds: pt.zoomBounds,
+            });
+            const label = textManager.addLabel(source);
+            group.userData.textLabels.push(label);
+        }
     }
 
     _removeTextLabelsForGroup(group) {
-        // ... без изменений ...
+        if (group.userData.textLabels && this._map && this._map.textManager) {
+            for (const label of group.userData.textLabels) {
+                this._map.textManager.removeLabel(label);
+            }
+        }
+        group.userData.textLabels = [];
     }
 
     _getFillMaterialFromData(layerName, color, opacity) {
@@ -571,29 +696,141 @@ export class VectorTileLayer {
 
     /**
      * Применяет маски исключений к конкретной группе тайла.
+     * Для батч-мешей зданий вызывает специальную обработку по диапазонам.
      * @param {THREE.Group} group - Группа тайла.
      * @private
      */
     _applyExclusionsToGroup(group) {
         if (!group) return;
+        // Сначала обрабатываем обычные объекты (скрытие через visible)
         group.children.forEach(child => {
             if (!child.userData || !child.userData.layerName) {
                 child.visible = true;
                 return;
             }
-
+            if (child.userData.layerName === 'building' && child.userData.buildingRanges) {
+                // этот меш обрабатываем специально ниже
+                return;
+            }
             const layerName = child.userData.layerName;
             let shouldHide = false;
-
             for (const mask of this._exclusionMasks) {
                 if (mask.layers.has(layerName) && this._geometryIntersectsAnyPolygon(child, mask.polygons)) {
                     shouldHide = true;
                     break;
                 }
             }
-
             child.visible = !shouldHide;
         });
+
+        // Обрабатываем батч-меши зданий
+        group.children.forEach(child => {
+            if (child.userData && child.userData.buildingRanges) {
+                this._applyExclusionToBuildingMesh(child);
+            }
+        });
+    }
+
+    /**
+     * Пересобирает геометрию батч-меша зданий, удаляя вершины и рёбра тех зданий,
+     * которые пересекаются с полигонами исключения.
+     * @param {THREE.Mesh} mesh - Батч-меш зданий.
+     * @private
+     */
+    _applyExclusionToBuildingMesh(mesh) {
+        if (!mesh.userData.buildingRanges || !mesh.userData.originalPositions) return;
+        const ranges = mesh.userData.buildingRanges;
+        const originalPositions = mesh.userData.originalPositions;
+        const removeFlags = new Array(ranges.length).fill(false);
+
+        // проверяем каждое здание
+        for (let i = 0; i < ranges.length; i++) {
+            const [startVert, endVert] = ranges[i];
+            // вычисляем bounding box по вершинам этого здания
+            const bbox = this._computeBBoxFromPositions(originalPositions, startVert * 3, endVert * 3);
+            if (!bbox) continue;
+            const shiftedBBox = {
+                min: { x: bbox.min.x - this._map.worldGroup.position.x, z: bbox.min.z - this._map.worldGroup.position.z },
+                max: { x: bbox.max.x - this._map.worldGroup.position.x, z: bbox.max.z - this._map.worldGroup.position.z }
+            };
+            for (const mask of this._exclusionMasks) {
+                if (mask.layers.has('building')) {
+                    for (const rings of mask.polygons) {
+                        if (this._aabbIntersectsPolygon(shiftedBBox, rings)) {
+                            removeFlags[i] = true;
+                            break;
+                        }
+                    }
+                }
+                if (removeFlags[i]) break;
+            }
+        }
+
+        // если ничего не удаляем, выходим
+        if (!removeFlags.some(f => f)) {
+            // убедимся, что геометрия полная
+            mesh.geometry.setAttribute('position', new THREE.BufferAttribute(originalPositions, 3));
+            return;
+        }
+
+        // собираем новый массив позиций без удалённых диапазонов
+        const newPositions = [];
+        for (let i = 0; i < ranges.length; i++) {
+            const [start, end] = ranges[i];
+            const startByte = start * 3;
+            const endByte = end * 3;
+            if (!removeFlags[i]) {
+                for (let j = startByte; j < endByte; j++) {
+                    newPositions.push(originalPositions[j]);
+                }
+            }
+        }
+        mesh.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPositions), 3));
+        mesh.geometry.computeBoundingSphere();
+        mesh.geometry.computeBoundingBox();
+
+        // обрабатываем рёбра, если есть
+        const edgeMesh = group.children.find(c => c.userData && c.userData.edgeRanges && c.parent === mesh.parent);
+        if (edgeMesh && edgeMesh.userData.edgeRanges && edgeMesh.userData.originalEdgePositions) {
+            const edgeRanges = edgeMesh.userData.edgeRanges;
+            const originalEdges = edgeMesh.userData.originalEdgePositions;
+            const newEdges = [];
+            for (let i = 0; i < edgeRanges.length; i++) {
+                const [startEdge, endEdge] = edgeRanges[i];
+                const startByte = startEdge * 6;
+                const endByte = endEdge * 6;
+                if (!removeFlags[i]) {
+                    for (let j = startByte; j < endByte; j++) {
+                        newEdges.push(originalEdges[j]);
+                    }
+                }
+            }
+            edgeMesh.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newEdges), 3));
+            edgeMesh.geometry.computeBoundingSphere();
+            edgeMesh.geometry.computeBoundingBox();
+        }
+    }
+
+    /**
+     * Вычисляет ограничивающий прямоугольник по диапазону вершин (только XZ).
+     * @param {Float32Array} positions - Массив позиций.
+     * @param {number} startByte - Начальный индекс (в числах, кратный 3).
+     * @param {number} endByte - Конечный индекс (в числах, кратный 3).
+     * @returns {{min:{x:number,z:number}, max:{x:number,z:number}}|null}
+     * @private
+     */
+    _computeBBoxFromPositions(positions, startByte, endByte) {
+        if (startByte >= endByte) return null;
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        for (let i = startByte; i < endByte; i += 3) {
+            const x = positions[i];
+            const z = positions[i + 2];
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        }
+        return { min: { x: minX, z: minZ }, max: { x: maxX, z: maxZ } };
     }
 
     /**

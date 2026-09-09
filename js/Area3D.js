@@ -16,7 +16,7 @@
  * });
  * area.addTo(map);
  */
-import { THREE, GLTFLoader } from '../js_TP/tpb.js';
+import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
 import { proj } from './Utils.js';
 import { Layer } from './Layers.js';
 
@@ -273,12 +273,19 @@ export class Area3D {
         this._applyModelTransform();
     }
 
-    async _loadModel() {
-        if (this._modelPromise) return this._modelPromise;
-        this._modelPromise = (async () => {
-            try {
-                const loader = new GLTFLoader();
-                const gltf = await loader.loadAsync(this._modelUrl);
+async _loadModel() {
+    if (this._modelPromise) return this._modelPromise;
+    this._modelPromise = (async () => {
+        try {
+            const loader = new GLTFLoader();
+
+            // Настройка DRACOLoader для поддержки сжатых моделей
+            const dracoLoader = new DRACOLoader();
+            dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
+            dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
+            loader.setDRACOLoader(dracoLoader);
+
+            const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
 
                 if (this._playAnimation && gltf.animations?.length) {

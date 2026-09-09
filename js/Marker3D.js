@@ -1,11 +1,11 @@
 /**
- * Модуль 3D-маркера для картографической библиотеки на three.js.
+ * Модуль 3D-маркера
  * Поддерживает примитивы (куб, сфера, цилиндр, конус) и GLB-модели.
  *
  * @module Marker3D
  */
 
-import { THREE, GLTFLoader } from '../js_TP/tpb.js';
+import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
 import { proj } from './Utils.js';
 import { Layer } from './Layers.js';
 
@@ -209,12 +209,19 @@ export class Marker3D {
         throw new Error('Marker3D: invalid size type');
     }
 
-    async _loadModel() {
-        if (this._modelPromise) return this._modelPromise;
-        this._modelPromise = (async () => {
-            try {
-                const loader = new GLTFLoader();
-                const gltf = await loader.loadAsync(this._modelUrl);
+async _loadModel() {
+    if (this._modelPromise) return this._modelPromise;
+    this._modelPromise = (async () => {
+        try {
+            const loader = new GLTFLoader();
+
+
+            const dracoLoader = new DRACOLoader();
+            dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/draco/'); // путь к декодеру
+            dracoLoader.setDecoderConfig({ type: 'js' }); // или 'wasm'
+            loader.setDRACOLoader(dracoLoader);
+
+            const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
 
                 // --- Настройка анимаций (если включены и есть в модели) ---

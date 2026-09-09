@@ -521,7 +521,8 @@ _computeWorldPositionsFromAnchor() {
     const [ax, ay] = this._anchor;
     const [rx, ry, rz] = this._rotation;
 
-    const center = new THREE.Vector3(...proj.fromLonLat([lon, lat]), alt || 0);
+const [worldX, worldZ] = proj.fromLonLat([lon, lat]);
+const center = new THREE.Vector3(worldX, alt || 0, worldZ);
 
     const halfW = width / 2;
     const halfH = height / 2;

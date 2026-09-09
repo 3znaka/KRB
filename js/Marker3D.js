@@ -375,21 +375,35 @@ loader.setDRACOLoader(dracoLoader);
 
     getSize() { return this._size; }
 
-    _registerGlobalEvents(map) {
-        if (Marker3D._mapEventHandlers.has(map)) return;
-        const domElement = map.renderer.domElement;
-        const handlers = {
-            pointermove: (e) => this._onPointerMove(e, map),
-            pointerdown: (e) => this._onPointerDown(e, map),
-            pointerup: (e) => this._onPointerUp(e, map),
-            pointerleave: (e) => this._onPointerLeave(e, map)
-        };
-        domElement.addEventListener('pointermove', handlers.pointermove);
-        domElement.addEventListener('pointerdown', handlers.pointerdown);
-        domElement.addEventListener('pointerup', handlers.pointerup);
-        domElement.addEventListener('pointerleave', handlers.pointerleave);
-        Marker3D._mapEventHandlers.set(map, handlers);
-    }
+_registerGlobalEvents(map) {
+    if (Marker3D._mapEventHandlers.has(map)) return;
+    const domElement = map.renderer.domElement;
+    const handlers = {
+        pointermove: (e) => this._onPointerMove(e, map),
+        pointerdown: (e) => this._onPointerDown(e, map),
+        pointerup: (e) => this._onPointerUp(e, map),
+        pointercancel: (e) => this._onPointerCancel(e, map),
+        pointerleave: (e) => this._onPointerLeave(e, map)
+    };
+    // Используем фазу захвата, чтобы гарантировать выполнение до OrbitControls
+    domElement.addEventListener('pointermove', handlers.pointermove, { capture: true });
+    domElement.addEventListener('pointerdown', handlers.pointerdown, { capture: true });
+    domElement.addEventListener('pointerup', handlers.pointerup, { capture: true });
+    domElement.addEventListener('pointercancel', handlers.pointercancel, { capture: true });
+    domElement.addEventListener('pointerleave', handlers.pointerleave, { capture: true });
+    Marker3D._mapEventHandlers.set(map, handlers);
+}
+
+
+_onPopupHide() {
+    Marker3D._hoveredMarker = null;
+}
+
+
+_onPointerCancel(e, map) {
+    Marker3D._pressedMarker = null;
+    Marker3D._pressStart = null;
+}
 
     _getNDC(e, map) {
         const rect = map.renderer.domElement.getBoundingClientRect();

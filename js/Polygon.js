@@ -12,6 +12,11 @@
  * Дополнительно: единый обработчик событий мыши для всех полигонов,
  * переиспользование массивов, опция использования обычных линий,
  * а также (опционально) встроенный Web Worker для триангуляции.
+ *
+ * Экструдированные полигоны (extruded: true) по умолчанию используют
+ * MeshStandardMaterial и участвуют в shadow mapping (castShadow/receiveShadow),
+ * поэтому на них работают тени так же, как на Marker3D. Для плоских
+ * полигонов используется MeshBasicMaterial (тени не нужны, они лежат на земле).
  */
 
 import { proj } from './Utils.js';
@@ -52,6 +57,12 @@ function pointToSegmentDistance(point, a, b) {
  * Всплывающие подсказки обрабатываются централизованно через PopupManager
  * (доступен как `map.popupManager`).
  *
+ * Для экструдированных полигонов (extruded: true) материалы создаются на
+ * основе MeshStandardMaterial, а меши помечаются castShadow/receiveShadow —
+ * так же, как в Marker3D. Для этого у рендера карты должно быть включено
+ * `renderer.shadowMap.enabled = true` и хотя бы один источник света с
+ * `castShadow = true`.
+ *
  * @example
  * // Обычный плоский полигон
  * const flatPolygon = new Polygon({
@@ -72,7 +83,7 @@ function pointToSegmentDistance(point, a, b) {
  * });
  * flatPolygon.addTo(map);
  *
- * // Экструдированный (объёмный) полигон
+ * // Экструдированный (объёмный) полигон с тенями
  * const extrudedPolygon = new Polygon({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *     extruded: true,
@@ -85,6 +96,10 @@ function pointToSegmentDistance(point, a, b) {
  *     altitudeMode: 'clampToGround',
  *     altitudeOffset: 10, // базовое смещение (добавляется к поверхности)
  *     depthTest: true,
+ *     castShadow: true,     // отбрасывать тень (по умолчанию true для extruded)
+ *     receiveShadow: true,  // принимать тень (по умолчанию true для extruded)
+ *     roughness: 0.8,
+ *     metalness: 0.0,
  *     title: 'Объёмный полигон'
  * });
  * extrudedPolygon.addTo(map);
@@ -107,6 +122,10 @@ export class Polygon {
      * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
      * @param {boolean} [options.depthTest=false] - Включить тест глубины.
      * @param {boolean} [options.depthWrite=false] - Включить запись в буфер глубины.
+     * @param {boolean} [options.castShadow=true] - Отбрасывать тень (применяется только к extruded=true). По умолчанию true.
+     * @param {boolean} [options.receiveShadow=true] - Принимать тень (применяется только к extruded=true). По умолчанию true.
+     * @param {number} [options.roughness=0.8] - Шероховатость PBR-материала (только для extruded=true).
+     * @param {number} [options.metalness=0.0] - Металличность PBR-материала (только для extruded=true).
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором полигон виден.
      * @param {string} [options.title=''] - Текст постоянной подписи.
@@ -151,6 +170,12 @@ export class Polygon {
         if (this._extruded && (typeof this._height !== 'number' || this._height <= 0)) {
             throw new Error('Polygon: options.height must be a positive number when extruded is true');
         }
+
+        // Тени и PBR-параметры (применяются только при extruded=true)
+        /** @private */ this._castShadow = options.castShadow ?? true;
+        /** @private */ this._receiveShadow = options.receiveShadow ?? true;
+        /** @private */ this._roughness = options.roughness ?? 0.8;
+        /** @private */ this._metalness = options.metalness ?? 0.0;
 
         // Подпись
         /** @private */ this._title = options.title || '';
@@ -434,6 +459,57 @@ export class Polygon {
     }
 
     /**
+     * Создаёт материал для поверхности полигона.
+     * Для экструдированных полигонов используется MeshStandardMaterial
+     * (участвует в освещении и shadow mapping). Для плоских — MeshBasicMaterial,
+     * который просто заливает геометрию заданным цветом без реакции на свет.
+     *
+     * @returns {THREE.Material} Материал поверхности.
+     * @private
+     */
+    _createSurfaceMaterial() {
+        if (this._extruded) {
+            return new THREE.MeshStandardMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: this._fillOpacity < 1,
+                side: THREE.DoubleSide,
+                roughness: this._roughness,
+                metalness: this._metalness,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
+        }
+        return new THREE.MeshBasicMaterial({
+            color: this._fillColor,
+            opacity: this._fillOpacity,
+            transparent: this._fillOpacity < 1,
+            side: THREE.DoubleSide,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite
+        });
+    }
+
+    /**
+     * Применяет флаги теней к мешу, если полигон экструдированный.
+     * Для плоских полигонов ничего не делает (они не должны бросать/принимать тени).
+     *
+     * @param {THREE.Mesh} mesh - Меш полигона.
+     * @returns {void}
+     * @private
+     */
+    _applyShadowFlags(mesh) {
+        if (!mesh) return;
+        if (this._extruded) {
+            mesh.castShadow = this._castShadow;
+            mesh.receiveShadow = this._receiveShadow;
+        } else {
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+        }
+    }
+
+    /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
      *
@@ -543,17 +619,11 @@ export class Polygon {
         topGeometry.setIndex(indices);
         topGeometry.computeVertexNormals(); // однократно
 
-        const topMaterial = new THREE.MeshBasicMaterial({
-            color: this._fillColor,
-            opacity: this._fillOpacity,
-            transparent: this._fillOpacity < 1,
-            side: THREE.DoubleSide,
-            depthTest: this._depthTest,
-            depthWrite: this._depthWrite
-        });
+        const topMaterial = this._createSurfaceMaterial();
 
         const topMesh = new THREE.Mesh(topGeometry, topMaterial);
         topMesh.renderOrder = 998;
+        this._applyShadowFlags(topMesh);
         this._fillMesh = topMesh;
         this._fillGeometry = topGeometry;
         this._fillMaterial = topMaterial;
@@ -574,17 +644,11 @@ export class Polygon {
             bottomGeometry.setIndex(indices);
             bottomGeometry.computeVertexNormals();
 
-            const bottomMaterial = new THREE.MeshBasicMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: this._fillOpacity < 1,
-                side: THREE.DoubleSide,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
+            const bottomMaterial = this._createSurfaceMaterial();
 
             const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
             bottomMesh.renderOrder = 998;
+            this._applyShadowFlags(bottomMesh);
             this._bottomMesh = bottomMesh;
             this._bottomGeometry = bottomGeometry;
             this._bottomMaterial = bottomMaterial;
@@ -630,17 +694,11 @@ export class Polygon {
             sideGeometry.setIndex(sideIndices);
             sideGeometry.computeVertexNormals();
 
-            const sideMaterial = new THREE.MeshBasicMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: this._fillOpacity < 1,
-                side: THREE.DoubleSide,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
+            const sideMaterial = this._createSurfaceMaterial();
 
             const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
             sideMesh.renderOrder = 998;
+            this._applyShadowFlags(sideMesh);
             this._sideMesh = sideMesh;
             this._sideGeometry = sideGeometry;
             this._sideMaterial = sideMaterial;
@@ -1056,7 +1114,7 @@ export class Polygon {
             // Для обычного Line обновляем геометрию
             const pointArray = [];
             for (let i = 0; i < positions.length; i += 3) {
-                pointArray.push(new THREE.Vector3(positions[i], positions[i+1], positions[i+2]));
+                pointArray.push(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]));
             }
             this._strokeGeometry.setFromPoints(pointArray);
         } else {

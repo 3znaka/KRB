@@ -13,10 +13,16 @@
  * переиспользование массивов, опция использования обычных линий,
  * а также (опционально) встроенный Web Worker для триангуляции.
  *
- * Экструдированные полигоны (extruded: true) по умолчанию используют
- * MeshStandardMaterial и участвуют в shadow mapping (castShadow/receiveShadow),
- * поэтому на них работают тени так же, как на Marker3D. Для плоских
- * полигонов используется MeshBasicMaterial (тени не нужны, они лежат на земле).
+ * Экструдированные полигоны (extruded: true) используют MeshStandardMaterial
+ * и участвуют в shadow mapping (castShadow/receiveShadow), поэтому на них
+ * работают тени так же, как на Marker3D. Для корректного освещения нормали
+ * верхней/нижней крышек задаются явно ((0,1,0) и (0,-1,0)), а обход
+ * треугольников Earcut при необходимости инвертируется, чтобы нормаль
+ * совпадала с направлением фронтальной грани.
+ *
+ * ВАЖНО: для отображения теней у рендера должно быть включено
+ * `renderer.shadowMap.enabled = true`, и хотя бы один источник света
+ * должен иметь `castShadow = true`.
  */
 
 import { proj } from './Utils.js';
@@ -50,6 +56,23 @@ function pointToSegmentDistance(point, a, b) {
 }
 
 /**
+ * Вычисляет Y-компоненту векторного произведения (p1 - p0) × (p2 - p0)
+ * для треугольника, лежащего в плоскости XZ (Y=0).
+ * Используется для определения ориентации обхода (winding) треугольников Earcut.
+ *
+ * @param {THREE.Vector2} p0 - Первая вершина (x = X, y = Z).
+ * @param {THREE.Vector2} p1 - Вторая вершина.
+ * @param {THREE.Vector2} p2 - Третья вершина.
+ * @returns {number} > 0 — нормаль указывает вверх (+Y), < 0 — вниз (-Y).
+ * @private
+ */
+function crossY(p0, p1, p2) {
+    const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
+    const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
+    return dz1 * dx2 - dx1 * dz2;
+}
+
+/**
  * Класс, представляющий полигон на карте.
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
  * ограничения по зуму, текстовую подпись, а также обработчики событий
@@ -59,9 +82,10 @@ function pointToSegmentDistance(point, a, b) {
  *
  * Для экструдированных полигонов (extruded: true) материалы создаются на
  * основе MeshStandardMaterial, а меши помечаются castShadow/receiveShadow —
- * так же, как в Marker3D. Для этого у рендера карты должно быть включено
- * `renderer.shadowMap.enabled = true` и хотя бы один источник света с
- * `castShadow = true`.
+ * так же, как в Marker3D. Для корректного освещения нормали верхней/нижней
+ * крышек задаются явно, а обход треугольников Earcut согласуется с этими
+ * нормалями, чтобы шейдерная логика three.js (флип нормалей на back-face
+ * при DoubleSide) давала правильный результат с любой стороны.
  *
  * @example
  * // Обычный плоский полигон
@@ -90,16 +114,15 @@ function pointToSegmentDistance(point, a, b) {
  *     height: 500,      // толщина экструзии в метрах
  *     minHeight: 200,   // высота нижней грани над поверхностью в метрах
  *     fillColor: '#ff8800',
- *     fillOpacity: 0.8,
+ *     fillOpacity: 0.9,
  *     strokeColor: '#000000',
  *     strokeWidth: 3,
  *     altitudeMode: 'clampToGround',
- *     altitudeOffset: 10, // базовое смещение (добавляется к поверхности)
+ *     altitudeOffset: 10,
  *     depthTest: true,
- *     castShadow: true,     // отбрасывать тень (по умолчанию true для extruded)
- *     receiveShadow: true,  // принимать тень (по умолчанию true для extruded)
- *     roughness: 0.8,
- *     metalness: 0.0,
+ *     depthWrite: true,
+ *     castShadow: true,
+ *     receiveShadow: true,
  *     title: 'Объёмный полигон'
  * });
  * extrudedPolygon.addTo(map);
@@ -122,8 +145,8 @@ export class Polygon {
      * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
      * @param {boolean} [options.depthTest=false] - Включить тест глубины.
      * @param {boolean} [options.depthWrite=false] - Включить запись в буфер глубины.
-     * @param {boolean} [options.castShadow=true] - Отбрасывать тень (применяется только к extruded=true). По умолчанию true.
-     * @param {boolean} [options.receiveShadow=true] - Принимать тень (применяется только к extruded=true). По умолчанию true.
+     * @param {boolean} [options.castShadow=true] - Отбрасывать тень (применяется только к extruded=true).
+     * @param {boolean} [options.receiveShadow=true] - Принимать тень (применяется только к extruded=true).
      * @param {number} [options.roughness=0.8] - Шероховатость PBR-материала (только для extruded=true).
      * @param {number} [options.metalness=0.0] - Металличность PBR-материала (только для extruded=true).
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
@@ -189,9 +212,9 @@ export class Polygon {
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
-        /** @private */ this._boundHandlers = null; // { mousedown, mousemove, click }
+        /** @private */ this._boundHandlers = null;
 
-        // Тултип (HTML-текст, отображаемый через PopupManager)
+        // Тултип
         /** @private */ this._tooltipText = options.tooltip || '';
 
         // Внутренние структуры
@@ -199,21 +222,21 @@ export class Polygon {
         /** @private */ this._layer = null;
         /** @private */ this._group = new THREE.Group();
 
-        // Верхняя крышка (основная)
+        // Верхняя крышка
         /** @private */ this._fillMesh = null;
         /** @private */ this._fillGeometry = null;
         /** @private */ this._fillMaterial = null;
 
-        // Нижняя крышка (для экструзии)
+        // Нижняя крышка
         /** @private */ this._bottomMesh = null;
         /** @private */ this._bottomGeometry = null;
         /** @private */ this._bottomMaterial = null;
 
-        // Боковые стенки (для экструзии)
+        // Боковые стенки
         /** @private */ this._sideMesh = null;
         /** @private */ this._sideGeometry = null;
         /** @private */ this._sideMaterial = null;
-        /** @private */ this._sideVertexCount = 0; // число вершин в боковой геометрии
+        /** @private */ this._sideVertexCount = 0;
 
         // Обводка
         /** @private */ this._strokeLine = null;
@@ -224,21 +247,21 @@ export class Polygon {
         /** @private */ this._cachedHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private */ this._lastHeightUpdateTime = 0;
-        /** @private */ this._heightUpdateInterval = 500; // мс
+        /** @private */ this._heightUpdateInterval = 500;
 
         // 2D вершины и центроид
         /** @private */ this._vertices2D = [];
-        /** @private */ this._centroidWorld = new THREE.Vector3(); // абсолютные мировые координаты центроида
+        /** @private */ this._centroidWorld = new THREE.Vector3();
         /** @private */ this._cachedCentroidHeight = 0;
         /** @private */ this._lastCentroidHeightUpdateTime = 0;
 
-        // Кэш мировых координат (без учёта worldGroup) и радиус сферы
-        /** @private */ this._worldCoords = []; // массив [x,z] в порядке _vertices2D
-        /** @private */ this._strokeWorldCoords = []; // массив [x,z] для внешнего кольца
+        // Кэш мировых координат и bounding sphere
+        /** @private */ this._worldCoords = [];
+        /** @private */ this._strokeWorldCoords = [];
         /** @private */ this._boundingSphereRadius = 0;
         /** @private */ this._boundingSphereWorld = new THREE.Sphere();
 
-        // Dirty-флаг для высот
+        // Dirty-флаги
         /** @private */ this._heightsDirty = true;
         /** @private */ this._lastWorldGroupPos = new THREE.Vector3();
         /** @private */ this._lastDiscreteZoom = -1;
@@ -249,20 +272,20 @@ export class Polygon {
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
 
-        // Переиспользуемые массивы для производительности
+        // Переиспользуемые массивы
         /** @private */ this._strokePositionsArray = [];
         /** @private */ this._sidePositionsArray = [];
         /** @private */ this._sideIndicesArray = [];
         /** @private */ this._tempVec3 = new THREE.Vector3();
 
-        // Регистрация в глобальном реестре интерактивных полигонов
+        // Регистрация в реестре интерактивных полигонов
         if (this._onClick || this._onHover || this._tooltipText) {
             Polygon._registerInteractivePolygon(this);
         }
     }
 
     /* ================================================================
-       Статический реестр интерактивных полигонов и делегирование событий
+       Статический реестр интерактивных полигонов
        ================================================================ */
 
     /** @private */ static _interactivePolygons = new Set();
@@ -339,7 +362,6 @@ export class Polygon {
      * @private
      */
     static _getCanvas() {
-        // Берём canvas из любого зарегистрированного полигона (они должны быть привязаны к карте)
         for (const poly of Polygon._interactivePolygons) {
             if (poly._map && poly._map.renderer && poly._map.renderer.domElement) {
                 return poly._map.renderer.domElement;
@@ -357,10 +379,7 @@ export class Polygon {
     static _handleGlobalMouseDown(event) {
         for (const poly of Polygon._interactivePolygons) {
             if (poly._raycastPolygon(event, poly._map)) {
-                // Событие обрабатываем, но всплытие не останавливаем,
-                // так как это может помешать другим полигонам.
-                // Если нужно остановить перетаскивание карты, можно вызвать event.stopPropagation().
-                // Для простоты оставим как есть.
+                // Событие обрабатываем, но всплытие не останавливаем.
             }
         }
     }
@@ -409,7 +428,6 @@ export class Polygon {
 
     /**
      * Вызывается слоем при добавлении, строит геометрию и регистрирует подпись.
-     * Также при наличии обработчиков событий навешивает слушатели на canvas.
      *
      * @param {Object} map - Экземпляр карты.
      * @param {Layer} layer - Слой-владелец.
@@ -430,15 +448,12 @@ export class Polygon {
             this._textLabel = map.textManager.addLabel(this);
         }
 
-        // Если полигон интерактивный, он уже в реестре, но убедимся, что canvas существует
         if (this._onClick || this._onHover || this._tooltipText) {
-            // Глобальные обработчики уже должны быть прикреплены (если нет, прикрепим)
             if (!Polygon._eventListenersAttached) {
                 Polygon._attachGlobalListeners();
             }
         }
 
-        // Инициализируем состояние для обновлений
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
         this._heightsDirty = true;
@@ -492,7 +507,7 @@ export class Polygon {
 
     /**
      * Применяет флаги теней к мешу, если полигон экструдированный.
-     * Для плоских полигонов ничего не делает (они не должны бросать/принимать тени).
+     * Для плоских полигонов ничего не делает.
      *
      * @param {THREE.Mesh} mesh - Меш полигона.
      * @returns {void}
@@ -510,6 +525,24 @@ export class Polygon {
     }
 
     /**
+     * Инвертирует обход треугольников (swap 2-го и 3-го индексов в каждом треугольнике).
+     * Возвращает новый массив, исходный не изменяется.
+     *
+     * @param {Array.<number>|Uint32Array} indices - Индексы треугольников.
+     * @returns {Array.<number>} Новый массив индексов с инвертированным обходом.
+     * @private
+     */
+    _flipIndices(indices) {
+        const result = new Array(indices.length);
+        for (let i = 0; i < indices.length; i += 3) {
+            result[i] = indices[i];
+            result[i + 1] = indices[i + 2];
+            result[i + 2] = indices[i + 1];
+        }
+        return result;
+    }
+
+    /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
      *
@@ -524,7 +557,6 @@ export class Polygon {
             return;
         }
 
-        // Очищаем и заполняем кэш мировых координат
         this._worldCoords.length = 0;
         const coords = [];
         const points2D = [];
@@ -567,10 +599,9 @@ export class Polygon {
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
 
-        // Триангуляция (синхронно, но можно использовать воркер)
+        // Триангуляция
         let indices;
         if (this._useWorkerForTriangulation && typeof Worker !== 'undefined') {
-            // Экспериментально: запускаем воркер и делаем сборку асинхронно (не реализовано)
             console.warn('Worker triangulation is experimental, falling back to sync');
             indices = earcut(coords, holeIndices, 2);
         } else {
@@ -581,6 +612,17 @@ export class Polygon {
             console.warn('Polygon: Earcut returned no triangles');
             return;
         }
+
+        // ▼▼▼ ВАЖНО: согласуем winding Earcut-вывода ▼▼▼
+        // Верхняя крышка должна иметь CCW-обход при взгляде сверху (нормаль +Y),
+        // чтобы при DoubleSide + MeshStandardMaterial освещение было корректным.
+        // Если первый треугольник даёт нормаль вниз — инвертируем обход всего массива.
+        const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
+        const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
+        // Нижняя крышка — та же геометрия в XZ, но с противоположным обходом
+        // (фронтальная грань смотрит вниз, нормаль -Y).
+        const bottomIndices = this._flipIndices(topIndices);
+        // ▲▲▲
 
         // Центроид
         let cx = 0, cy = 0;
@@ -606,7 +648,7 @@ export class Polygon {
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
-        // Верхняя крышка
+        // ▼▼▼ Верхняя крышка ▼▼▼
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
@@ -616,8 +658,17 @@ export class Polygon {
             topPosArray[i * 3 + 2] = pt.y;
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-        topGeometry.setIndex(indices);
-        topGeometry.computeVertexNormals(); // однократно
+        topGeometry.setIndex(topIndices);
+
+        // Явно задаём нормали +Y для верхней крышки.
+        // Это избавляет от зависимости от computeVertexNormals() и гарантирует,
+        // что шейдер MeshStandardMaterial получает корректную нормаль
+        // независимо от того, как Earcut обошёл контур.
+        const topNormals = new Float32Array(points2D.length * 3);
+        for (let i = 0; i < points2D.length; i++) {
+            topNormals[i * 3 + 1] = 1; // (0, 1, 0)
+        }
+        topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
 
         const topMaterial = this._createSurfaceMaterial();
 
@@ -628,8 +679,9 @@ export class Polygon {
         this._fillGeometry = topGeometry;
         this._fillMaterial = topMaterial;
         this._group.add(topMesh);
+        // ▲▲▲
 
-        // Экструзия
+        // ▼▼▼ Экструзия: нижняя крышка и боковые стенки ▼▼▼
         if (this._extruded) {
             // Нижняя крышка
             const bottomGeometry = new THREE.BufferGeometry();
@@ -641,8 +693,14 @@ export class Polygon {
                 bottomPosArray[i * 3 + 2] = pt.y;
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            bottomGeometry.setIndex(indices);
-            bottomGeometry.computeVertexNormals();
+            bottomGeometry.setIndex(bottomIndices);
+
+            // Явные нормали -Y для нижней крышки.
+            const bottomNormals = new Float32Array(points2D.length * 3);
+            for (let i = 0; i < points2D.length; i++) {
+                bottomNormals[i * 3 + 1] = -1; // (0, -1, 0)
+            }
+            bottomGeometry.setAttribute('normal', new THREE.BufferAttribute(bottomNormals, 3));
 
             const bottomMaterial = this._createSurfaceMaterial();
 
@@ -654,7 +712,7 @@ export class Polygon {
             this._bottomMaterial = bottomMaterial;
             this._group.add(bottomMesh);
 
-            // Боковые стенки (используем переиспользуемые массивы)
+            // Боковые стенки
             const sidePositions = this._sidePositionsArray;
             const sideIndices = this._sideIndicesArray;
             sidePositions.length = 0;
@@ -692,6 +750,10 @@ export class Polygon {
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
             sideGeometry.setIndex(sideIndices);
+            // Боковые стенки ориентированы по обходу кольца, поэтому computeVertexNormals()
+            // даёт корректные нормали граней. DoubleSide + шейдерный флип для back-face
+            // обеспечивают правильное освещение независимо от того, как именно
+            // ориентирован обход входного кольца (CW или CCW).
             sideGeometry.computeVertexNormals();
 
             const sideMaterial = this._createSurfaceMaterial();
@@ -705,6 +767,7 @@ export class Polygon {
             this._sideVertexCount = sidePositions.length / 3;
             this._group.add(sideMesh);
         }
+        // ▲▲▲
     }
 
     /**
@@ -720,7 +783,6 @@ export class Polygon {
         const canvas = map.renderer.domElement;
 
         if (this._useSimpleStroke) {
-            // Используем обычный THREE.Line с LineBasicMaterial (ширина 1px)
             const points = [];
             const outerRing = this._rings[0];
             for (let i = 0; i < outerRing.length; i++) {
@@ -728,7 +790,6 @@ export class Polygon {
                 const [absX, absZ] = proj.fromLonLat([lon, lat]);
                 points.push(new THREE.Vector3(absX, 0, absZ));
             }
-            // замыкаем
             if (outerRing.length > 0) {
                 const [lon, lat] = outerRing[0];
                 const [absX, absZ] = proj.fromLonLat([lon, lat]);
@@ -750,7 +811,6 @@ export class Polygon {
             this._strokeMaterial = lineMaterial;
             this._group.add(line);
 
-            // кэш координат
             this._strokeWorldCoords.length = 0;
             for (let i = 0; i < outerRing.length; i++) {
                 const [lon, lat] = outerRing[i];
@@ -758,7 +818,6 @@ export class Polygon {
                 this._strokeWorldCoords.push([absX, absZ]);
             }
         } else {
-            // Line2 (толстая линия)
             this._strokeGeometry = new LineGeometry();
             this._strokeMaterial = new LineMaterial({
                 color: this._strokeColor,
@@ -774,7 +833,6 @@ export class Polygon {
             this._strokeLine = line;
             this._group.add(line);
 
-            // кэш координат
             this._strokeWorldCoords.length = 0;
             const outerRing = this._rings[0];
             for (let i = 0; i < outerRing.length; i++) {
@@ -839,7 +897,7 @@ export class Polygon {
 
     /**
      * Проверяет, находится ли точка экрана над геометрией полигона.
-     * Использует предварительную проверку bounding sphere для быстрого отсечения.
+     * Использует предварительную проверку bounding sphere.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @param {Object} map - Экземпляр карты.
@@ -858,7 +916,6 @@ export class Polygon {
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, map.camera);
 
-        // Быстрая проверка пересечения луча с ограничивающей сферой в мировых координатах
         const worldCenter = this._tempVec3.copy(this._group.position).add(map.worldGroup.position);
         this._boundingSphereWorld.set(worldCenter, this._boundingSphereRadius);
         if (!raycaster.ray.intersectsSphere(this._boundingSphereWorld)) {
@@ -877,13 +934,11 @@ export class Polygon {
 
     /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
-     * Также отвязывает обработчики событий мыши.
      *
      * @returns {void}
      */
     remove() {
         if (this._map) {
-            // Убираем из реестра интерактивных, если был там
             Polygon._unregisterInteractivePolygon(this);
         }
 
@@ -929,7 +984,6 @@ export class Polygon {
 
     /**
      * Обновляет состояние полигона на каждом кадре: видимость по зуму, высоты и позицию центроида.
-     * Использует оптимизированные проверки и отложенное обновление высот.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -948,13 +1002,11 @@ export class Polygon {
             return;
         }
 
-        // Убедимся, что группа находится в правильной ветке сцены
         if (this._group.parent !== this._map.worldGroup) {
             this._group.parent?.remove(this._group);
             this._map.worldGroup.add(this._group);
         }
 
-        // Актуализация разрешения материала обводки
         if (this._strokeMaterial) {
             const canvas = this._map.renderer.domElement;
             const res = this._strokeMaterial.resolution;
@@ -963,7 +1015,6 @@ export class Polygon {
             }
         }
 
-        // Проверка дальности отрисовки через bounding sphere
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
@@ -1001,7 +1052,8 @@ export class Polygon {
 
     /**
      * Обновляет высоты вершин всех геометрий в соответствии с режимом высоты и экструзией.
-     * Использует кэшированные мировые координаты для ускорения.
+     * Нормали крышек и стенок остаются неизменными (для плоских крышек они константны,
+     * а небольшой наклон из-за рельефа даёт визуально приемлемый результат).
      *
      * @returns {void}
      * @private
@@ -1042,7 +1094,7 @@ export class Polygon {
             this._cachedStrokeHeights[i] = base + this._minHeight + (this._extruded ? this._height : 0);
         }
 
-        // Применяем высоты к верхней крышке
+        // Верхняя крышка
         const topPos = this._fillGeometry.attributes.position.array;
         for (let i = 0; i < this._vertices2D.length; i++) {
             topPos[i * 3 + 1] = this._cachedHeights[i];
@@ -1079,12 +1131,14 @@ export class Polygon {
                 idx++;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
+            // Пересчитываем нормали боковых стенок после изменения высот,
+            // т.к. при разных высотах соседних вершин грани наклоняются.
+            this._sideGeometry.computeVertexNormals();
         }
     }
 
     /**
      * Обновляет позиции вершин обводки.
-     * Использует кэшированные мировые координаты и переиспользуемый массив.
      *
      * @returns {void}
      * @private
@@ -1093,7 +1147,7 @@ export class Polygon {
         if (!this._strokeLine || !this._strokeGeometry) return;
         const outerRing = this._rings[0];
         const positions = this._strokePositionsArray;
-        positions.length = 0; // очищаем, но не пересоздаём
+        positions.length = 0;
         const groupPos = this._group.position;
 
         for (let i = 0; i < outerRing.length; i++) {
@@ -1103,7 +1157,6 @@ export class Polygon {
             positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
         }
 
-        // Замыкаем
         if (outerRing.length > 0 && this._strokeWorldCoords.length > 0) {
             const first = this._strokeWorldCoords[0];
             const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
@@ -1111,14 +1164,12 @@ export class Polygon {
         }
 
         if (this._useSimpleStroke) {
-            // Для обычного Line обновляем геометрию
             const pointArray = [];
             for (let i = 0; i < positions.length; i += 3) {
                 pointArray.push(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]));
             }
             this._strokeGeometry.setFromPoints(pointArray);
         } else {
-            // Line2
             this._strokeGeometry.setPositions(positions);
             this._strokeLine.computeLineDistances();
         }

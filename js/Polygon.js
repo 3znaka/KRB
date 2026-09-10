@@ -15,14 +15,20 @@
  *
  * Экструдированные полигоны (extruded: true) используют MeshStandardMaterial
  * и участвуют в shadow mapping (castShadow/receiveShadow), поэтому на них
- * работают тени так же, как на Marker3D. Для корректного освещения нормали
- * верхней/нижней крышек задаются явно ((0,1,0) и (0,-1,0)), а обход
- * треугольников Earcut при необходимости инвертируется, чтобы нормаль
- * совпадала с направлением фронтальной грани.
+ * работают тени так же, как на Marker3D.
  *
- * ВАЖНО: для отображения теней у рендера должно быть включено
- * `renderer.shadowMap.enabled = true`, и хотя бы один источник света
- * должен иметь `castShadow = true`.
+ * ВАЖНО про корректность рендеринга:
+ *  1) Нормали верхней/нижней крышек задаются явно ((0,1,0) и (0,-1,0)),
+ *     а обход треугольников Earcut согласуется с этими нормалями — иначе
+ *     DoubleSide + шейдерный флип нормалей дают неверное освещение.
+ *  2) Bounding sphere всех трёх геометрий пересчитывается после каждого
+ *     обновления высот — иначе three.js отсекает «уехавшие» вверх крышки
+ *     по frustum culling, и они становятся невидимыми.
+ *  3) Для экструдированных полигонов depthTest/depthWrite по умолчанию true,
+ *     чтобы прозрачные стенки не просвечивали сквозь друг друга.
+ *  4) Для отображения теней у рендера должно быть включено
+ *     `renderer.shadowMap.enabled = true`, и хотя бы один источник света
+ *     должен иметь `castShadow = true`.
  */
 
 import { proj } from './Utils.js';
@@ -48,7 +54,7 @@ function pointToSegmentDistance(point, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
     const ap = new THREE.Vector3().subVectors(point, a);
     const abLenSq = ab.lengthSq();
-    if (abLenSq === 0) return point.distanceTo(a); // вырожденный отрезок
+    if (abLenSq === 0) return point.distanceTo(a);
     let t = ap.dot(ab) / abLenSq;
     t = Math.max(0, Math.min(1, t));
     const closest = new THREE.Vector3().copy(a).addScaledVector(ab, t);
@@ -80,13 +86,6 @@ function crossY(p0, p1, p2) {
  * Всплывающие подсказки обрабатываются централизованно через PopupManager
  * (доступен как `map.popupManager`).
  *
- * Для экструдированных полигонов (extruded: true) материалы создаются на
- * основе MeshStandardMaterial, а меши помечаются castShadow/receiveShadow —
- * так же, как в Marker3D. Для корректного освещения нормали верхней/нижней
- * крышек задаются явно, а обход треугольников Earcut согласуется с этими
- * нормалями, чтобы шейдерная логика three.js (флип нормалей на back-face
- * при DoubleSide) давала правильный результат с любой стороны.
- *
  * @example
  * // Обычный плоский полигон
  * const flatPolygon = new Polygon({
@@ -111,16 +110,15 @@ function crossY(p0, p1, p2) {
  * const extrudedPolygon = new Polygon({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
  *     extruded: true,
- *     height: 500,      // толщина экструзии в метрах
- *     minHeight: 200,   // высота нижней грани над поверхностью в метрах
+ *     height: 500,
+ *     minHeight: 200,
  *     fillColor: '#ff8800',
  *     fillOpacity: 0.9,
  *     strokeColor: '#000000',
  *     strokeWidth: 3,
  *     altitudeMode: 'clampToGround',
  *     altitudeOffset: 10,
- *     depthTest: true,
- *     depthWrite: true,
+ *     // depthTest/depthWrite для extruded по умолчанию true — можно не задавать
  *     castShadow: true,
  *     receiveShadow: true,
  *     title: 'Объёмный полигон'
@@ -143,8 +141,8 @@ export class Polygon {
      * @param {boolean} [options.extruded=false] - Включить экструзию (объёмный полигон).
      * @param {number} [options.height=0] - Толщина экструзии в метрах (только если extruded=true).
      * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
-     * @param {boolean} [options.depthTest=false] - Включить тест глубины.
-     * @param {boolean} [options.depthWrite=false] - Включить запись в буфер глубины.
+     * @param {boolean} [options.depthTest] - Включить тест глубины. По умолчанию: false для плоских, true для extruded.
+     * @param {boolean} [options.depthWrite] - Включить запись в буфер глубины. По умолчанию: false для плоских, true для extruded.
      * @param {boolean} [options.castShadow=true] - Отбрасывать тень (применяется только к extruded=true).
      * @param {boolean} [options.receiveShadow=true] - Принимать тень (применяется только к extruded=true).
      * @param {number} [options.roughness=0.8] - Шероховатость PBR-материала (только для extruded=true).
@@ -179,12 +177,6 @@ export class Polygon {
         /** @private */ this._strokeOpacity = options.strokeOpacity ?? 1;
         /** @private */ this._altitudeMode = options.altitudeMode || 'clampToGround';
         /** @private */ this._altitudeOffset = options.altitudeOffset ?? 10;
-        /** @private */ this._depthTest = options.depthTest ?? false;
-        /** @private */ this._depthWrite = options.depthWrite ?? false;
-        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-        /** @private */ this._useSimpleStroke = options.useSimpleStroke ?? false;
-        /** @private */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
 
         // Экструзия
         /** @private */ this._extruded = options.extruded ?? false;
@@ -194,7 +186,16 @@ export class Polygon {
             throw new Error('Polygon: options.height must be a positive number when extruded is true');
         }
 
-        // Тени и PBR-параметры (применяются только при extruded=true)
+        // Depth-опции: для extruded по умолчанию true, для плоских — false
+        /** @private */ this._depthTest = options.depthTest ?? this._extruded;
+        /** @private */ this._depthWrite = options.depthWrite ?? this._extruded;
+
+        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
+        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private */ this._useSimpleStroke = options.useSimpleStroke ?? false;
+        /** @private */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
+
+        // Тени и PBR (только для extruded=true)
         /** @private */ this._castShadow = options.castShadow ?? true;
         /** @private */ this._receiveShadow = options.receiveShadow ?? true;
         /** @private */ this._roughness = options.roughness ?? 0.8;
@@ -208,7 +209,7 @@ export class Polygon {
         /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
 
-        // События мыши
+        // События
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
@@ -217,7 +218,7 @@ export class Polygon {
         // Тултип
         /** @private */ this._tooltipText = options.tooltip || '';
 
-        // Внутренние структуры
+        // Структуры
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
         /** @private */ this._group = new THREE.Group();
@@ -249,13 +250,13 @@ export class Polygon {
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
 
-        // 2D вершины и центроид
+        // Центроид
         /** @private */ this._vertices2D = [];
         /** @private */ this._centroidWorld = new THREE.Vector3();
         /** @private */ this._cachedCentroidHeight = 0;
         /** @private */ this._lastCentroidHeightUpdateTime = 0;
 
-        // Кэш мировых координат и bounding sphere
+        // Мировые координаты и bounding sphere
         /** @private */ this._worldCoords = [];
         /** @private */ this._strokeWorldCoords = [];
         /** @private */ this._boundingSphereRadius = 0;
@@ -278,7 +279,7 @@ export class Polygon {
         /** @private */ this._sideIndicesArray = [];
         /** @private */ this._tempVec3 = new THREE.Vector3();
 
-        // Регистрация в реестре интерактивных полигонов
+        // Реестр интерактивных
         if (this._onClick || this._onHover || this._tooltipText) {
             Polygon._registerInteractivePolygon(this);
         }
@@ -476,8 +477,7 @@ export class Polygon {
     /**
      * Создаёт материал для поверхности полигона.
      * Для экструдированных полигонов используется MeshStandardMaterial
-     * (участвует в освещении и shadow mapping). Для плоских — MeshBasicMaterial,
-     * который просто заливает геометрию заданным цветом без реакции на свет.
+     * (участвует в освещении и shadow mapping). Для плоских — MeshBasicMaterial.
      *
      * @returns {THREE.Material} Материал поверхности.
      * @private
@@ -507,7 +507,6 @@ export class Polygon {
 
     /**
      * Применяет флаги теней к мешу, если полигон экструдированный.
-     * Для плоских полигонов ничего не делает.
      *
      * @param {THREE.Mesh} mesh - Меш полигона.
      * @returns {void}
@@ -583,7 +582,7 @@ export class Polygon {
                     firstPoint = [absX, absZ];
                 }
                 if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) {
-                    continue; // замыкающая точка
+                    continue;
                 }
                 coords.push(absX, absZ);
                 points2D.push(new THREE.Vector2(absX, absZ));
@@ -613,16 +612,11 @@ export class Polygon {
             return;
         }
 
-        // ▼▼▼ ВАЖНО: согласуем winding Earcut-вывода ▼▼▼
-        // Верхняя крышка должна иметь CCW-обход при взгляде сверху (нормаль +Y),
-        // чтобы при DoubleSide + MeshStandardMaterial освещение было корректным.
-        // Если первый треугольник даёт нормаль вниз — инвертируем обход всего массива.
+        // Согласуем winding Earcut-вывода: верхняя крышка должна быть CCW при
+        // взгляде сверху (нормаль +Y), нижняя — наоборот.
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
-        // Нижняя крышка — та же геометрия в XZ, но с противоположным обходом
-        // (фронтальная грань смотрит вниз, нормаль -Y).
         const bottomIndices = this._flipIndices(topIndices);
-        // ▲▲▲
 
         // Центроид
         let cx = 0, cy = 0;
@@ -648,7 +642,7 @@ export class Polygon {
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
-        // ▼▼▼ Верхняя крышка ▼▼▼
+        // === Верхняя крышка ===
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
@@ -660,28 +654,29 @@ export class Polygon {
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
         topGeometry.setIndex(topIndices);
 
-        // Явно задаём нормали +Y для верхней крышки.
-        // Это избавляет от зависимости от computeVertexNormals() и гарантирует,
-        // что шейдер MeshStandardMaterial получает корректную нормаль
-        // независимо от того, как Earcut обошёл контур.
+        // Явные нормали +Y для верхней крышки.
         const topNormals = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
-            topNormals[i * 3 + 1] = 1; // (0, 1, 0)
+            topNormals[i * 3 + 1] = 1;
         }
         topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
+        topGeometry.computeBoundingSphere(); // сразу валидная сфера
 
         const topMaterial = this._createSurfaceMaterial();
 
         const topMesh = new THREE.Mesh(topGeometry, topMaterial);
         topMesh.renderOrder = 998;
+        // Отключаем frustum culling у крышки: bounding sphere пересчитывается
+        // при каждом _updateHeights, но между апдейтами позиции успевают «уехать»
+        // по Y, и без этого three.js может отсечь крышку.
+        topMesh.frustumCulled = false;
         this._applyShadowFlags(topMesh);
         this._fillMesh = topMesh;
         this._fillGeometry = topGeometry;
         this._fillMaterial = topMaterial;
         this._group.add(topMesh);
-        // ▲▲▲
 
-        // ▼▼▼ Экструзия: нижняя крышка и боковые стенки ▼▼▼
+        // === Экструзия ===
         if (this._extruded) {
             // Нижняя крышка
             const bottomGeometry = new THREE.BufferGeometry();
@@ -695,28 +690,34 @@ export class Polygon {
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
             bottomGeometry.setIndex(bottomIndices);
 
-            // Явные нормали -Y для нижней крышки.
             const bottomNormals = new Float32Array(points2D.length * 3);
             for (let i = 0; i < points2D.length; i++) {
-                bottomNormals[i * 3 + 1] = -1; // (0, -1, 0)
+                bottomNormals[i * 3 + 1] = -1;
             }
             bottomGeometry.setAttribute('normal', new THREE.BufferAttribute(bottomNormals, 3));
+            bottomGeometry.computeBoundingSphere();
 
             const bottomMaterial = this._createSurfaceMaterial();
 
             const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-            bottomMesh.renderOrder = 998;
+            bottomMesh.renderOrder = 996; // ниже стенок и крышки
+            bottomMesh.frustumCulled = false;
             this._applyShadowFlags(bottomMesh);
             this._bottomMesh = bottomMesh;
             this._bottomGeometry = bottomGeometry;
             this._bottomMaterial = bottomMaterial;
             this._group.add(bottomMesh);
 
-            // Боковые стенки
+            // Боковые стенки.
+            // ВАЖНО: сразу задаём осмысленные Y (height сверху, 0 снизу), чтобы
+            // build-time computeVertexNormals() не получал вырожденные треугольники
+            // (иначе нормали будут NaN и стенки перестанут освещаться).
             const sidePositions = this._sidePositionsArray;
             const sideIndices = this._sideIndicesArray;
             sidePositions.length = 0;
             sideIndices.length = 0;
+
+            const initialHeight = this._height;
 
             for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
                 if (ringStartIndices[ringIdx] === undefined) continue;
@@ -737,9 +738,10 @@ export class Polygon {
 
                     const baseIndex = sidePositions.length / 3;
 
+                    // Порядок вершин: 0 = верх I, 1 = низ I, 2 = верх J, 3 = низ J
+                    sidePositions.push(topI.x, initialHeight, topI.y);
                     sidePositions.push(topI.x, 0, topI.y);
-                    sidePositions.push(topI.x, 0, topI.y);
-                    sidePositions.push(topJ.x, 0, topJ.y);
+                    sidePositions.push(topJ.x, initialHeight, topJ.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
 
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
@@ -750,16 +752,14 @@ export class Polygon {
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
             sideGeometry.setIndex(sideIndices);
-            // Боковые стенки ориентированы по обходу кольца, поэтому computeVertexNormals()
-            // даёт корректные нормали граней. DoubleSide + шейдерный флип для back-face
-            // обеспечивают правильное освещение независимо от того, как именно
-            // ориентирован обход входного кольца (CW или CCW).
-            sideGeometry.computeVertexNormals();
+            sideGeometry.computeVertexNormals(); // теперь нормали валидны
+            sideGeometry.computeBoundingSphere();
 
             const sideMaterial = this._createSurfaceMaterial();
 
             const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-            sideMesh.renderOrder = 998;
+            sideMesh.renderOrder = 997; // между нижней и верхней крышкой
+            sideMesh.frustumCulled = false;
             this._applyShadowFlags(sideMesh);
             this._sideMesh = sideMesh;
             this._sideGeometry = sideGeometry;
@@ -767,7 +767,6 @@ export class Polygon {
             this._sideVertexCount = sidePositions.length / 3;
             this._group.add(sideMesh);
         }
-        // ▲▲▲
     }
 
     /**
@@ -1052,8 +1051,8 @@ export class Polygon {
 
     /**
      * Обновляет высоты вершин всех геометрий в соответствии с режимом высоты и экструзией.
-     * Нормали крышек и стенок остаются неизменными (для плоских крышек они константны,
-     * а небольшой наклон из-за рельефа даёт визуально приемлемый результат).
+     * После изменения позиций принудительно пересчитывает bounding sphere каждой
+     * геометрии — иначе frustum culling отсекает меши, «уехавшие» по Y.
      *
      * @returns {void}
      * @private
@@ -1100,6 +1099,7 @@ export class Polygon {
             topPos[i * 3 + 1] = this._cachedHeights[i];
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
+        this._fillGeometry.computeBoundingSphere(); // ← критично
 
         // Нижняя крышка
         if (this._bottomGeometry) {
@@ -1108,6 +1108,7 @@ export class Polygon {
                 bottomPos[i * 3 + 1] = this._cachedHeights[i] - this._height;
             }
             this._bottomGeometry.attributes.position.needsUpdate = true;
+            this._bottomGeometry.computeBoundingSphere(); // ← критично
         }
 
         // Боковые стенки
@@ -1121,6 +1122,7 @@ export class Polygon {
                 const lowerI = upperI - this._height;
                 const lowerJ = upperJ - this._height;
 
+                // порядок вершин: upper I, lower I, upper J, lower J
                 sidePos[idx * 3 + 1] = upperI;
                 idx++;
                 sidePos[idx * 3 + 1] = lowerI;
@@ -1131,9 +1133,9 @@ export class Polygon {
                 idx++;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
-            // Пересчитываем нормали боковых стенок после изменения высот,
-            // т.к. при разных высотах соседних вершин грани наклоняются.
+            // Пересчитываем нормали и сферу после изменения высот.
             this._sideGeometry.computeVertexNormals();
+            this._sideGeometry.computeBoundingSphere(); // ← критично
         }
     }
 

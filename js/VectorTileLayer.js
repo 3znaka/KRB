@@ -117,6 +117,7 @@ export const VECTOR_TILE_RENDER_ORDER = {
  * @property {number} [options.labelDistanceSortZoom=17] - Зум, начиная с которого сортировка по расстоянию.
  * @property {number} [options.labelMaxPerTileClose=20] - Максимум подписей на тайл при близком зуме.
  * @property {number} [options.labelCullMargin=50] - Отступ за границами экрана для отсечения подписей.
+ * @property {number} [options.tileDataCacheMaxSize=200] - Максимум сырых PBF-буферов в LRU-кэше.
  * @property {boolean} [options.debug=false] - Режим отладки.
  * @property {Object} [options.styles={}] - Пользовательские стили, объединяются с DEFAULT_STYLES.
  * @property {Array.<string>} [options.workerScripts=['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js']] - Массив из двух URL скриптов для воркера.
@@ -147,7 +148,6 @@ export const VECTOR_TILE_RENDER_ORDER = {
  *     ]
  * });
  *
- * layer.printDiscoveredClasses();
  * layer.removeFromMap();
  */
 export class VectorTileLayer {
@@ -173,7 +173,6 @@ export class VectorTileLayer {
         this.labelCullMargin = options.labelCullMargin ?? 50;
 
         this._debug = options.debug ?? false;
-        this._discoveredClasses = new Map();
 
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
@@ -186,13 +185,22 @@ export class VectorTileLayer {
         this._activeLoads = 0;
         this._maxConcurrent = 4;
         this._queueInterval = 250;
+        this._queueTimer = null;
 
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;
         this._lastUpdateTime = 0;
         this._throttle = 500;
 
+        // Счётчик «поколения» загрузок. Увеличивается при любой инвалидации
+        // кэша тайлов (смена sourceZoom, clearAllTiles, invalidateAllTiles).
+        // Ответы воркера, полученные с устаревшим generation, утилизируются.
+        this._generation = 0;
+
+        // LRU-кэш сырых PBF-буферов. Ограничен по количеству тайлов.
         this._tileDataCache = new Map();
+        this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
+
         this._oldTileGroups = null;
         this._oldTileCleanupTimer = null;
         this._groupCache = new Map();
@@ -259,56 +267,89 @@ export class VectorTileLayer {
         }
     }
 
+    /**
+     * Обрабатывает сообщение от воркера.
+     * Проверяет актуальность полученного результата по generation.
+     *
+     * @private
+     * @param {Object} data - Данные сообщения.
+     */
     _onWorkerMessage(data) {
-        if (data.error) {
-            const pending = this._pendingWorkerRequests.get(data.id);
-            if (pending) {
-                pending.reject(new Error(data.error));
-                this._pendingWorkerRequests.delete(data.id);
-            }
-            return;
-        }
-        if (!data.result) return;
+        if (!data || typeof data.id === 'undefined') return;
+
         const pending = this._pendingWorkerRequests.get(data.id);
         if (!pending) return;
         this._pendingWorkerRequests.delete(data.id);
 
+        if (data.error) {
+            pending.reject(new Error(data.error));
+            return;
+        }
+
+        if (!data.result) {
+            pending.reject(new Error('Worker returned no result'));
+            return;
+        }
+
+        // Устаревший ответ — утилизируем без добавления в сцену.
+        if (pending.generation !== this._generation) {
+            if (pending.group) {
+                this._disposeTile(pending.group);
+            }
+            pending.resolve(null);
+            return;
+        }
+
         const result = data.result;
         const group = pending.group || new THREE.Group();
-        this._buildGroupFromWorkerResult(group, result);
+        try {
+            this._buildGroupFromWorkerResult(group, result);
+        } catch (err) {
+            console.error('[VectorTileLayer] Failed to build tile group:', err);
+            this._disposeTile(group);
+            pending.reject(err);
+            return;
+        }
+
         if (!pending.group) {
             this._rootGroup.add(group);
             const key = pending.key;
+            const existing = this._tileCache.get(key);
+            if (existing && existing !== group) this._disposeTile(existing);
             this._tileCache.set(key, group);
         }
         pending.resolve(group);
     }
 
-_buildGroupFromWorkerResult(group, result) {
-    this._removeTextLabelsForGroup(group);
+    /**
+     * Строит Three.js-группу тайла из результата воркера.
+     *
+     * @private
+     * @param {THREE.Group} group - Целевая группа.
+     * @param {Object} result - Результат обработки воркера.
+     */
+    _buildGroupFromWorkerResult(group, result) {
+        this._removeTextLabelsForGroup(group);
 
-    group.renderOrder = 1_000_000;
+        if (result.centerX !== undefined && result.centerZ !== undefined) {
+            group.position.set(result.centerX, 0, result.centerZ);
+        }
 
-    if (result.centerX !== undefined && result.centerZ !== undefined) {
-        group.position.set(result.centerX, this._verticalOffset ?? 0, result.centerZ);
-    }
+        while (group.children.length) {
+            const child = group.children[0];
+            if (child.geometry) child.geometry.dispose();
+            group.remove(child);
+        }
 
-while (group.children.length) {
-    const child = group.children[0];
-    if (child.geometry) child.geometry.dispose();
-
-    group.remove(child);
-}
-
-for (const fill of result.fills) {
-    const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
-    if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
-    group.add(mesh);
-}
+        for (const fill of result.fills) {
+            const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
+            if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
+            group.add(mesh);
+        }
 
         if (result.buildings.length > 0) {
             const byColor = new Map();
@@ -417,8 +458,8 @@ for (const fill of result.fills) {
             const zb = pt.zoomBounds || { min: 0, max: 24 };
             if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
-            // pt.x, pt.z теперь локальные относительно центра тайла,
-            // добавляем позицию группы тайла и сдвиг мира
+            // pt.x, pt.z — локальные относительно центра тайла,
+            // добавляем позицию группы тайла и сдвиг мира.
             const worldX = pt.x + group.position.x + worldOffset.x;
             const worldZ = pt.z + group.position.z + worldOffset.z;
 
@@ -427,7 +468,7 @@ for (const fill of result.fills) {
             const distSq = dx * dx + dz * dz;
 
             const worldPos = new THREE.Vector3(worldX, 0, worldZ);
-            const ndc = worldPos.clone().project(camera);
+            const ndc = worldPos.project(camera);
 
             if (ndc.z > 1 || ndc.z < -1) continue;
 
@@ -501,7 +542,8 @@ for (const fill of result.fills) {
     }
 
     _getFillMaterialFromData(layerName, color, opacity) {
-        const key = `fill:${layerName}:${color.toString(16)}:${opacity}`;
+        const op = opacity ?? 1;
+        const key = `fill:${layerName}:${color.toString(16)}:${op}`;
         return this._getFillMaterial(key);
     }
 
@@ -514,21 +556,6 @@ for (const fill of result.fills) {
     // -------------------------------------------------------------------------
     // Публичные методы
     // -------------------------------------------------------------------------
-    /**
-     * Выводит в консоль список обнаруженных классов по слоям.
-     *
-     * @returns {void} Ничего не возвращает.
-     */
-    printDiscoveredClasses() {
-        if (this._discoveredClasses.size === 0) {
-            console.log('[VectorTileLayer] No classes discovered yet.');
-            return;
-        }
-        console.log('[VectorTileLayer] Discovered classes:');
-        this._discoveredClasses.forEach((classes, layer) => {
-            console.log(`  ${layer}: [${Array.from(classes).join(', ')}]`);
-        });
-    }
 
     /**
      * Добавляет область исключения. Геометрия указанных слоёв, пересекающаяся с этой областью,
@@ -589,13 +616,10 @@ for (const fill of result.fills) {
      */
     _invalidateAllTiles() {
         this._clearAllTiles();
-        this._groupCache.clear();
+        this._clearGroupCache();
         this._tileDataCache.clear();
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;
-        this._pendingLoads.clear();
-        this._sortedLoadQueue = [];
-        this._activeLoads = 0;
     }
 
     _mergeStyles(base, overrides) {
@@ -619,11 +643,10 @@ for (const fill of result.fills) {
      */
     addTo(map) {
         if (this._map) this.removeFromMap();
-    this._map = map;
-    this._rootGroup.renderOrder = 1_000_000;
+        this._map = map;
 
-    map.worldGroup.add(this._rootGroup);
-    if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
+        map.worldGroup.add(this._rootGroup);
+        if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
 
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
@@ -639,6 +662,22 @@ for (const fill of result.fills) {
      */
     removeFromMap() {
         if (!this._map) return;
+
+        // Останавливаем все таймеры и реджектим висящие промисы,
+        // иначе они повиснут навсегда.
+        if (this._queueTimer) {
+            clearTimeout(this._queueTimer);
+            this._queueTimer = null;
+        }
+        if (this._oldTileCleanupTimer) {
+            clearTimeout(this._oldTileCleanupTimer);
+            this._oldTileCleanupTimer = null;
+        }
+        for (const pending of this._pendingWorkerRequests.values()) {
+            try { pending.reject(new Error('Layer removed')); } catch (e) {}
+        }
+        this._pendingWorkerRequests.clear();
+
         this._clearAllTiles();
         this._rootGroup.parent?.remove(this._rootGroup);
         const idx = this._map._dynamicLayers.indexOf(this);
@@ -662,12 +701,15 @@ for (const fill of result.fills) {
     }
 
     _clearAllTiles() {
+        // Инвалидация: все in-flight ответы воркера считаются устаревшими.
+        this._generation++;
         this._tileCache.forEach(group => this._disposeTile(group));
         this._tileCache.clear();
         this._pendingLoads.clear();
         this._sortedLoadQueue = [];
         this._clearOldTilesNow();
-        this._activeLoads = 0;
+        // НЕ сбрасываем _activeLoads: реальные in-flight запросы
+        // сами уменьшат его в finally.
     }
 
     _clearGroupCache() {
@@ -686,15 +728,15 @@ for (const fill of result.fills) {
         }
     }
 
-_disposeTile(group) {
-    this._removeTextLabelsForGroup(group);
-    while (group.children.length) {
-        const child = group.children[0];
-        if (child.geometry) child.geometry.dispose();
-        group.remove(child);
+    _disposeTile(group) {
+        this._removeTextLabelsForGroup(group);
+        while (group.children.length) {
+            const child = group.children[0];
+            if (child.geometry) child.geometry.dispose();
+            group.remove(child);
+        }
+        this._rootGroup.remove(group);
     }
-    this._rootGroup.remove(group);
-}
 
     _removeTile(key, group) {
         this._rootGroup.remove(group);
@@ -712,7 +754,7 @@ _disposeTile(group) {
         }
     }
 
-    _scheduleOldTilesCleanup(delay = 2000) {
+    _scheduleOldTilesCleanup(delay = 1500) {
         if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
         this._oldTileCleanupTimer = setTimeout(() => {
             if (this._sortedLoadQueue.length > 0 || this._activeLoads > 0) {
@@ -721,6 +763,28 @@ _disposeTile(group) {
                 this._clearOldTilesNow();
             }
         }, delay);
+    }
+
+    // -------------------------------------------------------------------------
+    // LRU-кэш сырых PBF-буферов
+    // -------------------------------------------------------------------------
+    _setTileDataCache(key, buffer) {
+        // Перезапись перемещает ключ в конец (как «свежий»).
+        this._tileDataCache.delete(key);
+        this._tileDataCache.set(key, buffer);
+        while (this._tileDataCache.size > this._tileDataCacheMaxSize) {
+            const oldestKey = this._tileDataCache.keys().next().value;
+            this._tileDataCache.delete(oldestKey);
+        }
+    }
+
+    _getTileDataCache(key) {
+        const val = this._tileDataCache.get(key);
+        if (val === undefined) return undefined;
+        // Освежаем «свежесть».
+        this._tileDataCache.delete(key);
+        this._tileDataCache.set(key, val);
+        return val;
     }
 
     _postUpdate(map) {
@@ -742,7 +806,9 @@ _disposeTile(group) {
 
         const discreteZoom = map.currentDiscreteZoom;
         if (discreteZoom < this.minZoom || discreteZoom > this.maxZoom) {
-            if (this._tileCache.size > 0 || this._oldTileGroups) this._clearAllTiles();
+            if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
+                this._clearAllTiles();
+            }
             this._lastSourceZoom = -1;
             this._lastDiscreteZoom = -1;
             return;
@@ -760,6 +826,9 @@ _disposeTile(group) {
         const sourceZoom = Math.max(this.minZoom, Math.min(discreteZoom, this.maxSourceZoom));
 
         if (sourceZoom !== this._lastSourceZoom) {
+            // Смена sourceZoom = полная инвалидация кэша тайлов.
+            // Увеличиваем generation — все in-flight ответы будут отброшены.
+            this._generation++;
             this._clearOldTilesNow();
             if (this._tileCache.size > 0) {
                 this._oldTileGroups = new Map(this._tileCache);
@@ -775,7 +844,7 @@ _disposeTile(group) {
             this._pendingLoads.clear();
             this._sortedLoadQueue = [];
             this._lastSourceZoom = sourceZoom;
-            this._scheduleOldTilesCleanup(3000);
+            this._scheduleOldTilesCleanup(1500);
         }
 
         const canvas = map.renderer.domElement;
@@ -803,7 +872,7 @@ _disposeTile(group) {
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000; // движение было в последнюю секунду
         const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000); // раз в секунду при движении
-        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime; // после остановки (движение было)
+        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime; // после остановки
 
         if ((settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
             this._lastLabelUpdateTime = labelNow;
@@ -857,20 +926,27 @@ _disposeTile(group) {
         const key = `${z},${xSlippy},${ySlippy}`;
         if (this._pendingLoads.has(key) || this._tileCache.has(key)) return;
 
+        const map = this._map;
+        if (!map) return;
+
         if (this._groupCache.has(key)) {
             const group = this._groupCache.get(key);
             this._groupCache.delete(key);
-            const is3dNow = this.buildings3d && (this._map?.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
+            const is3dNow = this.buildings3d && (map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             if (group.userData.is3d !== is3dNow) {
                 const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;
-                const buffer = this._tileDataCache.get(dataCacheKey);
-                if (buffer) {
+                const cached = this._getTileDataCache(dataCacheKey);
+                if (cached) {
                     this._pendingLoads.add(key);
                     this._activeLoads++;
                     try {
-                        await this._sendToWorker(buffer.slice(0), z, xSlippy, ySlippy, is3dNow, group);
-                        this._rootGroup.add(group);
-                        this._tileCache.set(key, group);
+                        const result = await this._sendToWorker(cached.slice(0), z, xSlippy, ySlippy, is3dNow, group);
+                        if (result) {
+                            this._rootGroup.add(group);
+                            this._tileCache.set(key, group);
+                        }
+                    } catch (err) {
+                        // игнорируем
                     } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
@@ -892,20 +968,26 @@ _disposeTile(group) {
         const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;
         try {
             let buffer;
-            if (this._tileDataCache.has(dataCacheKey)) {
-                buffer = this._tileDataCache.get(dataCacheKey).slice(0);
+            const cached = this._getTileDataCache(dataCacheKey);
+            if (cached) {
+                buffer = cached.slice(0);
             } else {
-                const url = this.url.replace('{z}', z).replace('{x}', xSlippy).replace('{y}', ySlippy);
+                const url = this.url
+                    .replaceAll('{z}', z)
+                    .replaceAll('{x}', xSlippy)
+                    .replaceAll('{y}', ySlippy);
                 const response = await fetch(url);
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 buffer = await response.arrayBuffer();
-                this._tileDataCache.set(dataCacheKey, buffer.slice(0));
+                this._setTileDataCache(dataCacheKey, buffer.slice(0));
             }
 
-            const is3dNow = this.buildings3d && (this._map?.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
+            const is3dNow = this.buildings3d && (map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
-            this._rootGroup.add(group);
-            this._tileCache.set(key, group);
+            if (group) {
+                this._rootGroup.add(group);
+                this._tileCache.set(key, group);
+            }
         } catch (err) {
             // игнорируем ошибки загрузки
         } finally {
@@ -923,9 +1005,15 @@ _disposeTile(group) {
     async _sendToWorker(buffer, z, x, y, is3d, existingGroup) {
         await this._workerReady;
         return new Promise((resolve, reject) => {
+            if (!this._worker || !this._map) {
+                reject(new Error('Layer removed'));
+                return;
+            }
+
+            const map = this._map;
             const id = ++this._requestId;
-            const tileSize = this._map.WORLD_SIZE / (1 << z);
-            const maxMerc = this._map.MAX_MERCATOR;
+            const tileSize = map.WORLD_SIZE / (1 << z);
+            const maxMerc = map.MAX_MERCATOR;
 
             const msg = {
                 type: 'process',
@@ -936,7 +1024,6 @@ _disposeTile(group) {
                 maxMerc,
                 is3d,
                 visibleLayers: this.visibleLayers,
-                buildings3dMinZoom: this.buildings3dMinZoom,
                 buildingEdges: this.buildingEdges,
                 exclusionPolygons: this._exclusionAreas,
                 exclusionLayers: Array.from(this._exclusionLayers)
@@ -947,111 +1034,118 @@ _disposeTile(group) {
                 reject,
                 group: existingGroup || null,
                 key: existingGroup ? null : `${z},${x},${y}`,
+                generation: this._generation,
             });
-            this._worker.postMessage(msg, [buffer]);
+            try {
+                this._worker.postMessage(msg, [buffer]);
+            } catch (err) {
+                this._pendingWorkerRequests.delete(id);
+                reject(err);
+            }
         });
     }
 
-_getVisibleTileKeys(z) {
-    const map = this._map;
-    const camera = map.camera;
-    const tileSize = map.WORLD_SIZE / (1 << z);
-    const off = map.worldGroup.position;
-    const maxTile = (1 << z) - 1;
-    const numTiles = 1 << z;
+    _getVisibleTileKeys(z) {
+        const map = this._map;
+        const camera = map.camera;
+        const tileSize = map.WORLD_SIZE / (1 << z);
+        const off = map.worldGroup.position;
+        const maxTile = (1 << z) - 1;
+        const numTiles = 1 << z;
 
-    // 4 луча из углов экрана — реальный фрустум вместо top-down приближения
-    const corners = [
-        [-1, -1], [1, -1], [-1, 1], [1, 1]
-    ];
-    const ray = new THREE.Raycaster();
-    const ndc = new THREE.Vector2();
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-    const hit = new THREE.Vector3();
+        // 4 луча из углов экрана — реальный фрустум вместо top-down приближения
+        const corners = [
+            [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ];
+        const ray = new THREE.Raycaster();
+        const ndc = new THREE.Vector2();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const hit = new THREE.Vector3();
 
-    let minX = Infinity, maxX = -Infinity;
-    let minZ = Infinity, maxZ = -Infinity;
-    let anyHit = false;
+        let minX = Infinity, maxX = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+        let anyHit = false;
 
-    for (const [nx, ny] of corners) {
-        ndc.set(nx, ny);
-        ray.setFromCamera(ndc, camera);
-        if (ray.ray.intersectPlane(plane, hit)) {
-            anyHit = true;
-            // переводим в локальные координаты worldGroup
-            const lx = hit.x - off.x;
-            const lz = hit.z - off.z;
-            if (lx < minX) minX = lx;
-            if (lx > maxX) maxX = lx;
-            if (lz < minZ) minZ = lz;
-            if (lz > maxZ) maxZ = lz;
+        for (const [nx, ny] of corners) {
+            ndc.set(nx, ny);
+            ray.setFromCamera(ndc, camera);
+            if (ray.ray.intersectPlane(plane, hit)) {
+                anyHit = true;
+                // переводим в локальные координаты worldGroup
+                const lx = hit.x - off.x;
+                const lz = hit.z - off.z;
+                if (lx < minX) minX = lx;
+                if (lx > maxX) maxX = lx;
+                if (lz < minZ) minZ = lz;
+                if (lz > maxZ) maxZ = lz;
+            }
         }
-    }
 
-    // Если углы не пересекли землю (камера смотрит в небо) — падаем на старую логику
-    if (!anyHit) {
-        const target = map.controls.target;
-        const distance = camera.position.distanceTo(target);
-        const vFov = camera.fov * Math.PI / 180;
-        const aspect = camera.aspect;
-        const margin = 1;
-        const hh = distance * Math.tan(vFov / 2) * aspect + margin * tileSize;
-        const hv = distance * Math.tan(vFov / 2) + margin * tileSize;
-        minX = target.x - off.x - hh;
-        maxX = target.x - off.x + hh;
-        minZ = target.z - off.z - hv;
-        maxZ = target.z - off.z + hv;
-    }
-
-    // Добавляем позицию камеры — гарантирует загрузку тайла под ногами
-    const camX = camera.position.x - off.x;
-    const camZ = camera.position.z - off.z;
-    if (camX < minX) minX = camX;
-    if (camX > maxX) maxX = camX;
-    if (camZ < minZ) minZ = camZ;
-    if (camZ > maxZ) maxZ = camZ;
-
-    // Небольшой запас, чтобы тайлы на границе экрана не мигали
-    const margin = tileSize;
-    minX -= margin; maxX += margin;
-    minZ -= margin; maxZ += margin;
-
-    const xMin = Math.floor((minX + map.MAX_MERCATOR) / tileSize);
-    const xMax = Math.floor((maxX + map.MAX_MERCATOR) / tileSize);
-    const yMin = Math.max(0, Math.floor((minZ + map.MAX_MERCATOR) / tileSize));
-    const yMax = Math.min(maxTile, Math.floor((maxZ + map.MAX_MERCATOR) / tileSize));
-
-    const keys = new Set();
-    for (let y = yMin; y <= yMax; y++) {
-        for (let x = xMin; x <= xMax; x++) {
-            keys.add(`${z},${((x % numTiles) + numTiles) % numTiles},${y}`);
+        // Если углы не пересекли землю (камера смотрит в небо) — падаем на старую логику
+        if (!anyHit) {
+            const target = map.controls.target;
+            const distance = camera.position.distanceTo(target);
+            const vFov = camera.fov * Math.PI / 180;
+            const aspect = camera.aspect;
+            const margin = 1;
+            const hh = distance * Math.tan(vFov / 2) * aspect + margin * tileSize;
+            const hv = distance * Math.tan(vFov / 2) + margin * tileSize;
+            minX = target.x - off.x - hh;
+            maxX = target.x - off.x + hh;
+            minZ = target.z - off.z - hv;
+            maxZ = target.z - off.z + hv;
         }
+
+        // Добавляем позицию камеры — гарантирует загрузку тайла под ногами
+        const camX = camera.position.x - off.x;
+        const camZ = camera.position.z - off.z;
+        if (camX < minX) minX = camX;
+        if (camX > maxX) maxX = camX;
+        if (camZ < minZ) minZ = camZ;
+        if (camZ > maxZ) maxZ = camZ;
+
+        // Небольшой запас, чтобы тайлы на границе экрана не мигали
+        const margin = tileSize;
+        minX -= margin; maxX += margin;
+        minZ -= margin; maxZ += margin;
+
+        const xMin = Math.floor((minX + map.MAX_MERCATOR) / tileSize);
+        const xMax = Math.floor((maxX + map.MAX_MERCATOR) / tileSize);
+        const yMin = Math.max(0, Math.floor((minZ + map.MAX_MERCATOR) / tileSize));
+        const yMax = Math.min(maxTile, Math.floor((maxZ + map.MAX_MERCATOR) / tileSize));
+
+        const keys = new Set();
+        for (let y = yMin; y <= yMax; y++) {
+            for (let x = xMin; x <= xMax; x++) {
+                keys.add(`${z},${((x % numTiles) + numTiles) % numTiles},${y}`);
+            }
+        }
+        return keys;
     }
-    return keys;
-}
 
     // -------------------------------------------------------------------------
     // Кеширование материалов
     // -------------------------------------------------------------------------
-_getFillMaterial(styleKey) {
-    if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
-    const parts = styleKey.split(':');
-    const color = parseInt(parts[2], 16);
-    const opacity = parseFloat(parts[3]) * this.fillOpacity;
-    const mat = new THREE.MeshBasicMaterial({
-        color,
-        side: THREE.DoubleSide, 
-        transparent: opacity < 1.0,      
-        opacity,
-        depthTest: true,
-        depthWrite: false,
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1
-    });
-    this._fillMaterialCache.set(styleKey, mat);
-    return mat;
-}
+    _getFillMaterial(styleKey) {
+        if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
+        const parts = styleKey.split(':');
+        const color = parseInt(parts[2], 16);
+        const rawOpacity = parseFloat(parts[3]);
+        const opacity = (isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
+        const mat = new THREE.MeshBasicMaterial({
+            color,
+            side: THREE.DoubleSide,
+            transparent: opacity < 1.0,
+            opacity,
+            depthTest: true,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
+        this._fillMaterialCache.set(styleKey, mat);
+        return mat;
+    }
 
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
@@ -1065,8 +1159,8 @@ _getFillMaterial(styleKey) {
                 this._map.renderer.domElement.width,
                 this._map.renderer.domElement.height
             ),
-    depthTest: true,    
-    depthWrite: false
+            depthTest: true,
+            depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;
@@ -1104,7 +1198,7 @@ _getFillMaterial(styleKey) {
 
         const mat = new THREE.MeshLambertMaterial({
             color,
-            side: THREE.FrontSide, // вместо THREE.DoubleSide
+            side: THREE.FrontSide,
             depthTest: true,
             depthWrite: true,
             polygonOffset: true,

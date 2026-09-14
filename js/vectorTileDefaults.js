@@ -1,6 +1,16 @@
-//vectorTileDefaults.js
+// vectorTileDefaults.js
 /**
- * Модуль стилей и порядка отрисовки векторных тайлов по умолчанию. Используется как в основном потоке (VectorTileLayer), так и внутри воркера.
+ * Модуль стилей и порядка отрисовки векторных тайлов по умолчанию.
+ * Используется как в основном потоке (VectorTileLayer), так и внутри воркера.
+ *
+ * СОГЛАШЕНИЯ:
+ * - Для слоёв, которые в воркере обрабатываются как точечные объекты и
+ *   попадают в подписи (`place`, `poi`, `housenumber`), стиль может содержать
+ *   текстовые поля: textColor, fontSize, fontFamily, fontWeight, textShadow,
+ *   textOffset, textAlign, textVerticalAlign, textPriority, textZoomMin, textZoomMax.
+ *   Эти поля читаются только этими слоями.
+ * - Поле `stroke` имеет смысл только для полигональных слоёв (заливки/обводки
+ *   контура). Для точечных слоёв оно игнорируется.
  */
 
 /**
@@ -12,6 +22,7 @@
  * @property {Object} landcover - Стили растительного покрова (лес, трава, парк и т.д.).
  * @property {Object} landuse - Стили землепользования (жилые, промышленные, коммерческие и т.д.).
  * @property {Object} park - Стили парков и охраняемых территорий.
+ * @property {Object} leisure - Стили зон отдыха (спорт, детские площадки, стадионы).
  * @property {Object} transportation - Стили транспортной сети (дороги, железные дороги, паромы и т.д.).
  * @property {Object} transportation_name - Стили подписей транспортной сети.
  * @property {Object} aeroway - Стили аэропортовой инфраструктуры.
@@ -50,7 +61,7 @@ export const DEFAULT_STYLES = {
         park: { color: 0xdcedc8 },
         sand: { color: 0xf5f0c0 },
         farmland: { color: 0xedf0c0 },
-        wetland: { color: 0xb8d4c8 },
+        wetland: { color: 0xb8d4c8 }
     },
     landuse: {
         residential: { color: 0xe0e0e0 },
@@ -97,6 +108,19 @@ export const DEFAULT_STYLES = {
         protected_area: { color: 0xb8d8a0 },
         _default: { color: 0xdcedc8 }
     },
+    // Зоны отдыха. Раньше LAYER_RENDER_ORDER ссылался на `leisure`,
+    // но соответствующего блока в DEFAULT_STYLES не было — все фичи
+    // слоя `leisure` отбрасывались в getFeatureStyle.
+    leisure: {
+        park: { color: 0xdcedc8 },
+        garden: { color: 0xdcedc8 },
+        playground: { color: 0xdcedc8 },
+        pitch: { color: 0xc8e6c9 },
+        stadium: { color: 0xc8e6c9 },
+        sports_centre: { color: 0xc8e6c9 },
+        golf_course: { color: 0xc8e6c9 },
+        _default: { color: 0xdcedc8 }
+    },
     transportation: {
         motorway:          { color: 0xff9933, width: 2.5 },
         trunk:             { color: 0xffcc66, width: 2.0 },
@@ -134,41 +158,41 @@ export const DEFAULT_STYLES = {
         _default: { color: 0xcccccc, width: 1.0 }
     },
     place: {
-        city: { 
-            color: 0xe8e8e8, stroke: 0xcccccc, opacity: 0.7, radius: 5,
+        city: {
+            color: 0xe8e8e8, opacity: 0.7, radius: 5,
             textColor: '#333333', fontSize: '14px', fontWeight: 'bold',
             textOffset: [0, -10], textZoomMin: 0, textZoomMax: 24
         },
-        town: { 
-            color: 0xe8e8e8, stroke: 0xcccccc, opacity: 0.6, radius: 4,
+        town: {
+            color: 0xe8e8e8, opacity: 0.6, radius: 4,
             textColor: '#333333', fontSize: '13px', fontWeight: 'bold',
             textOffset: [0, -8], textZoomMin: 0, textZoomMax: 24
         },
-        village: { 
-            color: 0xe8e8e8, stroke: 0xcccccc, opacity: 0.5, radius: 3,
+        village: {
+            color: 0xe8e8e8, opacity: 0.5, radius: 3,
             textColor: '#333333', fontSize: '12px', fontWeight: 'normal',
             textOffset: [0, -6], textZoomMin: 0, textZoomMax: 24
         },
-        hamlet: { 
-            color: 0xe8e8e8, stroke: 0xcccccc, opacity: 0.4, radius: 2,
+        hamlet: {
+            color: 0xe8e8e8, opacity: 0.4, radius: 2,
             textColor: '#333333', fontSize: '11px', fontWeight: 'normal',
             textOffset: [0, -4], textZoomMin: 0, textZoomMax: 24
         },
-        _default: { 
+        _default: {
             color: 0xe8e8e8, opacity: 0.5, radius: 3,
             textColor: '#333333', fontSize: '12px',
             textOffset: [0, -6], textZoomMin: 0, textZoomMax: 24
         }
     },
     poi: {
-        _default: { 
+        _default: {
             color: 0xcccccc, radius: 4,
             textColor: '#555555', fontSize: '11px', fontWeight: 'normal',
             textOffset: [0, -8], textZoomMin: 13, textZoomMax: 24
         }
     },
     housenumber: {
-        _default: { 
+        _default: {
             color: 0xffffff, radius: 2,
             textColor: '#333333', fontSize: '10px', fontWeight: 'normal',
             textOffset: [0, -4], textZoomMin: 16, textZoomMax: 24
@@ -180,27 +204,32 @@ export const DEFAULT_STYLES = {
     boundary: { color: 0x999999, width: 1.0, dash: [4, 2] },
     water_name: {
         _default: { color: 0xaaccff, width: 0.2, opacity: 0.3 }
-    },
+    }
 };
 
 /**
  * Порядок отрисовки слоёв. Чем больше число, тем выше слой.
  *
- * @property {number} water - Порядок отрисовки слоя водных объектов.
- * @property {number} waterway - Порядок отрисовки слоя водных путей.
- * @property {number} water_name - Порядок отрисовки подписей водных объектов.
+ * Значения уникальны, чтобы избежать конфликтов renderOrder между
+ * семантически разными слоями (раньше waterway, place и boundary делили
+ * одно значение 4, а park и leisure — 2).
+ *
  * @property {number} landuse - Порядок отрисовки слоя землепользования.
  * @property {number} landcover - Порядок отрисовки слоя растительного покрова.
  * @property {number} park - Порядок отрисовки слоя парков.
- * @property {number} building - Порядок отрисовки слоя зданий.
- * @property {number} place - Порядок отрисовки слоя населенных пунктов.
+ * @property {number} leisure - Порядок отрисовки слоя зон отдыха.
+ * @property {number} water - Порядок отрисовки слоя водных объектов.
+ * @property {number} waterway - Порядок отрисовки слоя водных путей.
+ * @property {number} water_name - Порядок отрисовки подписей водных объектов.
  * @property {number} boundary - Порядок отрисовки слоя границ.
+ * @property {number} place - Порядок отрисовки слоя населенных пунктов.
+ * @property {number} building - Порядок отрисовки слоя зданий.
  * @property {number} aeroway - Порядок отрисовки слоя аэропортовой инфраструктуры.
  * @property {number} transportation - Порядок отрисовки слоя транспортной сети.
  * @property {number} transportation_name - Порядок отрисовки подписей транспортной сети.
  * @property {number} poi - Порядок отрисовки слоя точек интереса.
- * @property {number} housenumber - Порядок отрисовки слоя номеров домов.
  * @property {number} mountain_peak - Порядок отрисовки слоя горных вершин.
+ * @property {number} housenumber - Порядок отрисовки слоя номеров домов.
  *
  * @example
  * const waterOrder = LAYER_RENDER_ORDER.water;
@@ -208,20 +237,20 @@ export const DEFAULT_STYLES = {
  * console.log(waterOrder, buildingOrder);
  */
 export const LAYER_RENDER_ORDER = {
-    landuse:   0, 
+    landuse:   0,
     landcover: 1,
-    park:      2,    
-    leisure:    2,
-    water:     3,   
+    park:      2,
+    leisure:   2,
+    water:     3,
     waterway:  4,
     water_name: 5,
-    building:  7,
-    place:     4,
-    boundary:  4,
-    aeroway:   10,
+    boundary:  6,
+    place:     8,
+    building:  10,
+    aeroway:   12,
     transportation: 15,
     transportation_name: 16,
     poi: 20,
-    housenumber: 21,
     mountain_peak: 20,
+    housenumber: 21
 };

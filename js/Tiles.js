@@ -1,7 +1,7 @@
 import {
   THREE
-} from '../js_TP/tpb.js';  
-import { getOriginZ, getSrcKey, getVirtKey, DEFAULTS } from './Utils.js';
+} from '../js_TP/tpb.js';
+import { getOriginZ, getVirtKey, DEFAULTS } from './Utils.js';
 
 /**
  * Шаг по вертикали между уровнями тайлов.
@@ -150,11 +150,20 @@ export class TileManager {
         this.engine = engine;
         this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation }
         this.textureCache = new Map(); // url -> { texture, refs }
+        this._inFlightTextures = new Map(); // url -> Promise<THREE.Texture|null>
         this.textureLoader = new THREE.TextureLoader();
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
         this.hasElevation = engine.hasElevation;
+
+        // Поля воркера высот объявляются всегда (для определённости),
+        // но используются только при hasElevation === true.
+        this.pendingWorkerJobs = [];
+        this.activeWorkerJobs = 0;
+        this.nextJobId = 1;
+        this.workerPromises = new Map();
+
         if (this.hasElevation) {
             this.srcKeyToElevUrl = new Map();
             this.parentElevCache = engine.globalElevCache || new Map();
@@ -179,7 +188,7 @@ export class TileManager {
      * @private
      */
     key(z, virtX, y) {
-        return `${z},${virtX},${y}`;
+        return getVirtKey(z, virtX, y);
     }
 
     /* ---- основной метод, вызывается из Core.maybeUpdateVisibleTiles ---- */
@@ -349,7 +358,7 @@ export class TileManager {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
-            const srcKey = getSrcKey(inst.z, srcX, inst.y);
+            const srcKey = getVirtKey(inst.z, srcX, inst.y);
             const texUrl = this.engine.getTextureUrl(inst.z, srcX, inst.y);
 
             if (this.hasElevation && inst.z >= this.engine.MIN_RELIEF_Z && inst.z <= this.engine.MAX_RELIEF_Z) {
@@ -405,40 +414,38 @@ export class TileManager {
      * @returns {THREE.Mesh} Меш тайла.
      * @private
      */
-createTileMesh(inst, texture) {
-    const { z, virtX, y } = inst;
-    const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
-    const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
-    const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
-    const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
+    createTileMesh(inst, texture) {
+        const { z, virtX, y } = inst;
+        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
+        const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
+        const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
+        const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
 
-    let geometry;
-    if (!this.hasElevation && this.flatTileGeometry) {
-        geometry = this.flatTileGeometry.clone();
-        geometry.rotateX(-Math.PI / 2);
-        // Трансляция убрана
-    } else {
-        geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
-        geometry.rotateX(-Math.PI / 2);
-        // Трансляция убрана
+        let geometry;
+        if (!this.hasElevation && this.flatTileGeometry) {
+            geometry = this.flatTileGeometry.clone();
+            geometry.rotateX(-Math.PI / 2);
+        } else {
+            geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
+            geometry.rotateX(-Math.PI / 2);
+        }
+
+        const mat = new THREE.MeshBasicMaterial({
+            map: texture,
+            depthWrite: this.hasElevation,
+            depthTest: this.hasElevation
+        });
+
+        const mesh = new THREE.Mesh(geometry, mat);
+        mesh.position.set(
+            originX + tileSize / 2,
+            this.hasElevation ? -(this.engine.MAX_ZOOM - z) * 0.05 : 0,
+            originZ + tileSize / 2
+        );
+        mesh.renderOrder = z;
+        mesh.visible = false;
+        return mesh;
     }
-
-    const mat = new THREE.MeshBasicMaterial({
-        map: texture,
-        depthWrite: this.hasElevation,
-        depthTest: this.hasElevation
-    });
-
-    const mesh = new THREE.Mesh(geometry, mat);
-mesh.position.set(
-  originX + tileSize / 2,
-  this.hasElevation ? -(this.engine.MAX_ZOOM - z) * 0.05 : 0,
-  originZ + tileSize / 2
-);
-    mesh.renderOrder = z;
-    mesh.visible = false;
-    return mesh;
-}
 
     /**
      * Создаёт статический фоновый меш тайла.
@@ -449,47 +456,70 @@ mesh.position.set(
      * @param {THREE.Texture|null} texture - Текстура (может быть null).
      * @returns {THREE.Mesh} Меш фонового тайла.
      */
-createStaticTileMesh(tileSize, originX, originZ, texture) {
-    const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
-    geom.rotateX(-Math.PI / 2);
-    // Трансляция убрана
-    const mat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        map: texture,
-        depthWrite: false,
-        depthTest: false
-    });
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.position.set(
-        originX + tileSize / 2,
-        -1.5,
-        originZ + tileSize / 2
-    );
-    mesh.renderOrder = -2;
-    return mesh;
-}
+    createStaticTileMesh(tileSize, originX, originZ, texture) {
+        const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
+        geom.rotateX(-Math.PI / 2);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            map: texture,
+            depthWrite: false,
+            depthTest: false
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(
+            originX + tileSize / 2,
+            -1.5,
+            originZ + tileSize / 2
+        );
+        mesh.renderOrder = -2;
+        return mesh;
+    }
 
     /* ---- текстуры ---- */
     /**
      * Асинхронно загружает текстуру по URL с кэшированием.
+     *
+     * Параллельные запросы на один и тот же URL разделяют единственный
+     * in-flight промис, что предотвращает двойную загрузку и утечку
+     * одной из текстур.
      *
      * @param {string} url - URL текстуры.
      * @returns {Promise<THREE.Texture|null>} Текстура или null при ошибке.
      */
     async loadTextureAsync(url) {
         if (!url) return null;
+
         if (this.textureCache.has(url)) {
             const e = this.textureCache.get(url);
             e.refs++;
             return e.texture;
         }
+
+        // Уже идёт загрузка того же URL — переиспользуем промис.
+        if (this._inFlightTextures.has(url)) {
+            const tex = await this._inFlightTextures.get(url);
+            if (tex) {
+                // Регистрируем новое использование (первый запрос уже
+                // зарегистрировал refs=1, каждый последующий — +1).
+                const e = this.textureCache.get(url);
+                if (e) e.refs++;
+                else this.textureCache.set(url, { texture: tex, refs: 2 });
+            }
+            return tex;
+        }
+
         const promise = new Promise((resolve) => {
             this.textureLoader.load(url, tex => {
                 tex.colorSpace = THREE.SRGBColorSpace;
                 resolve(tex);
             }, undefined, () => resolve(null));
         });
+
+        this._inFlightTextures.set(url, promise);
+
         const texture = await promise;
+        this._inFlightTextures.delete(url);
+
         if (!texture) return null;
         this.textureCache.set(url, { texture, refs: 1 });
         return texture;
@@ -525,7 +555,7 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
-            const srcKey = getSrcKey(inst.z, srcX, inst.y);
+            const srcKey = getVirtKey(inst.z, srcX, inst.y);
             const elevUrl = this.srcKeyToElevUrl.get(srcKey);
             const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
             const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
@@ -598,7 +628,11 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
         });
 
         this.elevDirectPromises.set(srcKey, promise);
-        promise.finally(() => this.elevDirectPromises.delete(srcKey));
+        // .finally() без .catch() создаёт unhandled rejection при ошибке,
+        // потому сначала глушим отказом (сам promise уже возвращён наружу).
+        promise.catch(() => {}).finally(() => {
+            this.elevDirectPromises.delete(srcKey);
+        });
         return promise;
     }
 
@@ -773,6 +807,9 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
         }
         instA.geometry.attributes.position.needsUpdate = true;
         instB.geometry.attributes.position.needsUpdate = true;
+        // После правки высот нормали становятся невалидными — пересчитываем.
+        instA.geometry.computeVertexNormals();
+        instB.geometry.computeVertexNormals();
     }
 
     /**
@@ -799,8 +836,14 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
         const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
         const margin = 2;
-        const xMin = Math.floor((center.x - tileSize * margin - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
-        const xMax = Math.floor((center.x + tileSize * margin - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
+        let xMin = Math.floor((center.x - tileSize * margin - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
+        let xMax = Math.floor((center.x + tileSize * margin - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
+        // Ограничиваем диапазон допустимыми координатами тайлов,
+        // иначе у границ мира запрашиваются несуществующие тайлы.
+        xMin = Math.max(0, xMin);
+        xMax = Math.min(maxTile, xMax);
+        if (xMin > xMax) return;
+
         for (let y = 0; y <= maxTile; y++) {
             const oz = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR) + worldGroupPos.z;
             if (oz + tileSize < center.z - tileSize * margin || oz > center.z + tileSize * margin) continue;
@@ -850,7 +893,6 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
     }
 
-    /* ---- Worker (без изменений) ---- */
     /**
      * Инициализирует воркер для вычисления высот.
      *
@@ -938,19 +980,21 @@ createStaticTileMesh(tileSize, originX, originZ, texture) {
             if (this.workerPromises.has(id)) {
                 const { resolve, reject } = this.workerPromises.get(id);
                 this.workerPromises.delete(id);
-                this.activeWorkerJobs--;
+                if (this.activeWorkerJobs > 0) this.activeWorkerJobs--;
                 this.processWorkerQueue();
                 if (error) reject(new Error(error));
                 else resolve(result);
             } else {
-                this.activeWorkerJobs--;
+                // Защита: неизвестный id — не должны декрементировать счётчик
+                // ниже нуля, но и «потерять» уже сделанный инкремент нельзя.
+                console.warn('[TileManager] Unexpected worker message id', id);
+                if (this.activeWorkerJobs > 0) this.activeWorkerJobs--;
                 this.processWorkerQueue();
             }
         };
-        this.pendingWorkerJobs = [];
-        this.activeWorkerJobs = 0;
-        this.nextJobId = 1;
-        this.workerPromises = new Map();
+        this.worker.onerror = (err) => {
+            console.error('[TileManager] Elevation worker error:', err);
+        };
     }
 
     /**

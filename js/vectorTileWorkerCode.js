@@ -52,14 +52,14 @@ function onMessage(e) {
     if (msg.type === 'process') {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
-            visibleLayers, buildings3dMinZoom, buildingEdges,
+            visibleLayers, buildingEdges,
             exclusionPolygons = [], exclusionLayers = []
         } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = processTile(
                 tile, z, x, y, tileSize, maxMerc, is3d,
-                visibleLayers, buildings3dMinZoom, buildingEdges,
+                visibleLayers, buildingEdges,
                 exclusionPolygons, exclusionLayers
             );
             const transferList = [];
@@ -89,12 +89,26 @@ function collectTransferables(obj, list) {
     }
 }
 
+// Явный allowlist ключей стиля, которые реально читаются в processTile.
+// Раньше копировались ВСЕ поля styleConfig (включая вложенные объекты-
+// подклассы, если они по какой-то причине там окажутся).
+const KNOWN_STYLE_KEYS = [
+    'color', 'opacity', 'stroke', 'width', 'dash',
+    'radius', 'height',
+    'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textShadow',
+    'textOffset', 'textAlign', 'textVerticalAlign', 'textPriority',
+    'textZoomMin', 'textZoomMax'
+];
+
 function getFeatureStyle(feature, layerName, styles) {
     const p = feature.properties || {};
     let styleConfig = styles[layerName];
     if (!styleConfig) return null;
 
-    if (typeof styleConfig === 'object' && !styleConfig.hasOwnProperty('color') && !styleConfig.hasOwnProperty('stroke')) {
+    if (typeof styleConfig === 'object' &&
+        !styleConfig.hasOwnProperty('color') &&
+        !styleConfig.hasOwnProperty('stroke') &&
+        !styleConfig.hasOwnProperty('width')) {
         const cls = p.class || p.subclass || '_default';
         const classStyle = styleConfig[cls] || styleConfig['_default'];
         if (!classStyle) return null;
@@ -102,23 +116,11 @@ function getFeatureStyle(feature, layerName, styles) {
     }
 
     const result = {};
-    if (styleConfig.color !== undefined) result.color = styleConfig.color;
-    if (styleConfig.opacity !== undefined) result.opacity = styleConfig.opacity;
-    if (styleConfig.stroke !== undefined) result.stroke = styleConfig.stroke;
-    if (styleConfig.width !== undefined) {
-        result.width = styleConfig.width;
-        result.type = 'line';
+    for (const key of KNOWN_STYLE_KEYS) {
+        if (styleConfig[key] !== undefined) {
+            result[key] = styleConfig[key];
+        }
     }
-    if (styleConfig.radius !== undefined) result.radius = styleConfig.radius;
-    if (styleConfig.height !== undefined) result.height = styleConfig.height;
-    if (styleConfig.dash !== undefined) result.dash = styleConfig.dash;
-    if (!result.type) result.type = 'fill';
-    if (result.stroke && !result.width) result.type = 'fill';
-
-    for (const [key, value] of Object.entries(styleConfig)) {
-        if (!(key in result)) result[key] = value;
-    }
-
     return result;
 }
 
@@ -300,22 +302,27 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
     const checkBoundary = halfTile > 0;
     const boundaryEps = Math.max(eps, halfTile * 1e-4);
 
-    const polygons = [];
-    let outerSign = null;
-
+    // Отбираем кольца с ненулевой площадью.
+    const validRings = [];
     for (const ring of cleaned) {
         const area = ringArea(ring);
-
-        // Почти вырожденные кольца пропускаем
         if (Math.abs(area) < 1e-9) continue;
+        validRings.push({ ring, area });
+    }
+    if (validRings.length === 0) return null;
 
-        if (outerSign === null) {
-            // Первое нормальное кольцо считаем внешним
-            outerSign = Math.sign(area);
-        }
+    // Внешним считаем кольцо того знака, которого больше.
+    // Нельзя полагаться на первое попавшееся кольцо: после клиппинга
+    // порядок может быть нарушен, и первым может идти дырка.
+    let posCount = 0, negCount = 0;
+    for (const { area } of validRings) {
+        if (area > 0) posCount++; else negCount++;
+    }
+    const outerSign = posCount >= negCount ? 1 : -1;
 
+    const polygons = [];
+    for (const { ring, area } of validRings) {
         const isOuter = Math.sign(area) === outerSign;
-
         if (isOuter) {
             polygons.push({ outer: ring, holes: [] });
         } else if (polygons.length > 0) {
@@ -332,7 +339,7 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
     const positions = [];
     const normals = [];
     const edges = [];
-    const cornerCos = Math.cos(15 * Math.PI / 180);
+    const sharpCos = Math.cos(15 * Math.PI / 180);
 
     for (const poly of polygons) {
         const outer = orientRing(poly.outer, false);
@@ -436,7 +443,7 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
 
                     if (
                         len2 > eps &&
-                        (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
+                        (dx * dx2 + dz * dz2) / (len * len2) < sharpCos
                     ) {
                         // Если угол лежит на границе тайла — вертикальное ребро
                         // в нём тоже артефакт клиппера, пропускаем.
@@ -548,6 +555,14 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
         for (let i = 0; i < line.length - 1; i++) {
             const a = line[i];
             const b = line[i + 1];
+
+            // Проверка: точка линии внутри exclusion-полигона
+            // (без неё линия, целиком лежащая внутри области, не исключалась).
+            for (const exPoly of exclusionPolygons) {
+                if (pointInPolygon(a, exPoly) || pointInPolygon(b, exPoly)) return true;
+            }
+
+            // Проверка пересечения сегментов
             for (const exPoly of exclusionPolygons) {
                 for (let j = 0; j < exPoly.length; j++) {
                     const c = exPoly[j];
@@ -561,12 +576,12 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 }
 // --- Конец функций для exclusion ---
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges, exclusionPolygons = [], exclusionLayers = []) {
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges, exclusionPolygons = [], exclusionLayers = []) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
     const halfTile = tileSize / 2;
 
-    // Вычисляем центр тайла для приведения exclusion в локальные координаты
+    // Центр тайла в мировых координатах. Используется и для exclusion, и для точек.
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
 
@@ -607,12 +622,11 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (ring.length === 0) continue;
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
-                const originX = x * tileSize - maxMerc;
-                const originZ = -maxMerc + y * tileSize;
-                const centerX = originX + tileSize / 2;
-                const centerZ = originZ + tileSize / 2;
-                const worldX = originX + (pt.x / 4095) * tileSize - centerX;
-                const worldZ = originZ + (pt.y / 4095) * tileSize - centerZ;
+
+                // Локальные координаты точки относительно центра тайла.
+                // Эквивалентно originX + (p.x/4095)*tileSize - centerX.
+                const worldX = (pt.x / 4095 - 0.5) * tileSize;
+                const worldZ = (pt.y / 4095 - 0.5) * tileSize;
 
                 // Проверка exclusion для точек
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
@@ -628,7 +642,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 }
 
                 if (textLayers.includes(name)) {
-                    const text = name === 'housenumber' 
+                    const text = name === 'housenumber'
                         ? (props.housenumber || '')
                         : (props.name || '');
                     if (!text) continue;
@@ -646,10 +660,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         textOffset: style.textOffset || [0, 0],
                         textAlign: style.textAlign || 'center',
                         textVerticalAlign: style.textVerticalAlign || 'center',
-                        priority: (style.textPriority !== undefined ? style.textPriority : (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
+                        priority: (style.textPriority ?? (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
                         zoomBounds: {
-                            min: style.textZoomMin !== undefined ? style.textZoomMin : 0,
-                            max: style.textZoomMax !== undefined ? style.textZoomMax : 24
+                            min: style.textZoomMin ?? 0,
+                            max: style.textZoomMax ?? 24
                         }
                     });
 

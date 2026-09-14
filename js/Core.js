@@ -1,8 +1,8 @@
 import {
   THREE,
   OrbitControls
-} from '../js_TP/tpb.js';  
-import { proj, DEFAULTS, getOriginZ, getVirtKey, getSrcKey, toLonLat } from './Utils.js';
+} from '../js_TP/tpb.js';
+import { proj, DEFAULTS, getOriginZ, getVirtKey, toLonLat } from './Utils.js';
 import { TileManager } from './Tiles.js';
 import { TextManager } from './TextManager.js';
 import { initUI } from './Ui.js';
@@ -164,16 +164,15 @@ export class KrbMap {
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
 
-        // --- Выделение временных объектов для уменьшения аллокаций ---
+        // --- Временные объекты для уменьшения аллокаций ---
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();
         this._tempDir = new THREE.Vector3();
         this._tempTarget = new THREE.Vector3();
-        this._tempPos = new THREE.Vector3();
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
-        // --------------------------------------------------------------
+        // --------------------------------------------------
 
         const [cx, cy] = this.view.center;
         const initialZoom = this.view.zoom;
@@ -205,8 +204,9 @@ export class KrbMap {
 
         this.tileManager = new TileManager(this);
 
-        // Кэш максимальной высоты поверхности
+        // Кэш максимальной высоты поверхности (LRU, ограничен по размеру)
         this._surfaceMaxHeightCache = new Map();
+        this._surfaceMaxHeightCacheMaxSize = 500;
         this.tileManager.onTileHeightAppliedCallbacks.push(() => {
             this._surfaceMaxHeightCache.clear();
         });
@@ -218,6 +218,7 @@ export class KrbMap {
         }
 
         this.lastVisibleUpdateTime = 0;
+        this._lastWrapCheck = 0;
         this.clock = new THREE.Clock();
 
         this.bindEvents();
@@ -412,6 +413,11 @@ export class KrbMap {
         this.intersection = new THREE.Vector3();
         this.isDragging = false;
         this.dragLocalPoint = new THREE.Vector3();
+
+        // Состояние для отсечения клика от драга.
+        this._mouseDownX = 0;
+        this._mouseDownY = 0;
+        this._mouseMoved = false;
     }
 
     /**
@@ -553,9 +559,7 @@ export class KrbMap {
             this.controls.target.copy(target);
             this.controls.update();
 
-            if (Math.floor((now - this.lastVisibleUpdateTime) / this.VISIBLE_UPDATE_THROTTLE) > 0) {
-                this.maybeUpdateVisibleTiles();
-            }
+            this.maybeUpdateVisibleTiles();
 
             if (!anyActive) {
                 this._cameraAnimation = null;
@@ -563,7 +567,7 @@ export class KrbMap {
                 this.controls.enableDamping = this._controlsDampingWasEnabled;
                 this.controls.target.copy(target);
                 this.controls.update();
-                this.maybeUpdateVisibleTiles();
+                this.maybeUpdateVisibleTiles(true);
                 return;
             }
 
@@ -630,6 +634,23 @@ export class KrbMap {
     }
 
     /**
+     * Записывает значение в LRU-кэш максимальной высоты поверхности.
+     *
+     * @private
+     * @param {string} key - Ключ тайла.
+     * @param {number} value - Максимальная высота.
+     */
+    _setSurfaceMaxHeight(key, value) {
+        // Перезапись перемещает ключ в конец (как «свежий»).
+        this._surfaceMaxHeightCache.delete(key);
+        this._surfaceMaxHeightCache.set(key, value);
+        while (this._surfaceMaxHeightCache.size > this._surfaceMaxHeightCacheMaxSize) {
+            const oldestKey = this._surfaceMaxHeightCache.keys().next().value;
+            this._surfaceMaxHeightCache.delete(oldestKey);
+        }
+    }
+
+    /**
      * Возвращает максимальную высоту поверхности в заданной мировой точке.
      * Использует кэш; инвалидация происходит при применении новых высот.
      *
@@ -663,7 +684,7 @@ export class KrbMap {
             }
             maxY += inst.mesh.position.y;
         }
-        this._surfaceMaxHeightCache.set(vk, maxY);
+        this._setSurfaceMaxHeight(vk, maxY);
         return maxY;
     }
 
@@ -815,6 +836,11 @@ export class KrbMap {
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
+
+        this._mouseDownX = e.clientX;
+        this._mouseDownY = e.clientY;
+        this._mouseMoved = false;
+
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -833,6 +859,16 @@ export class KrbMap {
      */
     onMouseMove(e) {
         if (this._cameraAnimation) return;
+
+        // Отслеживание факта сдвига для отсечения клика от драга.
+        if (!this._mouseMoved) {
+            const dx = e.clientX - this._mouseDownX;
+            const dy = e.clientY - this._mouseDownY;
+            if (dx * dx + dy * dy > 9) { // порог ~3px
+                this._mouseMoved = true;
+            }
+        }
+
         if (!this.isDragging) return;
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -996,49 +1032,50 @@ export class KrbMap {
         this.maybeUpdateVisibleTiles();
     }
 
-// В классе KrbMap, после метода onResize() добавьте:
+    /**
+     * Обрабатывает клик по карте с зажатой клавишей Shift.
+     * Определяет точку пересечения луча с видимыми тайлами,
+     * преобразует её в географические координаты и выводит их в консоль.
+     *
+     * Игнорируется, если мышь сдвинулась между mousedown и mouseup
+     * (чтобы клик не срабатывал после драга).
+     *
+     * @param {MouseEvent} e - Событие клика.
+     * @returns {void}
+     */
+    onClick(e) {
+        if (!e.shiftKey) return;
+        if (this._mouseMoved) return;
 
-/**
- * Обрабатывает клик по карте с зажатой клавишей Shift.
- * Определяет точку пересечения луча с видимыми тайлами,
- * преобразует её в географические координаты и выводит их в консоль.
- *
- * @param {MouseEvent} e - Событие клика.
- * @returns {void}
- */
-onClick(e) {
-    if (!e.shiftKey) return; // Реагируем только на Shift+Click
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        this._tempMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
 
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this._tempMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+        // Собираем все видимые меши тайлов из менеджера тайлов
+        const meshes = [];
+        for (const inst of this.tileManager.tiles.values()) {
+            if (inst.mesh && inst.mesh.visible) {
+                meshes.push(inst.mesh);
+            }
+        }
 
-    // Собираем все видимые меши тайлов из менеджера тайлов
-    const meshes = [];
-    for (const inst of this.tileManager.tiles.values()) {
-        if (inst.mesh && inst.mesh.visible) {
-            meshes.push(inst.mesh);
+        const intersects = this._tempRaycaster.intersectObjects(meshes, false);
+        if (intersects.length === 0) return;
+
+        const point = intersects[0].point;
+        const localX = point.x - this.worldGroup.position.x;
+        const localZ = point.z - this.worldGroup.position.z;
+        const [lon, lat] = toLonLat([localX, localZ]);
+
+        // Высота доступна только при наличии рельефа
+        const height = this.hasElevation ? point.y : null;
+        if (height !== null) {
+            console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
+        } else {
+            console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: N/A`);
         }
     }
-
-    const intersects = this._tempRaycaster.intersectObjects(meshes, false);
-    if (intersects.length === 0) return;
-
-    const point = intersects[0].point;
-    const localX = point.x - this.worldGroup.position.x;
-    const localZ = point.z - this.worldGroup.position.z;
-    const [lon, lat] = toLonLat([localX, localZ]);
-
-    // Высота доступна только при наличии рельефа
-    const height = this.hasElevation ? point.y : null;
-    if (height !== null) {
-        console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
-    } else {
-        console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: N/A`);
-    }
-}
-
 
     /**
      * Привязывает обработчики событий к элементам.
@@ -1055,7 +1092,7 @@ onClick(e) {
         this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
         this.renderer.domElement.addEventListener('touchend', (e) => this.onTouchEnd(e));
         this.renderer.domElement.addEventListener('touchcancel', (e) => this.onTouchEnd(e));
-this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
+        this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
     }
 
     /* ================================================================
@@ -1173,7 +1210,7 @@ this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
      */
     _wrapLongitudeIfNeeded() {
         const now = performance.now();
-        if (now - (this._lastWrapCheck || 0) < 1000) return;
+        if (now - this._lastWrapCheck < 1000) return;
         this._lastWrapCheck = now;
 
         const worldPos = this.worldGroup.position;
@@ -1253,9 +1290,7 @@ this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
             this.continuousZoom = currentZoom;
             this.targetContinuousZoom = currentZoom;
 
-            if (Math.floor(t * 10) !== Math.floor((t - 1/60) * 10)) {
-                this.maybeUpdateVisibleTiles();
-            }
+            this.maybeUpdateVisibleTiles();
 
             if (t >= 1.0) {
                 this._cameraAnimation = null;
@@ -1345,9 +1380,7 @@ this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
             this.controls.target.copy(anim.startTarget);
             this.controls.update();
 
-            if (Math.floor(t * 10) !== Math.floor((t - 1/60) * 10)) {
-                this.maybeUpdateVisibleTiles();
-            }
+            this.maybeUpdateVisibleTiles();
 
             if (t >= 1.0) {
                 this._cameraAnimation = null;
@@ -1395,15 +1428,15 @@ this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
 
         this.maybeUpdateVisibleTiles();
 
-for (const layer of this._dynamicLayers) {
-    if (layer._postUpdate) layer._postUpdate(this);
-}
+        for (const layer of this._dynamicLayers) {
+            if (layer._postUpdate) layer._postUpdate(this);
+        }
 
-if (this.textManager) {
-    this.textManager.update();
-}
+        if (this.textManager) {
+            this.textManager.update();
+        }
 
-// Рендерим сцену
-this.renderer.render(this.scene, this.camera);
+        // Рендерим сцену
+        this.renderer.render(this.scene, this.camera);
     }
 }

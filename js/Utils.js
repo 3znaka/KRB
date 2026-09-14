@@ -2,30 +2,32 @@
  * Вспомогательные утилиты для картографической библиотеки:
  * проекции, формирование ключей тайлов и глобальные константы.
  *
- *     @module utils
+ * @module utils
  */
 
 /**
  * Глобальные значения по умолчанию, используемые в библиотеке.
  *
- *     @type {Object}
- *     @property {number} R - Радиус Земли в метрах (6378137).
- *     @property {number} HEIGHT_SCALE - Масштабный коэффициент для рельефа.
- *     @property {number} SEGMENTS - Число сегментов сетки рельефа по умолчанию.
- *     @property {number} ANIM_DURATION - Длительность анимации перехода в секундах.
- *     @property {number} MIN_ZOOM - Минимальный допустимый уровень зума.
- *     @property {number} MAX_ZOOM - Максимальный допустимый уровень зума.
- *     @property {number} ZOOM_SENSITIVITY - Чувствительность управления зумом.
- *     @property {number} OBJECT_RENDER_DISTANCE_FACTOR - Множитель дальности отрисовки объектов.
- *     @property {number} MIN_RELIEF_Z - Минимальный зум, на котором используется рельеф.
- *     @property {number} MAX_RELIEF_Z - Максимальный зум, для которого есть собственные данные рельефа.
- *     @property {number} TILE_MARGIN - Запас в тайлах вокруг области видимости для основного слоя.
- *     @property {number} TILE_MARGIN_BG - Запас в тайлах для фонового слоя.
- *     @property {number} VISIBLE_UPDATE_THROTTLE - Минимальный интервал обновления видимости в мс.
- *     @property {number} MAX_WORKER_REQUESTS - Максимальное количество одновременных задач Web Worker.
- *     @property {number} BASE_ZOOM - Базовый уровень зума для начального отображения.
- *     @property {number} BASE_DISTANCE - Базовая дистанция камеры (м).
- *     @property {number} STATIC_BG_ZOOM - Уровень зума для статического фона.
+ * @type {Object}
+ * @property {number} R - Радиус Земли в метрах (6378137).
+ * @property {number} HEIGHT_SCALE - Масштабный коэффициент для рельефа.
+ * @property {number} SEGMENTS - Число сегментов сетки рельефа по умолчанию.
+ * @property {number} ANIM_DURATION - Длительность анимации перехода в секундах.
+ * @property {number} MIN_ZOOM - Минимальный допустимый уровень зума.
+ * @property {number} MAX_ZOOM - Максимальный допустимый уровень зума.
+ * @property {number} ZOOM_SENSITIVITY - Чувствительность управления зумом.
+ * @property {number} OBJECT_RENDER_DISTANCE_FACTOR - Множитель дальности отрисовки объектов.
+ * @property {number} MIN_RELIEF_Z - Минимальный зум, на котором используется рельеф.
+ * @property {number} MAX_RELIEF_Z - Максимальный зум, для которого есть собственные данные рельефа.
+ * @property {number} TILE_MARGIN - Запас в тайлах вокруг области видимости для основного слоя.
+ * @property {number} TILE_MARGIN_BG - Запас в тайлах для фонового слоя.
+ * @property {number} VISIBLE_UPDATE_THROTTLE - Минимальный интервал обновления видимости в мс.
+ * @property {number} MAX_WORKER_REQUESTS - Максимальное количество одновременных задач Web Worker.
+ * @property {number} BASE_ZOOM - Базовый уровень зума для начального отображения.
+ * @property {number} BASE_DISTANCE - Базовая дистанция камеры (м).
+ * @property {number} STATIC_BG_ZOOM - Уровень зума для статического фона.
+ * @property {number} TILE_PIXELS - Размер тайла в пикселях (информативное значение;
+ *   KrbMap использует его через this.TILE_PIXELS).
  */
 export const DEFAULTS = {
     R: 6378137,
@@ -44,27 +46,34 @@ export const DEFAULTS = {
     MAX_WORKER_REQUESTS: 8,
     BASE_ZOOM: 4,
     BASE_DISTANCE: 12_000_000,
-    STATIC_BG_ZOOM: 2
+    STATIC_BG_ZOOM: 2,
+    TILE_PIXELS: 256
 };
 
 /**
  * Утилиты для работы с проекцией Меркатора.
  *
- *     @type {Object}
- *     @property {Function} fromLonLat - Преобразует географические координаты в мировые координаты.
+ * ВАЖНО: функции этой группы используют {@link DEFAULTS.R} независимо от
+ * радиуса, переданного в KrbMap({ R }). Если карта создана с кастомным
+ * радиусом, проекция и мир могут рассинхронизироваться.
  *
- *     @example
- *     const lonLat = [37.6173, 55.7558];
- *     const worldCoord = proj.fromLonLat(lonLat);
- *     console.log(worldCoord[0], worldCoord[1]);
+ * @type {Object}
+ * @property {Function} fromLonLat - Преобразует географические координаты в мировые координаты.
+ *
+ * @example
+ * const lonLat = [37.6173, 55.7558];
+ * const worldCoord = proj.fromLonLat(lonLat);
+ * console.log(worldCoord[0], worldCoord[1]);
  */
 export const proj = {
     /**
      * Преобразует географические координаты (долготу/широту) в мировые
      * координаты на плоскости Меркатора (в метрах).
      *
-     *     @param {number[]} lonLat - Массив [долгота, широта] в градусах.
-     *     @returns {number[]} Массив [x, y] мировых координат.
+     * Возвращаемая ось Y соответствует мировой оси Z (север → отрицательные значения).
+     *
+     * @param {number[]} lonLat - Массив [долгота, широта] в градусах.
+     * @returns {number[]} Массив [x, y] мировых координат.
      */
     fromLonLat(lonLat) {
         const R = DEFAULTS.R;
@@ -80,16 +89,19 @@ export const proj = {
  * Обратное преобразование из мировых координат Меркатора в географические
  * (долготу/широту).
  *
- *     @param {number[]} coord - Массив [x, z] мировых координат (ось Z направлена на север).
- *     @returns {number[]} Массив [долгота, широта] в градусах.
+ * Входной массив — [x, z], где x — мировая координата X, z — мировая
+ * координата Z (север соответствует отрицательным значениям Z).
  *
- *     @example
- *     const worldCoord = [4187596.242, 7509138.925];
- *     const lonLat = toLonLat(worldCoord);
- *     console.log(lonLat[0], lonLat[1]);
+ * @param {number[]} coord - Массив [x, z] мировых координат.
+ * @returns {number[]} Массив [долгота, широта] в градусах.
+ *
+ * @example
+ * const worldCoord = [4187596.242, -7509138.925];
+ * const lonLat = toLonLat(worldCoord);
+ * console.log(lonLat[0], lonLat[1]);
  */
 export function toLonLat([x, z]) {
-    const R = 6378137;
+    const R = DEFAULTS.R;
     const lon = (x / R) * (180 / Math.PI);
     const lat = (2 * Math.atan(Math.exp(z / -R)) - Math.PI / 2) * (180 / Math.PI);
     return [lon, lat];
@@ -98,50 +110,57 @@ export function toLonLat([x, z]) {
 /**
  * Вычисляет координату Z начала тайла (северная граница) в мировой системе.
  *
- *     @param {number} y - Номер строки тайла (ось Y направлена на юг).
- *     @param {number} tileSize - Размер тайла в мировых единицах.
- *     @param {number} maxMercator - Максимальное значение координаты в проекции Меркатора.
- *     @returns {number} Z-координата начала тайла.
+ * @param {number} y - Номер строки тайла (ось Y направлена на юг).
+ * @param {number} tileSize - Размер тайла в мировых единицах.
+ * @param {number} maxMercator - Максимальное значение координаты в проекции Меркатора.
+ * @returns {number} Z-координата начала тайла.
  *
- *     @example
- *     const y = 0;
- *     const tileSize = 256;
- *     const maxMercator = 20037508.34;
- *     const originZ = getOriginZ(y, tileSize, maxMercator);
- *     console.log(originZ);
+ * @example
+ * const y = 0;
+ * const tileSize = 256;
+ * const maxMercator = 20037508.34;
+ * const originZ = getOriginZ(y, tileSize, maxMercator);
+ * console.log(originZ);
  */
 export function getOriginZ(y, tileSize, maxMercator) {
     return -maxMercator + y * tileSize;
 }
 
 /**
- * Формирует строковый ключ для исходного тайла (текстуры/высот).
+ * Формирует строковый ключ тайла в формате "z,x,y".
  *
- *     @param {number} z - Уровень зума.
- *     @param {number} srcX - X-координата исходного тайла.
- *     @param {number} y - Y-координата (строка).
- *     @returns {string} Ключ в формате "z,srcX,y".
+ * Используется как для исходных тайлов (URL), так и для виртуальных
+ * экземпляров на сцене — формат идентичен.
  *
- *     @example
- *     const key = getSrcKey(5, 10, 3);
- *     console.log(key);
+ * @param {number} z - Уровень зума.
+ * @param {number} x - X-координата тайла (виртуальная, не обёрнутая).
+ * @param {number} y - Y-координата (строка).
+ * @returns {string} Ключ в формате "z,x,y".
+ *
+ * @example
+ * const key = getVirtKey(5, 10, 3);
+ * console.log(key); // "5,10,3"
  */
-export function getSrcKey(z, srcX, y) {
-    return `${z},${srcX},${y}`;
+export function getVirtKey(z, x, y) {
+    return `${z},${x},${y}`;
 }
 
 /**
- * Формирует строковый ключ для виртуального тайла (экземпляра на сцене).
+ * Формирует строковый ключ для исходного тайла.
  *
- *     @param {number} z - Уровень зума.
- *     @param {number} virtX - Виртуальная X-координата (глобальная, не обёрнутая).
- *     @param {number} y - Y-координата (строка).
- *     @returns {string} Ключ в формате "z,virtX,y".
+ * @deprecated Дублирует {@link getVirtKey} — обе функции возвращают одну
+ * и ту же строку. Оставлено для обратной совместимости; в новом коде
+ * используйте getVirtKey.
  *
- *     @example
- *     const key = getVirtKey(5, 10, 3);
- *     console.log(key);
+ * @param {number} z - Уровень зума.
+ * @param {number} srcX - X-координата исходного тайла.
+ * @param {number} y - Y-координата (строка).
+ * @returns {string} Ключ в формате "z,srcX,y".
+ *
+ * @example
+ * const key = getSrcKey(5, 10, 3);
+ * console.log(key); // "5,10,3"
  */
-export function getVirtKey(z, virtX, y) {
-    return `${z},${virtX},${y}`;
+export function getSrcKey(z, srcX, y) {
+    return `${z},${srcX},${y}`;
 }

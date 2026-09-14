@@ -988,25 +988,25 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
     // Кеширование материалов
     // -------------------------------------------------------------------------
-    _getFillMaterial(styleKey) {
-        if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const opacity = parseFloat(parts[3]) * this.fillOpacity;
-const mat = new THREE.MeshBasicMaterial({
-    color,
-    side: THREE.DoubleSide,
-    transparent: opacity < 1,
-    opacity,
-    depthTest: true,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,  
-    polygonOffsetUnits: 1
-});
-        this._fillMaterialCache.set(styleKey, mat);
-        return mat;
-    }
+_getFillMaterial(styleKey) {
+    if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
+    const parts = styleKey.split(':');
+    const color = parseInt(parts[2], 16);
+    const opacity = parseFloat(parts[3]) * this.fillOpacity;
+    const mat = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.DoubleSide,
+        transparent: true,          
+        opacity,
+        depthTest: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
+    });
+    this._fillMaterialCache.set(styleKey, mat);
+    return mat;
+}
 
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);

@@ -1062,8 +1062,8 @@ _getFillMaterial(styleKey) {
                 this._map.renderer.domElement.width,
                 this._map.renderer.domElement.height
             ),
-            depthTest: true,
-            depthWrite: false
+    depthTest: false,    
+    depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;

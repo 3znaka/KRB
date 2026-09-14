@@ -292,15 +292,12 @@ export class VectorTileLayer {
             group.position.set(result.centerX, 0, result.centerZ);
         }
 
-        while (group.children.length) {
-            const child = group.children[0];
-            if (child.geometry) child.geometry.dispose();
-            if (child.material) {
-                if (child.material.map) child.material.map.dispose();
-                child.material.dispose();
-            }
-            group.remove(child);
-        }
+while (group.children.length) {
+    const child = group.children[0];
+    if (child.geometry) child.geometry.dispose();
+
+    group.remove(child);
+}
 
 for (const fill of result.fills) {
     const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
@@ -686,19 +683,15 @@ for (const fill of result.fills) {
         }
     }
 
-    _disposeTile(group) {
-        this._removeTextLabelsForGroup(group);
-        while (group.children.length) {
-            const child = group.children[0];
-            if (child.geometry) child.geometry.dispose();
-            if (child.material) {
-                if (child.material.map) child.material.map.dispose();
-                child.material.dispose();
-            }
-            group.remove(child);
-        }
-        this._rootGroup.remove(group);
+_disposeTile(group) {
+    this._removeTextLabelsForGroup(group);
+    while (group.children.length) {
+        const child = group.children[0];
+        if (child.geometry) child.geometry.dispose();
+        group.remove(child);
     }
+    this._rootGroup.remove(group);
+}
 
     _removeTile(key, group) {
         this._rootGroup.remove(group);
@@ -956,34 +949,83 @@ for (const fill of result.fills) {
         });
     }
 
-    _getVisibleTileKeys(z) {
-        const map = this._map;
-        const camera = map.camera;
+_getVisibleTileKeys(z) {
+    const map = this._map;
+    const camera = map.camera;
+    const tileSize = map.WORLD_SIZE / (1 << z);
+    const off = map.worldGroup.position;
+    const maxTile = (1 << z) - 1;
+    const numTiles = 1 << z;
+
+    // 4 луча из углов экрана — реальный фрустум вместо top-down приближения
+    const corners = [
+        [-1, -1], [1, -1], [-1, 1], [1, 1]
+    ];
+    const ray = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const hit = new THREE.Vector3();
+
+    let minX = Infinity, maxX = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    let anyHit = false;
+
+    for (const [nx, ny] of corners) {
+        ndc.set(nx, ny);
+        ray.setFromCamera(ndc, camera);
+        if (ray.ray.intersectPlane(plane, hit)) {
+            anyHit = true;
+            // переводим в локальные координаты worldGroup
+            const lx = hit.x - off.x;
+            const lz = hit.z - off.z;
+            if (lx < minX) minX = lx;
+            if (lx > maxX) maxX = lx;
+            if (lz < minZ) minZ = lz;
+            if (lz > maxZ) maxZ = lz;
+        }
+    }
+
+    // Если углы не пересекли землю (камера смотрит в небо) — падаем на старую логику
+    if (!anyHit) {
         const target = map.controls.target;
         const distance = camera.position.distanceTo(target);
-        const tileSize = map.WORLD_SIZE / (1 << z);
-        const margin = 1;
         const vFov = camera.fov * Math.PI / 180;
         const aspect = camera.aspect;
+        const margin = 1;
         const hh = distance * Math.tan(vFov / 2) * aspect + margin * tileSize;
         const hv = distance * Math.tan(vFov / 2) + margin * tileSize;
-        const off = map.worldGroup.position;
-        const minX = target.x - hh, maxX = target.x + hh;
-        const minZ = target.z - hv, maxZ = target.z + hv;
-        const maxTile = (1 << z) - 1;
-        const numTiles = 1 << z;
-        const xMin = Math.floor((minX - off.x + map.MAX_MERCATOR) / tileSize);
-        const xMax = Math.floor((maxX - off.x + map.MAX_MERCATOR) / tileSize);
-        const yMin = Math.max(0, Math.floor((minZ - off.z + map.MAX_MERCATOR) / tileSize));
-        const yMax = Math.min(maxTile, Math.floor((maxZ - off.z + map.MAX_MERCATOR) / tileSize));
-        const keys = new Set();
-        for (let y = yMin; y <= yMax; y++) {
-            for (let x = xMin; x <= xMax; x++) {
-                keys.add(`${z},${((x % numTiles) + numTiles) % numTiles},${y}`);
-            }
-        }
-        return keys;
+        minX = target.x - off.x - hh;
+        maxX = target.x - off.x + hh;
+        minZ = target.z - off.z - hv;
+        maxZ = target.z - off.z + hv;
     }
+
+    // Добавляем позицию камеры — гарантирует загрузку тайла под ногами
+    const camX = camera.position.x - off.x;
+    const camZ = camera.position.z - off.z;
+    if (camX < minX) minX = camX;
+    if (camX > maxX) maxX = camX;
+    if (camZ < minZ) minZ = camZ;
+    if (camZ > maxZ) maxZ = camZ;
+
+    // Небольшой запас, чтобы тайлы на границе экрана не мигали
+    const margin = tileSize;
+    minX -= margin; maxX += margin;
+    minZ -= margin; maxZ += margin;
+
+    const xMin = Math.floor((minX + map.MAX_MERCATOR) / tileSize);
+    const xMax = Math.floor((maxX + map.MAX_MERCATOR) / tileSize);
+    const yMin = Math.max(0, Math.floor((minZ + map.MAX_MERCATOR) / tileSize));
+    const yMax = Math.min(maxTile, Math.floor((maxZ + map.MAX_MERCATOR) / tileSize));
+
+    const keys = new Set();
+    for (let y = yMin; y <= yMax; y++) {
+        for (let x = xMin; x <= xMax; x++) {
+            keys.add(`${z},${((x % numTiles) + numTiles) % numTiles},${y}`);
+        }
+    }
+    return keys;
+}
 
     // -------------------------------------------------------------------------
     // Кеширование материалов

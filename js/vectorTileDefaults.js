@@ -208,9 +208,10 @@ export const DEFAULT_STYLES = {
  * console.log(waterOrder, buildingOrder);
  */
 export const LAYER_RENDER_ORDER = {
-    landcover: 0,
-    landuse:   1,   
+    landuse:   0, 
+    landcover: 1,
     park:      2,    
+    leisure:    2,
     water:     3,   
     waterway:  4,
     water_name: 5,

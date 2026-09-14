@@ -1115,20 +1115,34 @@ export class VectorTileLayer {
         let minZ = Infinity, maxZ = -Infinity;
         let anyHit = false;
 
-        for (const [nx, ny] of corners) {
-            ndc.set(nx, ny);
-            ray.setFromCamera(ndc, camera);
-            if (ray.ray.intersectPlane(plane, hit)) {
-                anyHit = true;
-                // переводим в локальные координаты worldGroup
-                const lx = hit.x - off.x;
-                const lz = hit.z - off.z;
-                if (lx < minX) minX = lx;
-                if (lx > maxX) maxX = lx;
-                if (lz < minZ) minZ = lz;
-                if (lz > maxZ) maxZ = lz;
-            }
-        }
+const camTargetDist = camera.position.distanceTo(map.controls.target);
+const maxLoadDist   = Math.max(camTargetDist * 4, tileSize * 32);
+const maxLoadDistSq = maxLoadDist * maxLoadDist;
+
+const MIN_RAY_Y = Math.sin(5 * Math.PI / 180);
+
+for (const [nx, ny] of corners) {
+    ndc.set(nx, ny);
+    ray.setFromCamera(ndc, camera);
+
+    // Луч почти горизонтален — пересечение ненадёжно, пропускаем.
+    if (Math.abs(ray.ray.direction.y) < MIN_RAY_Y) continue;
+
+    if (!ray.ray.intersectPlane(plane, hit)) continue;
+
+    // Слишком далеко от камеры — тоже не тянем этот тайл.
+    const dxCam = hit.x - camera.position.x;
+    const dzCam = hit.z - camera.position.z;
+    if (dxCam * dxCam + dzCam * dzCam > maxLoadDistSq) continue;
+
+    anyHit = true;
+    const lx = hit.x - off.x;
+    const lz = hit.z - off.z;
+    if (lx < minX) minX = lx;
+    if (lx > maxX) maxX = lx;
+    if (lz < minZ) minZ = lz;
+    if (lz > maxZ) maxZ = lz;
+}
 
         // Если углы не пересекли землю (камера смотрит в небо) — падаем на старую логику
         if (!anyHit) {

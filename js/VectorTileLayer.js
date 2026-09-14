@@ -302,15 +302,15 @@ export class VectorTileLayer {
             group.remove(child);
         }
 
-        for (const fill of result.fills) {
-            const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
-            const geom = new THREE.BufferGeometry();
-            geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
-            if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
-            const mesh = new THREE.Mesh(geom, mat);
-            mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
-            group.add(mesh);
-        }
+for (const fill of result.fills) {
+    const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
+    if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
+    group.add(mesh);
+}
 
         if (result.buildings.length > 0) {
             const byColor = new Map();

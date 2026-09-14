@@ -595,7 +595,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     radius,
                     color: style.color,
                     opacity: style.opacity ?? 1,
-                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + sortKey * 0.001
+                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
                 });
                 continue;
             }
@@ -638,7 +638,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                                         edgePositions: geo.edgePositions,
                                         color: style.color,
                                         stroke: style.stroke || 0xb3b3b3,
-                                        renderOrder: (LAYER_RENDER_ORDER[name] ?? 7) + sortKey * 0.001
+                                        renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
                                     });
                                     continue;
                                 }
@@ -740,7 +740,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             opacity: parseFloat(parts[3]),
-            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + avgSortKey * 0.001
+            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
         });
     }
 
@@ -755,7 +755,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
             dash: lineGroup.dash,
-            renderOrder: lineGroup.renderOrder + avgSortKey * 0.001
+            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
         });
     }
 
@@ -769,7 +769,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             width: parseFloat(parts[3]),
-            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + 1 + avgSortKey * 0.001
+            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
         });
     }
 

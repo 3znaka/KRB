@@ -2,7 +2,7 @@
 
 import {
   THREE,
-} from '../js_TP/tpb.js';  
+} from '../js_TP/tpb.js';
 
 /**
  * Менеджер текстовых подписей (лейблов) для карты.
@@ -85,6 +85,31 @@ export class TextManager {
     }
 
     /**
+     * Уничтожает менеджер: снимает таймеры у всех подписей, удаляет DOM-элементы
+     * и удаляет pane из целевого элемента карты.
+     *
+     * @returns {void}
+     */
+    dispose() {
+        for (const label of this.labels) {
+            if (label._hideTimeout) {
+                clearTimeout(label._hideTimeout);
+                label._hideTimeout = null;
+            }
+            if (label.element && label.element.parentNode) {
+                label.element.parentNode.removeChild(label.element);
+            }
+        }
+        this.labels.length = 0;
+        if (this.pane && this.pane.parentNode) {
+            this.pane.parentNode.removeChild(this.pane);
+        }
+        this.pane = null;
+        this._lastVisibleIds = null;
+        this._lastZoom = null;
+    }
+
+    /**
      * Добавляет новую подпись на карту на основе объекта-источника.
      * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
      *
@@ -111,7 +136,6 @@ export class TextManager {
     addLabel(source) {
         const el = document.createElement('div');
         el.className = 'krb-text-label';
-        // Начальные стили (whiteSpace будет переопределён ниже)
         Object.assign(el.style, {
             position: 'absolute',
             display: 'none',
@@ -124,22 +148,20 @@ export class TextManager {
             padding: '0',
             margin: '0',
             transformOrigin: '0 0',
-            left: '0',            // обязательно для transform-позиционирования
-            top: '0',             // обязательно для transform-позиционирования
-            willChange: 'transform' // подсказка браузеру для GPU-ускорения
+            left: '0',
+            top: '0',
+            willChange: 'transform'
         });
         Object.assign(el.style, source.getTextStyle());
-        // Добавляем transition для плавного появления/исчезновения
         el.style.transition = 'opacity 0.08s linear';
         el.style.opacity = '0';
 
         // Для точечных подписей включаем многострочность и применяем перенос
         if (source.getLabelType() === 'point') {
-            el.style.whiteSpace = 'pre-line';  // разрешаем перенос по \n
+            el.style.whiteSpace = 'pre-line';
             const wrapped = this._wrapPointText(source.getText(), el.style.fontSize);
             el.textContent = wrapped;
         } else {
-            // Для линейных подписей оставляем как есть (nowrap)
             el.textContent = source.getText();
         }
 
@@ -154,10 +176,18 @@ export class TextManager {
             stuck: false,
             hiddenByPriority: false,
             priority: source.getPriority ? source.getPriority() : 0,
-            allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false
+            allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
+            // Кэш значений, чтобы не дёргать layout/getComputedStyle в hot path
+            _fontSize: 12,
+            _bbox: null
         };
         this.labels.push(label);
         this._measureLabel(label);
+
+        // Состав подписей изменился — сбрасываем снимок прошлого кадра,
+        // чтобы stuck-флаги корректно пересчитались на ближайшем update().
+        this._lastVisibleIds = null;
+
         return label;
     }
 
@@ -167,7 +197,7 @@ export class TextManager {
      * @param {Object} label - Объект подписи, ранее возвращённый методом addLabel.
      */
     removeLabel(label) {
-        // Отменяем возможный таймер скрытия
+        if (!label) return;
         if (label._hideTimeout) {
             clearTimeout(label._hideTimeout);
             label._hideTimeout = null;
@@ -175,8 +205,12 @@ export class TextManager {
         const idx = this.labels.indexOf(label);
         if (idx > -1) {
             this.labels.splice(idx, 1);
-            label.element.remove();
+            if (label.element && label.element.parentNode) {
+                label.element.parentNode.removeChild(label.element);
+            }
         }
+        // Инвалидация снимка прошлого кадра.
+        this._lastVisibleIds = null;
     }
 
     /**
@@ -190,34 +224,29 @@ export class TextManager {
      * @private
      */
     _wrapPointText(text, fontSize) {
-        if (!text || text.indexOf(' ') === -1) return text; // нет пробелов или пусто
+        if (!text || text.indexOf(' ') === -1) return text;
 
         const words = text.split(/\s+/).filter(w => w.length > 0);
         if (words.length <= 1) return text;
 
         const fontPx = parseFloat(fontSize) || 12;
-        const charWidth = fontPx * 0.6;      // примерная ширина символа
-        const spaceWidth = fontPx * 0.3;     // примерная ширина пробела
+        const charWidth = fontPx * 0.6;
+        const spaceWidth = fontPx * 0.3;
 
         const wordWidths = words.map(w => w.length * charWidth);
         const totalSingleLineWidth = wordWidths.reduce((sum, w) => sum + w, 0) +
             (words.length - 1) * spaceWidth;
 
-        // Порог, при котором перенос не требуется (можно вынести в настройки)
         const maxSingleLineWidth = 160;
         if (totalSingleLineWidth <= maxSingleLineWidth) return text;
 
-        // Высота одной строки (примерно)
         const lineHeight = fontPx * 1.2;
 
-        // Желаемое количество строк для квадратной формы:
-        // totalWidth / lines ≈ lines * lineHeight  =>  lines = sqrt(totalWidth / lineHeight)
         let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
-        targetLines = Math.min(targetLines, 5); // ограничение, чтобы не делать слишком много строк
+        targetLines = Math.min(targetLines, 5);
 
         const targetLineWidth = totalSingleLineWidth / targetLines;
 
-        // Жадное заполнение строк
         const lines = [];
         let currentLine = [];
         let currentWidth = 0;
@@ -245,7 +274,6 @@ export class TextManager {
             lines.push(currentLine.join(' '));
         }
 
-        // Если в итоге получилась одна строка (например, из-за ограничений), возвращаем исходный текст
         if (lines.length <= 1) return text;
 
         return lines.join('\n');
@@ -255,6 +283,9 @@ export class TextManager {
      * Измеряет реальные ширину и высоту DOM-элемента подписи.
      * Временно делает элемент видимым (но невидимым для пользователя через visibility:hidden),
      * считывает offsetWidth/offsetHeight и возвращает исходное состояние.
+     *
+     * Дополнительно кэширует fontSize в label._fontSize, чтобы далее не вызывать
+     * window.getComputedStyle в горячем пути (каждый кадр для каждой подписи).
      *
      * @param {Object} label - Объект подписи.
      * @private
@@ -267,6 +298,9 @@ export class TextManager {
         el.style.visibility = 'hidden';
         label.width = el.offsetWidth;
         label.height = el.offsetHeight;
+        // Один layout-вызов на подпись — кэшируем fontSize.
+        const style = window.getComputedStyle(el);
+        label._fontSize = parseFloat(style.fontSize) || 12;
         el.style.display = prevDisplay;
         el.style.visibility = prevVisibility;
     }
@@ -283,70 +317,48 @@ export class TextManager {
         const el = label.element;
 
         if (visible) {
-            // Если был запланирован таймер скрытия — отменяем
             if (label._hideTimeout) {
                 clearTimeout(label._hideTimeout);
                 label._hideTimeout = null;
             }
 
-            // Если элемент скрыт (display: none) — делаем fade-in
             if (el.style.display === 'none') {
                 el.style.display = 'block';
                 el.style.opacity = '0';
-                // Принудительный reflow, чтобы transition сработал
                 void el.offsetWidth;
                 el.style.opacity = '1';
             } else {
-                // Если уже видим, просто устанавливаем opacity: 1 (transition сам анимирует при необходимости)
                 el.style.opacity = '1';
             }
         } else {
-            // Если уже скрыт — ничего не делаем
             if (el.style.display === 'none') return;
 
-            // Запускаем fade-out
             el.style.opacity = '0';
 
-            // Таймер для скрытия после завершения анимации
             if (label._hideTimeout) clearTimeout(label._hideTimeout);
             label._hideTimeout = setTimeout(() => {
                 if (parseFloat(el.style.opacity) === 0) {
                     el.style.display = 'none';
                 }
                 label._hideTimeout = null;
-            }, 80); // 80 мс ≈ 5 кадров при 60 fps
+            }, 80);
         }
     }
 
     /**
-     * Вычисляет экранные координаты четырёх углов прямоугольника подписи
-     * с учётом выравнивания, смещения и поворота.
+     * Вычисляет anchor-смещение и матрицу поворота подписи.
+     *
+     * Вынесено из _getLabelCorners и рендера, чтобы избежать дублирования
+     * расчёта (ранее формула повторялась в двух местах).
      *
      * @param {Object} label - Объект подписи.
-     * @param {number|null} [tOverride=null] - Параметр t для линейной подписи (если отличается от label.t).
-     * @returns {Object[]|null} Массив из четырёх точек {x, y} углов прямоугольника или null, если позиция не определена.
+     * @param {number} rotationDeg - Угол поворота в градусах.
+     * @returns {{dx: number, dy: number, offX: number, offY: number,
+     *            w: number, h: number, cos: number, sin: number}}
      * @private
      */
-    _getLabelCorners(label, tOverride = null) {
+    _computeAnchor(label, rotationDeg) {
         const src = label.source;
-        const el = label.element;
-
-        let scrX, scrY, rotation = 0;
-        const isLine = src.getLabelType() === 'line';
-        if (isLine) {
-            const t = tOverride !== null ? tOverride : label.t;
-            const pos = src.getScreenPositionAt(t);
-            if (!pos) return null;
-            scrX = pos.x;
-            scrY = pos.y;
-            rotation = src.getScreenAngleAt(t);
-        } else {
-            const pos = src.getScreenPosition();
-            if (!pos) return null;
-            scrX = pos.x;
-            scrY = pos.y;
-        }
-
         if (!label.width || !label.height) this._measureLabel(label);
         const w = label.width;
         const h = label.height;
@@ -365,18 +377,52 @@ export class TextManager {
         else if (vAlign === 'bottom') anchorY = h;
         else anchorY = h / 2;
 
-        const rad = rotation * Math.PI / 180;
+        const rad = rotationDeg * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
 
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
 
+        return { dx, dy, offX, offY, w, h, cos, sin };
+    }
+
+    /**
+     * Вычисляет экранные координаты четырёх углов прямоугольника подписи
+     * с учётом выравнивания, смещения и поворота.
+     *
+     * @param {Object} label - Объект подписи.
+     * @param {number|null} [tOverride=null] - Параметр t для линейной подписи (если отличается от label.t).
+     * @returns {Object[]|null} Массив из четырёх точек {x, y} углов прямоугольника или null, если позиция не определена.
+     * @private
+     */
+    _getLabelCorners(label, tOverride = null) {
+        const src = label.source;
+        const isLine = src.getLabelType() === 'line';
+
+        let scrX, scrY, rotation = 0;
+        if (isLine) {
+            const t = tOverride !== null ? tOverride : label.t;
+            const pos = src.getScreenPositionAt(t);
+            if (!pos) return null;
+            scrX = pos.x;
+            scrY = pos.y;
+            rotation = src.getScreenAngleAt(t);
+        } else {
+            // Переиспользуем кэшированный screenPos, если он есть,
+            // чтобы не вызывать getScreenPosition() лишний раз.
+            const pos = label.screenPos || src.getScreenPosition();
+            if (!pos) return null;
+            scrX = pos.x;
+            scrY = pos.y;
+        }
+
+        const a = this._computeAnchor(label, rotation);
+        const { dx, dy, offX, offY, w, h, cos, sin } = a;
+
         let top = scrY + dy + offY;
         if (isLine) {
-            const style = window.getComputedStyle(el);
-            const fontSize = parseFloat(style.fontSize) || 12;
-            top += fontSize;
+            top += label._fontSize || 12;
         }
         const left = scrX + dx + offX;
 
@@ -398,6 +444,38 @@ export class TextManager {
         }
 
         return corners;
+    }
+
+    /**
+     * Вычисляет axis-aligned bounding box для массива точек.
+     *
+     * @param {Object[]} corners - Массив точек {x, y}.
+     * @returns {{minX: number, minY: number, maxX: number, maxY: number}}
+     * @private
+     */
+    _getBBox(corners) {
+        let minX = Infinity, minY = Infinity;
+        let maxX = -Infinity, maxY = -Infinity;
+        for (const c of corners) {
+            if (c.x < minX) minX = c.x;
+            if (c.y < minY) minY = c.y;
+            if (c.x > maxX) maxX = c.x;
+            if (c.y > maxY) maxY = c.y;
+        }
+        return { minX, minY, maxX, maxY };
+    }
+
+    /**
+     * Быстрая проверка пересечения двух AABB.
+     *
+     * @param {{minX: number, minY: number, maxX: number, maxY: number}} a
+     * @param {{minX: number, minY: number, maxX: number, maxY: number}} b
+     * @returns {boolean}
+     * @private
+     */
+    _bboxOverlap(a, b) {
+        return !(a.maxX < b.minX || b.maxX < a.minX ||
+                 a.maxY < b.minY || b.maxY < a.minY);
     }
 
     /**
@@ -459,16 +537,21 @@ export class TextManager {
         const map = this.map;
         const zoom = map.continuousZoom;
 
-        // Сброс stuck при изменении состава или зума
-        const currentIds = this.labels.map(l => l.source).filter(src => {
+        // Сброс stuck при изменении состава или зума.
+        // Используем Set<source>, чтобы не материализовать промежуточный массив дважды.
+        const idSet = new Set();
+        for (const l of this.labels) {
+            const src = l.source;
             const zb = src.getTextZoomBounds();
-            return zoom >= zb.min && zoom <= zb.max && src.isVisible();
-        });
-        const idSet = new Set(currentIds);
-        if (!this._lastVisibleIds || !this._lastZoom ||
+            if (zoom >= zb.min && zoom <= zb.max && src.isVisible()) {
+                idSet.add(src);
+            }
+        }
+        if (this._lastVisibleIds === null ||
+            this._lastZoom === null ||
             this._lastZoom !== zoom ||
             this._lastVisibleIds.size !== idSet.size ||
-            [...this._lastVisibleIds].some(id => !idSet.has(id))) {
+            this._setDiffers(this._lastVisibleIds, idSet)) {
             for (const lbl of this.labels) {
                 lbl.stuck = false;
                 lbl.hiddenByPriority = false;
@@ -491,8 +574,6 @@ export class TextManager {
 
             label.priority = src.getPriority ? src.getPriority() : 0;
             label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
-
-            // сбрасываем hiddenByPriority каждый кадр — будет пересчитано ниже
             label.hiddenByPriority = false;
 
             if (src.getLabelType() === 'line') {
@@ -538,18 +619,22 @@ export class TextManager {
 
                     lbl.rect = this._getLabelCorners(lbl);
                     if (!lbl.rect) continue;
+                    const lblBBox = this._getBBox(lbl.rect);
 
                     const overlapping = [];
                     for (const other of visibleLabels) {
                         if (other === lbl) continue;
-                        if (other.rect && this._rectsIntersect(lbl.rect, other.rect)) {
+                        if (!other.rect) continue;
+                        const otherBBox = other._bbox || this._getBBox(other.rect);
+                        other._bbox = otherBBox;
+                        if (!this._bboxOverlap(lblBBox, otherBBox)) continue;
+                        if (this._rectsIntersect(lbl.rect, other.rect)) {
                             overlapping.push(other);
                         }
                     }
 
                     if (overlapping.length === 0) continue;
 
-                    // учитываем только тех, у кого приоритет >= нашего
                     const relevant = overlapping.filter(o => o.priority >= lbl.priority);
                     if (relevant.length === 0) continue;
 
@@ -606,7 +691,14 @@ export class TextManager {
                     lbl.stuck = true;
                     continue;
                 }
-                const overlapping = visibleLabels.filter(o => o !== lbl && o.rect && this._rectsIntersect(lbl.rect, o.rect));
+                const lblBBox = this._getBBox(lbl.rect);
+                const overlapping = visibleLabels.filter(o => {
+                    if (o === lbl || !o.rect) return false;
+                    const otherBBox = o._bbox || this._getBBox(o.rect);
+                    o._bbox = otherBBox;
+                    if (!this._bboxOverlap(lblBBox, otherBBox)) return false;
+                    return this._rectsIntersect(lbl.rect, o.rect);
+                });
                 const oldT = lbl.source.getLabelParameter();
                 if (overlapping.length > 0 && Math.abs(lbl.t - oldT) < stuckThreshold) {
                     lbl.stuck = true;
@@ -618,7 +710,7 @@ export class TextManager {
             // сохраняем t в источники для незастрявших
             for (const lbl of lineLabels) {
                 if (lbl.stuck) {
-                    lbl.t = lbl.source.getLabelParameter(); // откат
+                    lbl.t = lbl.source.getLabelParameter();
                 } else {
                     lbl.source.setLabelParameter(lbl.t);
                 }
@@ -634,7 +726,10 @@ export class TextManager {
             return a.source.getText().localeCompare(b.source.getText());
         });
 
+        // Раздельные массивы прямоугольников и их bbox — предварительная
+        // быстрая отбраковка по AABB до дорогой SAT-проверки.
         const placedRects = [];
+        const placedBBoxes = [];
 
         for (const lbl of sorted) {
             lbl.rect = this._getLabelCorners(lbl);
@@ -642,10 +737,13 @@ export class TextManager {
                 lbl.hiddenByPriority = true;
                 continue;
             }
+            const bbox = this._getBBox(lbl.rect);
+            lbl._bbox = bbox;
 
             let overlaps = false;
-            for (const placed of placedRects) {
-                if (this._rectsIntersect(lbl.rect, placed)) {
+            for (let i = 0; i < placedRects.length; i++) {
+                if (!this._bboxOverlap(bbox, placedBBoxes[i])) continue;
+                if (this._rectsIntersect(lbl.rect, placedRects[i])) {
                     overlaps = true;
                     break;
                 }
@@ -653,6 +751,7 @@ export class TextManager {
 
             if (!overlaps) {
                 placedRects.push(lbl.rect);
+                placedBBoxes.push(bbox);
                 lbl.hiddenByPriority = false;
             } else {
                 lbl.hiddenByPriority = true;
@@ -675,7 +774,7 @@ export class TextManager {
 
             if (src.getLabelType() === 'line') {
                 const pos = src.getScreenPositionAt(label.t);
-                if (!pos) continue; // если позиция недоступна, transform не обновляем
+                if (!pos) continue;
                 screenX = pos.x;
                 screenY = pos.y;
                 rotation = src.getScreenAngleAt(label.t);
@@ -684,38 +783,12 @@ export class TextManager {
                 screenY = label.screenPos.y;
             }
 
-            if (!label.width || !label.height) this._measureLabel(label);
-            const w = label.width;
-            const h = label.height;
-
-            const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
-            const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
-
-            let localAnchorX;
-            if (align === 'left') localAnchorX = 0;
-            else if (align === 'right') localAnchorX = w;
-            else localAnchorX = w / 2;
-
-            let localAnchorY;
-            if (vAlign === 'top') localAnchorY = 0;
-            else if (vAlign === 'bottom') localAnchorY = h;
-            else localAnchorY = h / 2;
-
-            const rad = rotation * Math.PI / 180;
-            const cos = Math.cos(rad);
-            const sin = Math.sin(rad);
-
-            const dx = -localAnchorX * cos + localAnchorY * sin;
-            const dy = -localAnchorX * sin - localAnchorY * cos;
-
-            const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+            const a = this._computeAnchor(label, rotation);
+            const { dx, dy, offX, offY } = a;
 
             let top = screenY + dy + offY;
-
             if (src.getLabelType() === 'line') {
-                const style = window.getComputedStyle(el);
-                const fontSize = parseFloat(style.fontSize) || 12;
-                top += fontSize;
+                top += label._fontSize || 12;
             }
 
             let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
@@ -724,5 +797,22 @@ export class TextManager {
             }
             el.style.transform = transform;
         }
+    }
+
+    /**
+     * Проверяет, отличаются ли два множества. Используется вместо
+     * `[...a].some(x => !b.has(x))`, чтобы не материализовать массив.
+     *
+     * @param {Set} a - Первое множество.
+     * @param {Set} b - Второе множество.
+     * @returns {boolean} True, если множества различаются.
+     * @private
+     */
+    _setDiffers(a, b) {
+        if (a.size !== b.size) return true;
+        for (const item of a) {
+            if (!b.has(item)) return true;
+        }
+        return false;
     }
 }

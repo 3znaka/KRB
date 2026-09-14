@@ -174,6 +174,19 @@ export class KrbMap {
         this._tempMouse = new THREE.Vector2();
         // --------------------------------------------------
 
+        // --- Zoom-to-cursor: якорь для привязки зума к курсору ---
+        // Идея: в момент начала зума (колесо или pinch) запоминаем,
+        // какая точка карты (в локальных координатах worldGroup) находится
+        // под курсором. В процессе зума после каждого пересчёта камеры
+        // сдвигаем worldGroup так, чтобы эта же точка карты снова оказалась
+        // под курсором. Сдвиг компенсирует расхождение между курсором
+        // и центром экрана.
+        this._zoomAnchorNdc = new THREE.Vector2();
+        this._zoomAnchorLocal = new THREE.Vector3();
+        this._zoomAnchorActive = false;
+        this._tempGroundPoint = new THREE.Vector3();
+        // --------------------------------------------------
+
         const [cx, cy] = this.view.center;
         const initialZoom = this.view.zoom;
         const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
@@ -824,6 +837,69 @@ export class KrbMap {
     }
 
     /* ================================================================
+       Zoom-to-cursor: привязка зума к положению курсора/тача
+       ================================================================ */
+
+    /**
+     * Запоминает точку карты под курсором (в локальных координатах worldGroup).
+     * Пока anchor активен, при каждом пересчёте камеры worldGroup будет
+     * сдвигаться так, чтобы эта точка оставалась под курсором.
+     *
+     * @private
+     * @param {number} nx - NDC X (от -1 до 1).
+     * @param {number} ny - NDC Y (от -1 до 1).
+     * @returns {void}
+     */
+    _setZoomAnchor(nx, ny) {
+        this._zoomAnchorNdc.set(nx, ny);
+
+        this._tempMouse.set(nx, ny);
+        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+        if (this._tempRaycaster.ray.intersectPlane(this.groundPlane, this._tempGroundPoint)) {
+            // Локальные координаты точки карты относительно worldGroup.
+            this._zoomAnchorLocal.set(
+                this._tempGroundPoint.x - this.worldGroup.position.x,
+                0,
+                this._tempGroundPoint.z - this.worldGroup.position.z
+            );
+            this._zoomAnchorActive = true;
+        } else {
+            // Курсор смотрит выше горизонта — привязка невозможна.
+            this._zoomAnchorActive = false;
+        }
+    }
+
+    /**
+     * Сдвигает worldGroup так, чтобы закреплённая точка карты оказалась
+     * ровно под курсором. Вызывается из applyZoomDistance после пересчёта
+     * позиции камеры, пока идёт зум.
+     *
+     * @private
+     * @returns {void}
+     */
+    _applyZoomAnchorCorrection() {
+        this._tempMouse.set(this._zoomAnchorNdc.x, this._zoomAnchorNdc.y);
+        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+        if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, this._tempGroundPoint)) {
+            // Курсор вышел за пределы плоскости — привязку терять не страшно,
+            // но продолжать нет смысла.
+            this._zoomAnchorActive = false;
+            return;
+        }
+
+        // Хотим: worldPointUnderCursor - worldGroup.position == anchorLocal.
+        // Отсюда: worldGroup.position = worldPointUnderCursor - anchorLocal.
+        this.worldGroup.position.x = this._tempGroundPoint.x - this._zoomAnchorLocal.x;
+        this.worldGroup.position.z = this._tempGroundPoint.z - this._zoomAnchorLocal.z;
+
+        // Когда continuousZoom догнал targetContinuousZoom, дальнейшая
+        // коррекция не нужна — снимаем anchor, чтобы не тратить CPU на raycast.
+        if (Math.abs(this.continuousZoom - this.targetContinuousZoom) < 1e-4) {
+            this._zoomAnchorActive = false;
+        }
+    }
+
+    /* ================================================================
        Ввод: мышь, колёсико, касания
        ================================================================ */
 
@@ -836,6 +912,9 @@ export class KrbMap {
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
+
+        // Драг по карте конфликтует с коррекцией зума — снимаем якорь.
+        this._zoomAnchorActive = false;
 
         this._mouseDownX = e.clientX;
         this._mouseDownY = e.clientY;
@@ -860,7 +939,6 @@ export class KrbMap {
     onMouseMove(e) {
         if (this._cameraAnimation) return;
 
-        // Отслеживание факта сдвига для отсечения клика от драга.
         if (!this._mouseMoved) {
             const dx = e.clientX - this._mouseDownX;
             const dy = e.clientY - this._mouseDownY;
@@ -894,6 +972,7 @@ export class KrbMap {
 
     /**
      * Обрабатывает прокрутку колеса мыши.
+     * Дополнительно запоминает точку под курсором, чтобы зум «прилипал» к ней.
      *
      * @param {WheelEvent} e - Событие колеса.
      * @returns {void}
@@ -902,6 +981,13 @@ export class KrbMap {
         if (this._cameraAnimation) return;
         e.preventDefault();
         const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
+
+        // Запоминаем точку под курсором до изменения зума.
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        this._setZoomAnchor(nx, ny);
+
         this.applyZoomDelta(delta);
     }
 
@@ -926,6 +1012,9 @@ export class KrbMap {
     onTouchStart(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length === 1) {
+            // Одиночный палец = драг; снимаем якорь зума, чтобы он не мешал.
+            this._zoomAnchorActive = false;
+
             const rect = this.renderer.domElement.getBoundingClientRect();
             const touch = e.touches[0];
             this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
@@ -950,6 +1039,15 @@ export class KrbMap {
             const dx = e.touches[0].clientX - e.touches[1].clientX;
             const dy = e.touches[0].clientY - e.touches[1].clientY;
             this.touchState.accumulatedLineAngle = Math.atan2(dy, dx);
+
+            // Anchor — центр между двумя пальцами на момент начала pinch.
+            // За это время зум будет привязан к этой точке карты.
+            const rect = this.renderer.domElement.getBoundingClientRect();
+            const cx = (e.touches[0].clientX + e.touches[1].clientX) * 0.5;
+            const cy = (e.touches[0].clientY + e.touches[1].clientY) * 0.5;
+            const nx = ((cx - rect.left) / rect.width) * 2 - 1;
+            const ny = -((cy - rect.top) / rect.height) * 2 + 1;
+            this._setZoomAnchor(nx, ny);
         }
     }
 
@@ -1016,6 +1114,9 @@ export class KrbMap {
             this.touchDragActive = false;
             this.syncControlsTarget();
         }
+        // При завершении pinch коррекция ещё может быть нужна до тех пор,
+        // пока continuousZoom не догонит targetContinuousZoom — снимается
+        // автоматически в _applyZoomAnchorCorrection.
     }
 
     /**
@@ -1068,7 +1169,6 @@ export class KrbMap {
         const localZ = point.z - this.worldGroup.position.z;
         const [lon, lat] = toLonLat([localX, localZ]);
 
-        // Высота доступна только при наличии рельефа
         const height = this.hasElevation ? point.y : null;
         if (height !== null) {
             console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
@@ -1101,6 +1201,8 @@ export class KrbMap {
 
     /**
      * Применяет дистанцию камеры в соответствии с текущим непрерывным зумом.
+     * После пересчёта позиции камеры, если активна привязка к курсору,
+     * сдвигает worldGroup так, чтобы точка под курсором осталась на месте.
      *
      * @returns {void}
      */
@@ -1126,6 +1228,11 @@ export class KrbMap {
             target.z + dist * Math.sin(pitch) * Math.sin(azimuth)
         );
         this.camera.lookAt(target);
+
+        // Zoom-to-cursor: сдвигаем мир, чтобы точка под курсором осталась на месте.
+        if (this._zoomAnchorActive) {
+            this._applyZoomAnchorCorrection();
+        }
     }
 
     /**

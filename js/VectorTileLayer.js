@@ -1037,8 +1037,8 @@ _getFillMaterial(styleKey) {
     const opacity = parseFloat(parts[3]) * this.fillOpacity;
     const mat = new THREE.MeshBasicMaterial({
         color,
-        side: THREE.DoubleSide,
-        transparent: true,          
+        side: THREE.DoubleSide, 
+        transparent: opacity < 1.0,      
         opacity,
         depthTest: true,
         depthWrite: false,

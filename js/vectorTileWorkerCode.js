@@ -730,48 +730,48 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         centerZ: centerZ
     };
 
-    for (const [key, triGroup] of fillsMap) {
-        const merged = mergePolygonGeometries(triGroup);
-        const parts = key.split(':');
-        const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
-        result.fills.push({
-            positions: merged.positions,
-            indices: merged.indices,
-            layerName: parts[1],
-            color: parseInt(parts[2], 16),
-            opacity: parseFloat(parts[3]),
-            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
-        });
-    }
+for (const [key, triGroup] of fillsMap) {
+    const merged = mergePolygonGeometries(triGroup);
+    const parts = key.split(':');
+    const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
+    result.fills.push({
+        positions: merged.positions,
+        indices: merged.indices,
+        layerName: parts[1],
+        color: parseInt(parts[2], 16),
+        opacity: parseFloat(parts[3]),
+        renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + Math.min(avgSortKey * 0.001, 0.4)
+    });
+}
 
-    for (const [key, lineGroup] of linesMap) {
-        const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
-        if (!positions) continue;
-        const parts = key.split(':');
-        const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
-        result.lines.push({
-            positions,
-            layerName: parts[1],
-            color: parseInt(parts[2], 16),
-            width: parseFloat(parts[3]),
-            dash: lineGroup.dash,
-            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
-        });
-    }
+for (const [key, lineGroup] of linesMap) {
+    const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
+    if (!positions) continue;
+    const parts = key.split(':');
+    const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
+    result.lines.push({
+        positions,
+        layerName: parts[1],
+        color: parseInt(parts[2], 16),
+        width: parseFloat(parts[3]),
+        dash: lineGroup.dash,
+        renderOrder: lineGroup.renderOrder + Math.min(avgSortKey * 0.001, 0.4)
+    });
+}
 
-    for (const [key, strokeGroup] of strokesMap) {
-        const positions = createLinePositions(strokeGroup.map(s => s.ring));
-        if (!positions) continue;
-        const parts = key.split(':');
-        const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
-        result.strokes.push({
-            positions,
-            layerName: parts[1],
-            color: parseInt(parts[2], 16),
-            width: parseFloat(parts[3]),
-            renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
-        });
-    }
+for (const [key, strokeGroup] of strokesMap) {
+    const positions = createLinePositions(strokeGroup.map(s => s.ring));
+    if (!positions) continue;
+    const parts = key.split(':');
+    const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
+    result.strokes.push({
+        positions,
+        layerName: parts[1],
+        color: parseInt(parts[2], 16),
+        width: parseFloat(parts[3]),
+        renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + 1 + Math.min(avgSortKey * 0.001, 0.4)
+    });
+}
 
     result.buildings = buildings.map(b => ({
         positions: b.positions,

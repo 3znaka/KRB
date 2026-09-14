@@ -215,6 +215,47 @@ function orientRing(ring, ccw) {
     return ring;
 }
 
+// ---------------------------------------------------------------------------
+// Проверки принадлежности рёбер/вершин границе тайла.
+// Нужны, чтобы не генерировать «искусственные» стенки, созданные клиппером
+// на границе тайла. Соседний тайл достроит свою часть стены, а крышки
+// (верхняя и нижняя) горизонтальны и стыкуются между тайлами без шва.
+// ---------------------------------------------------------------------------
+
+/**
+ * Возвращает true, если вершина лежит на любой из четырёх границ тайла
+ * (в локальных координатах относительно центра тайла).
+ */
+function isVertexOnTileBoundary(x, z, halfTile, eps) {
+    return Math.abs(Math.abs(x) - halfTile) < eps ||
+           Math.abs(Math.abs(z) - halfTile) < eps;
+}
+
+/**
+ * Возвращает true, если оба конца ребра лежат на одной и той же границе
+ * тайла (обе точки на x = +halfTile, или обе на x = -halfTile, или обе
+ * на z = +halfTile, или обе на z = -halfTile).
+ * Такое ребро — артефакт клиппера и не должно давать стенку.
+ */
+function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
+    const onXPlus1  = Math.abs(x1 - halfTile)  < eps;
+    const onXMinus1 = Math.abs(x1 + halfTile)  < eps;
+    const onZPlus1  = Math.abs(z1 - halfTile)  < eps;
+    const onZMinus1 = Math.abs(z1 + halfTile)  < eps;
+
+    const onXPlus2  = Math.abs(x2 - halfTile)  < eps;
+    const onXMinus2 = Math.abs(x2 + halfTile)  < eps;
+    const onZPlus2  = Math.abs(z2 - halfTile)  < eps;
+    const onZMinus2 = Math.abs(z2 + halfTile)  < eps;
+
+    if (onXPlus1  && onXPlus2)  return true;
+    if (onXMinus1 && onXMinus2) return true;
+    if (onZPlus1  && onZPlus2)  return true;
+    if (onZMinus1 && onZMinus2) return true;
+
+    return false;
+}
+
 function triangulatePolygon(outer, holes, eps) {
     if (outer.length < 3) return null;
     const cleanHoles = holes.filter(h => h.length >= 3);
@@ -250,10 +291,14 @@ function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx
     }
 }
 
-function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true) {
+function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true, halfTile = 0) {
     if (!rings || rings.length === 0 || height <= 0) return null;
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
     if (cleaned.length === 0) return null;
+
+    // Проверка границы включается только если передан размер половины тайла.
+    const checkBoundary = halfTile > 0;
+    const boundaryEps = Math.max(eps, halfTile * 1e-4);
 
     const polygons = [];
     let outerSign = null;
@@ -296,6 +341,8 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
         if (!triData) continue;
         const { vertices, indices } = triData;
 
+        // Верхняя крышка (рисуется всегда, в т.ч. на границе тайла —
+        // горизонтальна, стыкуется с соседним тайлом без шва).
         for (let i = 0; i < indices.length; i += 3) {
             const a = indices[i], b = indices[i + 1], c = indices[i + 2];
 
@@ -311,6 +358,8 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
                 0, 1, 0
             );
         }
+
+        // Нижняя крышка (только для зданий с minHeight > 0).
         if (minHeight > 0) {
             for (let i = 0; i < indices.length; i += 3) {
                 const a = indices[i], b = indices[i + 1], c = indices[i + 2];
@@ -329,6 +378,7 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
             }
         }
 
+        // Стенки по периметру (outer + holes).
         for (const ring of [outer, ...holes]) {
             const n = ring.length;
 
@@ -344,31 +394,41 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
                 const nx = dz / len;
                 const nz = -dx / len;
 
-                // Первый треугольник стенки
-                pushTriangle(
-                    positions, normals,
-                    p0.x, minHeight, p0.z,
-                    p1.x, minHeight, p1.z,
-                    p1.x, height, p1.z,
-                    nx, 0, nz
-                );
+                // Ребро лежит целиком на границе тайла → это шов клиппера.
+                // Соседний тайл достроит свою часть. Стенку не генерируем.
+                const onBoundary = checkBoundary &&
+                    isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
 
-                // Второй треугольник стенки
-                pushTriangle(
-                    positions, normals,
-                    p0.x, minHeight, p0.z,
-                    p1.x, height, p1.z,
-                    p0.x, height, p0.z,
-                    nx, 0, nz
-                );
+                if (!onBoundary) {
+                    // Первый треугольник стенки
+                    pushTriangle(
+                        positions, normals,
+                        p0.x, minHeight, p0.z,
+                        p1.x, minHeight, p1.z,
+                        p1.x, height, p1.z,
+                        nx, 0, nz
+                    );
+
+                    // Второй треугольник стенки
+                    pushTriangle(
+                        positions, normals,
+                        p0.x, minHeight, p0.z,
+                        p1.x, height, p1.z,
+                        p0.x, height, p0.z,
+                        nx, 0, nz
+                    );
+                }
 
                 if (includeEdges) {
-                    // Рёбра оставляем без изменений
-                    edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-                    if (minHeight > 0) {
-                        edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+                    // Горизонтальные рёбра по верхнему/нижнему контуру.
+                    if (!onBoundary) {
+                        edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
+                        if (minHeight > 0) {
+                            edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
+                        }
                     }
 
+                    // Вертикальное ребро в остром углу.
                     const p2 = ring[(i + 2) % n];
                     const dx2 = p2.x - p1.x;
                     const dz2 = p2.z - p1.z;
@@ -378,7 +438,13 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true)
                         len2 > eps &&
                         (dx * dx2 + dz * dz2) / (len * len2) < Math.cos(15 * Math.PI / 180)
                     ) {
-                        edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+                        // Если угол лежит на границе тайла — вертикальное ребро
+                        // в нём тоже артефакт клиппера, пропускаем.
+                        const cornerOnBoundary = checkBoundary &&
+                            isVertexOnTileBoundary(p1.x, p1.z, halfTile, boundaryEps);
+                        if (!cornerOnBoundary) {
+                            edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
+                        }
                     }
                 }
             }
@@ -498,6 +564,7 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildings3dMinZoom, buildingEdges, exclusionPolygons = [], exclusionLayers = []) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
+    const halfTile = tileSize / 2;
 
     // Вычисляем центр тайла для приведения exclusion в локальные координаты
     const centerX = x * tileSize - maxMerc + tileSize / 2;
@@ -601,7 +668,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 continue;
             }
 
-  const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
+            const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
 
             if (geomType === 3) {
                 // Проверка exclusion для полигонов
@@ -631,7 +698,9 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             const isPart = props['building:part'] === 'yes';
                             const isSimpleBuilding = props['building:part'] === undefined;
                             if (is3d && (isPart || isSimpleBuilding)) {
-                                const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges);
+                                // Передаём halfTile, чтобы воркер мог отбросить
+                                // стенки и рёбра, лежащие на границе тайла.
+                                const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
                                 if (geo) {
                                     buildings.push({
                                         positions: geo.positions,
@@ -731,48 +800,48 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         centerZ: centerZ
     };
 
-for (const [key, triGroup] of fillsMap) {
-    const merged = mergePolygonGeometries(triGroup);
-    const parts = key.split(':');
-    const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
-    result.fills.push({
-        positions: merged.positions,
-        indices: merged.indices,
-        layerName: parts[1],
-        color: parseInt(parts[2], 16),
-        opacity: parseFloat(parts[3]),
-        renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + Math.min(avgSortKey * 0.001, 0.4)
-    });
-}
+    for (const [key, triGroup] of fillsMap) {
+        const merged = mergePolygonGeometries(triGroup);
+        const parts = key.split(':');
+        const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
+        result.fills.push({
+            positions: merged.positions,
+            indices: merged.indices,
+            layerName: parts[1],
+            color: parseInt(parts[2], 16),
+            opacity: parseFloat(parts[3]),
+            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + Math.min(avgSortKey * 0.001, 0.4)
+        });
+    }
 
-for (const [key, lineGroup] of linesMap) {
-    const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
-    if (!positions) continue;
-    const parts = key.split(':');
-    const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
-    result.lines.push({
-        positions,
-        layerName: parts[1],
-        color: parseInt(parts[2], 16),
-        width: parseFloat(parts[3]),
-        dash: lineGroup.dash,
-        renderOrder: lineGroup.renderOrder + Math.min(avgSortKey * 0.001, 0.4)
-    });
-}
+    for (const [key, lineGroup] of linesMap) {
+        const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
+        if (!positions) continue;
+        const parts = key.split(':');
+        const avgSortKey = lineGroup.rings.reduce((sum, r) => sum + (r.sortKey || 0), 0) / lineGroup.rings.length;
+        result.lines.push({
+            positions,
+            layerName: parts[1],
+            color: parseInt(parts[2], 16),
+            width: parseFloat(parts[3]),
+            dash: lineGroup.dash,
+            renderOrder: lineGroup.renderOrder + Math.min(avgSortKey * 0.001, 0.4)
+        });
+    }
 
-for (const [key, strokeGroup] of strokesMap) {
-    const positions = createLinePositions(strokeGroup.map(s => s.ring));
-    if (!positions) continue;
-    const parts = key.split(':');
-    const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
-    result.strokes.push({
-        positions,
-        layerName: parts[1],
-        color: parseInt(parts[2], 16),
-        width: parseFloat(parts[3]),
-        renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + 1 + Math.min(avgSortKey * 0.001, 0.4)
-    });
-}
+    for (const [key, strokeGroup] of strokesMap) {
+        const positions = createLinePositions(strokeGroup.map(s => s.ring));
+        if (!positions) continue;
+        const parts = key.split(':');
+        const avgSortKey = strokeGroup.reduce((sum, s) => sum + (s.sortKey || 0), 0) / strokeGroup.length;
+        result.strokes.push({
+            positions,
+            layerName: parts[1],
+            color: parseInt(parts[2], 16),
+            width: parseFloat(parts[3]),
+            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + 1 + Math.min(avgSortKey * 0.001, 0.4)
+        });
+    }
 
     result.buildings = buildings.map(b => ({
         positions: b.positions,

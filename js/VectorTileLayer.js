@@ -289,7 +289,7 @@ export class VectorTileLayer {
 
         // Устанавливаем позицию группы в абсолютный центр тайла
         if (result.centerX !== undefined && result.centerZ !== undefined) {
-            group.position.set(result.centerX, 0, result.centerZ);
+            group.position.set(result.centerX, this._verticalOffset ?? 0, result.centerZ);
         }
 
 while (group.children.length) {

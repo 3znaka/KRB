@@ -84,6 +84,15 @@ class VectorPointLabelSource {
     }
 }
 
+export const VECTOR_TILE_RENDER_ORDER = {
+    FILL:     10,
+    LINE:     20,
+    STROKE:   25,
+    POINT:    30,
+    BUILDING: 50,
+    EDGE:     51
+};
+
 // -----------------------------------------------------------------------------
 // Основной класс
 // -----------------------------------------------------------------------------
@@ -299,7 +308,7 @@ export class VectorTileLayer {
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
-            mesh.renderOrder = fill.renderOrder;
+            mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
 
@@ -318,14 +327,14 @@ export class VectorTileLayer {
                 geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
                 geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
                 const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color));
-                mesh.renderOrder = 50;
+                mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
                 group.add(mesh);
 
                 if (this.buildingEdges && g.edg.length) {
                     const eGeom = new THREE.BufferGeometry();
                     eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
                     const lines = new THREE.LineSegments(eGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555));
-                    lines.renderOrder = 51;
+                    lines.renderOrder = VECTOR_TILE_RENDER_ORDER.EDGE;
                     group.add(lines);
                 }
             }
@@ -357,7 +366,7 @@ export class VectorTileLayer {
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
             mesh.position.set(pt.x, 0, pt.z);
-            mesh.renderOrder = pt.renderOrder;
+            mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
 
@@ -984,14 +993,17 @@ export class VectorTileLayer {
         const parts = styleKey.split(':');
         const color = parseInt(parts[2], 16);
         const opacity = parseFloat(parts[3]) * this.fillOpacity;
-        const mat = new THREE.MeshBasicMaterial({
-            color,
-            side: THREE.DoubleSide,
-            transparent: opacity < 1,
-            opacity,
-            depthTest: true,
-            depthWrite: false
-        });
+const mat = new THREE.MeshBasicMaterial({
+    color,
+    side: THREE.DoubleSide,
+    transparent: opacity < 1,
+    opacity,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,  
+    polygonOffsetUnits: 1
+});
         this._fillMaterialCache.set(styleKey, mat);
         return mat;
     }

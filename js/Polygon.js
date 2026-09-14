@@ -41,6 +41,13 @@ import {
 import { Layer } from './Layers.js';
 import earcut from '../js_TP/earcut.js';
 
+export const POLYGON_RENDER_ORDER = {
+    BOTTOM: 900,
+    SIDE:   901,
+    TOP:    902,
+    STROKE: 903
+};
+
 /**
  * Вычисляет минимальное расстояние от точки до отрезка.
  *
@@ -482,28 +489,38 @@ export class Polygon {
      * @returns {THREE.Material} Материал поверхности.
      * @private
      */
-    _createSurfaceMaterial() {
-        if (this._extruded) {
-            return new THREE.MeshStandardMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: this._fillOpacity < 1,
-                side: THREE.DoubleSide,
-                roughness: this._roughness,
-                metalness: this._metalness,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
-        }
-        return new THREE.MeshBasicMaterial({
+_createSurfaceMaterial() {
+    const forceTransparent = true;
+
+    if (this._extruded) {
+        return new THREE.MeshStandardMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
-            transparent: this._fillOpacity < 1,
+            transparent: forceTransparent,
             side: THREE.DoubleSide,
+            roughness: this._roughness,
+            metalness: this._metalness,
             depthTest: this._depthTest,
-            depthWrite: this._depthWrite
+            depthWrite: this._depthWrite,
+            // Сдвигаем polygon глубже/ближе к камере, чтобы при extruded=true
+            // низ/верх не z-fight'ил с копланарной геометрией тайлов.
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1
         });
     }
+    return new THREE.MeshBasicMaterial({
+        color: this._fillColor,
+        opacity: this._fillOpacity,
+        transparent: forceTransparent,
+        side: THREE.DoubleSide,
+        depthTest: this._depthTest,
+        depthWrite: this._depthWrite,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+    });
+}
 
     /**
      * Применяет флаги теней к мешу, если полигон экструдированный.
@@ -665,10 +682,8 @@ export class Polygon {
         const topMaterial = this._createSurfaceMaterial();
 
         const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-        topMesh.renderOrder = 998;
-        // Отключаем frustum culling у крышки: bounding sphere пересчитывается
-        // при каждом _updateHeights, но между апдейтами позиции успевают «уехать»
-        // по Y, и без этого three.js может отсечь крышку.
+topMesh.renderOrder    = POLYGON_RENDER_ORDER.TOP;
+
         topMesh.frustumCulled = false;
         this._applyShadowFlags(topMesh);
         this._fillMesh = topMesh;
@@ -700,7 +715,7 @@ export class Polygon {
             const bottomMaterial = this._createSurfaceMaterial();
 
             const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-            bottomMesh.renderOrder = 996; // ниже стенок и крышки
+bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
             bottomMesh.frustumCulled = false;
             this._applyShadowFlags(bottomMesh);
             this._bottomMesh = bottomMesh;
@@ -758,7 +773,7 @@ export class Polygon {
             const sideMaterial = this._createSurfaceMaterial();
 
             const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-            sideMesh.renderOrder = 997; // между нижней и верхней крышкой
+sideMesh.renderOrder   = POLYGON_RENDER_ORDER.SIDE;
             sideMesh.frustumCulled = false;
             this._applyShadowFlags(sideMesh);
             this._sideMesh = sideMesh;
@@ -796,15 +811,16 @@ export class Polygon {
             }
 
             const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
-            const lineMaterial = new THREE.LineBasicMaterial({
-                color: this._strokeColor,
-                opacity: this._strokeOpacity,
-                transparent: this._strokeOpacity < 1,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite
-            });
+
+const lineMaterial = new THREE.LineBasicMaterial({
+    color: this._strokeColor,
+    opacity: this._strokeOpacity,
+    transparent: true,             // ← было: this._strokeOpacity < 1
+    depthTest: this._depthTest,
+    depthWrite: this._depthWrite
+});
             const line = new THREE.Line(lineGeometry, lineMaterial);
-            line.renderOrder = 999;
+line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._strokeGeometry = lineGeometry;
             this._strokeMaterial = lineMaterial;
@@ -818,17 +834,18 @@ export class Polygon {
             }
         } else {
             this._strokeGeometry = new LineGeometry();
-            this._strokeMaterial = new LineMaterial({
-                color: this._strokeColor,
-                linewidth: this._strokeWidth,
-                opacity: this._strokeOpacity,
-                transparent: this._strokeOpacity < 1,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite,
-                resolution: new THREE.Vector2(canvas.width, canvas.height)
-            });
+
+this._strokeMaterial = new LineMaterial({
+    color: this._strokeColor,
+    linewidth: this._strokeWidth,
+    opacity: this._strokeOpacity,
+    transparent: true,           
+    depthTest: this._depthTest,
+    depthWrite: this._depthWrite,
+    resolution: new THREE.Vector2(canvas.width, canvas.height)
+});
             const line = new Line2(this._strokeGeometry, this._strokeMaterial);
-            line.renderOrder = 999;
+line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._group.add(line);
 

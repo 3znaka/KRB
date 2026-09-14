@@ -20,6 +20,9 @@ import { THREE } from '../js_TP/tpb.js';
  * 1. Скрытие тултипа при клике (или касании) вне его области.
  * 2. Автоматическое скрытие, если переданный HTML не содержит видимого содержимого.
  *
+ * Цикл обновления позиции запускается только при наличии активного объекта
+ * и останавливается при hide() — это экономит CPU, когда тултип скрыт.
+ *
  * @example
  * // В конструкторе карты:
  * this.popupManager = new PopupManager(this);
@@ -29,24 +32,40 @@ import { THREE } from '../js_TP/tpb.js';
  *
  * // Скрыть:
  * map.popupManager.hide();
+ *
+ * // С кликабельным содержимым:
+ * new PopupManager(map, { pointerEvents: 'auto' });
  */
 export class PopupManager {
     /**
      * Создаёт экземпляр PopupManager.
      *
      * @param {Object} map - Экземпляр карты (KrbMap).
+     * @param {Object} [options] - Опции менеджера.
+     * @param {'none'|'auto'} [options.pointerEvents='none'] - Значение CSS pointer-events
+     *   для тултипа. 'auto' имеет смысл, если содержимое должно быть кликабельным
+     *   (ссылки, кнопки); при этом клик по тултипу не будет закрывать его.
+     * @param {number} [options.zIndex=1200] - z-index тултипа.
      */
-    constructor(map) {
+    constructor(map, options = {}) {
         /** @private */ this._map = map;
         /** @private */ this._activeObject = null;   // объект, к которому привязан текущий тултип
-        /** @private */ this._animationFrameId = null; // id requestAnimationFrame
+        /** @private */ this._animationFrameId = null;
         /** @private */ this._tooltipElement = null;
+        /** @private */ this._isLoopRunning = false;
 
-        // Привязанные обработчики для возможности удаления
+        // Кэш последней позиции — чтобы не трогать DOM, если ничего не изменилось.
+        /** @private */ this._lastX = NaN;
+        /** @private */ this._lastY = NaN;
+        /** @private */ this._lastHtml = null;
+
+        /** @private */ this._pointerEvents = options.pointerEvents ?? 'none';
+        /** @private */ this._zIndex = String(options.zIndex ?? 1200);
+
+        // Привязанный обработчик для возможности удаления.
         /** @private */ this._onDocumentPointerDown = null;
 
         this._createTooltipElement();
-        this._startUpdateLoop();
         this._bindOutsideClickHandlers();
     }
 
@@ -66,30 +85,20 @@ export class PopupManager {
             boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
             padding: '8px 12px',
             fontSize: '14px',
-            pointerEvents: 'none',     
+            pointerEvents: this._pointerEvents,
+            // translate3d задаётся отдельно в _updatePosition() — здесь только
+            // общий сдвиг, чтобы попап «висел» над точкой.
             transform: 'translate(-50%, -100%)',
             display: 'none',
-            zIndex: '1200',
-            maxWidth: '300px'
+            zIndex: this._zIndex,
+            maxWidth: '300px',
+            // Явно фиксируем начало координат, чтобы translate3d работал предсказуемо.
+            left: '0',
+            top: '0',
+            willChange: 'transform'
         });
         this._map.targetElement.appendChild(el);
         this._tooltipElement = el;
-    }
-
-    /**
-     * Запускает цикл обновления позиции тултипа.
-     * Каждый кадр проверяет активный объект и обновляет координаты.
-     *
-     * @private
-     */
-    _startUpdateLoop() {
-        const tick = () => {
-            if (this._activeObject) {
-                this._updatePosition();
-            }
-            this._animationFrameId = requestAnimationFrame(tick);
-        };
-        this._animationFrameId = requestAnimationFrame(tick);
     }
 
     /**
@@ -130,8 +139,46 @@ export class PopupManager {
     }
 
     /**
+     * Запускает цикл обновления позиции. Идемпотентен: повторный вызов
+     * при активном цикле ничего не делает.
+     *
+     * @private
+     */
+    _startLoop() {
+        if (this._isLoopRunning) return;
+        this._isLoopRunning = true;
+
+        const tick = () => {
+            if (!this._isLoopRunning) return;
+            if (this._activeObject) {
+                this._updatePosition();
+            } else {
+                // Нет активного объекта — дальше крутить цикл нет смысла.
+                this._stopLoop();
+                return;
+            }
+            this._animationFrameId = requestAnimationFrame(tick);
+        };
+        this._animationFrameId = requestAnimationFrame(tick);
+    }
+
+    /**
+     * Останавливает цикл обновления позиции, если он запущен.
+     *
+     * @private
+     */
+    _stopLoop() {
+        this._isLoopRunning = false;
+        if (this._animationFrameId !== null) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = null;
+        }
+    }
+
+    /**
      * Обновляет позицию тултипа на основе экранных координат активного объекта.
-     * Если объект невидим или координаты недоступны, скрывает тултип (но не сбрасывает активный объект).
+     * Если объект невидим или координаты недоступны, тултип временно прячется
+     * (без сброса активного объекта — он может снова стать видимым).
      *
      * @private
      */
@@ -141,13 +188,26 @@ export class PopupManager {
             return;
         }
         const screenPos = this._activeObject.getScreenPosition?.();
-        if (!screenPos || (typeof screenPos.x !== 'number' || typeof screenPos.y !== 'number')) {
+        if (!screenPos || typeof screenPos.x !== 'number' || typeof screenPos.y !== 'number') {
             this._hide();
             return;
         }
-        this._tooltipElement.style.display = 'block';
-        this._tooltipElement.style.left = screenPos.x + 'px';
-        this._tooltipElement.style.top = screenPos.y + 'px';
+
+        // Не трогаем DOM, если позиция не изменилась (типично для статичной карты).
+        if (screenPos.x === this._lastX && screenPos.y === this._lastY) {
+            if (this._tooltipElement.style.display !== 'block') {
+                this._tooltipElement.style.display = 'block';
+            }
+            return;
+        }
+        this._lastX = screenPos.x;
+        this._lastY = screenPos.y;
+
+        const el = this._tooltipElement;
+        if (el.style.display !== 'block') el.style.display = 'block';
+        // translate3d + центрирующий translate(-50%, -100%) — оба в transform.
+        el.style.transform =
+            `translate3d(${screenPos.x}px, ${screenPos.y}px, 0) translate(-50%, -100%)`;
     }
 
     /**
@@ -166,18 +226,31 @@ export class PopupManager {
         }
 
         this._activeObject = object;
-        this._tooltipElement.innerHTML = html;
 
-        // Проверяем, есть ли видимое содержимое после установки innerHTML.
-        // Если нет (например, пустая строка или только пробелы), скрываем тултип.
-        if (!this._tooltipElement.textContent || this._tooltipElement.textContent.trim() === '') {
-            this.hide();
-            return;
+        // innerHTML перезаписываем только если он реально изменился —
+        // иначе лишний parse-HTML и вызовы textContent.
+        if (this._lastHtml !== html) {
+            this._tooltipElement.innerHTML = html;
+            this._lastHtml = html;
+
+            // Проверяем, есть ли видимое содержимое после установки innerHTML.
+            if (!this._tooltipElement.textContent ||
+                this._tooltipElement.textContent.trim() === '') {
+                this.hide();
+                return;
+            }
         }
 
+        // Сброс кэша позиции, чтобы первый _updatePosition гарантированно
+        // применил transform (даже если координаты совпали со «старыми»).
+        this._lastX = NaN;
+        this._lastY = NaN;
+
         this._tooltipElement.style.display = 'block';
-        // Немедленно обновляем позицию, чтобы не ждать следующего кадра
+        // Немедленно обновляем позицию, чтобы не ждать следующего кадра.
         this._updatePosition();
+
+        this._startLoop();
     }
 
     /**
@@ -189,46 +262,54 @@ export class PopupManager {
      */
     hide() {
         if (this._activeObject && typeof this._activeObject._onPopupHide === 'function') {
-            this._activeObject._onPopupHide();
+            try {
+                this._activeObject._onPopupHide();
+            } catch (e) {
+                console.warn('[PopupManager] _onPopupHide threw:', e);
+            }
         }
         this._activeObject = null;
         this._hide();
+        this._stopLoop();
     }
 
     /**
-     * Скрывает DOM-элемент тултипа (без сброса активного объекта).
+     * Скрывает DOM-элемент тултипа, не сбрасывая активный объект
+     * и не останавливая цикл обновления. Используется внутри _updatePosition(),
+     * когда объект временно невидим (например, за кадром).
      *
      * @private
      */
     _hide() {
-        if (this._tooltipElement) {
+        if (this._tooltipElement && this._tooltipElement.style.display !== 'none') {
             this._tooltipElement.style.display = 'none';
         }
     }
 
     /**
      * Уничтожает менеджер: останавливает цикл, удаляет обработчики,
-     * удаляет DOM-элемент и очищает ссылки.
+     * удаляет DOM-элемент и очищает ссылки. Идемпотентен.
      *
      * @returns {void}
      */
     destroy() {
-        if (this._animationFrameId) {
-            cancelAnimationFrame(this._animationFrameId);
-            this._animationFrameId = null;
-        }
+        this._stopLoop();
 
-        // Удаляем обработчик pointerdown, если он был установлен
         if (this._onDocumentPointerDown) {
             document.removeEventListener('pointerdown', this._onDocumentPointerDown);
             this._onDocumentPointerDown = null;
         }
 
         if (this._tooltipElement) {
-            this._tooltipElement.remove();
+            if (this._tooltipElement.parentNode) {
+                this._tooltipElement.parentNode.removeChild(this._tooltipElement);
+            }
             this._tooltipElement = null;
         }
         this._activeObject = null;
         this._map = null;
+        this._lastHtml = null;
+        this._lastX = NaN;
+        this._lastY = NaN;
     }
 }

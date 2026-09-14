@@ -2,6 +2,13 @@
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалами и подписями.
+ *
+ * ВАЖНО: Three.js не наследует `Group.renderOrder` по дереву сцены —
+ * каждая промежуточная Group при обходе сбрасывает унаследованный
+ * `groupOrder` в своё значение `renderOrder`. Все группы векторного слоя
+ * явно помечаются большим `renderOrder` (`_tileGroupRenderOrder`),
+ * иначе линии/заливки получат `groupOrder = 0` и будут перекрыты
+ * растровыми тайлами (у которых `renderOrder = z`, 18+).
  */
 
 import {
@@ -118,6 +125,8 @@ export const VECTOR_TILE_RENDER_ORDER = {
  * @property {number} [options.labelMaxPerTileClose=20] - Максимум подписей на тайл при близком зуме.
  * @property {number} [options.labelCullMargin=50] - Отступ за границами экрана для отсечения подписей.
  * @property {number} [options.tileDataCacheMaxSize=200] - Максимум сырых PBF-буферов в LRU-кэше.
+ * @property {number} [options.tileGroupRenderOrder=1000000] - renderOrder для tileGroup
+ *   (КРИТИЧНО, см. описание модуля). Только если понимаешь, что делаешь.
  * @property {boolean} [options.debug=false] - Режим отладки.
  * @property {Object} [options.styles={}] - Пользовательские стили, объединяются с DEFAULT_STYLES.
  * @property {Array.<string>} [options.workerScripts=['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js']] - Массив из двух URL скриптов для воркера.
@@ -175,6 +184,24 @@ export class VectorTileLayer {
         this._debug = options.debug ?? false;
 
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
+
+        // =====================================================================
+        // КРИТИЧНО: renderOrder для Group.
+        //
+        // Three.js при обходе сцены НЕ наследует groupOrder через промежуточные
+        // Group — каждая Group сбрасывает унаследованный groupOrder в своё
+        // значение renderOrder. Если у tileGroup (промежуточной) renderOrder
+        // остаётся 0 (по умолчанию), все её дети (Line2, Mesh) получают
+        // groupOrder = 0 — ту же категорию, что и растровые тайлы
+        // (у них renderOrder = z = 18+). Тогда painterSortStable сравнивает
+        // только их собственные renderOrder: line (15) < raster (18) →
+        // растровый тайл рисуется ПОСЛЕ и перекрывает линии.
+        //
+        // Выставление большого renderOrder на tileGroup сдвигает groupOrder
+        // всех её детей выше растра, и они рисуются поверх независимо от
+        // их индивидуального renderOrder.
+        // =====================================================================
+        this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
 
         this._map = null;
         this._rootGroup = new THREE.Group();
@@ -330,6 +357,21 @@ export class VectorTileLayer {
      */
     _buildGroupFromWorkerResult(group, result) {
         this._removeTextLabelsForGroup(group);
+
+        // =====================================================================
+        // КРИТИЧНО: renderOrder для tileGroup.
+        //
+        // Three.js при обходе сцены НЕ наследует groupOrder через промежуточные
+        // Group — каждая Group сбрасывает унаследованный groupOrder в своё
+        // значение renderOrder. Если здесь НЕ выставить renderOrder, он
+        // останется 0 (по умолчанию), и все дети этой группы получат
+        // groupOrder = 0 — тот же, что у растровых тайлов (renderOrder = z = 18+).
+        // В результате растр рисуется ПОСЛЕ линий и перекрывает их.
+        //
+        // НЕ УДАЛЯТЬ. Отсутствие этой строки = линии не видны ближе к камере
+        // (там, где растр перекрывает периферию). См. описание модуля.
+        // =====================================================================
+        group.renderOrder = this._tileGroupRenderOrder;
 
         if (result.centerX !== undefined && result.centerZ !== undefined) {
             group.position.set(result.centerX, 0, result.centerZ);
@@ -644,6 +686,13 @@ export class VectorTileLayer {
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
+
+        // См. комментарий у _tileGroupRenderOrder. Здесь выставляем renderOrder
+        // на корневую группу слоя. Само по себе это ничего не даёт (промежуточные
+        // tileGroup всё равно сбросят groupOrder), но пусть будет — на случай,
+        // если в будущем дерево упростится и tileGroup станет прямой дочерью
+        // _rootGroup без посредников.
+        this._rootGroup.renderOrder = this._tileGroupRenderOrder;
 
         map.worldGroup.add(this._rootGroup);
         if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);

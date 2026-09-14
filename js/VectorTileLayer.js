@@ -284,13 +284,14 @@ export class VectorTileLayer {
         pending.resolve(group);
     }
 
-    _buildGroupFromWorkerResult(group, result) {
-        this._removeTextLabelsForGroup(group);
+_buildGroupFromWorkerResult(group, result) {
+    this._removeTextLabelsForGroup(group);
 
-        // Устанавливаем позицию группы в абсолютный центр тайла
-        if (result.centerX !== undefined && result.centerZ !== undefined) {
-            group.position.set(result.centerX, this._verticalOffset ?? 0, result.centerZ);
-        }
+    group.renderOrder = 1_000_000;
+
+    if (result.centerX !== undefined && result.centerZ !== undefined) {
+        group.position.set(result.centerX, this._verticalOffset ?? 0, result.centerZ);
+    }
 
 while (group.children.length) {
     const child = group.children[0];

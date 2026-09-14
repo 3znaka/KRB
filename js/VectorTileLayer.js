@@ -618,9 +618,11 @@ for (const fill of result.fills) {
      */
     addTo(map) {
         if (this._map) this.removeFromMap();
-        this._map = map;
-        map.worldGroup.add(this._rootGroup);
-        if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
+    this._map = map;
+    this._rootGroup.renderOrder = 1_000_000;
+
+    map.worldGroup.add(this._rootGroup);
+    if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
 
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
@@ -1062,7 +1064,7 @@ _getFillMaterial(styleKey) {
                 this._map.renderer.domElement.width,
                 this._map.renderer.domElement.height
             ),
-    depthTest: false,    
+    depthTest: true,    
     depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {

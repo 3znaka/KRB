@@ -122,7 +122,8 @@ function getFeatureStyle(feature, layerName, styles) {
     return result;
 }
 
-function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
+function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine = false) {
+    const minLen = isLine ? 2 : 3;
     const originZ = -maxMerc + ySlippy * tileSize;
     const originX = xSlippy * tileSize - maxMerc;
     const centerX = originX + tileSize / 2;
@@ -130,7 +131,7 @@ function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc) {
     const geom = feature.loadGeometry();
     return geom
         .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
-        .filter(ring => ring.length >= 3)
+        .filter(ring => ring.length >= minLen)
         .map(ring => ring.map(p => ({
             x: originX + (p.x / 4095) * tileSize - centerX,
             z: originZ + (p.y / 4095) * tileSize - centerZ
@@ -600,7 +601,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 continue;
             }
 
-            const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc);
+  const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
 
             if (geomType === 3) {
                 // Проверка exclusion для полигонов

@@ -432,7 +432,7 @@ createTileMesh(inst, texture) {
     const mesh = new THREE.Mesh(geometry, mat);
 mesh.position.set(
   originX + tileSize / 2,
-  this.hasElevation ? z * LEVEL_Y_STEP : 0,  
+  this.hasElevation ? -(this.engine.MAX_ZOOM - z) * 0.05 : 0,
   originZ + tileSize / 2
 );
     mesh.renderOrder = z;

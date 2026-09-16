@@ -32,6 +32,30 @@ const ANCESTOR_FALLBACK = 4;
 const MAX_COVER_DEPTH = 2; // глубина поиска потомков при отдалении
 
 /**
+ * Длительность fade-in/fade-out в кадрах.
+ * Определяет и шаг изменения opacity, и задержку перед началом fade-out
+ * (чтобы новый тайл успел стать полностью непрозрачным).
+ * @type {number}
+ * @private
+ */
+const FADE_FRAMES = 6;
+
+/**
+ * Шаг изменения opacity за один кадр.
+ * @type {number}
+ * @private
+ */
+const FADE_SPEED = 1 / FADE_FRAMES;
+
+/**
+ * Порог, ниже которого тайл считается полностью прозрачным
+ * (и может быть снят с рендера).
+ * @type {number}
+ * @private
+ */
+const FADE_EPSILON = 0.001;
+
+/**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
  *
  * @property {THREE.Texture} texture - Текстура тайла.
@@ -148,7 +172,7 @@ export class TileManager {
      */
     constructor(engine) {
         this.engine = engine;
-        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation }
+        this.tiles = new Map(); // ключ -> { z, virtX, y, mesh, geometry, ready, failed, loading, texUrl, lastUsed, heightsApplied, elevationAppliedLevel, expectsElevation, opacity, targetOpacity, fadeOutDelay }
         this.textureCache = new Map(); // url -> { texture, refs }
         this._inFlightTextures = new Map(); // url -> Promise<THREE.Texture|null>
         this.textureLoader = new THREE.TextureLoader();
@@ -195,6 +219,11 @@ export class TileManager {
     /**
      * Обновляет видимые тайлы на основе положения камеры и зума.
      *
+     * Помимо собственно выбора видимых тайлов, метод обновляет
+     * целевые значения непрозрачности (`targetOpacity`). Реальное
+     * переключение видимости и анимация opacity выполняются в
+     * `tickFade()`, вызываемом из главного цикла рендера.
+     *
      * @param {THREE.Camera} camera - Камера.
      * @param {THREE.Vector3} controlsTarget - Цель контролов.
      * @param {number} continuousZoom - Непрерывный зум.
@@ -237,6 +266,15 @@ export class TileManager {
 
             if (inst.ready) {
                 renderSet.add(k);
+                // --- fade ---
+                // Пока новый тайл не стал полностью непрозрачным, держим
+                // готового предка под ним. Без этого во время проявления
+                // нового тайла образуется «дырка»: предок уже снят с рендера,
+                // а новый ещё полупрозрачный.
+                if (inst.opacity < 1) {
+                    const anc = this.findReadyAncestor(idealZ, vx, y);
+                    if (anc) renderSet.add(this.key(anc.z, anc.virtX, anc.y));
+                }
                 continue;
             }
 
@@ -250,12 +288,27 @@ export class TileManager {
             }
         }
 
-        // Переключение видимости
+        // --- fade ---
+        // Обновляем только целевые значения. Реальное переключение
+        // mesh.visible и изменение material.opacity выполняет tickFade().
+        // Здесь же выставляем fadeOutDelay, чтобы скрываемый тайл успел
+        // дождаться, пока «замещающий» его тайл станет непрозрачным.
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
-            if (inst.mesh.visible !== show) inst.mesh.visible = show;
-            if (show) inst.lastUsed = this.frame;
+            if (show) {
+                if (inst.targetOpacity !== 1) {
+                    inst.targetOpacity = 1;
+                    inst.fadeOutDelay = 0;
+                }
+                inst.lastUsed = this.frame;
+            } else {
+                if (inst.targetOpacity !== 0) {
+                    inst.targetOpacity = 0;
+                    // Задержка перед уходом — только если тайл реально что-то показывал.
+                    if (inst.opacity > 0) inst.fadeOutDelay = FADE_FRAMES;
+                }
+            }
         }
 
         this.gc(renderSet);
@@ -340,7 +393,11 @@ export class TileManager {
             lastUsed: this.frame,
             heightsApplied: false,
             elevationAppliedLevel: 0,
-            expectsElevation: false
+            expectsElevation: false,
+            // --- fade state ---
+            opacity: 0,          // текущая непрозрачность (0..1)
+            targetOpacity: 0,    // цель: 0 — скрыт, 1 — полностью виден
+            fadeOutDelay: 0,     // кадров удерживать opacity перед началом ухода
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -409,6 +466,9 @@ export class TileManager {
     /**
      * Создаёт меш для тайла с текстурой.
      *
+     * Материал изначально прозрачный с opacity = 0 — это отправная точка
+     * для fade-in. Анимация выполняется в tickFade().
+     *
      * @param {Object} inst - Объект тайла.
      * @param {THREE.Texture} texture - Текстура.
      * @returns {THREE.Mesh} Меш тайла.
@@ -430,8 +490,15 @@ export class TileManager {
             geometry.rotateX(-Math.PI / 2);
         }
 
+        // --- fade ---
+        // transparent: true включаем сразу и навсегда, чтобы избежать
+        // дорогой перекомпиляции шейдера при переключении в рантайме.
+        // Для полностью непрозрачного тайла (opacity === 1) визуальной
+        // разницы нет, а порядок отрисовки регулируется renderOrder.
         const mat = new THREE.MeshBasicMaterial({
             map: texture,
+            transparent: true,
+            opacity: 0,
             depthWrite: this.hasElevation,
             depthTest: this.hasElevation
         });
@@ -857,6 +924,9 @@ export class TileManager {
     /**
      * Выполняет сборку мусора для тайлов.
      *
+     * Тайлы, находящиеся в процессе fade-out (opacity > 0), не удаляются:
+     * иначе анимация оборвалась бы резким исчезновением.
+     *
      * @param {Set} renderSet - Множество ключей для отрисовки.
      * @returns {void}
      * @private
@@ -866,6 +936,9 @@ export class TileManager {
         const candidates = [];
         for (const [k, inst] of this.tiles) {
             if (renderSet.has(k) || inst.loading) continue;
+            // --- fade ---
+            // Не трогаем тайлы, которые сейчас анимируются (fade-in или fade-out).
+            if (inst.opacity > 0) continue;
             candidates.push(inst);
         }
         candidates.sort((a, b) => a.lastUsed - b.lastUsed);
@@ -891,6 +964,48 @@ export class TileManager {
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
+    }
+
+    /**
+     * Покадровая анимация непрозрачности тайлов.
+     *
+     * Вызывается из главного цикла рендера (Core.animate) сразу после
+     * `maybeUpdateVisibleTiles()`. На каждом кадре:
+     *  1) уменьшает счётчик `fadeOutDelay` (если > 0);
+     *  2) двигает `opacity` в сторону `targetOpacity` с шагом FADE_SPEED;
+     *  3) применяет значение к материалу меша;
+     *  4) переключает `mesh.visible` (тайл отрисовывается, только когда opacity > FADE_EPSILON).
+     *
+     * Благодаря тому, что метод вызывается каждый кадр (а update()
+     * троттлится), анимация получается плавной независимо от частоты
+     * пересчёта видимых тайлов.
+     *
+     * @returns {void}
+     */
+    tickFade() {
+        for (const inst of this.tiles.values()) {
+            if (!inst.mesh) continue;
+
+            if (inst.fadeOutDelay > 0) {
+                // Удерживаем текущее значение opacity — ждём, пока
+                // «замещающий» тайл успеет стать непрозрачным.
+                inst.fadeOutDelay--;
+            } else if (inst.opacity < inst.targetOpacity) {
+                inst.opacity = Math.min(inst.targetOpacity, inst.opacity + FADE_SPEED);
+            } else if (inst.opacity > inst.targetOpacity) {
+                inst.opacity = Math.max(inst.targetOpacity, inst.opacity - FADE_SPEED);
+            }
+
+            const mat = inst.mesh.material;
+            if (mat.opacity !== inst.opacity) {
+                mat.opacity = inst.opacity;
+            }
+
+            const shouldRender = inst.opacity > FADE_EPSILON;
+            if (inst.mesh.visible !== shouldRender) {
+                inst.mesh.visible = shouldRender;
+            }
+        }
     }
 
     /**

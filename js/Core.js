@@ -1428,10 +1428,6 @@ export class KrbMap {
 
         this.maybeUpdateVisibleTiles();
 
-        if (this.tileManager) {
-    this.tileManager.tickFade();
-}
-
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);
         }

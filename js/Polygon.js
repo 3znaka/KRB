@@ -9,7 +9,7 @@
  * регистрирует колбэки при `_attach` и снимает регистрацию в `remove`.
  */
 
-import { Projections } from './Projections.js';
+import { Projections, WGS84 } from './Projections.js';
 import {
   THREE,
   Line2,
@@ -49,6 +49,89 @@ function crossY(p0, p1, p2) {
 }
 
 /**
+ * Клиппует замкнутое кольцо (в lon/lat) прямоугольником области
+ * определения проекции. Классический алгоритм Sutherland–Hodgman,
+ * 4 полуплоскости.
+ *
+ * @param {Array.<[number, number]>} ring - Кольцо [ [lon, lat], ... ].
+ * @param {number} lonMin - Минимальная долгота области определения.
+ * @param {number} lonMax - Максимальная долгота области определения.
+ * @param {number} latMin - Минимальная широта области определения.
+ * @param {number} latMax - Максимальная широта области определения.
+ * @returns {Array.<[number, number]>|null} Кольцо без дубликата замыкающей
+ *     точки или null, если после клиппинга не осталось корректного кольца.
+ * @private
+ */
+function clipRingToLonLatBox(ring, lonMin, lonMax, latMin, latMax) {
+    if (!ring || ring.length < 3) return null;
+
+    const clipAgainst = (input, insideFn, intersectFn) => {
+        if (input.length === 0) return input;
+        const out = [];
+        for (let i = 0; i < input.length; i++) {
+            const a = input[i];
+            const b = input[(i + 1) % input.length];
+            const aIn = insideFn(a);
+            const bIn = insideFn(b);
+            if (aIn && bIn) {
+                out.push(b);
+            } else if (aIn && !bIn) {
+                out.push(intersectFn(a, b));
+            } else if (!aIn && bIn) {
+                out.push(intersectFn(a, b));
+                out.push(b);
+            }
+            // !aIn && !bIn — ничего.
+        }
+        return out;
+    };
+
+    let output = ring;
+
+    output = clipAgainst(
+        output,
+        p => p[0] >= lonMin,
+        (a, b) => {
+            const t = (lonMin - a[0]) / (b[0] - a[0]);
+            return [lonMin, a[1] + t * (b[1] - a[1])];
+        }
+    );
+    if (output.length === 0) return null;
+
+    output = clipAgainst(
+        output,
+        p => p[0] <= lonMax,
+        (a, b) => {
+            const t = (lonMax - a[0]) / (b[0] - a[0]);
+            return [lonMax, a[1] + t * (b[1] - a[1])];
+        }
+    );
+    if (output.length === 0) return null;
+
+    output = clipAgainst(
+        output,
+        p => p[1] >= latMin,
+        (a, b) => {
+            const t = (latMin - a[1]) / (b[1] - a[1]);
+            return [a[0] + t * (b[0] - a[0]), latMin];
+        }
+    );
+    if (output.length === 0) return null;
+
+    output = clipAgainst(
+        output,
+        p => p[1] <= latMax,
+        (a, b) => {
+            const t = (latMax - a[1]) / (b[1] - a[1]);
+            return [a[0] + t * (b[0] - a[0]), latMax];
+        }
+    );
+    if (output.length < 3) return null;
+
+    return output;
+}
+
+/**
  * Класс, представляющий полигон на карте.
  *
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
@@ -58,10 +141,6 @@ function crossY(p0, p1, p2) {
  * `map.popupManager`), а их показ/скрытие инициируется
  * {@link InteractionManager}.
  *
- * Координаты колец задаются в системе координат `options.crs`.
- * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
- * Внутри карты координаты автоматически преобразуются в метры проекции
- * карты (`map.projection`) через {@link KrbMap#project}.
  *
  * @example
  * // Обычный плоский полигон
@@ -313,6 +392,21 @@ export class Polygon {
         // Мировые координаты и bounding sphere
         /** @private @type {Array.<[number, number]>} */ this._worldCoords = [];
         /** @private @type {Array.<[number, number]>} */ this._strokeWorldCoords = [];
+
+        /**
+         * Спроецированное (и, при необходимости, клипованное по области
+         * определения проекции карты) внешнее кольцо. Массив мировых
+         * координат [x, z]. Заполняется в `_buildFillGeometry` и
+         * переиспользуется в `_buildStrokeGeometry`, чтобы заливка и обводка
+         * опирались на одну и ту же геометрию.
+         *
+         * `null` — если внешнее кольцо полностью выпало из области
+         * определения проекции (полигон не рендерится).
+         *
+         * @private
+         * @type {Array.<[number, number]>|null}
+         */
+        this._projectedOuterRing = null;
 
         /**
          * Радиус bounding-сферы в локальных координатах группы полигона.
@@ -591,9 +685,96 @@ export class Polygon {
     }
 
     /**
+     * Проецирует кольцо в мировые координаты карты (метры проекции),
+     * при необходимости клиппуя его по области определения проекции.
+     *
+     * Логика:
+     *   1. Если у проекции карты нет ограничений (WGS84) — просто
+     *      проецируем все точки через `map.projectSafe`.
+     *   2. Если все точки кольца попадают в область определения проекции
+     *      (в lon/lat) — проецируем напрямую.
+     *   3. Иначе — клиппуем кольцо в lon/lat прямоугольником области
+     *      определения (Sutherland–Hodgman) и проецируем клипованное кольцо.
+     *
+     * Возвращаемый массив — это список [x, z] в мировых координатах карты
+     * (без вычета центроида; сам вычет делает `_buildFillGeometry`).
+     *
+     * @param {Array.<Array.<number>>} ring - Кольцо в СК `this._crs`.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @returns {Array.<[number, number]>|null} Список [x, z] или null,
+     *     если после клиппинга от кольца ничего не осталось (либо
+     *     кольцо целиком выпало из области определения).
+     * @private
+     */
+    _projectRing(ring, map) {
+        const srcCrs = this._crs;
+        const validBounds = typeof map.projection.getValidLonLatBounds === 'function'
+            ? map.projection.getValidLonLatBounds()
+            : null;
+
+        // --- 1. Проекция без ограничений: проецируем напрямую ---
+        if (!validBounds) {
+            const out = new Array(ring.length);
+            for (let i = 0; i < ring.length; i++) {
+                const p = map.projectSafe(ring[i], srcCrs);
+                if (!p) return null;
+                out[i] = p;
+            }
+            return out;
+        }
+
+        // --- 2. Переводим кольцо в lon/lat и проверяем попадание ---
+        const lonLatRing = new Array(ring.length);
+        let allInside = true;
+        for (let i = 0; i < ring.length; i++) {
+            const ll = typeof srcCrs.toLonLatSafe === 'function'
+                ? srcCrs.toLonLatSafe(ring[i])
+                : srcCrs.toLonLat(ring[i]);
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) {
+                return null;
+            }
+            lonLatRing[i] = ll;
+            if (!map.projection.isValidLonLat(ll)) allInside = false;
+        }
+
+        if (allInside) {
+            // Проекция lon/lat → world напрямую через WGS84-мост.
+            const out = new Array(ring.length);
+            for (let i = 0; i < ring.length; i++) {
+                const p = map.projectSafe(lonLatRing[i], WGS84);
+                if (!p) return null;
+                out[i] = p;
+            }
+            return out;
+        }
+
+        // --- 3. Клиппинг в lon/lat и проекция клипованного кольца ---
+        const clipped = clipRingToLonLatBox(
+            lonLatRing,
+            validBounds.lonMin, validBounds.lonMax,
+            validBounds.latMin, validBounds.latMax
+        );
+        if (!clipped || clipped.length < 3) return null;
+
+        const out = [];
+        for (let i = 0; i < clipped.length; i++) {
+            const p = map.projectSafe(clipped[i], WGS84);
+            if (!p) continue;
+            out.push(p);
+        }
+        return out.length >= 3 ? out : null;
+    }
+
+    /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку
      * и боковые стенки.
+     *
+     * Каждое кольцо сначала проецируется в мировые координаты карты
+     * (с клиппингом по области определения проекции, см. `_projectRing`).
+     * Если внешнее кольцо (rings[0]) полностью выпадает из области
+     * определения — полигон не строится (предупреждение в консоль).
+     * Если выпадает кольцо-отверстие — оно отбрасывается.
      *
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
@@ -607,16 +788,33 @@ export class Polygon {
         }
 
         this._worldCoords.length = 0;
+        this._projectedOuterRing = null;
         const coords = [];
         const points2D = [];
         const holeIndices = [];
         const ringStartIndices = [];
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            const ring = rings[ringIdx];
-            if (ring.length < 3) {
-                console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
+            const rawRing = rings[ringIdx];
+            if (rawRing.length < 3) {
+                console.warn(`Polygon: ring ${ringIdx} must have at least 3 points`);
+                if (ringIdx === 0) return;
                 continue;
+            }
+
+            const projected = this._projectRing(rawRing, map);
+            if (!projected || projected.length < 3) {
+                console.warn(
+                    `Polygon: ring ${ringIdx} полностью выпала из области ` +
+                    `определения проекции ${map.projection.code}`
+                );
+                // Без внешнего кольца полигона нет — прерываем построение.
+                if (ringIdx === 0) return;
+                continue;
+            }
+
+            if (ringIdx === 0) {
+                this._projectedOuterRing = projected;
             }
 
             ringStartIndices.push(points2D.length);
@@ -625,10 +823,9 @@ export class Polygon {
             }
 
             let firstPoint = null;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
-                // Координаты кольца → метры проекции карты.
-                const [absX, absZ] = map.project(pt, this._crs);
+            for (let i = 0; i < projected.length; i++) {
+                const absX = projected[i][0];
+                const absZ = projected[i][1];
                 if (i === 0) {
                     firstPoint = [absX, absZ];
                 }
@@ -830,6 +1027,11 @@ export class Polygon {
      * Строит геометрию обводки полигона. В зависимости от опций использует
      * Line2 или обычный THREE.Line.
      *
+     * Обводка строится по тому же спроецированному (и, при необходимости,
+     * клипованному) внешнему кольцу, что и заливка, — это гарантирует,
+     * что обводка совпадает с заливкой и не тянет «усы» через всю сцену
+     * из-за точек, вышедших за область определения проекции.
+     *
      * ВАЖНО: `_strokeWorldCoords` заполняется координатами внешнего кольца
      * без замыкающей точки (если последняя совпадает с первой — она
      * отбрасывается). Это значит, что длина `_strokeWorldCoords` может
@@ -845,21 +1047,27 @@ export class Polygon {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
 
         const canvas = map.renderer.domElement;
-        const outerRing = this._rings[0];
+        const projected = this._projectedOuterRing;
+
+        // Если внешнее кольцо целиком выпало из области определения —
+        // обводку строить не из чего.
+        if (!projected || projected.length < 2) {
+            this._strokeWorldCoords.length = 0;
+            this._cachedStrokeHeights = [];
+            return;
+        }
 
         // Заполняем _strokeWorldCoords без дубликата замыкающей точки
         // (совпадающей с первой) — так длины массивов остаются
         // согласованными между собой и с _cachedStrokeHeights.
         this._strokeWorldCoords.length = 0;
-        let firstStrokePoint = null;
-        for (let i = 0; i < outerRing.length; i++) {
-            const [absX, absZ] = map.project(outerRing[i], this._crs);
-            if (i === 0) {
-                firstStrokePoint = [absX, absZ];
-            } else if (absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) {
+        const first = projected[0];
+        for (let i = 0; i < projected.length; i++) {
+            const p = projected[i];
+            if (i > 0 && p[0] === first[0] && p[1] === first[1]) {
                 continue;
             }
-            this._strokeWorldCoords.push([absX, absZ]);
+            this._strokeWorldCoords.push([p[0], p[1]]);
         }
 
         // _cachedStrokeHeights всегда согласован по длине с _strokeWorldCoords.
@@ -872,8 +1080,8 @@ export class Polygon {
                 positions.push(wc[0], 0, wc[1]);
             }
             if (this._strokeWorldCoords.length > 0) {
-                const first = this._strokeWorldCoords[0];
-                positions.push(first[0], 0, first[1]);
+                const firstWc = this._strokeWorldCoords[0];
+                positions.push(firstWc[0], 0, firstWc[1]);
             }
 
             const lineGeometry = new THREE.BufferGeometry();
@@ -956,6 +1164,7 @@ export class Polygon {
         }
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
+        this._projectedOuterRing = null;
         this._vertices2D.length = 0;
         this._boundingSphereRadius = 0;
         this._cachedHeights.length = 0;
@@ -1150,14 +1359,6 @@ export class Polygon {
 
     /**
      * Обновляет позиции вершин обводки.
-     *
-     * Обход ведётся по фактической длине `_strokeWorldCoords`
-     * (а не по длине исходного внешнего кольца), так как дубликат
-     * замыкающей точки отбрасывается в `_buildStrokeGeometry`.
-     * Замыкающий сегмент добавляется отдельно в конце.
-     *
-     * Для `useSimpleStroke` атрибут `position` переиспользуется между
-     * вызовами (обновляется in-place), если его размер не изменился.
      *
      * @returns {void}
      * @private

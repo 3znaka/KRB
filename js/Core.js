@@ -565,6 +565,11 @@ this.tileManager = new TileManager(this);
      * конвенции CRS (для EPSG:3857/3395 Y направлен на север); знак Y
      * автоматически инвертируется.
      *
+     * ВНИМАНИЕ: этот метод не проверяет область определения проекции.
+     * Если точка заведомо может оказаться вне зоны (например, мировой
+     * GeoJSON в Gauss-Kruger), используйте {@link KrbMap#projectSafe} —
+     * он вернёт null вместо бесконечности/NaN.
+     *
      * @param {Array.<number>} coord - Координаты [x, y] в СК `fromCrs`.
      * @param {Projection|string} [fromCrs=this.inputCRS] - Проекция входных данных
      *     (объект Projection или код вроде 'EPSG:4326').
@@ -585,6 +590,71 @@ this.tileManager = new TileManager(this);
         const lonLat = src.toLonLat(coord);
         const [x, y] = this.projection.fromLonLat(lonLat);
         return [x, -y];
+    }
+
+    /**
+     * Безопасная версия {@link KrbMap#project}: возвращает `null` вместо
+     * невалидных координат (Infinity / NaN) и вместо точек, лежащих вне
+     * области определения проекции карты.
+     *
+     * Именно этим методом должны пользоваться потребители (Polygon,
+     * Polyline, Marker3D, Area3D, …), чтобы координаты не попадали в
+     * BufferGeometry и не превращались в «усы» через всю сцену.
+     *
+     * Логика:
+     *   1. Если `fromCrs === this.projection` — только флип Y (без проверок,
+     *      т.к. пользователь сам отвечает за корректность).
+     *   2. Иначе — конвертация в WGS84, проверка `projection.isValidLonLat`,
+     *      конвертация в целевую проекцию, проверка `projection.isValidCoord`.
+     *
+     * @param {Array.<number>} coord - Координаты [x, y] в СК `fromCrs`.
+     * @param {Projection|string} [fromCrs=this.inputCRS] - Проекция входных данных.
+     * @returns {Array.<number>|null} Мировые координаты [x, z] (север = −Z)
+     *     или `null`, если точка невалидна/вне области определения.
+     *
+     * @example
+     * const p = map.projectSafe([37.6173, 55.7558]);        // [x, z] или null
+     * const q = map.projectSafe([-120, 40], 'EPSG:4326');   // null в Gauss-Kruger
+     */
+    projectSafe(coord, fromCrs = this.inputCRS) {
+        if (!coord || coord.length < 2) return null;
+        if (!Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) return null;
+
+        const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
+
+        if (src === this.projection) {
+            // Пользователь дал координаты в СК самой карты — только флип Y.
+            // Доменные проверки в этом случае не имеют смысла: это уже метры.
+            return [coord[0], -coord[1]];
+        }
+
+        // src → WGS84 (используем безопасную версию, если доступна).
+        const lonLat = typeof src.toLonLatSafe === 'function'
+            ? src.toLonLatSafe(coord)
+            : src.toLonLat(coord);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return null;
+        }
+
+        // Проверка домена целевой проекции карты по lon/lat.
+        if (typeof this.projection.isValidLonLat === 'function'
+            && !this.projection.isValidLonLat(lonLat)) {
+            return null;
+        }
+
+        // WGS84 → целевая проекция карты.
+        const proj = this.projection.fromLonLat(lonLat);
+        if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) {
+            return null;
+        }
+
+        // Финальная проверка численной валидности спроецированных координат.
+        if (typeof this.projection.isValidCoord === 'function'
+            && !this.projection.isValidCoord(proj)) {
+            return null;
+        }
+
+        return [proj[0], -proj[1]];
     }
 
     /**

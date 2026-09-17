@@ -3,8 +3,6 @@
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * экструзии, видимости по зуму и подписей через TextManager.
- * Добавлена поддержка событий onHover и onClick через raycasting,
- * а также возможность отображения HTML-тултипа через PopupManager.
  */
 
 import { Projections } from './Projections.js';
@@ -321,6 +319,19 @@ export class Polygon {
     /** @private */ static _lastRaycastTime = 0;
 
     /**
+     * Координаты последнего pointerdown и флаг его активности.
+     * Используются, чтобы отличить реальный клик от отпускания мыши
+     * после панорамирования: браузер может сгенерировать `click` даже
+     * при заметном смещении указателя между нажатием и отпусканием.
+     *
+     * @private
+     */
+    /** @private */ static _pointerDownX = 0;
+    /** @private */ static _pointerDownY = 0;
+    /** @private */ static _pointerDownActive = false;
+    /** @private */ static _clickMoveThreshold = 5;
+
+    /**
      * Регистрирует полигон для обработки событий мыши через общий обработчик.
      *
      * @param {Polygon} polygon - Экземпляр полигона.
@@ -348,8 +359,15 @@ export class Polygon {
 
     /**
      * Добавляет глобальные обработчики событий на canvas.
-     * Раньше вешался также mousedown, но он не делал ничего осмысленного,
-     * поэтому убран. Остались только mousemove (для hover) и click.
+     *
+     * Слушаем:
+     *  - `pointerdown` — чтобы запомнить точку нажатия (для отсечения
+     *    «клика после панорамирования»);
+     *  - `mousemove` — для hover;
+     *  - `click` — для onClick и показа тултипа.
+     *
+     * Все обработчики — в фазе capture, чтобы гарантированно выполняться
+     * до OrbitControls.
      *
      * @private
      */
@@ -358,10 +376,12 @@ export class Polygon {
         if (!canvas) return;
 
         Polygon._delegatedHandlers = {
+            pointerdown: (e) => Polygon._handleGlobalPointerDown(e),
             mousemove: (e) => Polygon._handleGlobalMouseMove(e),
             click: (e) => Polygon._handleGlobalClick(e)
         };
 
+        canvas.addEventListener('pointerdown', Polygon._delegatedHandlers.pointerdown, true);
         canvas.addEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
         canvas.addEventListener('click', Polygon._delegatedHandlers.click, true);
         Polygon._eventListenersAttached = true;
@@ -376,6 +396,7 @@ export class Polygon {
         const canvas = Polygon._getCanvas();
         if (!canvas || !Polygon._delegatedHandlers) return;
 
+        canvas.removeEventListener('pointerdown', Polygon._delegatedHandlers.pointerdown, true);
         canvas.removeEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
         canvas.removeEventListener('click', Polygon._delegatedHandlers.click, true);
         Polygon._delegatedHandlers = null;
@@ -429,6 +450,19 @@ export class Polygon {
             ((event.clientX - rect.left) / rect.width) * 2 - 1,
             -((event.clientY - rect.top) / rect.height) * 2 + 1
         );
+    }
+
+    /**
+     * Запоминает точку нажатия. Нужен, чтобы в `_handleGlobalClick`
+     * отличить реальный клик от отпускания мыши после панорамирования.
+     *
+     * @param {PointerEvent} event - Событие нажатия.
+     * @private
+     */
+    static _handleGlobalPointerDown(event) {
+        Polygon._pointerDownX = event.clientX;
+        Polygon._pointerDownY = event.clientY;
+        Polygon._pointerDownActive = true;
     }
 
     /**
@@ -503,11 +537,29 @@ export class Polygon {
     /**
      * Глобальный обработчик click. Один raycast на все полигоны.
      *
+     * Перед обработкой проверяется, не было ли между pointerdown и click
+     * заметного смещения указателя — если да, клик отбрасывается как
+     * результат панорамирования. Это устраняет ложные срабатывания
+     * onClick при перетаскивании карты, начатом и законченном внутри
+     * контура полигона.
+     *
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     static _handleGlobalClick(event) {
         if (Polygon._interactivePolygons.size === 0) return;
+
+        // Проверка «это точно клик, а не конец драга?»
+        const hadPointerDown = Polygon._pointerDownActive;
+        Polygon._pointerDownActive = false;
+        if (hadPointerDown) {
+            const dx = event.clientX - Polygon._pointerDownX;
+            const dy = event.clientY - Polygon._pointerDownY;
+            const threshold = Polygon._clickMoveThreshold;
+            if (dx * dx + dy * dy > threshold * threshold) {
+                return; // было панорамирование, не клик
+            }
+        }
 
         const byMap = Polygon._groupByMap();
         for (const [map, polys] of byMap) {

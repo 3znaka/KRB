@@ -170,6 +170,19 @@ export class Image {
     /** @private */ static _delegatedHandlers = null;
 
     /**
+     * Координаты последнего pointerdown и флаг его активности.
+     * Используются, чтобы отличить реальный клик от отпускания мыши
+     * после панорамирования: браузер может сгенерировать `click` даже
+     * при заметном смещении указателя между нажатием и отпусканием.
+     *
+     * @private
+     */
+    /** @private */ static _pointerDownX = 0;
+    /** @private */ static _pointerDownY = 0;
+    /** @private */ static _pointerDownActive = false;
+    /** @private */ static _clickMoveThreshold = 5;
+
+    /**
      * Регистрирует изображение для обработки событий мыши.
      * @param {Image} image - Экземпляр изображения.
      * @private
@@ -195,6 +208,15 @@ export class Image {
 
     /**
      * Добавляет глобальные обработчики событий на canvas.
+     *
+     * Слушаем:
+     *  - `pointerdown` — чтобы запомнить точку нажатия (для отсечения
+     *    «клика после панорамирования»);
+     *  - `mousemove` — для hover;
+     *  - `click` — для onClick и показа тултипа.
+     *
+     * Все обработчики — в фазе capture.
+     *
      * @private
      */
     static _attachGlobalListeners() {
@@ -202,10 +224,12 @@ export class Image {
         if (!canvas) return;
 
         Image._delegatedHandlers = {
+            pointerdown: (e) => Image._handleGlobalPointerDown(e),
             mousemove: (e) => Image._handleGlobalMouseMove(e),
             click: (e) => Image._handleGlobalClick(e)
         };
 
+        canvas.addEventListener('pointerdown', Image._delegatedHandlers.pointerdown, true);
         canvas.addEventListener('mousemove', Image._delegatedHandlers.mousemove, true);
         canvas.addEventListener('click', Image._delegatedHandlers.click, true);
         Image._eventListenersAttached = true;
@@ -219,6 +243,7 @@ export class Image {
         const canvas = Image._getCanvas();
         if (!canvas || !Image._delegatedHandlers) return;
 
+        canvas.removeEventListener('pointerdown', Image._delegatedHandlers.pointerdown, true);
         canvas.removeEventListener('mousemove', Image._delegatedHandlers.mousemove, true);
         canvas.removeEventListener('click', Image._delegatedHandlers.click, true);
         Image._delegatedHandlers = null;
@@ -240,6 +265,19 @@ export class Image {
     }
 
     /**
+     * Запоминает точку нажатия. Нужен, чтобы в `_handleGlobalClick`
+     * отличить реальный клик от отпускания мыши после панорамирования.
+     *
+     * @param {PointerEvent} event - Событие нажатия.
+     * @private
+     */
+    static _handleGlobalPointerDown(event) {
+        Image._pointerDownX = event.clientX;
+        Image._pointerDownY = event.clientY;
+        Image._pointerDownActive = true;
+    }
+
+    /**
      * Глобальный обработчик mousemove.
      * @param {MouseEvent} event - Событие мыши.
      * @private
@@ -252,10 +290,29 @@ export class Image {
 
     /**
      * Глобальный обработчик click.
+     *
+     * Перед обработкой проверяется, не было ли между pointerdown и click
+     * заметного смещения указателя — если да, клик отбрасывается как
+     * результат панорамирования. Это устраняет ложные срабатывания
+     * onClick при перетаскивании карты, начатом и законченном внутри
+     * контура изображения.
+     *
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     static _handleGlobalClick(event) {
+        // Проверка «это точно клик, а не конец драга?»
+        const hadPointerDown = Image._pointerDownActive;
+        Image._pointerDownActive = false;
+        if (hadPointerDown) {
+            const dx = event.clientX - Image._pointerDownX;
+            const dy = event.clientY - Image._pointerDownY;
+            const threshold = Image._clickMoveThreshold;
+            if (dx * dx + dy * dy > threshold * threshold) {
+                return; // было панорамирование, не клик
+            }
+        }
+
         for (const img of Image._interactiveImages) {
             img._handleClick(event);
         }

@@ -6,7 +6,7 @@ import {
 
 /**
  * Простой пространственный индекс (равномерная сетка) для ускорения
- * проверки коллизий подписей. 
+ * проверки коллизий подписей.
  *
  * @private
  */
@@ -107,6 +107,26 @@ class _GridIndex {
  * (Point) и линейных объектов (LineString). Для линейных подписей реализовано
  * анимированное перемещение вдоль линии с целью избежать перекрытий, а также
  * жадная приоритезация всех видимых подписей для предотвращения наложений.
+ *
+ * Особенности реализации, важные для производительности и отсутствия мерцания:
+ *
+ *  - **Reuse DOM по stableId.** Вызывающая сторона может передать в
+ *    {@link TextManager#addLabel} второй аргумент — стабильный идентификатор
+ *    подписи (например, ключ, который не меняется при панорамировании, но
+ *    остаётся уникальным в пределах логической сущности). Если подпись с таким
+ *    id уже существует, DOM-узел переиспользуется: обновляются только `source`,
+ *    стили и (при необходимости) текст. Никаких удаление + пересоздание —
+ *    а значит, нет вспышек fade-in/out и reflow при пересборке.
+ *
+ *  - **Батч-измерение.** Реальные `offsetWidth/offsetHeight` снимаются не в
+ *    момент `addLabel`, а в рамках одного прохода {@link TextManager#_flushMeasurements}
+ *    (write-фаза: показать скрыто; read-фаза: снять размеры; restore). Так
+ *    массовое добавление N подписей даёт один layout, а не N.
+ *
+ *  - **Троттлинг update().** {@link TextManager#update} делает ранний выход,
+ *    если с момента предыдущего вызова не изменились ни зум, ни положение
+ *    мира, ни положение камеры, ни состав подписей. Состав помечается флагом
+ *    `_dirty` при любой мутации (addLabel/removeLabel/pruneStaleLabels).
  */
 export class TextManager {
     /**
@@ -126,6 +146,16 @@ export class TextManager {
          * @type {Object[]}
          */
         this.labels = [];
+
+        /**
+         * Быстрый доступ к подписям по stableId. Ключ — идентификатор,
+         * переданный в {@link TextManager#addLabel}. Значение — объект label.
+         * Позволяет переиспользовать DOM-узлы без пересоздания.
+         *
+         * @type {Map<*, Object>}
+         * @private
+         */
+        this._labelsById = new Map();
 
         /**
          * DOM-элемент-контейнер, в котором размещаются подписи.
@@ -169,6 +199,45 @@ export class TextManager {
          */
         this._gridIndex = new _GridIndex(128);
 
+        /**
+         * Очередь подписей, ожидающих измерения. Заполняется в
+         * {@link TextManager#_scheduleMeasure}, обрабатывается в
+         * {@link TextManager#_flushMeasurements}.
+         *
+         * @type {Object[]}
+         * @private
+         */
+        this._measureQueue = [];
+
+        /**
+         * Флаг «замер уже запланирован на ближайший rAF». Защищает от
+         * многократного планирования в пределах одного кадра.
+         *
+         * @type {boolean}
+         * @private
+         */
+        this._measureScheduled = false;
+
+        /**
+         * Подпись предыдущего кадра для троттлинга {@link TextManager#update}.
+         * Если подпись не менялась и состав подписей тоже (`_dirty === false`),
+         * update завершается сразу.
+         *
+         * @type {string|null}
+         * @private
+         */
+        this._lastFrameSig = null;
+
+        /**
+         * Флаг «состав подписей изменился — update нужно выполнить, даже
+         * если сигнатура кадра совпадает с прошлой». Выставляется в
+         * addLabel / removeLabel / pruneStaleLabels.
+         *
+         * @type {boolean}
+         * @private
+         */
+        this._dirty = true;
+
         this._initPane();
     }
 
@@ -192,7 +261,7 @@ export class TextManager {
     /**
      * Возвращает статистику для отладки.
      *
-     * @returns {{total: number, visible: number, hiddenByPriority: number, maxLabels: number}}
+     * @returns {{total: number, visible: number, hiddenByPriority: number, maxLabels: number, stableIds: number}}
      */
     getDebugStats() {
         let visible = 0;
@@ -205,7 +274,8 @@ export class TextManager {
             total: this.labels.length,
             visible,
             hiddenByPriority: hidden,
-            maxLabels: this.maxLabels
+            maxLabels: this.maxLabels,
+            stableIds: this._labelsById.size
         };
     }
 
@@ -251,18 +321,29 @@ export class TextManager {
             }
         }
         this.labels.length = 0;
+        this._labelsById.clear();
+        this._measureQueue.length = 0;
+        this._measureScheduled = false;
         if (this.pane && this.pane.parentNode) {
             this.pane.parentNode.removeChild(this.pane);
         }
         this.pane = null;
         this._lastVisibleIds = null;
         this._lastZoom = null;
+        this._lastFrameSig = null;
+        this._dirty = true;
         this._gridIndex.clear();
     }
 
     /**
      * Добавляет новую подпись на карту на основе объекта-источника.
-     * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
+     *
+     * Если передан `stableId` и подпись с таким id уже существует, DOM-узел
+     * **переиспользуется**: обновляются только ссылка на источник, текст (если
+     * он изменился) и стили. Это устраняет мерцание и reflow при массовой
+     * пересборке подписей (например, при панорамировании карты).
+     *
+     * Если `stableId` не передан или не найден — создаётся новая подпись.
      *
      * @param {Object} source - Объект-источник подписи.
      * @property {Function} source.getText - Возвращает текст подписи.
@@ -282,9 +363,25 @@ export class TextManager {
      * @property {Function} source.getLabelParameter - Возвращает текущий параметр линии.
      * @property {Function} source.setLabelParameter - Устанавливает параметр линии.
      * @property {Function} source.getPlacement - Возвращает режим размещения вдоль линии.
+     * @param {*} [stableId=null] - Стабильный идентификатор подписи (любой
+     *     примитив или объект, поддерживающий `===`). Позволяет переиспользовать
+     *     существующий DOM-узел при повторном вызове с тем же id.
      * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
-    addLabel(source) {
+    addLabel(source, stableId = null) {
+        // --- Reuse path -----------------------------------------------------
+        if (stableId != null) {
+            const existing = this._labelsById.get(stableId);
+            if (existing) {
+                this._updateLabelSource(existing, source);
+                // Состав не изменился, но подпись "освежилась" — update должен
+                // её обработать (например, если поменялся текст или стиль).
+                this._dirty = true;
+                return existing;
+            }
+        }
+
+        // --- Create path ----------------------------------------------------
         const el = document.createElement('div');
         el.className = 'krb-text-label';
         Object.assign(el.style, {
@@ -321,6 +418,7 @@ export class TextManager {
         const label = {
             source,
             element: el,
+            stableId: stableId,
             t: 0,
             width: 0,
             height: 0,
@@ -330,16 +428,77 @@ export class TextManager {
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
             // Кэш значений, чтобы не дёргать layout/getComputedStyle в hot path
             _fontSize: 12,
-            _bbox: null
+            _bbox: null,
+            // Флаг «размеры ещё не сняты».
+            _needsMeasure: true,
+            // Защита от дублирования в очереди измерения.
+            _queuedForMeasure: false
         };
         this.labels.push(label);
-        this._measureLabel(label);
+        if (stableId != null) this._labelsById.set(stableId, label);
+
+        // Батч-измерение: реальные размеры снимем одним layout-проходом
+        // (в ближайшем _flushMeasurements, который гарантированно вызовется
+        // либо из update(), либо из rAF).
+        this._scheduleMeasure(label);
 
         // Состав подписей изменился — сбрасываем снимок прошлого кадра,
         // чтобы stuck-флаги корректно пересчитались на ближайшем update().
         this._lastVisibleIds = null;
+        this._dirty = true;
 
         return label;
+    }
+
+    /**
+     * Обновляет существующую подпись при переиспользовании по stableId:
+     * переназначает источник, применяет новые стили, при необходимости
+     * обновляет текст и ставит подпись в очередь на переизмерение.
+     *
+     * Позиционные метаданные (`t`, `stuck`, `_bbox`) сохраняются — они
+     * относятся к жизненному циклу самой подписи, а не к источнику.
+     *
+     * @param {Object} label - Существующий объект подписи.
+     * @param {Object} newSource - Новый источник.
+     * @private
+     */
+    _updateLabelSource(label, newSource) {
+        const oldSource = label.source;
+        const el = label.element;
+
+        const oldText = oldSource && oldSource.getText ? oldSource.getText() : '';
+        const newText = newSource.getText ? newSource.getText() : '';
+
+        const oldStyle = oldSource && oldSource.getTextStyle ? oldSource.getTextStyle() : {};
+        const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
+
+        // Переназначаем источник.
+        label.source = newSource;
+
+        // Применяем стили (даже если они идентичны — Object.assign дёшев,
+        // браузер сам отсечёт no-op изменения).
+        Object.assign(el.style, newStyle);
+
+        const textChanged = oldText !== newText;
+        const fontChanged =
+            oldStyle.fontSize !== newStyle.fontSize ||
+            oldStyle.fontFamily !== newStyle.fontFamily ||
+            oldStyle.fontWeight !== newStyle.fontWeight;
+
+        if (textChanged) {
+            if (newSource.getLabelType && newSource.getLabelType() === 'point') {
+                el.style.whiteSpace = 'pre-line';
+                el.textContent = this._wrapPointText(newText, el.style.fontSize);
+            } else {
+                el.textContent = newText;
+            }
+        }
+
+        // Переизмерение нужно только если реально поменялся текст или шрифт.
+        if (textChanged || fontChanged) {
+            label._needsMeasure = true;
+            this._scheduleMeasure(label);
+        }
     }
 
     /**
@@ -360,8 +519,47 @@ export class TextManager {
                 label.element.parentNode.removeChild(label.element);
             }
         }
+        // Снимаем привязку по stableId — только если текущий маппинг
+        // действительно ведёт на этот объект (защита от рассинхронизации,
+        // если по какой-то причине в Map лежит уже другой label).
+        if (label.stableId != null && this._labelsById.get(label.stableId) === label) {
+            this._labelsById.delete(label.stableId);
+        }
+        label._queuedForMeasure = false;
+
         // Инвалидация снимка прошлого кадра.
         this._lastVisibleIds = null;
+        this._dirty = true;
+    }
+
+    /**
+     * Удаляет все подписи, чьи stableId отсутствуют в переданном множестве.
+     * Используется вызывающей стороной (например, VectorTileLayer) после
+     * серии вызовов {@link TextManager#addLabel} для очистки "устаревших"
+     * подписей, которые больше не видны.
+     *
+     * Если у подписи нет stableId (была добавлена без него), она НЕ
+     * удаляется этим методом — за неё отвечает вызывающая сторона через
+     * {@link TextManager#removeLabel}.
+     *
+     * @param {Set<*>} activeIds - Множество stableId, которые нужно сохранить.
+     * @returns {void}
+     */
+    pruneStaleLabels(activeIds) {
+        if (!activeIds || this._labelsById.size === 0) return;
+
+        // Собираем сначала список, чтобы не мутировать Map во время итерации.
+        let toRemove = null;
+        for (const [id, label] of this._labelsById) {
+            if (!activeIds.has(id)) {
+                if (!toRemove) toRemove = [];
+                toRemove.push(label);
+            }
+        }
+        if (!toRemove) return;
+        for (let i = 0; i < toRemove.length; i++) {
+            this.removeLabel(toRemove[i]);
+        }
     }
 
     /**
@@ -431,29 +629,89 @@ export class TextManager {
     }
 
     /**
-     * Измеряет реальные ширину и высоту DOM-элемента подписи.
-     * Временно делает элемент видимым (но невидимым для пользователя через visibility:hidden),
-     * считывает offsetWidth/offsetHeight и возвращает исходное состояние.
+     * Помечает подпись как требующую измерения и ставит её в батч-очередь.
+     * Реальные размеры будут сняты в {@link TextManager#_flushMeasurements}
+     * одним layout-проходом (write-фаза → read-фаза → restore).
      *
-     * Дополнительно кэширует fontSize в label._fontSize, чтобы далее не вызывать
-     * window.getComputedStyle в горячем пути (каждый кадр для каждой подписи).
+     * Защищён от повторного попадания в очередь в пределах одного кадра.
      *
      * @param {Object} label - Объект подписи.
      * @private
      */
     _measureLabel(label) {
-        const el = label.element;
-        const prevDisplay = el.style.display;
-        const prevVisibility = el.style.visibility;
-        el.style.display = 'block';
-        el.style.visibility = 'hidden';
-        label.width = el.offsetWidth;
-        label.height = el.offsetHeight;
-        // Один layout-вызов на подпись — кэшируем fontSize.
-        const style = window.getComputedStyle(el);
-        label._fontSize = parseFloat(style.fontSize) || 12;
-        el.style.display = prevDisplay;
-        el.style.visibility = prevVisibility;
+        label._needsMeasure = true;
+        this._scheduleMeasure(label);
+    }
+
+    /**
+     * Планирует обработку очереди измерений. Обработка происходит в
+     * ближайшем rAF-кадре, а также форсируется синхронно в начале
+     * {@link TextManager#update}, чтобы размеры были гарантированно
+     * доступны уже в текущем кадре.
+     *
+     * @param {Object} label - Объект подписи.
+     * @private
+     */
+    _scheduleMeasure(label) {
+        if (label._queuedForMeasure) return;
+        label._queuedForMeasure = true;
+        this._measureQueue.push(label);
+
+        if (this._measureScheduled) return;
+        this._measureScheduled = true;
+
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => this._flushMeasurements());
+        }
+    }
+
+    /**
+     * Единый проход по очереди измерений. Работает в три фазы:
+     *
+     *  1. **Write.** Все элементы очереди временно делаются видимыми
+     *     (`display:block; visibility:hidden`) — без снятия размеров.
+     *  2. **Read.** Одним вызовом `offsetWidth/offsetHeight` браузер
+     *     выполняет layout, и мы снимаем размеры сразу для всех подписей.
+     *     Дополнительно кэшируем `fontSize` через `getComputedStyle`.
+     *  3. **Restore.** Возвращаем элементам исходное скрытое состояние.
+     *
+     * Такая схема даёт **один reflow на пачку** вместо N.
+     *
+     * @private
+     */
+    _flushMeasurements() {
+        this._measureScheduled = false;
+        const queue = this._measureQueue;
+        if (queue.length === 0) return;
+        this._measureQueue = [];
+
+        // Фаза 1: write. Показываем все скрытые элементы как visibility:hidden —
+        // браузер сможет их измерить, но пользователь их не увидит.
+        for (let i = 0; i < queue.length; i++) {
+            const label = queue[i];
+            const el = label.element;
+            el.style.display = 'block';
+            el.style.visibility = 'hidden';
+        }
+
+        // Фаза 2: read. Один layout на всю пачку.
+        for (let i = 0; i < queue.length; i++) {
+            const label = queue[i];
+            const el = label.element;
+            label.width = el.offsetWidth;
+            label.height = el.offsetHeight;
+            const cs = window.getComputedStyle(el);
+            label._fontSize = parseFloat(cs.fontSize) || 12;
+            label._needsMeasure = false;
+            label._queuedForMeasure = false;
+        }
+
+        // Фаза 3: restore. Возвращаем исходное скрытое состояние.
+        for (let i = 0; i < queue.length; i++) {
+            const el = queue[i].element;
+            el.style.visibility = '';
+            el.style.display = 'none';
+        }
     }
 
     /**
@@ -510,7 +768,12 @@ export class TextManager {
      */
     _computeAnchor(label, rotationDeg) {
         const src = label.source;
-        if (!label.width || !label.height) this._measureLabel(label);
+
+        // Безопасная страховка: если подпись всё ещё «грязная» (например,
+        // её добавили извне и update не успел выполнить flush), форсируем
+        // измерение ровно один раз — очередь после этого станет пустой.
+        if (label._needsMeasure) this._flushMeasurements();
+
         const w = label.width;
         const h = label.height;
 
@@ -677,17 +940,42 @@ export class TextManager {
 
     /**
      * Главный метод обновления всех подписей. Выполняет следующие шаги:
-     * 1. Сбор видимых подписей с учётом zoom-границ и видимости источника.
-     * 2. Сброс stuck-состояний при изменении набора видимых подписей или зума.
-     * 3. Итеративное раздвижение линейных подписей для избежания перекрытий.
-     * 4. Жадная приоритезация всех подписей: отрисовываются подписи с высшим приоритетом
+     * 0. Форсирует обработку очереди измерений (если что-то накопилось).
+     * 1. Ранний выход, если состав и положение сцены не изменились.
+     * 2. Сбор видимых подписей с учётом zoom-границ и видимости источника.
+     * 3. Сброс stuck-состояний при изменении набора видимых подписей или зума.
+     * 4. Итеративное раздвижение линейных подписей для избежания перекрытий.
+     * 5. Жадная приоритезация всех подписей: отрисовываются подписи с высшим приоритетом
      *    без перекрытий с уже размещёнными. Для ускорения проверки коллизий
      *    используется пространственный индекс (_GridIndex).
-     * 5. Применение вычисленных позиций к DOM-элементам.
+     * 6. Применение вычисленных позиций к DOM-элементам.
      */
     update() {
+        // --- 0. Форсируем измерения до любых вычислений ----------------------
+        if (this._measureQueue.length > 0) {
+            this._flushMeasurements();
+        }
+
         const map = this.map;
         const zoom = map.continuousZoom;
+
+        // --- 1. Троттлинг ----------------------------------------------------
+        // Сигнатура кадра: зум + локальное положение мира + позиция камеры
+        // + количество подписей. Любое значимое изменение → пересчёт.
+        // Округление до 3 знаков после запятой ≈ субмиллиметровая точность
+        // в мировых метрах — визуально неразличимое смещение игнорируется.
+        const wp = map.worldGroup.position;
+        const cam = map.camera.position;
+        const sig = zoom
+            + '|' + wp.x.toFixed(3) + ',' + wp.z.toFixed(3)
+            + '|' + cam.x.toFixed(3) + ',' + cam.y.toFixed(3) + ',' + cam.z.toFixed(3)
+            + '|' + this.labels.length;
+
+        if (!this._dirty && this._lastFrameSig === sig) {
+            return;
+        }
+        this._lastFrameSig = sig;
+        this._dirty = false;
 
         // Сброс stuck при изменении состава или зума.
         // Используем Set<source>, чтобы не материализовать промежуточный массив дважды.
@@ -712,7 +1000,7 @@ export class TextManager {
         this._lastVisibleIds = idSet;
         this._lastZoom = zoom;
 
-        // 1. Сбор видимых подписей
+        // 2. Сбор видимых подписей
         const visibleLabels = [];
         for (const label of this.labels) {
             const src = label.source;
@@ -756,7 +1044,7 @@ export class TextManager {
             }
         }
 
-        // 2. Раздвижение линейных подписей
+        // 3. Раздвижение линейных подписей
         const lineLabels = visibleLabels.filter(l => l.source.getLabelType() === 'line');
         if (lineLabels.length > 0) {
             const maxIterations = 15;
@@ -869,7 +1157,7 @@ export class TextManager {
             }
         }
 
-        // 3. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
+        // 4. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
         //
         // Используем _GridIndex для быстрой проверки коллизий: вместо перебора
         // всех уже размещённых прямоугольников (O(n²)) опрашиваем только те
@@ -921,7 +1209,7 @@ export class TextManager {
             this._setLabelVisible(label, shouldBeVisible);
         }
 
-        // 4. Рендеринг DOM-элементов (только обновление transform)
+        // 5. Рендеринг DOM-элементов (только обновление transform)
         for (const label of visibleLabels) {
             const src = label.source;
             const el = label.element;

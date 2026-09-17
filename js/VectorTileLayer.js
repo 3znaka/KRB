@@ -384,6 +384,11 @@ export class VectorTileLayer {
     /**
      * Строит Three.js-группу тайла из результата воркера.
      *
+     * Здесь вызывается «жёсткий» сброс подписей группы: при пересборке
+     * геометрии старые подписи удаляются из TextManager, а новые будут
+     * пересозданы (или переиспользованы с обновлёнными источниками) в
+     * рамках ближайшего {@link VectorTileLayer#_refreshTextLabelsForVisibleTiles}.
+     *
      * @private
      * @param {THREE.Group} group - Целевая группа.
      * @param {Object} result - Результат обработки воркера.
@@ -494,35 +499,55 @@ export class VectorTileLayer {
 
     /**
      * Пересобирает все текстовые подписи для всех видимых тайлов.
+     *
+     * Ключевое отличие от старой реализации: НЕ удаляет DOM-подписи всех
+     * групп в начале. Вместо этого каждый кандидат передаётся в TextManager
+     * вместе со стабильным id (`group.uuid + ':' + индексВTextPointsData`).
+     * Если подпись с таким id уже существует — она переиспользуется (без
+     * пересоздания DOM), если нет — создаётся. По завершении вызывается
+     * `pruneStaleLabels(activeIds)` для удаления тех, чьи id больше не активны.
+     *
+     * Это устраняет мерцание: DOM-узлы не уничтожаются и не создаются заново
+     * при каждом обновлении, а переиспользуются.
+     *
      * @private
      */
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
-
-        // 1. Удаляем все существующие DOM-подписи.
-        this._tileCache.forEach(group => {
-            this._removeTextLabelsForGroup(group);
-        });
-
-        // 2. Собираем кандидатов со всех видимых групп.
-        const { candidates, isClose } = this._collectLabelCandidates();
-        if (candidates.length === 0) return;
-
-        // 3. Глобальная сортировка.
-        if (isClose) {
-            candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
-        } else {
-            candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
-        }
-
-        // 4. Ограничиваем глобальным бюджетом и создаём DOM-подписи.
-        const limit = Math.min(candidates.length, this.maxTextLabels);
         const textManager = this._map.textManager;
 
-        for (let i = 0; i < limit; i++) {
-            const cand = candidates[i];
+        // 1. Собираем кандидатов со всех видимых групп. Каждый кандидат
+        //    теперь несёт стабильный id (см. _collectLabelCandidates).
+        const { candidates, isClose } = this._collectLabelCandidates();
+
+        // 2. Глобальная сортировка и отбор top-N по бюджету.
+        let selected;
+        if (candidates.length === 0) {
+            selected = [];
+        } else {
+            if (isClose) {
+                candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
+            } else {
+                candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
+            }
+            const limit = Math.min(candidates.length, this.maxTextLabels);
+            selected = candidates.slice(0, limit);
+        }
+
+        // 3. Создаём / переиспользуем подписи, попутно аккумулируя:
+        //    - activeIds: stableId всех живых в этом кадре подписей;
+        //    - groupLabels: Map<group, label[]> — какой группе какие
+        //      подписи сейчас принадлежат (для пересборки userData).
+        const activeIds = new Set();
+        const groupLabels = new Map();
+
+        for (let i = 0; i < selected.length; i++) {
+            const cand = selected[i];
             const pt = cand.pt;
             const group = cand.group;
+            const id = cand.id;
+
+            activeIds.add(id);
 
             const localWorldX = pt.x + group.position.x;
             const localWorldZ = pt.z + group.position.z;
@@ -539,11 +564,28 @@ export class VectorTileLayer {
                 priority: pt.priority,
                 zoomBounds: pt.zoomBounds,
             });
-            const label = textManager.addLabel(source);
 
-            if (!group.userData.textLabels) group.userData.textLabels = [];
-            group.userData.textLabels.push(label);
+            const label = textManager.addLabel(source, id);
+
+            let arr = groupLabels.get(group);
+            if (!arr) {
+                arr = [];
+                groupLabels.set(group, arr);
+            }
+            arr.push(label);
         }
+
+        // 4. Удаляем из TextManager все подписи, чьи stableId не попали
+        //    в activeIds (вышли из бюджета, потеряли видимость, тайл
+        //    выгрузился и т.п.).
+        textManager.pruneStaleLabels(activeIds);
+
+        // 5. Пересобираем userData.textLabels для всех видимых групп.
+        //    Группы, у которых подписей нет, получают пустой массив.
+        this._tileCache.forEach(g => {
+            const arr = groupLabels.get(g);
+            g.userData.textLabels = arr || [];
+        });
     }
 
     /**
@@ -553,6 +595,10 @@ export class VectorTileLayer {
      * Каждый кандидат содержит:
      *  - `pt` — исходная запись из `group.userData.textPointsData`;
      *  - `group` — THREE.Group тайла;
+     *  - `id` — **стабильный** идентификатор подписи вида `group.uuid + ':' + i`,
+     *    где `i` — индекс записи в `textPointsData`. Стабилен, пока жив объект
+     *    группы; при пересоздании тайла группа получает новый uuid, а значит
+     *    старые подписи корректно «вымываются» через pruneStaleLabels.
      *  - `distSq` — квадрат расстояния до цели камеры;
      *  - `priority` — приоритет;
      *  - `sx`, `sy` — экранные координаты (для отладки; кешировать не нужно,
@@ -586,6 +632,7 @@ export class VectorTileLayer {
 
             const gx = group.position.x + worldOffset.x;
             const gz = group.position.z + worldOffset.z;
+            const groupIdPrefix = group.uuid + ':';
 
             for (let i = 0; i < data.length; i++) {
                 const pt = data[i];
@@ -619,6 +666,7 @@ export class VectorTileLayer {
                 candidates.push({
                     pt,
                     group,
+                    id: groupIdPrefix + i,
                     distSq,
                     priority: pt.priority || 0,
                     sx,
@@ -632,6 +680,11 @@ export class VectorTileLayer {
 
     /**
      * Удаляет все DOM-подписи, привязанные к конкретной группе тайла.
+     *
+     * «Жёсткий» путь очистки: используется при уничтожении/пересборке группы.
+     * В штатном цикле обновления ({@link VectorTileLayer#_refreshTextLabelsForVisibleTiles})
+     * этот метод НЕ вызывается — там подписи переиспользуются по stableId,
+     * а устаревшие удаляются через `TextManager.pruneStaleLabels`.
      *
      * @private
      * @param {THREE.Group} group - Группа тайла.
@@ -880,6 +933,10 @@ export class VectorTileLayer {
         this._rootGroup.remove(group);
         this._tileCache.delete(key);
         if (!this._groupCache.has(key)) {
+            // «Жёсткий» путь: тайл уходит из сцены, подписи удаляются
+            // немедленно. Альтернатива — дать pruneStaleLabels сделать это
+            // в ближайшем refresh; но так как группа кэшируется без подписей,
+            // удаляем сразу, чтобы не тащить висячие ссылки.
             this._removeTextLabelsForGroup(group);
             this._groupCache.set(key, group);
             if (this._groupCache.size > this._groupCacheMaxSize) {

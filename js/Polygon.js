@@ -31,7 +31,7 @@
  *     должен иметь `castShadow = true`.
  */
 
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import {
   THREE,
   Line2,
@@ -93,6 +93,11 @@ function crossY(p0, p1, p2) {
  * Всплывающие подсказки обрабатываются централизованно через PopupManager
  * (доступен как `map.popupManager`).
  *
+ * Координаты колец задаются в системе координат `options.crs`.
+ * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+ * Внутри карты координаты автоматически преобразуются в метры проекции
+ * карты (`map.projection`) через {@link KrbMap#project}.
+ *
  * @example
  * // Обычный плоский полигон
  * const flatPolygon = new Polygon({
@@ -131,13 +136,27 @@ function crossY(p0, p1, p2) {
  *     title: 'Объёмный полигон'
  * });
  * extrudedPolygon.addTo(map);
+ *
+ * @example
+ * // Кольца в UTM зоне 37N (EPSG:32637)
+ * const utmPolygon = new Polygon({
+ *     rings: [[[413500, 6178000], [414000, 6178500], [413800, 6179000]]],
+ *     crs: 'EPSG:32637',
+ *     title: 'UTM-полигон'
+ * });
+ * utmPolygon.addTo(map);
  */
 export class Polygon {
     /**
      * Инициализирует новый экземпляр полигона с заданными настройками.
      *
      * @param {Object} options - Настройки полигона.
-     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец. Первое кольцо – внешний контур, остальные (опционально) – отверстия. Каждое кольцо – массив точек [долгота, широта].
+     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец. Первое кольцо – внешний контур, остальные (опционально) – отверстия. Каждое кольцо – массив точек [x, y] в СК `options.crs` (по умолчанию — [долгота, широта] в градусах WGS84).
+     * @param {string} [options.crs] - Код системы координат для `rings`
+     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *     Если не указан — используется `map.inputCRS`.
+     *     Перед созданием полигона соответствующая проекция должна быть
+     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
      * @param {string} [options.fillColor='#3388ff'] - Цвет заливки (CSS).
      * @param {number} [options.fillOpacity=0.5] - Прозрачность заливки (0..1).
      * @param {string} [options.strokeColor='#000000'] - Цвет обводки.
@@ -177,6 +196,19 @@ export class Polygon {
             throw new Error('Polygon: options.rings required with at least one ring');
         }
         /** @private */ this._rings = options.rings;
+        /**
+         * Код СК колец; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         /** @private */ this._fillColor = options.fillColor || '#3388ff';
         /** @private */ this._fillOpacity = options.fillOpacity ?? 0.5;
         /** @private */ this._strokeColor = options.strokeColor || '#000000';
@@ -448,6 +480,11 @@ export class Polygon {
         this._map = map;
         this._layer = layer;
 
+        // Резолвим проекцию полигона: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
@@ -593,8 +630,9 @@ _createSurfaceMaterial() {
 
             let firstPoint = null;
             for (let i = 0; i < ring.length; i++) {
-                const [lon, lat] = ring[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                const pt = ring[i];
+                // Координаты кольца → метры проекции карты.
+                const [absX, absZ] = map.project(pt, this._crs);
                 if (i === 0) {
                     firstPoint = [absX, absZ];
                 }
@@ -800,13 +838,11 @@ sideMesh.renderOrder   = POLYGON_RENDER_ORDER.SIDE;
             const points = [];
             const outerRing = this._rings[0];
             for (let i = 0; i < outerRing.length; i++) {
-                const [lon, lat] = outerRing[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                const [absX, absZ] = map.project(outerRing[i], this._crs);
                 points.push(new THREE.Vector3(absX, 0, absZ));
             }
             if (outerRing.length > 0) {
-                const [lon, lat] = outerRing[0];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                const [absX, absZ] = map.project(outerRing[0], this._crs);
                 points.push(new THREE.Vector3(absX, 0, absZ));
             }
 
@@ -828,8 +864,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
 
             this._strokeWorldCoords.length = 0;
             for (let i = 0; i < outerRing.length; i++) {
-                const [lon, lat] = outerRing[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                const [absX, absZ] = map.project(outerRing[i], this._crs);
                 this._strokeWorldCoords.push([absX, absZ]);
             }
         } else {
@@ -839,7 +874,7 @@ this._strokeMaterial = new LineMaterial({
     color: this._strokeColor,
     linewidth: this._strokeWidth,
     opacity: this._strokeOpacity,
-    transparent: true,           
+    transparent: true,
     depthTest: this._depthTest,
     depthWrite: this._depthWrite,
     resolution: new THREE.Vector2(canvas.width, canvas.height)
@@ -852,8 +887,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             this._strokeWorldCoords.length = 0;
             const outerRing = this._rings[0];
             for (let i = 0; i < outerRing.length; i++) {
-                const [lon, lat] = outerRing[i];
-                const [absX, absZ] = proj.fromLonLat([lon, lat]);
+                const [absX, absZ] = map.project(outerRing[i], this._crs);
                 this._strokeWorldCoords.push([absX, absZ]);
             }
             this._cachedStrokeHeights = new Array(outerRing.length).fill(0);
@@ -996,6 +1030,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
+        this._crs = null;
     }
 
     /**

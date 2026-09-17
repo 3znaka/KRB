@@ -7,15 +7,14 @@
  * @module polyline
  */
 
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import {
   THREE,
   Line2,
   LineMaterial,
   LineGeometry,
-} from '../js_TP/tpb.js';  
+} from '../js_TP/tpb.js';
 import { Layer } from './Layers.js';
-
 
 /**
  * Вычисляет минимальное расстояние от точки до отрезка.
@@ -42,6 +41,11 @@ function pointToSegmentDistance(point, a, b) {
  * Класс, представляющий полилинию на карте.
  * Поддерживает настройку цвета, толщины, прозрачности, режима высоты,
  * ограничения по зуму и текстовую подпись.
+ *
+ * Координаты точек задаются в системе координат `options.crs`.
+ * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+ * Внутри карты координаты автоматически преобразуются в метры проекции
+ * карты (`map.projection`) через {@link KrbMap#project}.
  *
  * @example
  * // Предполагается, что переменная map уже содержит экземпляр карты.
@@ -93,13 +97,27 @@ function pointToSegmentDistance(point, a, b) {
  * } catch (error) {
  *   console.error('Ошибка:', error.message);
  * }
+ *
+ * @example
+ * // Точки в UTM зоне 37N (EPSG:32637)
+ * const utmLine = new Polyline({
+ *   positions: [[413500, 6178000], [414000, 6178500]],
+ *   crs: 'EPSG:32637',
+ *   color: '#00aa00'
+ * });
+ * utmLine.addTo(map);
  */
 export class Polyline {
     /**
      * Создаёт экземпляр полилинии с заданными настройками.
      *
      * @param {Object} options - Настройки полилинии.
-     * @param {[number, number][]} options.positions - Массив точек [долгота, широта] (минимум 2).
+     * @param {[number, number][]} options.positions - Массив точек [x, y] в СК `options.crs` (минимум 2). По умолчанию — [долгота, широта] в градусах WGS84.
+     * @param {string} [options.crs] - Код системы координат для `positions`
+     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *     Если не указан — используется `map.inputCRS`.
+     *     Перед созданием полилинии соответствующая проекция должна быть
+     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
      * @param {string} [options.color='#3388ff'] - Цвет линии (CSS).
      * @param {number} [options.opacity=1] - Прозрачность (0..1).
      * @param {number} [options.width=2] - Толщина линии в пикселях (поддерживается LineMaterial).
@@ -127,6 +145,19 @@ export class Polyline {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }
         /** @private */ this._positions = options.positions;
+        /**
+         * Код СК точек; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         /** @private */ this._color = options.color || '#3388ff';
         /** @private */ this._opacity = options.opacity ?? 1;
         /** @private */ this._width = options.width || 2;
@@ -170,7 +201,7 @@ export class Polyline {
         /** @private */ this._line = null;
         /** @private */ this._material = null;
         /** @private */ this._geometry = null;
-        
+
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
     }
@@ -204,8 +235,15 @@ export class Polyline {
         this._map = map;
         this._layer = layer;
 
-        // Преобразование координат в мировую проекцию Меркатора
-        this._absPositions = this._positions.map(([lon, lat]) => proj.fromLonLat([lon, lat]));
+        // Резолвим проекцию полилинии: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
+        // Преобразование координат в мировую систему карты.
+        this._absPositions = this._positions.map(
+            pt => map.project(pt, this._crs)
+        );
         this._cachedHeights = null;
 
         this._geometry = new LineGeometry();
@@ -248,6 +286,7 @@ export class Polyline {
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
+        this._crs = null;
         this._screenData.valid = false;
     }
 

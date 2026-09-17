@@ -8,8 +8,8 @@
 
 import {
   THREE,
-} from '../js_TP/tpb.js';  
-import { proj } from './Utils.js';
+} from '../js_TP/tpb.js';
+import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 
 /**
@@ -18,6 +18,11 @@ import { Layer } from './Layers.js';
  * а копирует геометрию тайлов и накладывает на них текстуру полигона.
  *
  * Поддерживает заливку, обводку и заданное возвышение над поверхностью.
+ *
+ * Координаты колец задаются в системе координат `options.crs`.
+ * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+ * Внутри карты координаты автоматически преобразуются в метры проекции
+ * карты (`map.projection`) через {@link KrbMap#project}.
  *
  * @example
  * const poly = new SurfacePolygon({
@@ -38,7 +43,13 @@ export class SurfacePolygon {
      * @param {Object} options - Настройки полигона.
      * @param {Array<Array<[number,number]>>} options.rings - Массив колец.
      *        Первое кольцо – внешний контур (обязательно), остальные (опционально) – отверстия.
-     *        Каждое кольцо – массив точек [долгота, широта].
+     *        Каждое кольцо – массив точек [x, y] в СК `options.crs`
+     *        (по умолчанию — [долгота, широта] в градусах WGS84).
+     * @param {string} [options.crs] - Код системы координат для `rings`
+     *        (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *        Если не указан — используется `map.inputCRS`.
+     *        Перед созданием полигона соответствующая проекция должна быть
+     *        зарегистрирована в `Projections` (см. `Projections.ensure`).
      * @param {string} [options.fillColor='#ff0000'] - Цвет заливки (CSS).
      * @param {number} [options.fillOpacity=0.6] - Прозрачность заливки (0..1).
      * @param {string} [options.strokeColor='#000000'] - Цвет обводки.
@@ -51,6 +62,19 @@ export class SurfacePolygon {
         }
 
         /** @private */ this._rings = options.rings;
+        /**
+         * Код СК колец; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         /** @private */ this._fillColor = options.fillColor || '#ff0000';
         /** @private */ this._fillOpacity = options.fillOpacity ?? 0.6;
         /** @private */ this._strokeColor = options.strokeColor || '#000000';
@@ -93,6 +117,11 @@ export class SurfacePolygon {
         this._map = map;
         this._layer = layer;
 
+        // Резолвим проекцию полигона: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
         if (map.tileManager?.onTileHeightAppliedCallbacks) {
             this._callback = (ctx, inst) => this._onTileHeightApplied(ctx, inst);
             map.tileManager.onTileHeightAppliedCallbacks.push(this._callback);
@@ -110,7 +139,7 @@ export class SurfacePolygon {
     }
 
     /**
-     * Вычисляет ограничивающий прямоугольник тайла в мировых координатах Меркатора.
+     * Вычисляет ограничивающий прямоугольник тайла в мировых координатах.
      * `bottom` – северная кромка (минимальная Z), `top` – южная кромка (максимальная Z).
      *
      * @param {Object} ctx - Контекст тайлового слоя.
@@ -140,8 +169,9 @@ export class SurfacePolygon {
     _polygonIntersectsTile(bbox) {
         const ring = this._rings[0];
         let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-        for (const [lon, lat] of ring) {
-            const [x, z] = proj.fromLonLat([lon, lat]);
+        for (const pt of ring) {
+            // Координата кольца → метры проекции карты.
+            const [x, z] = this._map.project(pt, this._crs);
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
             if (z < minZ) minZ = z;
@@ -198,8 +228,9 @@ export class SurfacePolygon {
 
         // Преобразуем координаты кольца полигона в UV тайла (могут выходить за 0..1)
         const ring = this._rings[0];
-        const uvPoints = ring.map(([lon, lat]) => {
-            const [wx, wz] = proj.fromLonLat([lon, lat]);
+        const uvPoints = ring.map((pt) => {
+            // Координата кольца → метры проекции карты.
+            const [wx, wz] = map.project(pt, this._crs);
             const u = (wx - bbox.left) / ts;
             const v = (wz - bbox.bottom) / ts;   // 0 = север, 1 = юг
             return { u, v };
@@ -277,5 +308,6 @@ export class SurfacePolygon {
             this._layer = null;
         }
         this._map = null;
+        this._crs = null;
     }
 }

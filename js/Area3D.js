@@ -3,6 +3,11 @@
  * Позволяет размещать GLB-модели или примитивы внутри четырёхугольного полигона
  * с возможностью растягивания/вписывания, поворота и учётом рельефа.
  *
+ * Координаты колец задаются в системе координат `options.crs`.
+ * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+ * Внутри карты координаты автоматически преобразуются в метры проекции
+ * карты (`map.projection`) через {@link KrbMap#project}.
+ *
  * @example
  * const area = new Area3D({
  *     rings: [[[30.5, 50.4], [31.0, 50.5], [31.2, 50.7], [30.8, 50.8], [30.5, 50.4]]],
@@ -17,7 +22,7 @@
  * area.addTo(map);
  */
 import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 
 const AREA3D_RENDER_ORDER = 1000;
@@ -32,12 +37,61 @@ export class Area3D {
     static _mapEventHandlers = new WeakMap();
     static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
+    /**
+     * Создаёт Area3D.
+     *
+     * @param {Object} options - Настройки.
+     * @param {Array<Array<[number,number]>>} options.rings - Кольца полигона в СК `options.crs`
+     *     (по умолчанию — [долгота, широта] в градусах WGS84). Первое кольцо — внешний контур,
+     *     минимум 3 точки.
+     * @param {string} [options.crs] - Код СК координат `rings` (например, 'EPSG:4326',
+     *     'EPSG:3857', 'EPSG:32637'). Если не указан — используется `map.inputCRS`.
+     *     Перед созданием объекта соответствующая проекция должна быть зарегистрирована
+     *     в `Projections` (см. `Projections.ensure`).
+     * @param {string} [options.modelUrl] - URL GLB-модели (если не задан — строится примитив).
+     * @param {string} [options.primitiveType='box'] - Тип примитива: 'box', 'sphere', 'cylinder', 'cone'.
+     * @param {number|number[]} [options.size] - Размеры примитива.
+     * @param {string} [options.fit='stretch'] - Режим вписывания модели в полигон: 'stretch' или 'contain'.
+     * @param {number} [options.rotate=0] - Поворот модели (0-3, кратно 90°).
+     * @param {number} [options.altitude=0] - Высота над поверхностью (для clampToGround) или абсолютная (для absolute).
+     * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты.
+     * @param {[number, number, number]} [options.anchor=[0.5,0,0.5]] - Точка привязки.
+     * @param {number} [options.minZoom=-Infinity] - Минимальный зум видимости.
+     * @param {number} [options.maxZoom=Infinity] - Максимальный зум видимости.
+     * @param {boolean} [options.playAnimation=true] - Воспроизводить ли встроенные анимации GLB.
+     * @param {string|number} [options.color=0x3388ff] - Цвет примитива.
+     * @param {boolean} [options.depthTest=true] - Тест глубины.
+     * @param {boolean} [options.depthWrite=true] - Запись глубины.
+     * @param {string} [options.title=''] - Текст постоянной подписи.
+     * @param {Object} [options.titleStyle] - CSS-стили подписи.
+     * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум подписи.
+     * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум подписи.
+     * @param {string} [options.titlePlacement='top'] - Положение подписи: 'top', 'bottom', 'left', 'right'.
+     * @param {string} [options.titleAlign] - Горизонтальное выравнивание подписи (по умолчанию зависит от placement).
+     * @param {[number, number]} [options.titleOffset] - Смещение подписи в пикселях (по умолчанию зависит от placement).
+     * @param {string} [options.tooltip=''] - HTML-текст всплывающей подсказки.
+     * @param {Function} [options.onClick] - Обработчик клика.
+     * @param {Function} [options.onHover] - Обработчик наведения.
+     */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }
 
         this._rings = options.rings;
+        /**
+         * Код СК колец; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         this._modelUrl = options.modelUrl || null;
         this._primitiveType = options.primitiveType || 'box';
         this._size = options.size || null;
@@ -156,6 +210,7 @@ export class Area3D {
             this._layer = null;
         }
         this._map = null;
+        this._crs = null;
     }
 
     _attach(map, layer) {
@@ -163,6 +218,11 @@ export class Area3D {
         this.remove();
         this._map = map;
         this._layer = layer;
+
+        // Резолвим проекцию Area3D: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
 
         this._calculatePolygonParams();
         this._group.position.set(this._centroidWorld.x, 0, this._centroidWorld.z);
@@ -190,8 +250,8 @@ export class Area3D {
         let sumX = 0, sumZ = 0;
         let uniquePoints = [];
         for (let i = 0; i < outerRing.length; i++) {
-            const [lon, lat] = outerRing[i];
-            const [absX, absZ] = proj.fromLonLat([lon, lat]);
+            // Координата кольца → метры проекции карты.
+            const [absX, absZ] = this._map.project(outerRing[i], this._crs);
             if (i > 0 && absX === uniquePoints[0]?.[0] && absZ === uniquePoints[0]?.[1]) continue;
             uniquePoints.push([absX, absZ]);
             this._worldCoords.push([absX, absZ]);

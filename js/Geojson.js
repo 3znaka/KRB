@@ -1,11 +1,15 @@
 // geojson.js — загрузка GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon), стилизация через свойства и коллбэки
+//
+// Координаты GeoJSON по умолчанию интерпретируются как WGS84 (EPSG:4326).
+// Если данные в другой СК — передайте её код через options.crs, либо
+// переопределите CRS точечно через коллбэки pointToOptions / lineToOptions /
+// polygonToOptions / point3DToOptions / polygon3DToOptions, вернув { crs: 'EPSG:...' }.
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
 import { Marker3D } from './Marker3D.js';
-import { Area3D } from './Area3D.js'; // Добавлен импорт Area3D
+import { Area3D } from './Area3D.js';
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
-import { proj } from './Utils.js';
 
 /**
  * Слой, автоматически создающий маркеры, линии и полигоны на основе данных GeoJSON.
@@ -23,6 +27,11 @@ import { proj } from './Utils.js';
  * @param {Object} [options={}] - Объект с настройками слоя.
  * @param {string} [options.url] - URL GeoJSON-файла для загрузки данных.
  * @param {Object} [options.data] - Готовый GeoJSON-объект (FeatureCollection, Feature или отдельная геометрия).
+ * @param {string} [options.crs] - Код системы координат для координат GeoJSON
+ *        (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+ *        Если не указан — используется `map.inputCRS` (по умолчанию EPSG:4326, что
+ *        соответствует стандарту GeoJSON RFC 7946).
+ *        Может быть переопределён в каждом коллбэке через поле `crs`.
  * @param {Function} [options.pointToOptions] - Функция для создания опций маркера.
  *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker}.
  * @param {Function} [options.point3DToOptions] - Функция для создания опций 3D-маркера.
@@ -82,8 +91,7 @@ import { proj } from './Utils.js';
  * @param {string} [options.defaultPolygon3DModelUrl=null] - URL GLB-модели для Area3D по умолчанию.
  * @param {boolean} [options.defaultPolygon3DDepthTest=true] - Включение теста глубины для Area3D.
  * @param {boolean} [options.defaultPolygon3DDepthWrite=true] - Запись глубины для Area3D.
- *
-/**
+ * 
  * @example
  * const layer = new GeoJSONLayer({
  *     url: 'data.geojson',
@@ -148,6 +156,14 @@ import { proj } from './Utils.js';
  * });
  * layer.addTo(map);
  * layer.reload();
+ *
+ * @example
+ * // GeoJSON в UTM зоне 37N (EPSG:32637)
+ * const utmLayer = new GeoJSONLayer({
+ *     url: 'utm-data.geojson',
+ *     crs: 'EPSG:32637'
+ * });
+ * utmLayer.addTo(map);
  */
 export class GeoJSONLayer extends Layer {
     /**
@@ -156,6 +172,7 @@ export class GeoJSONLayer extends Layer {
      * @param {Object} [options={}] - Объект с настройками слоя.
      * @param {string} [options.url] - URL GeoJSON-файла для загрузки данных.
      * @param {Object} [options.data] - Готовый GeoJSON-объект (FeatureCollection, Feature или отдельная геометрия).
+     * @param {string} [options.crs] - Код СК координат GeoJSON. Если не указан — `map.inputCRS`.
      * @param {Function} [options.pointToOptions] - Функция для создания опций маркера.
      *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker}.
      * @param {Function} [options.point3DToOptions] - Функция для создания опций 3D-маркера.
@@ -220,6 +237,7 @@ export class GeoJSONLayer extends Layer {
 
         this.url = options.url || null;
         this.data = options.data || null;
+        this.crs = options.crs || null;
         this.filter = options.filter || null;
         this.onEachFeature = options.onEachFeature || null;
 
@@ -227,7 +245,7 @@ export class GeoJSONLayer extends Layer {
         this.point3DToOptions = options.point3DToOptions || null;
         this.lineToOptions = options.lineToOptions || null;
         this.polygonToOptions = options.polygonToOptions || null;
-        this.polygon3DToOptions = options.polygon3DToOptions || null; // Новый коллбэк для 3D-площадных объектов
+        this.polygon3DToOptions = options.polygon3DToOptions || null;
 
         // --- Параметры по умолчанию для обычных маркеров ---
         this.defaultIconUrl = options.defaultIconUrl || 'marker.png';
@@ -437,6 +455,7 @@ export class GeoJSONLayer extends Layer {
 
             const marker3DOptions = {
                 position: coords,
+                crs: options.crs ?? this.crs,
                 title: options.title || props.title || props.name || '',
                 tooltip: options.tooltip || props.tooltip || props.description || '',
                 primitiveType: options.primitiveType || props.primitiveType || this.default3DPrimitiveType,
@@ -466,7 +485,7 @@ export class GeoJSONLayer extends Layer {
                 this.onEachFeature(feature, marker3D);
             }
         } else {
-            // --- Создание обычного маркера (как раньше) ---
+            // --- Создание обычного маркера ---
             let options;
             if (this.pointToOptions) {
                 options = this.pointToOptions(feature, props) || {};
@@ -476,6 +495,7 @@ export class GeoJSONLayer extends Layer {
 
             const markerOptions = {
                 position: coords,
+                crs: options.crs ?? this.crs,
                 title: options.title || props.title || props.name || '',
                 tooltip: options.tooltip || props.tooltip || props.description || '',
                 iconUrl: options.iconUrl !== undefined ? options.iconUrl : (props.icon || this.defaultIconUrl),
@@ -573,6 +593,7 @@ export class GeoJSONLayer extends Layer {
             const lineOptions = {
                 positions: coords,
                 ...options,
+                crs: options.crs ?? this.crs,
                 title: options.title ?? props.title ?? props.name ?? '',
                 titleOffset: options.titleOffset ?? this._parsePair(props.titleOffset),
                 titleAlign: options.titleAlign ?? props.titleAlign ?? 'center',
@@ -648,6 +669,7 @@ export class GeoJSONLayer extends Layer {
 
                 const areaOptions = {
                     rings: rings,
+                    crs: options3D.crs ?? this.crs,
                     modelUrl: options3D.modelUrl || props.modelUrl || this.defaultPolygon3DModelUrl,
                     fit: options3D.fit || props.fit || this.defaultPolygon3DFit,
                     rotate: options3D.rotate ?? props.rotate ?? this.defaultPolygon3DRotate,
@@ -690,6 +712,7 @@ export class GeoJSONLayer extends Layer {
                 const polygonOptions = {
                     rings: rings,
                     ...options,
+                    crs: options.crs ?? this.crs,
                     title: options.title ?? props.title ?? props.name ?? '',
                     titleOffset: options.titleOffset ?? this._parsePair(props.titleOffset),
                     titleAlign: options.titleAlign ?? props.titleAlign ?? 'center',

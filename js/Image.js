@@ -10,7 +10,7 @@
  */
 
 import { THREE } from '../js_TP/tpb.js';
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 
 /**
@@ -21,7 +21,13 @@ const IMAGE_RENDER_ORDER = 997;
 
 /**
  * Класс, представляющий плоское изображение на карте.
- * 
+ *
+ * Координаты узлов (`nodes`) и альтернативной позиции (`position`)
+ * задаются в системе координат `options.crs`. Если `crs` не указан,
+ * используется `map.inputCRS` (по умолчанию WGS84). Внутри карты
+ * координаты автоматически преобразуются в метры проекции карты
+ * (`map.projection`) через {@link KrbMap#project}.
+ *
  * @example
  * // Создание изображения по четырём узлам (углам)
  * const img = new Image({
@@ -56,8 +62,13 @@ export class Image {
      *
      * @param {Object} options - Настройки изображения.
      * @param {string|HTMLImageElement|HTMLCanvasElement} options.source - Источник изображения: URL, готовый элемент или канвас.
-     * @param {Array.<Object>} [options.nodes] - Массив из 3 или 4 узлов (углов изображения). Каждый узел: { lon, lat, alt }. Порядок: [нижний левый, нижний правый, верхний левый, верхний правый] (соответствует вершинам PlaneGeometry). Если задано 3 узла, четвёртый игнорируется (будет треугольник). Если 4 узла не лежат в одной плоскости, четвёртый проецируется на плоскость первых трёх.
-     * @param {Array.<number>} [options.position] - Географическая позиция [lon, lat, alt] для альтернативного позиционирования (используется, если не заданы nodes).
+     * @param {Array.<Object>} [options.nodes] - Массив из 3 или 4 узлов (углов изображения). Каждый узел: { lon, lat, alt } — координаты в СК `options.crs` (по умолчанию WGS84). Порядок: [нижний левый, нижний правый, верхний левый, верхний правый] (соответствует вершинам PlaneGeometry). Если задано 3 узла, четвёртый игнорируется (будет треугольник). Если 4 узла не лежат в одной плоскости, четвёртый проецируется на плоскость первых трёх.
+     * @param {string} [options.crs] - Код системы координат для `nodes` и `position`
+     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *     Если не указан — используется `map.inputCRS`.
+     *     Перед созданием изображения соответствующая проекция должна быть
+     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
+     * @param {Array.<number>} [options.position] - Позиция [x, y, alt] в СК `options.crs` для альтернативного позиционирования (используется, если не заданы nodes). По умолчанию — [долгота, широта, высота] в WGS84.
      * @param {Array.<number>} [options.size] - Размеры изображения [width, height] в метрах (для альтернативного позиционирования).
      * @param {Array.<number>} [options.anchor=[0.5,0.5]] - Точка привязки внутри изображения в нормализованных координатах (0..1). Например, (0,0) – нижний левый угол, (1,1) – верхний правый.
      * @param {Array.<number>} [options.rotation=[0,0,0]] - Углы поворота [x, y, z] в радианах (для альтернативного позиционирования).
@@ -86,6 +97,19 @@ export class Image {
         /** @private */ this._source = options.source;
         /** @private */ this._nodes = options.nodes || null;
         /** @private */ this._position = options.position || null;
+        /**
+         * Код СК узлов и позиции; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         /** @private */ this._size = options.size || [100, 100];
         /** @private */ this._anchor = options.anchor || [0.5, 0.5];
         /** @private */ this._rotation = options.rotation || [0, 0, 0];
@@ -266,6 +290,11 @@ export class Image {
         this._map = map;
         this._layer = layer;
 
+        // Резолвим проекцию изображения: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
         this._loadTexture();
         this._buildGeometry(map);
         map.worldGroup.add(this._group);
@@ -308,6 +337,7 @@ export class Image {
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
+        this._crs = null;
         this._isVisible = false;
         this._worldPositions.length = 0;
     }
@@ -477,14 +507,17 @@ export class Image {
 
     /**
      * Вычисляет мировые координаты (без worldGroup) для заданных узлов.
+     * Координаты узлов интерпретируются в СК `this._crs`.
      * @returns {Array.<THREE.Vector3>} Массив векторов.
      * @private
      */
     _computeWorldPositionsFromNodes() {
         if (!this._nodes || this._nodes.length < 3) return [];
 
+        const map = this._map;
         const positions = this._nodes.map(node => {
-            const [x, z] = proj.fromLonLat([node.lon, node.lat]);
+            // Узел задаётся объектом { lon, lat, alt }; проект только первые два.
+            const [x, z] = map.project([node.lon, node.lat], this._crs);
             const y = node.alt || 0;
             return new THREE.Vector3(x, y, z);
         });
@@ -510,6 +543,8 @@ export class Image {
 
     /**
      * Вычисляет мировые координаты узлов из альтернативного позиционирования (anchor, rotation, size).
+     * Первые два элемента `_position` интерпретируются в СК `this._crs`,
+     * третий элемент (`alt`) — как мировая Y-координата.
      * @returns {Array.<THREE.Vector3>} Массив из четырёх векторов в порядке [нижний левый, нижний правый, верхний левый, верхний правый].
      * @private
      */
@@ -521,8 +556,8 @@ _computeWorldPositionsFromAnchor() {
     const [ax, ay] = this._anchor;
     const [rx, ry, rz] = this._rotation;
 
-const [worldX, worldZ] = proj.fromLonLat([lon, lat]);
-const center = new THREE.Vector3(worldX, alt || 0, worldZ);
+    const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
+    const center = new THREE.Vector3(worldX, alt || 0, worldZ);
 
     const halfW = width / 2;
     const halfH = height / 2;
@@ -595,7 +630,7 @@ const center = new THREE.Vector3(worldX, alt || 0, worldZ);
         this._centroidWorld.copy(centroid);
 
         // Создаём PlaneGeometry с 4 вершинами (для треугольника можно использовать также, но 4-я вершина будет продублирована)
-        // Если узлов 3, создадим треугольную геометрию: используем три первые вершины, четвёртую ставим в ту же точку, что и третью? 
+        // Если узлов 3, создадим треугольную геометрию: используем три первые вершины, четвёртую ставим в ту же точку, что и третью?
         // Но текстура будет искажена. Лучше создать геометрию с 3 вершинами и индексами.
         let geometry;
         if (worldPositions.length === 3) {
@@ -609,7 +644,7 @@ const center = new THREE.Vector3(worldX, alt || 0, worldZ);
             });
             geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
             geometry.setIndex([0, 1, 2]);
-            // UV для треугольника: сопоставим углам изображения (0,0), (1,0), (0,1) или (0,1), (1,1), (0,0)? 
+            // UV для треугольника: сопоставим углам изображения (0,0), (1,0), (0,1) или (0,1), (1,1), (0,0)?
             // Для простоты установим UV: (0,0), (1,0), (0,1) в порядке вершин.
             const uvs = new Float32Array([0,0, 1,0, 0,1]);
             geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));

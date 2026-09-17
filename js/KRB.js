@@ -12,4 +12,5 @@ export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
 export { Area3D } from './Area3D.js';
 export { Image } from './Image.js';
+export { Projections } from './Projections.js';
 export { exportToGLB } from './Exporter.js';

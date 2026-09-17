@@ -9,6 +9,11 @@
  * явно помечаются большим `renderOrder` (`_tileGroupRenderOrder`),
  * иначе линии/заливки получат `groupOrder = 0` и будут перекрыты
  * растровыми тайлами (у которых `renderOrder = z`, 18+).
+ *
+ * ПРОЕКЦИИ: слой работает в метрах проекции карты (`map.projection`).
+ * Координаты GeoJSON для exclusion-областей задаются в системе координат
+ * `options.crs` (по умолчанию `map.inputCRS` = WGS84) и преобразуются
+ * в метры через {@link KrbMap#project}.
  */
 
 import {
@@ -19,7 +24,7 @@ import {
 } from '../js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
@@ -109,6 +114,9 @@ export const VECTOR_TILE_RENDER_ORDER = {
  *
  * @param {Object} options - Объект с настройками слоя.
  * @property {string} options.url - URL шаблона тайлов с плейсхолдерами {z}, {x}, {y}.
+ * @property {string} [options.crs] - Код системы координат для GeoJSON-координат,
+ *   передаваемых в `addExclusionArea`. Если не указан — используется `map.inputCRS`
+ *   (по умолчанию EPSG:4326 = WGS84).
  * @property {number} [options.minZoom=0] - Минимальный зум, при котором слой видим.
  * @property {number} [options.maxZoom=Infinity] - Максимальный зум, при котором слой видим.
  * @property {number} [options.maxSourceZoom=14] - Максимальный исходный зум тайлов.
@@ -157,11 +165,28 @@ export const VECTOR_TILE_RENDER_ORDER = {
  *     ]
  * });
  *
+ * layer.addTo(map);
+ * layer.addExclusionArea(geojsonExclusion, ['water', 'landcover']);
  * layer.removeFromMap();
  */
 export class VectorTileLayer {
     constructor(options = {}) {
         this.url = options.url;
+
+        /**
+         * Код СК для GeoJSON-координат exclusion-областей.
+         * null — использовать `map.inputCRS` (по умолчанию WGS84).
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `addTo`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
         this.maxSourceZoom = options.maxSourceZoom ?? 14;
@@ -603,12 +628,23 @@ export class VectorTileLayer {
      * Добавляет область исключения. Геометрия указанных слоёв, пересекающаяся с этой областью,
      * не будет отображаться.
      *
+     * Координаты GeoJSON интерпретируются в системе координат, заданной в опции `crs`
+     * конструктора (по умолчанию — `map.inputCRS`, т.е. WGS84) и преобразуются
+     * во внутренние метры карты через {@link KrbMap#project}.
+     *
+     * Слой должен быть предварительно добавлен на карту через `addTo(map)`, иначе
+     * невозможно преобразовать координаты в метры проекции карты.
+     *
      * @param {Object} collection - GeoJSON (FeatureCollection, Feature или Geometry).
      * @param {Array<string>} layers - Список имён слоёв, к которым применяется исключение.
      * @returns {VectorTileLayer} Текущий экземпляр слоя.
-     * @throws {Error} Если передан некорректный GeoJSON.
+     * @throws {Error} Если слой не добавлен на карту или передан некорректный GeoJSON.
      */
     addExclusionArea(collection, layers) {
+        if (!this._map) {
+            throw new Error('VectorTileLayer.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
+        }
+
         // Извлекаем полигоны из GeoJSON
         const geometries = [];
         if (collection.type === 'FeatureCollection') {
@@ -620,6 +656,11 @@ export class VectorTileLayer {
         } else {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
+
+        // Резолвим CRS: либо заданный у слоя, либо inputCRS карты.
+        const crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : this._map.inputCRS;
 
         const worldPolygons = [];
         for (const geom of geometries) {
@@ -635,8 +676,9 @@ export class VectorTileLayer {
             }
 
             for (const ring of rings) {
-                const worldRing = ring.map(([lon, lat]) => {
-                    const [x, z] = proj.fromLonLat([lon, lat]);
+                const worldRing = ring.map(pt => {
+                    // Координата [x, y] в СК слоя → метры проекции карты.
+                    const [x, z] = this._map.project(pt, crs);
                     return { x, z };
                 });
                 worldPolygons.push(worldRing);
@@ -687,6 +729,11 @@ export class VectorTileLayer {
         if (this._map) this.removeFromMap();
         this._map = map;
 
+        // Резолвим СК для exclusion-областей.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
         // См. комментарий у _tileGroupRenderOrder. Здесь выставляем renderOrder
         // на корневую группу слоя. Само по себе это ничего не даёт (промежуточные
         // tileGroup всё равно сбросят groupOrder), но пусть будет — на случай,
@@ -732,6 +779,7 @@ export class VectorTileLayer {
         const idx = this._map._dynamicLayers.indexOf(this);
         if (idx > -1) this._map._dynamicLayers.splice(idx, 1);
         this._map = null;
+        this._crs = null;
 
         this._fillMaterialCache.forEach(m => m.dispose());
         this._lineMaterialCache.forEach(m => m.dispose());

@@ -7,10 +7,9 @@
  */
 
 import { _getPanes } from './Marker.js';
-import { proj } from './Utils.js';
 import {
   THREE
-} from '../js_TP/tpb.js';  
+} from '../js_TP/tpb.js';
 
 /**
  * Базовый слой, управляющий коллекцией объектов карты.
@@ -154,6 +153,11 @@ export class Layer {
  * Группирует близко расположенные маркеры в кластеры, отображаемые
  * в виде специальных DOM-элементов. Наследует {@link Layer}.
  *
+ * Координаты маркеров могут быть заданы в любой СК, зарегистрированной
+ * в `Projections` (через опцию `crs` у маркера). Внутри слоя они всегда
+ * приводятся к мировым координатам карты методом `map.project`, поэтому
+ * кластеризация корректно работает даже при смешанных СК у маркеров.
+ *
  * @example
  * const layer = new ClusterLayer({
  *     clusterDistance: 60,
@@ -174,8 +178,8 @@ export class Layer {
  *     _clusterable: true,
  *     _minZoom: 0,
  *     _maxZoom: 22,
- *     _lon: 0,
- *     _lat: 0,
+ *     _coord: [0, 0],
+ *     _crs: null,
  *     _altitudeMode: 'absolute',
  *     _element: document.createElement('div'),
  *     _attach(map, layer) { this._map = map; this._layer = layer; },
@@ -315,7 +319,9 @@ export class ClusterLayer extends Layer {
             if (zoom < marker._minZoom || zoom > marker._maxZoom) continue;
             if (!marker._element) continue;
 
-            const [wx, wz] = proj.fromLonLat([marker._lon, marker._lat]);
+            // Координаты маркера → метры проекции карты.
+            // Работает для любой зарегистрированной СК, заданной у маркера.
+            const [wx, wz] = map.project(marker._coord, marker._crs);
             const wgPos = map.worldGroup.position;
             const worldX = wx + wgPos.x;
             const worldZ = wz + wgPos.z;
@@ -484,18 +490,29 @@ export class ClusterLayer extends Layer {
      * Обрабатывает клик по кластеру: перемещает камеру к центру кластера
      * и увеличивает зум, чтобы разгруппировать маркеры.
      *
+     * Центр кластера вычисляется в мировых координатах (усреднение
+     * `worldPos` из группы), затем переводится в WGS84 через
+     * `map.unprojectToLonLat`. Такой подход корректно работает даже
+     * если маркеры в кластере заданы в разных СК.
+     *
      * @param {Array} group - Массив объектов { marker, sx, sy, worldPos }.
      * @param {Object} map - Экземпляр карты.
      * @private
      */
     _handleClusterClick(group, map) {
-        const markers = group.map(p => p.marker);
-        const avgLon = markers.reduce((s, m) => s + m._lon, 0) / markers.length;
-        const avgLat = markers.reduce((s, m) => s + m._lat, 0) / markers.length;
+        let avgX = 0, avgZ = 0;
+        for (const pt of group) {
+            avgX += pt.worldPos.x;
+            avgZ += pt.worldPos.z;
+        }
+        avgX /= group.length;
+        avgZ /= group.length;
+
+        const [lon, lat] = map.unprojectToLonLat(avgX, avgZ);
 
         const currentZoom = map.continuousZoom;
         const targetZoom = Math.min(currentZoom + this.clusterZoomOnClick, this.clusterMaxZoom);
 
-        map.moveCameraToSlow(avgLon, avgLat, 0.6, targetZoom);
+        map.moveCameraToSlow(lon, lat, 0.6, targetZoom);
     }
 }

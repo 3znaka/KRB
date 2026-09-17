@@ -6,10 +6,10 @@
  * @module marker
  */
 
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import {
   THREE
-} from '../js_TP/tpb.js';  
+} from '../js_TP/tpb.js';
 import { Layer } from './Layers.js';
 
 /**
@@ -63,7 +63,13 @@ export function _getPanes(map) {
  * Всплывающие подсказки обрабатываются централизованно через PopupManager
  * (доступен как `map.popupManager`).
  *
+ * Координаты маркера задаются в системе координат `options.crs`.
+ * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+ * Внутри карты координаты автоматически преобразуются в метры
+ * проекции карты (`map.projection`) через {@link KrbMap#project}.
+ *
  * @example
+ * // Координаты в WGS84 (по умолчанию)
  * const marker = new Marker({
  *   position: [37.662039, 55.763493],
  *   iconSize: [32, 32],
@@ -71,7 +77,7 @@ export function _getPanes(map) {
  *   minZoom: 5,
  *   maxZoom: 18,
  *   altitudeMode: 'absolute',
- *   altitude: 150, // высота в метрах относительно 0
+ *   altitude: 150,
  *   tooltip: '<b>МИИГАиК</b>',
  *   iconUrl: './custom-marker.png',
  *   onHover: (hovered) => console.log('Hover:', hovered),
@@ -87,18 +93,15 @@ export function _getPanes(map) {
  *   titlePriority: 5
  * });
  * marker.addTo(map);
- * console.log(marker.getText());
- * console.log(marker.getTextStyle());
- * console.log(marker.getTextZoomBounds());
- * console.log(marker.getLabelType());
- * console.log(marker.isVisible());
- * console.log(marker.getScreenPosition());
- * console.log(marker.getTitleAlign());
- * console.log(marker.getTitleOffset());
- * console.log(marker.getTitleVerticalAlign());
- * console.log(marker.getAllowOverflow());
- * console.log(marker.getPriority());
- * marker.remove();
+ *
+ * @example
+ * // Координаты в UTM зоне 37N (EPSG:32637)
+ * const utmMarker = new Marker({
+ *   position: [413500, 6178000],
+ *   crs: 'EPSG:32637',
+ *   title: 'UTM-точка'
+ * });
+ * utmMarker.addTo(map);
  */
 export class Marker {
     /**
@@ -112,7 +115,13 @@ export class Marker {
      * Создаёт новый маркер.
      *
      * @param {Object} options - Настройки маркера.
-     * @param {[number, number]} options.position - Географические координаты [долгота, широта] в градусах.
+     * @param {[number, number]} options.position - Координаты [x, y] в СК `options.crs`.
+     *     По умолчанию — [долгота, широта] в градусах WGS84.
+     * @param {string} [options.crs] - Код системы координат для `position`
+     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *     Если не указан — используется `map.inputCRS`.
+     *     Перед созданием маркера соответствующая проекция должна быть
+     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
      * @param {[number, number]} [options.iconSize=[16,16]] - Размер иконки в пикселях [ширина, высота].
      * @param {[number, number]} [options.anchor=[0.5,1.0]] - Якорь иконки (доли от размера), определяет точку привязки.
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором маркер виден.
@@ -136,16 +145,38 @@ export class Marker {
      */
     constructor(options = {}) {
         if (!options.position || options.position.length !== 2) {
-            throw new Error('Marker: options.position is required [lon, lat]');
+            throw new Error('Marker: options.position is required [x, y]');
         }
-        /** @private */ this._lon = options.position[0];
-        /** @private */ this._lat = options.position[1];
+        /**
+         * Координаты маркера в собственной СК.
+         * @private
+         * @type {[number, number]}
+         */
+        this._coord = [options.position[0], options.position[1]];
+        /**
+         * Код СК маркера; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
+        // Производные WGS84-координаты (для обратной совместимости с внешним кодом,
+        // например ClusterLayer). Заполняются в `_attach`, когда известна карта.
+        /** @private */ this._lon = null;
+        /** @private */ this._lat = null;
+
         /** @private */ this._iconSize = options.iconSize || [16, 16];
         /** @private */ this._anchor = options.anchor || [0.5, 1.0];
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private */ this._altitudeMode = options.altitudeMode || 'ground';
-        /** @private */ this._altitude = options.altitude || 0; // НОВОЕ: высота для абсолютного режима
+        /** @private */ this._altitude = options.altitude || 0;
         /** @private */ this._tooltipText = options.tooltip || '';
         /** @private */ this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : DEFAULT_ICON_URL;
         /** @private */ this._onHover = options.onHover || null;
@@ -173,7 +204,7 @@ export class Marker {
 
         /** @private */ this._isVisible = false;
         /** @private */ this._lastScreenPos = null;
-        
+
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
 
@@ -209,6 +240,17 @@ export class Marker {
         this.remove();
         this._map = map;
         this._layer = layer;
+
+        // Резолвим проекцию маркера: либо заданная явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
+        // Производные WGS84-координаты — для обратной совместимости
+        // (ClusterLayer, внешний код, читающий marker._lon / marker._lat).
+        const lonLat = this._crs.toLonLat(this._coord);
+        this._lon = lonLat[0];
+        this._lat = lonLat[1];
 
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
@@ -299,7 +341,10 @@ export class Marker {
      * @private
      */
     _defaultClickAction() {
-        if (this._map) this._map.moveCameraToSlow(this._lon, this._lat, 0.3);
+        if (this._map && this._crs) {
+            const [lon, lat] = this._crs.toLonLat(this._coord);
+            this._map.moveCameraToSlow(lon, lat, 0.3);
+        }
         if (this._isMobile && this._tooltipText && this._map?.popupManager) {
             this._map.popupManager.show(this, this._tooltipText);
         }
@@ -328,6 +373,7 @@ export class Marker {
             this._layer = null;
         }
         this._map = null;
+        this._crs = null;
         this._isVisible = false;
         this._lastScreenPos = null;
     }
@@ -412,7 +458,8 @@ export class Marker {
             return;
         }
 
-        const [absWorldX, absWorldZ] = proj.fromLonLat([this._lon, this._lat]);
+        // Координаты маркера → мировые координаты карты (метры проекции карты).
+        const [absWorldX, absWorldZ] = mapInstance.project(this._coord, this._crs);
         const wgPos = mapInstance.worldGroup.position;
         const worldX = absWorldX + wgPos.x;
         const worldZ = absWorldZ + wgPos.z;
@@ -557,4 +604,29 @@ export class Marker {
      * @returns {number} Приоритет подписи.
      */
     getPriority() { return this._titlePriority; }
+
+    /**
+     * Возвращает исходные координаты маркера в его собственной СК.
+     *
+     * @returns {[number, number]} Координаты [x, y] в СК маркера.
+     */
+    getPosition() { return this._coord.slice(); }
+
+    /**
+     * Возвращает код СК маркера или null, если используется `map.inputCRS`.
+     *
+     * @returns {string|null} Код СК или null.
+     */
+    getCRS() { return this._crsCode; }
+
+    /**
+     * Возвращает координаты маркера в WGS84 (долгота, широта).
+     * Доступно только после добавления маркера на карту (когда резолвлена СК).
+     *
+     * @returns {[number, number]|null} [lon, lat] или null, если маркер не привязан к карте.
+     */
+    getLonLat() {
+        if (!this._crs) return null;
+        return this._crs.toLonLat(this._coord);
+    }
 }

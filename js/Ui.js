@@ -6,7 +6,6 @@
  * @module ui
  */
 
-import { DEFAULTS, toLonLat } from './Utils.js';
 import {
   THREE
 } from '../js_TP/tpb.js';
@@ -27,9 +26,10 @@ import {
  * @param {THREE.Vector3} map.worldGroup.position - Смещение группы в мировых координатах.
  * @param {Object} map.controls - Орбитальные контролы.
  * @param {THREE.Vector3} map.controls.target - Точка цели камеры.
- * @param {number} [map.R] - Радиус планеты (по умолчанию из {@link DEFAULTS.R}).
+ * @param {number} [map.R] - Радиус планеты карты (используется для отображения).
  * @param {Function} map.applyZoomDelta - Функция изменения зума на заданный шаг.
  * @param {Function} map.resetBearing - Функция сброса направления (север вверх).
+ * @param {Function} map.unprojectToLonLat - Преобразование мировых координат в WGS84.
  * @param {THREE.Camera} map.camera - Камера сцены.
  * @param {THREE.WebGLRenderer} map.renderer - Рендерер (для размеров canvas).
  * @param {THREE.Plane} map.groundPlane - Плоскость земли.
@@ -250,7 +250,9 @@ export function initUI(map) {
         const centerX = target.x - worldPos.x;
         const centerZ = target.z - worldPos.z;
 
-        const [lon, lat] = toLonLat([centerX, centerZ]);
+        // Мировые координаты центра → WGS84 через проекцию карты.
+        // Работает для любой зарегистрированной проекции (3857, 3395, ...).
+        const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
 
         // Наклон камеры (pitch) — угол между направлением target→camera и осью Y.
         _dirVec.subVectors(map.camera.position, target);
@@ -267,7 +269,10 @@ export function initUI(map) {
 
         const barLengthPx = 100;
         const planeDistance = getGroundDistanceForPixels(map, barLengthPx);
-        // Переводим в реальное расстояние с учётом широты (Web Mercator).
+        // Переводим в реальное расстояние с учётом широты.
+        // Для Меркатора (и сферического 3857, и эллиптического 3395) масштаб
+        // в первом порядке пропорционален sec(φ), поэтому поправка cos(φ)
+        // даёт корректную оценку истинного расстояния.
         const distance = planeDistance * Math.cos(lat * Math.PI / 180);
 
         if (distance > 0) {

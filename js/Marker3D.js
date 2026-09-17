@@ -6,7 +6,7 @@
  */
 
 import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
-import { proj } from './Utils.js';
+import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 
 /**
@@ -29,8 +29,19 @@ export class Marker3D {
     /**
      * Создаёт 3D-маркер.
      *
+     * Координаты маркера задаются в системе координат `options.crs`.
+     * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
+     * Внутри карты координаты автоматически приводятся к метрам проекции
+     * карты (`map.projection`) через {@link KrbMap#project}.
+     *
      * @param {Object} options - Настройки 3D-маркера.
-     * @param {[number, number]} options.position - Географические координаты [lon, lat].
+     * @param {[number, number]} options.position - Координаты [x, y] в СК `options.crs`.
+     *     По умолчанию — [долгота, широта] в градусах WGS84.
+     * @param {string} [options.crs] - Код системы координат для `position`
+     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
+     *     Если не указан — используется `map.inputCRS`.
+     *     Перед созданием маркера соответствующая проекция должна быть
+     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
      * @param {string} [options.primitiveType='box'] - Тип примитива: 'box', 'sphere', 'cylinder', 'cone'.
      * @param {number|Array<number>} [options.size] - Размеры объекта. Для примитивов: массив [width, height, depth] в метрах; число или массивы из 1-3 элементов преобразуются к тройке. Для GLB-моделей: число - равномерное масштабирование до максимального габарита; [height] - масштабирование по высоте с сохранением пропорций; [width, height] - ширина и высота, глубина пропорционально среднему; [width, height, depth] - точные размеры по осям.
      * @param {string} [options.modelUrl] - URL GLB-модели. Если указан, примитив игнорируется.
@@ -57,11 +68,28 @@ export class Marker3D {
      */
     constructor(options = {}) {
         if (!options.position || options.position.length !== 2) {
-            throw new Error('Marker3D: options.position is required [lon, lat]');
+            throw new Error('Marker3D: options.position is required [x, y]');
         }
 
-        /** @private */ this._lon = options.position[0];
-        /** @private */ this._lat = options.position[1];
+        /**
+         * Координаты маркера в собственной СК.
+         * @private
+         * @type {[number, number]}
+         */
+        this._coord = [options.position[0], options.position[1]];
+        /**
+         * Код СК маркера; null — использовать `map.inputCRS`.
+         * @private
+         * @type {string|null}
+         */
+        this._crsCode = options.crs ?? null;
+        /**
+         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
+         * @private
+         * @type {import('./Projections.js').Projection|null}
+         */
+        this._crs = null;
+
         /** @private */ this._primitiveType = options.primitiveType || 'box';
         /** @private */ this._size = options.size || null;
         /** @private */ this._modelUrl = options.modelUrl || null;
@@ -149,6 +177,11 @@ export class Marker3D {
         this.remove();
         this._map = map;
         this._layer = layer;
+
+        // Резолвим проекцию маркера: либо заданную явно, либо inputCRS карты.
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
 
         if (this._modelUrl) {
             this._object3D = new THREE.Group();
@@ -545,6 +578,7 @@ _onPointerCancel(e, map) {
             this._layer = null;
         }
         this._map = null;
+        this._crs = null;
         this._isVisible = false;
         this._worldPosition.set(0, 0, 0);
         this._localBox = null;
@@ -603,7 +637,8 @@ _onPointerCancel(e, map) {
             this._mixer.update(delta);
         }
 
-        const [absWorldX, absWorldZ] = proj.fromLonLat([this._lon, this._lat]);
+        // Координаты маркера → мировые координаты карты (метры проекции карты).
+        const [absWorldX, absWorldZ] = mapInstance.project(this._coord, this._crs);
         const wgPos = mapInstance.worldGroup.position;
         const worldX = absWorldX + wgPos.x;
         const worldZ = absWorldZ + wgPos.z;

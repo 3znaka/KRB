@@ -5,6 +5,111 @@ import {
 } from '../js_TP/tpb.js';
 
 /**
+ * Простой пространственный индекс (равномерная сетка) для ускорения
+ * проверки коллизий подписей. Вдохновлён `CollisionIndex` из Mapbox GL.
+ *
+ * Идея: при жадном размещении подписей (сортировка по приоритету) мы для
+ * каждой следующей подписи должны проверить, пересекается ли её bbox с уже
+ * размещёнными. Наивный перебор даёт O(n²). Сетка разбивает экран на
+ * квадратные ячейки фиксированного размера; каждый размещённый bbox
+ * регистрируется во всех ячейках, которые он задевает. При проверке новой
+ * подписи мы смотрим только в те ячейки, которые пересекает её bbox — как
+ * правило, это 1–4 ячейки, и в каждой лежит небольшое число прямоугольников.
+ *
+ * При типичной плотности подписей это даёт ~O(n) вместо O(n²).
+ *
+ * @private
+ */
+class _GridIndex {
+    /**
+     * @param {number} [cellSize=128] - Размер ячейки в пикселях. Меньше —
+     *   быстрее запрос, но больше памяти и накладных расходов на вставку.
+     */
+    constructor(cellSize = 128) {
+        this.cellSize = cellSize;
+        /** @type {Map<string, Array<Object>>} */
+        this.grid = new Map();
+    }
+
+    /**
+     * Ключ ячейки.
+     * @param {number} col
+     * @param {number} row
+     * @returns {string}
+     * @private
+     */
+    _key(col, row) {
+        return col + ',' + row;
+    }
+
+    /**
+     * Очищает индекс.
+     * @returns {void}
+     */
+    clear() {
+        this.grid.clear();
+    }
+
+    /**
+     * Вставляет значение, ассоциированное с bbox, во все ячейки,
+     * которые этот bbox пересекает.
+     *
+     * @param {{minX:number, minY:number, maxX:number, maxY:number}} bbox
+     * @param {Object} value - Произвольное значение (например, label).
+     * @returns {void}
+     */
+    insert(bbox, value) {
+        const cs = this.cellSize;
+        const c0 = Math.floor(bbox.minX / cs);
+        const c1 = Math.floor(bbox.maxX / cs);
+        const r0 = Math.floor(bbox.minY / cs);
+        const r1 = Math.floor(bbox.maxY / cs);
+        for (let c = c0; c <= c1; c++) {
+            for (let r = r0; r <= r1; r++) {
+                const k = this._key(c, r);
+                let cell = this.grid.get(k);
+                if (!cell) {
+                    cell = [];
+                    this.grid.set(k, cell);
+                }
+                cell.push(value);
+            }
+        }
+    }
+
+    /**
+     * Возвращает все значения, чьи bbox лежат в ячейках, пересекаемых
+     * переданным bbox. Результат не дедуплицирован на уровне значений —
+     * дедупликация выполняется внутри (по ссылке на объект).
+     *
+     * @param {{minX:number, minY:number, maxX:number, maxY:number}} bbox
+     * @returns {Array<Object>} Массив значений (порядок не определён).
+     */
+    query(bbox) {
+        const cs = this.cellSize;
+        const c0 = Math.floor(bbox.minX / cs);
+        const c1 = Math.floor(bbox.maxX / cs);
+        const r0 = Math.floor(bbox.minY / cs);
+        const r1 = Math.floor(bbox.maxY / cs);
+        const result = [];
+        const seen = new Set();
+        for (let c = c0; c <= c1; c++) {
+            for (let r = r0; r <= r1; r++) {
+                const cell = this.grid.get(this._key(c, r));
+                if (!cell) continue;
+                for (let i = 0; i < cell.length; i++) {
+                    const v = cell[i];
+                    if (seen.has(v)) continue;
+                    seen.add(v);
+                    result.push(v);
+                }
+            }
+        }
+        return result;
+    }
+}
+
+/**
  * Менеджер текстовых подписей (лейблов) для карты.
  *
  * Управляет жизненным циклом DOM-элементов подписей: создание, позиционирование,
@@ -13,6 +118,15 @@ import {
  * анимированное перемещение вдоль линии с целью избежать перекрытий, а также
  * жадная приоритезация всех видимых подписей для предотвращения наложений.
  *
+ * ГЛОБАЛЬНЫЙ БЮДЖЕТ: сами подписи создаются вызывающей стороной (например,
+ * `VectorTileLayer`) — менеджер лишь управляет уже созданными. Поле
+ * `this.maxLabels` хранит мягкий ориентир для отладки/будущих оптимизаций;
+ * жёсткого ограничения на число подписей внутри менеджера нет.
+ *
+ * ПРОИЗВОДИТЕЛЬНОСТЬ: для быстрого разрешения коллизий используется
+ * внутренний `_GridIndex` (равномерная сетка). Это делает жадное размещение
+ * подписей близким к O(n) вместо O(n²), что критично при большом количестве
+ * подписей (например, номера домов на плотной городской застройке).
  */
 export class TextManager {
     /**
@@ -40,6 +154,16 @@ export class TextManager {
         this.pane = null;
 
         /**
+         * Мягкий ориентир максимального числа подписей. Устанавливается
+         * снаружи через {@link TextManager#setMaxLabels}. Внутри менеджера
+         * не используется как жёсткий лимит — фактический бюджет контролирует
+         * вызывающая сторона (например, VectorTileLayer).
+         *
+         * @type {number}
+         */
+        this.maxLabels = 500;
+
+        /**
          * Набор идентификаторов источников подписей, видимых в предыдущем кадре.
          * Используется для сброса флагов stuck при изменении состава подписей.
          *
@@ -56,7 +180,53 @@ export class TextManager {
          */
         this._lastZoom = null;
 
+        /**
+         * Пространственный индекс для жадного размещения подписей.
+         * Пересоздаётся на каждом кадре в {@link TextManager#update}.
+         *
+         * @type {_GridIndex}
+         * @private
+         */
+        this._gridIndex = new _GridIndex(128);
+
         this._initPane();
+    }
+
+    /**
+     * Устанавливает мягкий лимит числа подписей. Вызывается извне
+     * (например, `VectorTileLayer.addTo`) для синхронизации с настройками слоя.
+     *
+     * ВАЖНО: метод не удаляет уже добавленные подписи и не блокирует
+     * `addLabel`. Ответственность за соблюдение бюджета лежит на вызывающей
+     * стороне.
+     *
+     * @param {number} max - Максимальное число подписей.
+     * @returns {void}
+     */
+    setMaxLabels(max) {
+        if (typeof max === 'number' && max > 0) {
+            this.maxLabels = max;
+        }
+    }
+
+    /**
+     * Возвращает статистику для отладки.
+     *
+     * @returns {{total: number, visible: number, hiddenByPriority: number, maxLabels: number}}
+     */
+    getDebugStats() {
+        let visible = 0;
+        let hidden = 0;
+        for (const l of this.labels) {
+            if (l.hiddenByPriority) hidden++;
+            else if (l.element && l.element.style.display !== 'none') visible++;
+        }
+        return {
+            total: this.labels.length,
+            visible,
+            hiddenByPriority: hidden,
+            maxLabels: this.maxLabels
+        };
     }
 
     /**
@@ -107,6 +277,7 @@ export class TextManager {
         this.pane = null;
         this._lastVisibleIds = null;
         this._lastZoom = null;
+        this._gridIndex.clear();
     }
 
     /**
@@ -530,7 +701,8 @@ export class TextManager {
      * 2. Сброс stuck-состояний при изменении набора видимых подписей или зума.
      * 3. Итеративное раздвижение линейных подписей для избежания перекрытий.
      * 4. Жадная приоритезация всех подписей: отрисовываются подписи с высшим приоритетом
-     *    без перекрытий с уже размещёнными.
+     *    без перекрытий с уже размещёнными. Для ускорения проверки коллизий
+     *    используется пространственный индекс (_GridIndex).
      * 5. Применение вычисленных позиций к DOM-элементам.
      */
     update() {
@@ -718,6 +890,10 @@ export class TextManager {
         }
 
         // 3. ЖАДНАЯ ПРИОРИТЕЗАЦИЯ ДЛЯ ВСЕХ ВИДИМЫХ ПОДПИСЕЙ
+        //
+        // Используем _GridIndex для быстрой проверки коллизий: вместо перебора
+        // всех уже размещённых прямоугольников (O(n²)) опрашиваем только те
+        // ячейки сетки, которые пересекает bbox текущей подписи.
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aLine = a.source.getLabelType() === 'line' ? 1 : 0;
@@ -726,10 +902,7 @@ export class TextManager {
             return a.source.getText().localeCompare(b.source.getText());
         });
 
-        // Раздельные массивы прямоугольников и их bbox — предварительная
-        // быстрая отбраковка по AABB до дорогой SAT-проверки.
-        const placedRects = [];
-        const placedBBoxes = [];
+        this._gridIndex.clear();
 
         for (const lbl of sorted) {
             lbl.rect = this._getLabelCorners(lbl);
@@ -740,18 +913,21 @@ export class TextManager {
             const bbox = this._getBBox(lbl.rect);
             lbl._bbox = bbox;
 
+            const candidates = this._gridIndex.query(bbox);
             let overlaps = false;
-            for (let i = 0; i < placedRects.length; i++) {
-                if (!this._bboxOverlap(bbox, placedBBoxes[i])) continue;
-                if (this._rectsIntersect(lbl.rect, placedRects[i])) {
+            for (let i = 0; i < candidates.length; i++) {
+                const other = candidates[i];
+                // Двойная защита: сначала быстрая AABB-проверка,
+                // затем точная SAT (для повёрнутых прямоугольников).
+                if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
+                if (this._rectsIntersect(lbl.rect, other.rect)) {
                     overlaps = true;
                     break;
                 }
             }
 
             if (!overlaps) {
-                placedRects.push(lbl.rect);
-                placedBBoxes.push(bbox);
+                this._gridIndex.insert(bbox, lbl);
                 lbl.hiddenByPriority = false;
             } else {
                 lbl.hiddenByPriority = true;

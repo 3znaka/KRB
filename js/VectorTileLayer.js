@@ -14,6 +14,11 @@
  * Координаты GeoJSON для exclusion-областей задаются в системе координат
  * `options.crs` (по умолчанию `map.inputCRS` = WGS84) и преобразуются
  * в метры через {@link KrbMap#project}.
+ *
+ * ПОДПИСИ: подписи собираются глобально — со всех видимых тайлов одновременно,
+ * а не по тайлам по отдельности. Это устраняет ситуацию, когда подписи из
+ * одного тайла «съедают» весь бюджет `maxTextLabels` и лишают остальные тайлы
+ * возможности показать свои подписи. Подход вдохновлён архитектурой Mapbox GL.
  */
 
 import {
@@ -127,11 +132,18 @@ export const VECTOR_TILE_RENDER_ORDER = {
  * @property {boolean} [options.buildings3d=true] - Включить 3D-здания.
  * @property {number} [options.buildings3dMinZoom=17] - Минимальный зум для отображения 3D-зданий.
  * @property {boolean} [options.buildingEdges=true] - Выделять острые рёбра зданий.
- * @property {number} [options.maxTextLabels=500] - Максимальное общее количество текстовых подписей.
- * @property {number} [options.maxTextPointsPerTile=50] - Максимум подписей на тайл.
+ * @property {number} [options.maxTextLabels=500] - Максимальное общее количество
+ *   текстовых подписей (глобальный бюджет на всю карту, распределяется между тайлами
+ *   по приоритету/расстоянию, а не по порядку загрузки тайлов).
+ * @property {number} [options.maxTextPointsPerTile=50] - Максимум подписей на тайл
+ *   (мягкий лимит для одного тайла при глобальной сортировке; в текущей реализации
+ *   не применяется жёстко, оставлен для совместимости и будущих оптимизаций).
  * @property {number} [options.labelDistanceSortZoom=17] - Зум, начиная с которого сортировка по расстоянию.
  * @property {number} [options.labelMaxPerTileClose=20] - Максимум подписей на тайл при близком зуме.
- * @property {number} [options.labelCullMargin=50] - Отступ за границами экрана для отсечения подписей.
+ * @property {number} [options.labelCullMargin=250] - Отступ за границами экрана для
+ *   отсечения подписей. Большое значение (по умолчанию 250 px) позволяет готовить
+ *   подписи заранее за пределами видимой области, чтобы они не «выскакивали»
+ *   при панорамировании.
  * @property {number} [options.tileDataCacheMaxSize=200] - Максимум сырых PBF-буферов в LRU-кэше.
  * @property {number} [options.tileGroupRenderOrder=1000000] - renderOrder для tileGroup
  *   (КРИТИЧНО, см. описание модуля). Только если понимаешь, что делаешь.
@@ -156,7 +168,7 @@ export const VECTOR_TILE_RENDER_ORDER = {
  *     maxTextPointsPerTile: 50,
  *     labelDistanceSortZoom: 17,
  *     labelMaxPerTileClose: 20,
- *     labelCullMargin: 50,
+ *     labelCullMargin: 250,
  *     debug: false,
  *     styles: { building: { color: 0xff0000, stroke: 'black' } },
  *     workerScripts: [
@@ -204,7 +216,7 @@ export class VectorTileLayer {
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50;
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
-        this.labelCullMargin = options.labelCullMargin ?? 50;
+        this.labelCullMargin = options.labelCullMargin ?? 250;
 
         this._debug = options.debug ?? false;
 
@@ -273,6 +285,16 @@ export class VectorTileLayer {
         this._lastWorldPos = new THREE.Vector3();
         this._lastMovementTime = 0;
         this._lastLabelUpdateTime = 0;
+
+        /**
+         * Флаг «подписи нуждаются в пересборке». Устанавливается при загрузке
+         * нового тайла или при удалении старого. Сбрасывается в _postUpdate
+         * после пересборки. Позволяет избежать немедленной пересборки подписей
+         * при каждом событии загрузки/выгрузки тайла.
+         * @private
+         * @type {boolean}
+         */
+        this._labelsDirty = false;
 
         const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
         this._workerScriptUrls = rawScripts.map(s => {
@@ -370,6 +392,9 @@ export class VectorTileLayer {
             if (existing && existing !== group) this._disposeTile(existing);
             this._tileCache.set(key, group);
         }
+        // Подписи нового/перестроенного тайла должны быть пересобраны
+        // в рамках глобального пула (см. _refreshTextLabelsForVisibleTiles).
+        this._labelsDirty = true;
         pending.resolve(group);
     }
 
@@ -476,113 +501,64 @@ export class VectorTileLayer {
             group.add(mesh);
         }
 
+        // Сохраняем «сырые» текстовые точки тайла — DOM-подписи будут
+        // созданы позже в _refreshTextLabelsForVisibleTiles уже с глобальной
+        // сортировкой и глобальным бюджетом.
         group.userData.textPointsData = result.textPoints || [];
-        this._createTextLabelsForGroup(group);
-
+        group.userData.textLabels = [];
         group.userData.is3d = result.is3d;
     }
 
     /**
-     * Пересоздаёт текстовые подписи для всех видимых тайлов из кэша.
-     * Используется при панорамировании, чтобы обновить подписи без перестройки геометрии.
+     * Пересобирает все текстовые подписи для всех видимых тайлов.
+     *
+     * Логика:
+     *  1. Удаляем все существующие DOM-подписи у видимых групп.
+     *  2. Проходим по всем видимым группам и собираем «сырые» текстовые точки
+     *     в единый массив кандидатов (с экранными координатами и расстоянием
+     *     до цели камеры).
+     *  3. Сортируем кандидатов глобально — по расстоянию при близком зуме,
+     *     по приоритету при дальнем.
+     *  4. Берём первые `maxTextLabels` кандидатов и создаём для них DOM-подписи.
+     *
+     * Такой подход полностью устраняет проблему «FIFO по порядку загрузки
+     * тайлов»: раньше первая же группа могла заполнить весь бюджет, и
+     * подписи на краях экрана уже не создавались.
      *
      * @private
      */
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
+
+        // 1. Удаляем все существующие DOM-подписи.
         this._tileCache.forEach(group => {
-            this._createTextLabelsForGroup(group);
-        });
-    }
-
-    _createTextLabelsForGroup(group) {
-        if (!this._map || !this._map.textManager) return;
-
-        if (group.userData.textLabels) {
             this._removeTextLabelsForGroup(group);
-        }
-        group.userData.textLabels = [];
+        });
 
-        const map = this._map;
-        const textManager = map.textManager;
-        const data = group.userData.textPointsData || [];
+        // 2. Собираем кандидатов со всех видимых групп.
+        const { candidates, isClose } = this._collectLabelCandidates();
+        if (candidates.length === 0) return;
 
-        if (!data.length) return;
-
-        const continuousZoom = map.continuousZoom;
-        const discreteZoom = map.currentDiscreteZoom;
-        const camera = map.camera;
-        const targetWorld = map.controls.target.clone();
-        const worldOffset = map.worldGroup.position;
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        const cullMargin = this.labelCullMargin ?? 50;
-
-        const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
-
-        const candidates = [];
-
-        for (const pt of data) {
-            const zb = pt.zoomBounds || { min: 0, max: 24 };
-            if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
-
-            // pt.x, pt.z — локальные относительно центра тайла,
-            // добавляем позицию группы тайла и сдвиг мира.
-            const worldX = pt.x + group.position.x + worldOffset.x;
-            const worldZ = pt.z + group.position.z + worldOffset.z;
-
-            const dx = worldX - targetWorld.x;
-            const dz = worldZ - targetWorld.z;
-            const distSq = dx * dx + dz * dz;
-
-            const worldPos = new THREE.Vector3(worldX, 0, worldZ);
-            const ndc = worldPos.project(camera);
-
-            if (ndc.z > 1 || ndc.z < -1) continue;
-
-            const sx = (ndc.x * 0.5 + 0.5) * rect.width;
-            const sy = (-ndc.y * 0.5 + 0.5) * rect.height;
-
-            if (
-                sx < -cullMargin ||
-                sx > rect.width + cullMargin ||
-                sy < -cullMargin ||
-                sy > rect.height + cullMargin
-            ) {
-                continue;
-            }
-
-            candidates.push({
-                pt,
-                distSq,
-                priority: pt.priority || 0,
-            });
-        }
-
+        // 3. Глобальная сортировка.
         if (isClose) {
             candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
         } else {
             candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
         }
 
-        const maxPerTile = isClose
-            ? Math.min(this.maxTextPointsPerTile, this.labelMaxPerTileClose ?? 20)
-            : this.maxTextPointsPerTile;
+        // 4. Ограничиваем глобальным бюджетом и создаём DOM-подписи.
+        const limit = Math.min(candidates.length, this.maxTextLabels);
+        const textManager = this._map.textManager;
 
-        let finalData = candidates.slice(0, maxPerTile);
-
-        if (textManager.labels && textManager.maxLabels !== undefined) {
-            const currentCount = textManager.labels.length;
-            const remaining = Math.max(0, this.maxTextLabels - currentCount);
-            if (remaining <= 0) return;
-            finalData = finalData.slice(0, Math.min(finalData.length, remaining));
-        }
-
-        for (const cand of finalData) {
+        for (let i = 0; i < limit; i++) {
+            const cand = candidates[i];
             const pt = cand.pt;
+            const group = cand.group;
 
             const localWorldX = pt.x + group.position.x;
             const localWorldZ = pt.z + group.position.z;
-            const source = new VectorPointLabelSource(map, localWorldX, localWorldZ, pt.text, {
+
+            const source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
                 textColor: pt.textColor,
                 fontSize: pt.fontSize,
                 fontFamily: pt.fontFamily,
@@ -595,10 +571,102 @@ export class VectorTileLayer {
                 zoomBounds: pt.zoomBounds,
             });
             const label = textManager.addLabel(source);
+
+            if (!group.userData.textLabels) group.userData.textLabels = [];
             group.userData.textLabels.push(label);
         }
     }
 
+    /**
+     * Проходит по всем видимым группам тайлов, собирает «сырые» текстовые точки
+     * и возвращает массив кандидатов вместе с флагом isClose (близкий ли зум).
+     *
+     * Каждый кандидат содержит:
+     *  - `pt` — исходная запись из `group.userData.textPointsData`;
+     *  - `group` — THREE.Group тайла;
+     *  - `distSq` — квадрат расстояния до цели камеры;
+     *  - `priority` — приоритет;
+     *  - `sx`, `sy` — экранные координаты (для отладки; кешировать не нужно,
+     *    т.к. используется только для отсечения).
+     *
+     * @private
+     * @returns {{candidates: Array<Object>, isClose: boolean}}
+     */
+    _collectLabelCandidates() {
+        const map = this._map;
+        const camera = map.camera;
+        const continuousZoom = map.continuousZoom;
+        const discreteZoom = map.currentDiscreteZoom;
+        const targetWorld = map.controls.target;
+        const worldOffset = map.worldGroup.position;
+        const rect = map.renderer.domElement.getBoundingClientRect();
+
+        const cullMargin = this.labelCullMargin ?? 250;
+        const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
+
+        // Один переиспользуемый вектор — избегаем аллокаций в цикле.
+        const tempVec = new THREE.Vector3();
+
+        const candidates = [];
+        const rectW = rect.width;
+        const rectH = rect.height;
+
+        this._tileCache.forEach(group => {
+            const data = group.userData.textPointsData;
+            if (!data || data.length === 0) return;
+
+            const gx = group.position.x + worldOffset.x;
+            const gz = group.position.z + worldOffset.z;
+
+            for (let i = 0; i < data.length; i++) {
+                const pt = data[i];
+                const zb = pt.zoomBounds || { min: 0, max: 24 };
+                if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
+
+                const worldX = pt.x + gx;
+                const worldZ = pt.z + gz;
+
+                const dx = worldX - targetWorld.x;
+                const dz = worldZ - targetWorld.z;
+                const distSq = dx * dx + dz * dz;
+
+                tempVec.set(worldX, 0, worldZ).project(camera);
+                // NDC z за пределами [-1, 1] — точка позади камеры или вне
+                // ближней/дальней плоскостей.
+                if (tempVec.z > 1 || tempVec.z < -1) continue;
+
+                const sx = (tempVec.x * 0.5 + 0.5) * rectW;
+                const sy = (-tempVec.y * 0.5 + 0.5) * rectH;
+
+                if (
+                    sx < -cullMargin ||
+                    sx > rectW + cullMargin ||
+                    sy < -cullMargin ||
+                    sy > rectH + cullMargin
+                ) {
+                    continue;
+                }
+
+                candidates.push({
+                    pt,
+                    group,
+                    distSq,
+                    priority: pt.priority || 0,
+                    sx,
+                    sy,
+                });
+            }
+        });
+
+        return { candidates, isClose };
+    }
+
+    /**
+     * Удаляет все DOM-подписи, привязанные к конкретной группе тайла.
+     *
+     * @private
+     * @param {THREE.Group} group - Группа тайла.
+     */
     _removeTextLabelsForGroup(group) {
         if (group.userData.textLabels && this._map && this._map.textManager) {
             for (const label of group.userData.textLabels) {
@@ -704,6 +772,7 @@ export class VectorTileLayer {
         this._tileDataCache.clear();
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;
+        this._labelsDirty = true;
     }
 
     _mergeStyles(base, overrides) {
@@ -747,6 +816,8 @@ export class VectorTileLayer {
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
         }
+
+        this._labelsDirty = true;
 
         return this;
     }
@@ -807,6 +878,7 @@ export class VectorTileLayer {
         this._clearOldTilesNow();
         // НЕ сбрасываем _activeLoads: реальные in-flight запросы
         // сами уменьшат его в finally.
+        this._labelsDirty = true;
     }
 
     _clearGroupCache() {
@@ -917,6 +989,9 @@ export class VectorTileLayer {
             if (was3d !== is3d) {
                 this._lastSourceZoom = -1;
             }
+            // Смена дискретного зума всегда инвалидирует подписи —
+            // изменилась видимость по zoomBounds.
+            this._labelsDirty = true;
         }
         this._lastDiscreteZoom = discreteZoom;
 
@@ -941,6 +1016,7 @@ export class VectorTileLayer {
             this._pendingLoads.clear();
             this._sortedLoadQueue = [];
             this._lastSourceZoom = sourceZoom;
+            this._labelsDirty = true;
             this._scheduleOldTilesCleanup(1500);
         }
 
@@ -961,17 +1037,22 @@ export class VectorTileLayer {
                 const group = this._tileCache.get(key);
                 this._removeTile(key, group);
                 this._pendingLoads.delete(key);
+                this._labelsDirty = true;
             }
         }
 
-        // Пересоздание подписей, если мир перемещался
+        // Пересборка подписей — по любому из триггеров:
+        //  - _labelsDirty (загрузился/удалился тайл, сменился зум);
+        //  - движение мира завершилось недавно (settleUpdateDue);
+        //  - мир движется и прошла секунда (periodicUpdateDue).
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
-        const isMoving = timeSinceLastMove < 1000; // движение было в последнюю секунду
-        const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000); // раз в секунду при движении
-        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime; // после остановки
+        const isMoving = timeSinceLastMove < 1000;
+        const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000);
+        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
 
-        if ((settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
+        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
+            this._labelsDirty = false;
             this._lastLabelUpdateTime = labelNow;
             this._refreshTextLabelsForVisibleTiles();
         }
@@ -1041,6 +1122,7 @@ export class VectorTileLayer {
                         if (result) {
                             this._rootGroup.add(group);
                             this._tileCache.set(key, group);
+                            this._labelsDirty = true;
                         }
                     } catch (err) {
                         // игнорируем
@@ -1055,7 +1137,7 @@ export class VectorTileLayer {
             } else {
                 this._rootGroup.add(group);
                 this._tileCache.set(key, group);
-                this._createTextLabelsForGroup(group);
+                this._labelsDirty = true;
                 return;
             }
         }
@@ -1084,6 +1166,7 @@ export class VectorTileLayer {
             if (group) {
                 this._rootGroup.add(group);
                 this._tileCache.set(key, group);
+                this._labelsDirty = true;
             }
         } catch (err) {
             // игнорируем ошибки загрузки
@@ -1142,6 +1225,31 @@ export class VectorTileLayer {
         });
     }
 
+    /**
+     * Вычисляет множество ключей тайлов, которые нужно загрузить/держать
+     * для текущего вида камеры.
+     *
+     * Алгоритм:
+     *  - Берём сетку NDC-точек 5×5 по всей площади экрана (25 лучей).
+     *  - Для каждой точки пускаем луч из камеры и находим пересечение
+     *    с плоскостью земли. Лучи, почти параллельные земле (< 3°),
+     *    и точки, оказавшиеся слишком далеко от камеры, отбрасываются.
+     *  - Границы AABB расширяются по всем успешным пересечениям.
+     *  - Всегда добавляется проекция самой камеры на плоскость земли —
+     *    это гарантирует, что тайл «под ногами» точно будет загружен.
+     *  - Если успешных пересечений слишком мало (< 4, например камера
+     *    смотрит почти в небо), включается fallback по цели камеры.
+     *  - В конце AABB расширяется на буфер в полтора тайла, чтобы
+     *    избежать мигания на границах.
+     *
+     * Такой подход, в отличие от варианта «4 угловых луча», корректно
+     * покрывает весь экран даже при сильном наклоне (pitch), при котором
+     * верхние углы уходят в небо.
+     *
+     * @private
+     * @param {number} z - Уровень зума тайлов.
+     * @returns {Set<string>} Множество ключей вида "z,x,y".
+     */
     _getVisibleTileKeys(z) {
         const map = this._map;
         const camera = map.camera;
@@ -1150,73 +1258,73 @@ export class VectorTileLayer {
         const maxTile = (1 << z) - 1;
         const numTiles = 1 << z;
 
-        // 4 луча из углов экрана — реальный фрустум вместо top-down приближения
-        const corners = [
-            [-1, -1], [1, -1], [-1, 1], [1, 1]
-        ];
         const ray = new THREE.Raycaster();
         const ndc = new THREE.Vector2();
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         const hit = new THREE.Vector3();
 
-        let minX = Infinity, maxX = -Infinity;
-        let minZ = Infinity, maxZ = -Infinity;
-        let anyHit = false;
+        // Всегда добавляем в AABB точку под камерой — гарантия, что тайл
+        // «под ногами» точно будет загружен.
+        const camXLocal = camera.position.x - off.x;
+        const camZLocal = camera.position.z - off.z;
+        let minX = camXLocal, maxX = camXLocal;
+        let minZ = camZLocal, maxZ = camZLocal;
 
-const camTargetDist = camera.position.distanceTo(map.controls.target);
-const maxLoadDist   = Math.max(camTargetDist * 4, tileSize * 32);
-const maxLoadDistSq = maxLoadDist * maxLoadDist;
+        const camTargetDist = camera.position.distanceTo(map.controls.target);
+        const maxLoadDist = Math.max(camTargetDist * 6, tileSize * 48);
+        const maxLoadDistSq = maxLoadDist * maxLoadDist;
 
-const MIN_RAY_Y = Math.sin(5 * Math.PI / 180);
+        // Отсекаем лучи, которые почти параллельны земле: их пересечение
+        // с плоскостью неустойчиво и даёт точки «у горизонта».
+        const MIN_RAY_Y = Math.sin(3 * Math.PI / 180);
 
-for (const [nx, ny] of corners) {
-    ndc.set(nx, ny);
-    ray.setFromCamera(ndc, camera);
+        const GRID = 5; // 5×5 = 25 лучей
+        let hitsCount = 0;
 
-    // Луч почти горизонтален — пересечение ненадёжно, пропускаем.
-    if (Math.abs(ray.ray.direction.y) < MIN_RAY_Y) continue;
+        for (let i = 0; i < GRID; i++) {
+            for (let j = 0; j < GRID; j++) {
+                const nx = (i / (GRID - 1)) * 2 - 1;
+                const ny = (j / (GRID - 1)) * 2 - 1;
+                ndc.set(nx, ny);
+                ray.setFromCamera(ndc, camera);
 
-    if (!ray.ray.intersectPlane(plane, hit)) continue;
+                if (Math.abs(ray.ray.direction.y) < MIN_RAY_Y) continue;
+                if (!ray.ray.intersectPlane(plane, hit)) continue;
 
-    // Слишком далеко от камеры — тоже не тянем этот тайл.
-    const dxCam = hit.x - camera.position.x;
-    const dzCam = hit.z - camera.position.z;
-    if (dxCam * dxCam + dzCam * dzCam > maxLoadDistSq) continue;
+                const dxCam = hit.x - camera.position.x;
+                const dzCam = hit.z - camera.position.z;
+                if (dxCam * dxCam + dzCam * dzCam > maxLoadDistSq) continue;
 
-    anyHit = true;
-    const lx = hit.x - off.x;
-    const lz = hit.z - off.z;
-    if (lx < minX) minX = lx;
-    if (lx > maxX) maxX = lx;
-    if (lz < minZ) minZ = lz;
-    if (lz > maxZ) maxZ = lz;
-}
+                hitsCount++;
+                const lx = hit.x - off.x;
+                const lz = hit.z - off.z;
+                if (lx < minX) minX = lx;
+                if (lx > maxX) maxX = lx;
+                if (lz < minZ) minZ = lz;
+                if (lz > maxZ) maxZ = lz;
+            }
+        }
 
-        // Если углы не пересекли землю (камера смотрит в небо) — падаем на старую логику
-        if (!anyHit) {
+        // Fallback: слишком мало успешных пересечений (например, камера
+        // смотрит почти в небо) — расширяем AABB от цели камеры по её FOV.
+        if (hitsCount < 4) {
             const target = map.controls.target;
             const distance = camera.position.distanceTo(target);
             const vFov = camera.fov * Math.PI / 180;
             const aspect = camera.aspect;
-            const margin = 1;
-            const hh = distance * Math.tan(vFov / 2) * aspect + margin * tileSize;
-            const hv = distance * Math.tan(vFov / 2) + margin * tileSize;
-            minX = target.x - off.x - hh;
-            maxX = target.x - off.x + hh;
-            minZ = target.z - off.z - hv;
-            maxZ = target.z - off.z + hv;
+            const hh = distance * Math.tan(vFov / 2) * aspect * 2 + 2 * tileSize;
+            const hv = distance * Math.tan(vFov / 2) * 2 + 2 * tileSize;
+            const targetXLocal = target.x - off.x;
+            const targetZLocal = target.z - off.z;
+            if (targetXLocal - hh < minX) minX = targetXLocal - hh;
+            if (targetXLocal + hh > maxX) maxX = targetXLocal + hh;
+            if (targetZLocal - hv < minZ) minZ = targetZLocal - hv;
+            if (targetZLocal + hv > maxZ) maxZ = targetZLocal + hv;
         }
 
-        // Добавляем позицию камеры — гарантирует загрузку тайла под ногами
-        const camX = camera.position.x - off.x;
-        const camZ = camera.position.z - off.z;
-        if (camX < minX) minX = camX;
-        if (camX > maxX) maxX = camX;
-        if (camZ < minZ) minZ = camZ;
-        if (camZ > maxZ) maxZ = camZ;
-
-        // Небольшой запас, чтобы тайлы на границе экрана не мигали
-        const margin = tileSize;
+        // Буфер в 1.5 тайла вокруг AABB — компенсирует быстрый пан и
+        // даёт время на загрузку при подлёте к границе экрана.
+        const margin = tileSize * 1.5;
         minX -= margin; maxX += margin;
         minZ -= margin; maxZ += margin;
 

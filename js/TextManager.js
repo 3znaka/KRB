@@ -6,17 +6,7 @@ import {
 
 /**
  * Простой пространственный индекс (равномерная сетка) для ускорения
- * проверки коллизий подписей. Вдохновлён `CollisionIndex` из Mapbox GL.
- *
- * Идея: при жадном размещении подписей (сортировка по приоритету) мы для
- * каждой следующей подписи должны проверить, пересекается ли её bbox с уже
- * размещёнными. Наивный перебор даёт O(n²). Сетка разбивает экран на
- * квадратные ячейки фиксированного размера; каждый размещённый bbox
- * регистрируется во всех ячейках, которые он задевает. При проверке новой
- * подписи мы смотрим только в те ячейки, которые пересекает её bbox — как
- * правило, это 1–4 ячейки, и в каждой лежит небольшое число прямоугольников.
- *
- * При типичной плотности подписей это даёт ~O(n) вместо O(n²).
+ * проверки коллизий подписей. 
  *
  * @private
  */
@@ -117,16 +107,6 @@ class _GridIndex {
  * (Point) и линейных объектов (LineString). Для линейных подписей реализовано
  * анимированное перемещение вдоль линии с целью избежать перекрытий, а также
  * жадная приоритезация всех видимых подписей для предотвращения наложений.
- *
- * ГЛОБАЛЬНЫЙ БЮДЖЕТ: сами подписи создаются вызывающей стороной (например,
- * `VectorTileLayer`) — менеджер лишь управляет уже созданными. Поле
- * `this.maxLabels` хранит мягкий ориентир для отладки/будущих оптимизаций;
- * жёсткого ограничения на число подписей внутри менеджера нет.
- *
- * ПРОИЗВОДИТЕЛЬНОСТЬ: для быстрого разрешения коллизий используется
- * внутренний `_GridIndex` (равномерная сетка). Это делает жадное размещение
- * подписей близким к O(n) вместо O(n²), что критично при большом количестве
- * подписей (например, номера домов на плотной городской застройке).
  */
 export class TextManager {
     /**
@@ -188,6 +168,35 @@ export class TextManager {
          * @private
          */
         this._gridIndex = new _GridIndex(128);
+
+        /**
+         * Карта для переиспользования DOM-элементов (stableId -> label).
+         * @type {Map<any, Object>}
+         * @private
+         */
+        this._labelMap = new Map();
+
+        /**
+         * Флаг изменений (добавление/удаление/обновление текста).
+         * Используется для троттлинга метода update().
+         * @type {boolean}
+         * @private
+         */
+        this._dirty = false;
+
+        /**
+         * Кэш мировой позиции X для троттлинга update().
+         * @type {number|null}
+         * @private
+         */
+        this._lastWorldX = null;
+
+        /**
+         * Кэш мировой позиции Z для троттлинга update().
+         * @type {number|null}
+         * @private
+         */
+        this._lastWorldZ = null;
 
         this._initPane();
     }
@@ -271,18 +280,23 @@ export class TextManager {
             }
         }
         this.labels.length = 0;
+        this._labelMap.clear();
         if (this.pane && this.pane.parentNode) {
             this.pane.parentNode.removeChild(this.pane);
         }
         this.pane = null;
         this._lastVisibleIds = null;
         this._lastZoom = null;
+        this._lastWorldX = null;
+        this._lastWorldZ = null;
+        this._dirty = false;
         this._gridIndex.clear();
     }
 
     /**
      * Добавляет новую подпись на карту на основе объекта-источника.
      * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
+     * Если элемент с таким stableId уже существует, переиспользует его.
      *
      * @param {Object} source - Объект-источник подписи.
      * @property {Function} source.getText - Возвращает текст подписи.
@@ -302,9 +316,41 @@ export class TextManager {
      * @property {Function} source.getLabelParameter - Возвращает текущий параметр линии.
      * @property {Function} source.setLabelParameter - Устанавливает параметр линии.
      * @property {Function} source.getPlacement - Возвращает режим размещения вдоль линии.
+     * @param {*} stableId - Стабильный идентификатор для переиспользования DOM-элемента (например, ссылка на объект данных).
+     * @param {boolean} [skipMeasure=false] - Пропустить немедленное измерение (используется для батчинга).
      * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
-    addLabel(source) {
+    addLabel(source, stableId, skipMeasure = false) {
+        // 1. Переиспользование существующего элемента
+        if (this._labelMap.has(stableId)) {
+            const label = this._labelMap.get(stableId);
+            label.source = source;
+            label.stuck = false;
+            label.hiddenByPriority = false;
+            label.priority = source.getPriority ? source.getPriority() : 0;
+            label.allowOverflow = source.getAllowOverflow ? source.getAllowOverflow() : false;
+
+            // Обновляем текст только если он изменился
+            const newText = source.getText();
+            if (label.element.textContent !== newText) {
+                if (source.getLabelType() === 'point') {
+                    label.element.style.whiteSpace = 'pre-line';
+                    label.element.textContent = this._wrapPointText(newText, label.element.style.fontSize);
+                } else {
+                    label.element.textContent = newText;
+                }
+                // Если текст изменился, измерить необходимо, игнорируем skipMeasure
+                this._measureLabel(label); 
+            }
+
+            if (!this.labels.includes(label)) {
+                this.labels.push(label);
+            }
+            this._dirty = true;
+            return label;
+        }
+
+        // 2. Создание нового элемента
         const el = document.createElement('div');
         el.className = 'krb-text-label';
         Object.assign(el.style, {
@@ -341,6 +387,7 @@ export class TextManager {
         const label = {
             source,
             element: el,
+            stableId,
             t: 0,
             width: 0,
             height: 0,
@@ -353,11 +400,16 @@ export class TextManager {
             _bbox: null
         };
         this.labels.push(label);
-        this._measureLabel(label);
+        this._labelMap.set(stableId, label);
+        
+        if (!skipMeasure) {
+            this._measureLabel(label);
+        }
 
         // Состав подписей изменился — сбрасываем снимок прошлого кадра,
         // чтобы stuck-флаги корректно пересчитались на ближайшем update().
         this._lastVisibleIds = null;
+        this._dirty = true;
 
         return label;
     }
@@ -369,6 +421,9 @@ export class TextManager {
      */
     removeLabel(label) {
         if (!label) return;
+        if (label.stableId !== undefined) {
+            this._labelMap.delete(label.stableId);
+        }
         if (label._hideTimeout) {
             clearTimeout(label._hideTimeout);
             label._hideTimeout = null;
@@ -382,6 +437,7 @@ export class TextManager {
         }
         // Инвалидация снимка прошлого кадра.
         this._lastVisibleIds = null;
+        this._dirty = true;
     }
 
     /**
@@ -474,6 +530,47 @@ export class TextManager {
         label._fontSize = parseFloat(style.fontSize) || 12;
         el.style.display = prevDisplay;
         el.style.visibility = prevVisibility;
+    }
+
+    /**
+     * Батчит измерение размеров DOM-элементов, выполняя ОДИН reflow 
+     * вместо N reflow при вызове по отдельности.
+     *
+     * @param {Object[]} labels - Массив объектов подписей.
+     * @private
+     */
+    _measureLabelsBatch(labels) {
+        if (!labels || labels.length === 0) return;
+        for (const label of labels) {
+            const el = label.element;
+            el.style.display = 'block';
+            el.style.visibility = 'hidden';
+        }
+        // Чтение свойств после массового изменения стилей вызывает один reflow
+        for (const label of labels) {
+            const el = label.element;
+            label.width = el.offsetWidth;
+            label.height = el.offsetHeight;
+            const style = window.getComputedStyle(el);
+            label._fontSize = parseFloat(style.fontSize) || 12;
+            
+            el.style.display = 'none';
+            el.style.visibility = 'visible';
+        }
+    }
+
+    /**
+     * Удаляет подписи, которых нет в списке активных идентификаторов.
+     *
+     * @param {Array<any>} activeIds - Массив стабильных идентификаторов, которые должны остаться.
+     */
+    pruneStaleLabels(activeIds) {
+        const activeSet = new Set(activeIds);
+        for (const [stableId, label] of this._labelMap.entries()) {
+            if (!activeSet.has(stableId)) {
+                this.removeLabel(label);
+            }
+        }
     }
 
     /**
@@ -708,6 +805,23 @@ export class TextManager {
     update() {
         const map = this.map;
         const zoom = map.continuousZoom;
+        const wx = map.worldGroup.position.x;
+        const wz = map.worldGroup.position.z;
+
+        // ТРОТТЛИНГ: если камера не двигалась, зум не менялся и не было добавлений/удалений
+        if (!this._dirty &&
+            this._lastZoom === zoom &&
+            this._lastWorldX === wx &&
+            this._lastWorldZ === wz) {
+            return;
+        }
+
+        const prevZoom = this._lastZoom;
+
+        this._dirty = false;
+        this._lastZoom = zoom;
+        this._lastWorldX = wx;
+        this._lastWorldZ = wz;
 
         // Сброс stuck при изменении состава или зума.
         // Используем Set<source>, чтобы не материализовать промежуточный массив дважды.
@@ -720,8 +834,8 @@ export class TextManager {
             }
         }
         if (this._lastVisibleIds === null ||
-            this._lastZoom === null ||
-            this._lastZoom !== zoom ||
+            prevZoom === null ||
+            prevZoom !== zoom ||
             this._lastVisibleIds.size !== idSet.size ||
             this._setDiffers(this._lastVisibleIds, idSet)) {
             for (const lbl of this.labels) {
@@ -730,7 +844,6 @@ export class TextManager {
             }
         }
         this._lastVisibleIds = idSet;
-        this._lastZoom = zoom;
 
         // 1. Сбор видимых подписей
         const visibleLabels = [];

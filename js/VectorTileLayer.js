@@ -2,23 +2,6 @@
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалами и подписями.
- *
- * ВАЖНО: Three.js не наследует `Group.renderOrder` по дереву сцены —
- * каждая промежуточная Group при обходе сбрасывает унаследованный
- * `groupOrder` в своё значение `renderOrder`. Все группы векторного слоя
- * явно помечаются большим `renderOrder` (`_tileGroupRenderOrder`),
- * иначе линии/заливки получат `groupOrder = 0` и будут перекрыты
- * растровыми тайлами (у которых `renderOrder = z`, 18+).
- *
- * ПРОЕКЦИИ: слой работает в метрах проекции карты (`map.projection`).
- * Координаты GeoJSON для exclusion-областей задаются в системе координат
- * `options.crs` (по умолчанию `map.inputCRS` = WGS84) и преобразуются
- * в метры через {@link KrbMap#project}.
- *
- * ПОДПИСИ: подписи собираются глобально — со всех видимых тайлов одновременно,
- * а не по тайлам по отдельности. Это устраняет ситуацию, когда подписи из
- * одного тайла «съедают» весь бюджет `maxTextLabels` и лишают остальные тайлы
- * возможности показать свои подписи. Подход вдохновлён архитектурой Mapbox GL.
  */
 
 import {
@@ -512,70 +495,79 @@ export class VectorTileLayer {
     /**
      * Пересобирает все текстовые подписи для всех видимых тайлов.
      *
-     * Логика:
-     *  1. Удаляем все существующие DOM-подписи у видимых групп.
-     *  2. Проходим по всем видимым группам и собираем «сырые» текстовые точки
-     *     в единый массив кандидатов (с экранными координатами и расстоянием
-     *     до цели камеры).
-     *  3. Сортируем кандидатов глобально — по расстоянию при близком зуме,
-     *     по приоритету при дальнем.
-     *  4. Берём первые `maxTextLabels` кандидатов и создаём для них DOM-подписи.
-     *
-     * Такой подход полностью устраняет проблему «FIFO по порядку загрузки
-     * тайлов»: раньше первая же группа могла заполнить весь бюджет, и
-     * подписи на краях экрана уже не создавались.
-     *
      * @private
      */
-    _refreshTextLabelsForVisibleTiles() {
-        if (!this._map || !this._map.textManager) return;
+_refreshTextLabelsForVisibleTiles() {
+    if (!this._map || !this._map.textManager) return;
 
-        // 1. Удаляем все существующие DOM-подписи.
-        this._tileCache.forEach(group => {
-            this._removeTextLabelsForGroup(group);
+    const { candidates, isClose } = this._collectLabelCandidates();
+    const textManager = this._map.textManager;
+
+    if (candidates.length === 0) {
+        textManager.pruneStaleLabels([]);
+        return;
+    }
+
+    // Глобальная сортировка
+    if (isClose) {
+        candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
+    } else {
+        candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
+    }
+
+    const limit = Math.min(candidates.length, this.maxTextLabels);
+    const activeIds = [];
+    const labelsToMeasure = [];
+
+    for (let i = 0; i < limit; i++) {
+        const cand = candidates[i];
+        const pt = cand.pt;
+        const group = cand.group;
+
+        const localWorldX = pt.x + group.position.x;
+        const localWorldZ = pt.z + group.position.z;
+
+        const source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
+            textColor: pt.textColor,
+            fontSize: pt.fontSize,
+            fontFamily: pt.fontFamily,
+            fontWeight: pt.fontWeight,
+            textShadow: pt.textShadow,
+            textOffset: pt.textOffset,
+            textAlign: pt.textAlign,
+            textVerticalAlign: pt.textVerticalAlign,
+            priority: pt.priority,
+            zoomBounds: pt.zoomBounds,
         });
 
-        // 2. Собираем кандидатов со всех видимых групп.
-        const { candidates, isClose } = this._collectLabelCandidates();
-        if (candidates.length === 0) return;
+        // pt (ссылка на объект) используется как стабильный идентификатор.
+        // skipMeasure = true, чтобы измерить все элементы за один проход ниже.
+        const label = textManager.addLabel(source, pt, true);
+        
+        activeIds.push(pt);
+        labelsToMeasure.push(label);
 
-        // 3. Глобальная сортировка.
-        if (isClose) {
-            candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
-        } else {
-            candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
-        }
-
-        // 4. Ограничиваем глобальным бюджетом и создаём DOM-подписи.
-        const limit = Math.min(candidates.length, this.maxTextLabels);
-        const textManager = this._map.textManager;
-
-        for (let i = 0; i < limit; i++) {
-            const cand = candidates[i];
-            const pt = cand.pt;
-            const group = cand.group;
-
-            const localWorldX = pt.x + group.position.x;
-            const localWorldZ = pt.z + group.position.z;
-
-            const source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
-                textColor: pt.textColor,
-                fontSize: pt.fontSize,
-                fontFamily: pt.fontFamily,
-                fontWeight: pt.fontWeight,
-                textShadow: pt.textShadow,
-                textOffset: pt.textOffset,
-                textAlign: pt.textAlign,
-                textVerticalAlign: pt.textVerticalAlign,
-                priority: pt.priority,
-                zoomBounds: pt.zoomBounds,
-            });
-            const label = textManager.addLabel(source);
-
-            if (!group.userData.textLabels) group.userData.textLabels = [];
+        if (!group.userData.textLabels) group.userData.textLabels = [];
+        if (!group.userData.textLabels.includes(label)) {
             group.userData.textLabels.push(label);
         }
     }
+
+    // АСИНХРОННОЕ ИЗМЕРЕНИЕ: один reflow для всех новых/обновлённых подписей
+    textManager._measureLabelsBatch(labelsToMeasure);
+
+    // УДАЛЕНИЕ УСТАРЕВШИХ: подписи, вышедшие за лимит или исчезнувшие из вида
+    textManager.pruneStaleLabels(activeIds);
+
+    // Очистка мёртвых ссылок в кэше групп (опционально, но полезно для памяти)
+    this._tileCache.forEach(group => {
+        if (group.userData.textLabels) {
+            group.userData.textLabels = group.userData.textLabels.filter(
+                lbl => lbl && activeIds.includes(lbl.stableId)
+            );
+        }
+    });
+}
 
     /**
      * Проходит по всем видимым группам тайлов, собирает «сырые» текстовые точки

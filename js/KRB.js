@@ -3,7 +3,6 @@ export { Tile } from './Tiles.js';
 export { initUI } from './Ui.js';
 export { Marker } from './Marker.js';
 export { Layer, ClusterLayer } from './Layers.js';
-export { proj } from './Utils.js';
 export { GeoJSONLayer } from './Geojson.js';
 export { Polyline } from './Polyline.js';
 export { Polygon } from './Polygon.js';

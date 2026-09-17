@@ -1,9 +1,7 @@
-// geojson.js — загрузка GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon), стилизация через свойства и коллбэки
-//
-// Координаты GeoJSON по умолчанию интерпретируются как WGS84 (EPSG:4326).
-// Если данные в другой СК — передайте её код через options.crs, либо
-// переопределите CRS точечно через коллбэки pointToOptions / lineToOptions /
-// polygonToOptions / point3DToOptions / polygon3DToOptions, вернув { crs: 'EPSG:...' }.
+// geojson.js — слой GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon).
+// Координаты по умолчанию интерпретируются как WGS84 (EPSG:4326); при необходимости
+// задайте options.crs или переопределите CRS точечно в коллбэках (свойство crs).
+
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
 import { Marker3D } from './Marker3D.js';
@@ -12,225 +10,78 @@ import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
 
 /**
- * Слой, автоматически создающий маркеры, линии и полигоны на основе данных GeoJSON.
+ * Слой, создающий маркеры, линии и полигоны из GeoJSON.
  *
- * Поддерживает:
- * - загрузку данных по URL или использование готового объекта GeoJSON;
- * - автоматическое определение типа геометрии (Point, LineString, MultiLineString, Polygon, MultiPolygon);
- * - умолчательные иконки, размеры, якоря и стили для каждого типа объектов;
- * - фильтрацию объектов (feature) перед добавлением на карту;
- * - кастомную стилизацию через коллбэки: pointToOptions, lineToOptions, polygonToOptions;
- * - добавление 3D-маркеров для точечных объектов (см. point3DToOptions и свойства 3d);
- * - добавление 3D-объектов для площадных объектов (см. polygon3DToOptions и свойства 3d);
- * - вызов onEachFeature(feature, object) после создания каждого графического объекта.
+ * Проецирование координат делегировано создаваемым объектам (Polygon,
+ * Polyline, Marker, …) — они сами вызывают map.projectSafe и корректно
+ * обрабатывают точки вне области определения проекции. Этот слой
+ * координаты не трогает, только передаёт их вместе с `crs`.
  *
- * @param {Object} [options={}] - Объект с настройками слоя.
- * @param {string} [options.url] - URL GeoJSON-файла для загрузки данных.
- * @param {Object} [options.data] - Готовый GeoJSON-объект (FeatureCollection, Feature или отдельная геометрия).
- * @param {string} [options.crs] - Код системы координат для координат GeoJSON
- *        (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
- *        Если не указан — используется `map.inputCRS` (по умолчанию EPSG:4326, что
- *        соответствует стандарту GeoJSON RFC 7946).
- *        Может быть переопределён в каждом коллбэке через поле `crs`.
- * @param {Function} [options.pointToOptions] - Функция для создания опций маркера.
- *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker}.
- * @param {Function} [options.point3DToOptions] - Функция для создания опций 3D-маркера.
- *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker3D}.
- * @param {Function} [options.lineToOptions] - Функция для создания опций линии.
- *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polyline}.
- * @param {Function} [options.polygonToOptions] - Функция для создания опций полигона.
- *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polygon}.
- * @param {Function} [options.polygon3DToOptions] - Функция для создания опций 3D-площадного объекта.
- *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Area3D}.
- * @param {Function} [options.filter] - Функция фильтрации фич. Принимает feature, должна вернуть true, чтобы фича была добавлена.
- * @param {Function} [options.onEachFeature] - Функция, вызываемая после создания каждого графического объекта.
- *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline, Polygon или Area3D.
- *
- * @param {string} [options.defaultIconUrl='marker.png'] - URL иконки по умолчанию для маркеров.
- * @param {number[]} [options.defaultIconSize=[16,16]] - Размер иконки по умолчанию [ширина, высота].
- * @param {number[]} [options.defaultAnchor=[0.5,1.0]] - Якорь иконки по умолчанию [x, y] в долях от размеров иконки.
- *
- * @param {string} [options.default3DPrimitiveType='box'] - Тип примитива 3D-маркера по умолчанию ('box', 'sphere', 'cylinder', 'cone').
- * @param {number[]} [options.default3DSize=[100,100,100]] - Размеры 3D-маркера по умолчанию [width, height, depth].
- * @param {number[]} [options.default3DAnchor=[0.5,0,0.5]] - Anchor point 3D-маркера по умолчанию.
- * @param {number} [options.default3DAltitude=0] - Высота 3D-маркера по умолчанию.
- * @param {string} [options.default3DAltitudeMode='clampToGround'] - Режим высоты 3D-маркера по умолчанию.
- *
- * @param {string} [options.defaultLineColor='#3388ff'] - Цвет линии по умолчанию.
- * @param {number} [options.defaultLineWidth=2] - Толщина линии по умолчанию.
- * @param {number} [options.defaultLineOpacity=1] - Прозрачность линии по умолчанию (0..1).
- * @param {'ground'|'clampToGround'} [options.defaultLineAltitudeMode='ground'] - Режим высоты линии по умолчанию.
- * @param {number} [options.defaultLineAltitudeOffset=10] - Смещение высоты линии по умолчанию.
- * @param {boolean} [options.defaultLineDepthTest=false] - Включение теста глубины для линии по умолчанию.
- * @param {boolean} [options.defaultLineDepthWrite=false] - Запись глубины для линии по умолчанию.
- * @param {number} [options.defaultLineMinZoom=-Infinity] - Минимальный zoom видимости линии по умолчанию.
- * @param {number} [options.defaultLineMaxZoom=Infinity] - Максимальный zoom видимости линии по умолчанию.
- *
- * @param {string} [options.defaultFillColor='#3388ff'] - Цвет заливки полигона по умолчанию.
- * @param {number} [options.defaultFillOpacity=0.5] - Прозрачность заливки полигона по умолчанию.
- * @param {string} [options.defaultStrokeColor='#000000'] - Цвет обводки полигона по умолчанию.
- * @param {number} [options.defaultStrokeWidth=2] - Толщина обводки полигона по умолчанию.
- * @param {number} [options.defaultStrokeOpacity=1] - Прозрачность обводки полигона по умолчанию.
- * @param {'ground'|'clampToGround'} [options.defaultPolygonAltitudeMode='ground'] - Режим высоты полигона по умолчанию.
- * @param {number} [options.defaultPolygonAltitudeOffset=10] - Смещение высоты полигона по умолчанию.
- * @param {boolean} [options.defaultPolygonDepthTest=false] - Включение теста глубины для полигона по умолчанию.
- * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
- * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
- * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
- * @param {boolean} [options.defaultPolygonExtruded=false] - Включить экструзию полигонов по умолчанию.
- * @param {number} [options.defaultPolygonHeight=0] - Толщина экструзии по умолчанию (в метрах).
- * @param {number} [options.defaultPolygonMinHeight=0] - Высота нижней грани над поверхностью по умолчанию (в метрах).
- *
- * @param {string} [options.defaultPolygon3DPrimitiveType='box'] - Тип примитива Area3D по умолчанию.
- * @param {number[]} [options.defaultPolygon3DSize=null] - Размеры Area3D для примитивов (если не задан modelUrl).
- * @param {number[]} [options.defaultPolygon3DAnchor=[0.5,0,0.5]] - Anchor point Area3D по умолчанию.
- * @param {number} [options.defaultPolygon3DAltitude=0] - Высота Area3D по умолчанию.
- * @param {string} [options.defaultPolygon3DAltitudeMode='clampToGround'] - Режим высоты Area3D по умолчанию.
- * @param {string} [options.defaultPolygon3DFit='stretch'] - Режим вписывания модели в полигон ('stretch', 'contain').
- * @param {number} [options.defaultPolygon3DRotate=0] - Поворот модели (0-3, кратно 90°).
- * @param {string} [options.defaultPolygon3DModelUrl=null] - URL GLB-модели для Area3D по умолчанию.
- * @param {boolean} [options.defaultPolygon3DDepthTest=true] - Включение теста глубины для Area3D.
- * @param {boolean} [options.defaultPolygon3DDepthWrite=true] - Запись глубины для Area3D.
- * 
  * @example
  * const layer = new GeoJSONLayer({
  *     url: 'data.geojson',
- *     pointToOptions: (feature, props) => ({ title: props.name, iconUrl: props.icon }),
- *     point3DToOptions: (feature, props) => ({ primitiveType: props.primitiveType, altitude: props.altitude }),
- *     lineToOptions: (feature, props) => ({ color: props.stroke }),
- *     polygonToOptions: (feature, props) => ({
- *         fillColor: props.fill,
- *         extruded: props.extruded !== undefined ? props.extruded : true,
- *         height: props.height || 300,
- *         minHeight: props.minHeight || 0
- *     }),
- *     polygon3DToOptions: (feature, props) => ({
- *         modelUrl: props.modelUrl,
- *         fit: props.fit || 'stretch',
- *         rotate: props.rotate || 0,
- *         altitude: props.altitude || 0
- *     }),
- *     filter: (feature) => feature.properties.visible !== false,
- *     onEachFeature: (feature, object) => console.log(feature, object),
- *     defaultIconUrl: 'custom-marker.png',
- *     defaultIconSize: [24, 24],
- *     defaultAnchor: [0.5, 1],
- *     default3DPrimitiveType: 'cylinder',
- *     default3DSize: [50, 50, 50],
- *     default3DAnchor: [0.5, 0, 0.5],
- *     default3DAltitude: 100,
- *     default3DAltitudeMode: 'relativeToGround',
- *     defaultLineColor: '#ff0000',
- *     defaultLineWidth: 4,
- *     defaultLineOpacity: 0.8,
- *     defaultLineAltitudeMode: 'clampToGround',
- *     defaultLineAltitudeOffset: 20,
- *     defaultLineDepthTest: true,
- *     defaultLineDepthWrite: true,
- *     defaultLineMinZoom: 10,
- *     defaultLineMaxZoom: 18,
- *     defaultFillColor: '#00ff00',
- *     defaultFillOpacity: 0.7,
- *     defaultStrokeColor: '#000000',
- *     defaultStrokeWidth: 3,
- *     defaultStrokeOpacity: 0.9,
- *     defaultPolygonAltitudeMode: 'clampToGround',
- *     defaultPolygonAltitudeOffset: 15,
- *     defaultPolygonDepthTest: true,
- *     defaultPolygonDepthWrite: true,
- *     defaultPolygonMinZoom: 10,
- *     defaultPolygonMaxZoom: 18,
- *     defaultPolygonExtruded: false,
- *     defaultPolygonHeight: 500,
- *     defaultPolygonMinHeight: 200,
- *     defaultPolygon3DPrimitiveType: 'box',
- *     defaultPolygon3DSize: null,
- *     defaultPolygon3DAnchor: [0.5, 0, 0.5],
- *     defaultPolygon3DAltitude: 0,
- *     defaultPolygon3DAltitudeMode: 'clampToGround',
- *     defaultPolygon3DFit: 'stretch',
- *     defaultPolygon3DRotate: 0,
- *     defaultPolygon3DModelUrl: null,
- *     defaultPolygon3DDepthTest: true,
- *     defaultPolygon3DDepthWrite: true
+ *     crs: 'EPSG:4326',
+ *     pointToOptions: (f, p) => ({ title: p.name }),
+ *     polygonToOptions: (f, p) => ({ fillColor: p.fill }),
+ *     onEachFeature: (f, obj) => console.log(f, obj)
  * });
  * layer.addTo(map);
  * layer.reload();
- *
- * @example
- * // GeoJSON в UTM зоне 37N (EPSG:32637)
- * const utmLayer = new GeoJSONLayer({
- *     url: 'utm-data.geojson',
- *     crs: 'EPSG:32637'
- * });
- * utmLayer.addTo(map);
  */
 export class GeoJSONLayer extends Layer {
     /**
-     * Создаёт экземпляр GeoJSONLayer.
-     *
-     * @param {Object} [options={}] - Объект с настройками слоя.
-     * @param {string} [options.url] - URL GeoJSON-файла для загрузки данных.
-     * @param {Object} [options.data] - Готовый GeoJSON-объект (FeatureCollection, Feature или отдельная геометрия).
-     * @param {string} [options.crs] - Код СК координат GeoJSON. Если не указан — `map.inputCRS`.
-     * @param {Function} [options.pointToOptions] - Функция для создания опций маркера.
-     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker}.
-     * @param {Function} [options.point3DToOptions] - Функция для создания опций 3D-маркера.
-     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Marker3D}.
-     * @param {Function} [options.lineToOptions] - Функция для создания опций линии.
-     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polyline}.
-     * @param {Function} [options.polygonToOptions] - Функция для создания опций полигона.
-     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Polygon}.
-     * @param {Function} [options.polygon3DToOptions] - Функция для создания опций 3D-площадного объекта.
-     *        Принимает (feature, properties) и должна возвращать объект с опциями для {@link Area3D}.
-     * @param {Function} [options.filter] - Функция фильтрации фич. Принимает feature, должна вернуть true, чтобы фича была добавлена.
-     * @param {Function} [options.onEachFeature] - Функция, вызываемая после создания каждого графического объекта.
-     *        Принимает (feature, object), где object — экземпляр Marker, Marker3D, Polyline, Polygon или Area3D.
-     *
-     * @param {string} [options.defaultIconUrl='marker.png'] - URL иконки по умолчанию для маркеров.
-     * @param {number[]} [options.defaultIconSize=[16,16]] - Размер иконки по умолчанию [ширина, высота].
-     * @param {number[]} [options.defaultAnchor=[0.5,1.0]] - Якорь иконки по умолчанию [x, y] в долях от размеров иконки.
-     *
-     * @param {string} [options.default3DPrimitiveType='box'] - Тип примитива 3D-маркера по умолчанию ('box', 'sphere', 'cylinder', 'cone').
-     * @param {number[]} [options.default3DSize=[100,100,100]] - Размеры 3D-маркера по умолчанию [width, height, depth].
-     * @param {number[]} [options.default3DAnchor=[0.5,0,0.5]] - Anchor point 3D-маркера по умолчанию.
-     * @param {number} [options.default3DAltitude=0] - Высота 3D-маркера по умолчанию.
-     * @param {string} [options.default3DAltitudeMode='clampToGround'] - Режим высоты 3D-маркера по умолчанию.
-     *
-     * @param {string} [options.defaultLineColor='#3388ff'] - Цвет линии по умолчанию.
-     * @param {number} [options.defaultLineWidth=2] - Толщина линии по умолчанию.
-     * @param {number} [options.defaultLineOpacity=1] - Прозрачность линии по умолчанию (0..1).
-     * @param {'ground'|'clampToGround'} [options.defaultLineAltitudeMode='ground'] - Режим высоты линии по умолчанию.
-     * @param {number} [options.defaultLineAltitudeOffset=10] - Смещение высоты линии по умолчанию.
-     * @param {boolean} [options.defaultLineDepthTest=false] - Включение теста глубины для линии по умолчанию.
-     * @param {boolean} [options.defaultLineDepthWrite=false] - Запись глубины для линии по умолчанию.
-     * @param {number} [options.defaultLineMinZoom=-Infinity] - Минимальный zoom видимости линии по умолчанию.
-     * @param {number} [options.defaultLineMaxZoom=Infinity] - Максимальный zoom видимости линии по умолчанию.
-     *
-     * @param {string} [options.defaultFillColor='#3388ff'] - Цвет заливки полигона по умолчанию.
-     * @param {number} [options.defaultFillOpacity=0.5] - Прозрачность заливки полигона по умолчанию.
-     * @param {string} [options.defaultStrokeColor='#000000'] - Цвет обводки полигона по умолчанию.
-     * @param {number} [options.defaultStrokeWidth=2] - Толщина обводки полигона по умолчанию.
-     * @param {number} [options.defaultStrokeOpacity=1] - Прозрачность обводки полигона по умолчанию.
-     * @param {'ground'|'clampToGround'} [options.defaultPolygonAltitudeMode='ground'] - Режим высоты полигона по умолчанию.
-     * @param {number} [options.defaultPolygonAltitudeOffset=10] - Смещение высоты полигона по умолчанию.
-     * @param {boolean} [options.defaultPolygonDepthTest=false] - Включение теста глубины для полигона по умолчанию.
-     * @param {boolean} [options.defaultPolygonDepthWrite=false] - Запись глубины для полигона по умолчанию.
-     * @param {number} [options.defaultPolygonMinZoom=-Infinity] - Минимальный zoom видимости полигона по умолчанию.
-     * @param {number} [options.defaultPolygonMaxZoom=Infinity] - Максимальный zoom видимости полигона по умолчанию.
-     * @param {boolean} [options.defaultPolygonExtruded=false] - Включить экструзию полигонов по умолчанию.
-     * @param {number} [options.defaultPolygonHeight=0] - Толщина экструзии по умолчанию (в метрах).
-     * @param {number} [options.defaultPolygonMinHeight=0] - Высота нижней грани над поверхностью по умолчанию (в метрах).
-     * @param {string} [options.defaultPolygon3DPrimitiveType='box'] - Тип примитива Area3D по умолчанию.
-     * @param {number[]} [options.defaultPolygon3DSize=null] - Размеры Area3D для примитивов (если не задан modelUrl).
-     * @param {number[]} [options.defaultPolygon3DAnchor=[0.5,0,0.5]] - Anchor point Area3D по умолчанию.
-     * @param {number} [options.defaultPolygon3DAltitude=0] - Высота Area3D по умолчанию.
-     * @param {string} [options.defaultPolygon3DAltitudeMode='clampToGround'] - Режим высоты Area3D по умолчанию.
-     * @param {string} [options.defaultPolygon3DFit='stretch'] - Режим вписывания модели в полигон ('stretch', 'contain').
-     * @param {number} [options.defaultPolygon3DRotate=0] - Поворот модели (0-3, кратно 90°).
-     * @param {string} [options.defaultPolygon3DModelUrl=null] - URL GLB-модели для Area3D по умолчанию.
-     * @param {boolean} [options.defaultPolygon3DDepthTest=true] - Включение теста глубины для Area3D.
-     * @param {boolean} [options.defaultPolygon3DDepthWrite=true] - Запись глубины для Area3D.
+     * @param {Object} [options]
+     * @param {string} [options.url] - URL GeoJSON-файла.
+     * @param {Object} [options.data] - Готовый GeoJSON (FeatureCollection/Feature/геометрия).
+     * @param {string} [options.crs] - Код СК координат; по умолчанию map.inputCRS.
+     * @param {Function} [options.pointToOptions] - (feature, props) → опции Marker.
+     * @param {Function} [options.point3DToOptions] - (feature, props) → опции Marker3D.
+     * @param {Function} [options.lineToOptions] - (feature, props) → опции Polyline.
+     * @param {Function} [options.polygonToOptions] - (feature, props) → опции Polygon.
+     * @param {Function} [options.polygon3DToOptions] - (feature, props) → опции Area3D.
+     * @param {Function} [options.filter] - (feature) → boolean; true — добавить.
+     * @param {Function} [options.onEachFeature] - (feature, object) — после создания.
+     * @param {string} [options.defaultIconUrl='marker.png']
+     * @param {number[]} [options.defaultIconSize=[16,16]]
+     * @param {number[]} [options.defaultAnchor=[0.5,1.0]]
+     * @param {string} [options.default3DPrimitiveType='box']
+     * @param {number[]} [options.default3DSize=[100,100,100]]
+     * @param {number[]} [options.default3DAnchor=[0.5,0,0.5]]
+     * @param {number} [options.default3DAltitude=0]
+     * @param {string} [options.default3DAltitudeMode='clampToGround']
+     * @param {string} [options.defaultLineColor='#3388ff']
+     * @param {number} [options.defaultLineWidth=2]
+     * @param {number} [options.defaultLineOpacity=1]
+     * @param {string} [options.defaultLineAltitudeMode='ground']
+     * @param {number} [options.defaultLineAltitudeOffset=10]
+     * @param {boolean} [options.defaultLineDepthTest=false]
+     * @param {boolean} [options.defaultLineDepthWrite=false]
+     * @param {number} [options.defaultLineMinZoom=-Infinity]
+     * @param {number} [options.defaultLineMaxZoom=Infinity]
+     * @param {string} [options.defaultFillColor='#3388ff']
+     * @param {number} [options.defaultFillOpacity=0.5]
+     * @param {string} [options.defaultStrokeColor='#000000']
+     * @param {number} [options.defaultStrokeWidth=2]
+     * @param {number} [options.defaultStrokeOpacity=1]
+     * @param {string} [options.defaultPolygonAltitudeMode='ground']
+     * @param {number} [options.defaultPolygonAltitudeOffset=10]
+     * @param {boolean} [options.defaultPolygonDepthTest=false]
+     * @param {boolean} [options.defaultPolygonDepthWrite=false]
+     * @param {number} [options.defaultPolygonMinZoom=-Infinity]
+     * @param {number} [options.defaultPolygonMaxZoom=Infinity]
+     * @param {boolean} [options.defaultPolygonExtruded=false]
+     * @param {number} [options.defaultPolygonHeight=0]
+     * @param {number} [options.defaultPolygonMinHeight=0]
+     * @param {string} [options.defaultPolygon3DPrimitiveType='box']
+     * @param {number[]} [options.defaultPolygon3DSize=null]
+     * @param {number[]} [options.defaultPolygon3DAnchor=[0.5,0,0.5]]
+     * @param {number} [options.defaultPolygon3DAltitude=0]
+     * @param {string} [options.defaultPolygon3DAltitudeMode='clampToGround']
+     * @param {string} [options.defaultPolygon3DFit='stretch']
+     * @param {number} [options.defaultPolygon3DRotate=0]
+     * @param {string} [options.defaultPolygon3DModelUrl=null]
+     * @param {boolean} [options.defaultPolygon3DDepthTest=true]
+     * @param {boolean} [options.defaultPolygon3DDepthWrite=true]
      */
     constructor(options = {}) {
         super();
@@ -247,19 +98,19 @@ export class GeoJSONLayer extends Layer {
         this.polygonToOptions = options.polygonToOptions || null;
         this.polygon3DToOptions = options.polygon3DToOptions || null;
 
-        // --- Параметры по умолчанию для обычных маркеров ---
+        // Обычные маркеры.
         this.defaultIconUrl = options.defaultIconUrl || 'marker.png';
         this.defaultIconSize = options.defaultIconSize || [16, 16];
         this.defaultAnchor = options.defaultAnchor || [0.5, 1.0];
 
-        // --- Параметры по умолчанию для 3D-маркеров ---
+        // 3D-маркеры.
         this.default3DPrimitiveType = options.default3DPrimitiveType || 'box';
         this.default3DSize = options.default3DSize || [100, 100, 100];
         this.default3DAnchor = options.default3DAnchor || [0.5, 0, 0.5];
         this.default3DAltitude = options.default3DAltitude ?? 0;
         this.default3DAltitudeMode = options.default3DAltitudeMode || 'clampToGround';
 
-        // --- Параметры по умолчанию для линий ---
+        // Линии.
         this.defaultLineColor = options.defaultLineColor || '#3388ff';
         this.defaultLineWidth = options.defaultLineWidth || 2;
         this.defaultLineOpacity = options.defaultLineOpacity ?? 1;
@@ -270,7 +121,7 @@ export class GeoJSONLayer extends Layer {
         this.defaultLineMinZoom = options.defaultLineMinZoom ?? -Infinity;
         this.defaultLineMaxZoom = options.defaultLineMaxZoom ?? Infinity;
 
-        // --- Параметры по умолчанию для полигонов ---
+        // Полигоны.
         this.defaultFillColor = options.defaultFillColor || '#3388ff';
         this.defaultFillOpacity = options.defaultFillOpacity ?? 0.5;
         this.defaultStrokeColor = options.defaultStrokeColor || '#000000';
@@ -286,7 +137,7 @@ export class GeoJSONLayer extends Layer {
         this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
         this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
 
-        // --- Параметры по умолчанию для Area3D (3D-площадные объекты) ---
+        // Area3D (3D-площадные).
         this.defaultPolygon3DPrimitiveType = options.defaultPolygon3DPrimitiveType || 'box';
         this.defaultPolygon3DSize = options.defaultPolygon3DSize || null;
         this.defaultPolygon3DAnchor = options.defaultPolygon3DAnchor || [0.5, 0, 0.5];
@@ -302,42 +153,24 @@ export class GeoJSONLayer extends Layer {
     }
 
     /**
-     * Добавляет слой на карту и запускает загрузку данных, если они ещё не были загружены.
-     *
-     * @param {Map} map - Экземпляр карты.
-     * @returns {this} Текущий экземпляр слоя для цепочек вызовов.
+     * Добавляет слой на карту и при необходимости запускает загрузку.
+     * @param {KrbMap} map @returns {this}
      */
     addTo(map) {
         super.addTo(map);
-        if (!this._loaded) {
-            this._load();
-        }
+        if (!this._loaded) this._load();
         return this;
     }
 
-    /**
-     * Полностью перезагружает данные слоя: удаляет все созданные объекты, сбрасывает флаг загрузки
-     * и повторно запускает процесс загрузки, если слой прикреплён к карте.
-     *
-     * @returns {void} Метод ничего не возвращает.
-     */
+    /** Полная перезагрузка: удаляет объекты, сбрасывает флаг, загружает заново. */
     reload() {
-        for (const obj of [...this._objects]) {
-            obj.remove();
-        }
+        for (const obj of [...this._objects]) obj.remove();
         this._objects = [];
         this._loaded = false;
-        if (this._map) {
-            this._load();
-        }
+        if (this._map) this._load();
     }
 
-    /**
-     * Загружает GeoJSON-данные: из URL или готового объекта, парсит и создаёт графические объекты.
-     *
-     * @returns {Promise<void>} Промис без значения.
-     * @private
-     */
+    /** @private */
     async _load() {
         let geojson = null;
         try {
@@ -359,51 +192,25 @@ export class GeoJSONLayer extends Layer {
         }
     }
 
-    /**
-     * Разбирает корневой объект GeoJSON и направляет фичи на дальнейшую обработку.
-     * Поддерживаются типы: FeatureCollection, Feature, Point, LineString, MultiLineString, Polygon, MultiPolygon.
-     *
-     * @param {Object} geojson - Корневой объект GeoJSON.
-     * @private
-     */
+    /** @private */
     _parse(geojson) {
         const type = geojson.type;
         if (type === 'FeatureCollection') {
-            for (const feature of geojson.features) {
-                this._addFeature(feature);
-            }
+            for (const feature of geojson.features) this._addFeature(feature);
         } else if (type === 'Feature') {
             this._addFeature(geojson);
-        } else if (type === 'Point') {
-            this._addFeature({
-                type: 'Feature',
-                geometry: geojson,
-                properties: {}
-            });
-        } else if (type === 'LineString' || type === 'MultiLineString') {
-            this._addFeature({
-                type: 'Feature',
-                geometry: geojson,
-                properties: {}
-            });
-        } else if (type === 'Polygon' || type === 'MultiPolygon') {
-            this._addFeature({
-                type: 'Feature',
-                geometry: geojson,
-                properties: {}
-            });
+        } else if (type === 'Point'
+            || type === 'LineString'
+            || type === 'MultiLineString'
+            || type === 'Polygon'
+            || type === 'MultiPolygon') {
+            this._addFeature({ type: 'Feature', geometry: geojson, properties: {} });
         } else {
             console.debug(`GeoJSONLayer: тип "${type}" пока не поддерживается`);
         }
     }
 
-    /**
-     * Обрабатывает отдельную фичу: применяет фильтр и в зависимости от типа геометрии
-     * вызывает соответствующий метод создания объектов.
-     *
-     * @param {Object} feature - Объект GeoJSON Feature.
-     * @private
-     */
+    /** @private */
     _addFeature(feature) {
         if (this.filter && !this.filter(feature)) return;
 
@@ -411,47 +218,30 @@ export class GeoJSONLayer extends Layer {
         if (!geom) return;
 
         switch (geom.type) {
-            case 'Point':
-                this._addPointFeature(feature);
-                break;
+            case 'Point': this._addPointFeature(feature); break;
             case 'LineString':
-            case 'MultiLineString':
-                this._addLineFeature(feature);
-                break;
+            case 'MultiLineString': this._addLineFeature(feature); break;
             case 'Polygon':
-            case 'MultiPolygon':
-                this._addPolygonFeature(feature);
-                break;
+            case 'MultiPolygon': this._addPolygonFeature(feature); break;
             default:
                 console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
         }
     }
 
-    /**
-     * Создаёт маркер (обычный или 3D) на основе точечной фичи.
-     * Решение о типе маркера принимается по коллбэку point3DToOptions или по свойству `3d: true` / `type: '3d'` в properties.
-     *
-     * @param {Object} feature - GeoJSON-фича с геометрией типа Point.
-     * @private
-     */
+    /** @private */
     _addPointFeature(feature) {
         const props = feature.properties || {};
         const coords = feature.geometry.coordinates;
 
-        // Определяем, является ли точка 3D
         const is3D = (this.point3DToOptions && this.point3DToOptions(feature, props))
             || props['3d'] === true
             || props.type === '3d'
             || props.markerType === '3d';
 
         if (is3D) {
-            // --- Создание 3D-маркера ---
-            let options;
-            if (this.point3DToOptions) {
-                options = this.point3DToOptions(feature, props) || {};
-            } else {
-                options = this._default3DPointOptions(feature, props);
-            }
+            const options = this.point3DToOptions
+                ? (this.point3DToOptions(feature, props) || {})
+                : this._default3DPointOptions(feature, props);
 
             const marker3DOptions = {
                 position: coords,
@@ -481,17 +271,11 @@ export class GeoJSONLayer extends Layer {
 
             const marker3D = new Marker3D(marker3DOptions);
             this.add(marker3D);
-            if (this.onEachFeature) {
-                this.onEachFeature(feature, marker3D);
-            }
+            if (this.onEachFeature) this.onEachFeature(feature, marker3D);
         } else {
-            // --- Создание обычного маркера ---
-            let options;
-            if (this.pointToOptions) {
-                options = this.pointToOptions(feature, props) || {};
-            } else {
-                options = this._defaultPointOptions(feature, props);
-            }
+            const options = this.pointToOptions
+                ? (this.pointToOptions(feature, props) || {})
+                : this._defaultPointOptions(feature, props);
 
             const markerOptions = {
                 position: coords,
@@ -502,7 +286,9 @@ export class GeoJSONLayer extends Layer {
                 iconSize: this._parseSize(options.iconSize || props.iconSize) || this.defaultIconSize,
                 anchor: this._parseAnchor(options.anchor || props.anchor) || this.defaultAnchor,
                 altitudeMode: options.altitudeMode || props.altitudeMode || 'ground',
-                clusterable: options.clusterable !== undefined ? options.clusterable : (props.clusterable !== undefined ? props.clusterable : true),
+                clusterable: options.clusterable !== undefined
+                    ? options.clusterable
+                    : (props.clusterable !== undefined ? props.clusterable : true),
                 minZoom: options.minZoom ?? props.minZoom ?? -Infinity,
                 maxZoom: options.maxZoom ?? props.maxZoom ?? Infinity,
                 titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
@@ -513,21 +299,11 @@ export class GeoJSONLayer extends Layer {
 
             const marker = new Marker(markerOptions);
             this.add(marker);
-            if (this.onEachFeature) {
-                this.onEachFeature(feature, marker);
-            }
+            if (this.onEachFeature) this.onEachFeature(feature, marker);
         }
     }
 
-    /**
-     * Возвращает умолчательные опции для точечного объекта, полученные из свойств фичи.
-     * Используется, когда не задан коллбэк pointToOptions.
-     *
-     * @param {Object} feature - GeoJSON-фича.
-     * @param {Object} props - Свойства (properties) фичи.
-     * @returns {Object} Объект с опциями маркера.
-     * @private
-     */
+    /** @private */
     _defaultPointOptions(feature, props) {
         return {
             title: props.title || props.name || '',
@@ -540,15 +316,7 @@ export class GeoJSONLayer extends Layer {
         };
     }
 
-    /**
-     * Возвращает умолчательные опции для 3D-точечного объекта, полученные из свойств фичи.
-     * Используется, когда не задан коллбэк point3DToOptions, но точка определена как 3D.
-     *
-     * @param {Object} feature - GeoJSON-фича.
-     * @param {Object} props - Свойства (properties) фичи.
-     * @returns {Object} Объект с опциями Marker3D.
-     * @private
-     */
+    /** @private */
     _default3DPointOptions(feature, props) {
         return {
             primitiveType: props.primitiveType || this.default3DPrimitiveType,
@@ -566,29 +334,18 @@ export class GeoJSONLayer extends Layer {
         };
     }
 
-    /**
-     * Создаёт линейные объекты (Polyline) на основе фичи с геометрией LineString или MultiLineString.
-     * Для MultiLineString создаётся отдельная линия на каждую группу координат.
-     *
-     * @param {Object} feature - GeoJSON-фича с геометрией LineString или MultiLineString.
-     * @private
-     */
+    /** @private */
     _addLineFeature(feature) {
         const props = feature.properties || {};
         const geom = feature.geometry;
-        const coordSets = geom.type === 'LineString'
-            ? [geom.coordinates]
-            : geom.coordinates; // MultiLineString
+        const coordSets = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
 
         for (const coords of coordSets) {
             if (coords.length < 2) continue;
 
-            let options;
-            if (this.lineToOptions) {
-                options = this.lineToOptions(feature, props) || {};
-            } else {
-                options = this._defaultLineOptions(feature, props);
-            }
+            const options = this.lineToOptions
+                ? (this.lineToOptions(feature, props) || {})
+                : this._defaultLineOptions(feature, props);
 
             const lineOptions = {
                 positions: coords,
@@ -605,21 +362,11 @@ export class GeoJSONLayer extends Layer {
 
             const polyline = new Polyline(lineOptions);
             this.add(polyline);
-            if (this.onEachFeature) {
-                this.onEachFeature(feature, polyline);
-            }
+            if (this.onEachFeature) this.onEachFeature(feature, polyline);
         }
     }
 
-    /**
-     * Возвращает умолчательные опции для линейного объекта, полученные из свойств фичи.
-     * Используется, когда не задан коллбэк lineToOptions.
-     *
-     * @param {Object} feature - GeoJSON-фича.
-     * @param {Object} props - Свойства (properties) фичи.
-     * @returns {Object} Объект с опциями полилинии.
-     * @private
-     */
+    /** @private */
     _defaultLineOptions(feature, props) {
         return {
             color: props.stroke || props.color || this.defaultLineColor,
@@ -634,41 +381,27 @@ export class GeoJSONLayer extends Layer {
         };
     }
 
-    /**
-     * Создаёт полигональные объекты (Polygon или Area3D) на основе фичи с геометрией Polygon или MultiPolygon.
-     * Для MultiPolygon создаётся отдельный объект на каждый набор колец.
-     * Если фича определена как 3D (через polygon3DToOptions или свойства), создаётся Area3D, иначе обычный Polygon.
-     *
-     * @param {Object} feature - GeoJSON-фича с геометрией Polygon или MultiPolygon.
-     * @private
-     */
+    /** @private */
     _addPolygonFeature(feature) {
         const props = feature.properties || {};
         const geom = feature.geometry;
-        const polygonSets = geom.type === 'Polygon'
-            ? [geom.coordinates]
-            : geom.coordinates; // MultiPolygon
+        const polygonSets = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
 
         for (const rings of polygonSets) {
             if (!rings.length || !rings[0].length) continue;
 
-            // Определяем, является ли полигон 3D
             const is3D = (this.polygon3DToOptions && this.polygon3DToOptions(feature, props))
                 || props['3d'] === true
                 || props.type === '3d'
                 || props.markerType === '3d';
 
             if (is3D) {
-                // --- Создание 3D-площадного объекта (Area3D) ---
-                let options3D;
-                if (this.polygon3DToOptions) {
-                    options3D = this.polygon3DToOptions(feature, props) || {};
-                } else {
-                    options3D = this._defaultPolygon3DOptions(feature, props);
-                }
+                const options3D = this.polygon3DToOptions
+                    ? (this.polygon3DToOptions(feature, props) || {})
+                    : this._defaultPolygon3DOptions(feature, props);
 
                 const areaOptions = {
-                    rings: rings,
+                    rings,
                     crs: options3D.crs ?? this.crs,
                     modelUrl: options3D.modelUrl || props.modelUrl || this.defaultPolygon3DModelUrl,
                     fit: options3D.fit || props.fit || this.defaultPolygon3DFit,
@@ -697,20 +430,14 @@ export class GeoJSONLayer extends Layer {
 
                 const area = new Area3D(areaOptions);
                 this.add(area);
-                if (this.onEachFeature) {
-                    this.onEachFeature(feature, area);
-                }
+                if (this.onEachFeature) this.onEachFeature(feature, area);
             } else {
-                // --- Создание обычного полигона ---
-                let options;
-                if (this.polygonToOptions) {
-                    options = this.polygonToOptions(feature, props) || {};
-                } else {
-                    options = this._defaultPolygonOptions(feature, props);
-                }
+                const options = this.polygonToOptions
+                    ? (this.polygonToOptions(feature, props) || {})
+                    : this._defaultPolygonOptions(feature, props);
 
                 const polygonOptions = {
-                    rings: rings,
+                    rings,
                     ...options,
                     crs: options.crs ?? this.crs,
                     title: options.title ?? props.title ?? props.name ?? '',
@@ -718,27 +445,17 @@ export class GeoJSONLayer extends Layer {
                     titleAlign: options.titleAlign ?? props.titleAlign ?? 'center',
                     titleStyle: options.titleStyle ?? props.titleStyle ?? {},
                     titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
-                    titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+                    titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity
                 };
 
                 const polygon = new Polygon(polygonOptions);
                 this.add(polygon);
-                if (this.onEachFeature) {
-                    this.onEachFeature(feature, polygon);
-                }
+                if (this.onEachFeature) this.onEachFeature(feature, polygon);
             }
         }
     }
 
-    /**
-     * Возвращает умолчательные опции для полигонального объекта, полученные из свойств фичи.
-     * Используется, когда не задан коллбэк polygonToOptions.
-     *
-     * @param {Object} feature - GeoJSON-фича.
-     * @param {Object} props - Свойства (properties) фичи.
-     * @returns {Object} Объект с опциями полигона.
-     * @private
-     */
+    /** @private */
     _defaultPolygonOptions(feature, props) {
         return {
             fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
@@ -754,19 +471,11 @@ export class GeoJSONLayer extends Layer {
             maxZoom: props.maxZoom ?? this.defaultPolygonMaxZoom,
             extruded: props.extruded ?? this.defaultPolygonExtruded,
             height: props.height ?? this.defaultPolygonHeight,
-            minHeight: props.minHeight ?? this.defaultPolygonMinHeight,
+            minHeight: props.minHeight ?? this.defaultPolygonMinHeight
         };
     }
 
-    /**
-     * Возвращает умолчательные опции для 3D-площадного объекта (Area3D), полученные из свойств фичи.
-     * Используется, когда не задан коллбэк polygon3DToOptions, но полигон определён как 3D.
-     *
-     * @param {Object} feature - GeoJSON-фича.
-     * @param {Object} props - Свойства (properties) фичи.
-     * @returns {Object} Объект с опциями Area3D.
-     * @private
-     */
+    /** @private */
     _defaultPolygon3DOptions(feature, props) {
         return {
             modelUrl: props.modelUrl || this.defaultPolygon3DModelUrl,
@@ -795,13 +504,7 @@ export class GeoJSONLayer extends Layer {
         };
     }
 
-    /**
-     * Преобразует сырое значение размера (массив или строка с запятой) в массив двух чисел.
-     *
-     * @param {number[]|string} raw - Исходное значение.
-     * @returns {number[]|null} Массив [ширина, высота] или null, если преобразовать не удалось.
-     * @private
-     */
+    /** @private */
     _parseSize(raw) {
         if (!raw) return null;
         if (Array.isArray(raw)) return raw;
@@ -812,14 +515,7 @@ export class GeoJSONLayer extends Layer {
         return null;
     }
 
-    /**
-     * Преобразует сырое значение пары чисел (массив или строка с запятой) в массив двух чисел.
-     * Используется, например, для смещения подписи.
-     *
-     * @param {number[]|string} raw - Исходное значение.
-     * @returns {number[]|null} Массив [x, y] или null.
-     * @private
-     */
+    /** @private */
     _parsePair(raw) {
         if (!raw) return null;
         if (Array.isArray(raw)) return raw;
@@ -830,13 +526,7 @@ export class GeoJSONLayer extends Layer {
         return null;
     }
 
-    /**
-     * Преобразует сырое значение якоря (массив или строка с запятой) в массив двух чисел.
-     *
-     * @param {number[]|string} raw - Исходное значение.
-     * @returns {number[]|null} Массив [x, y] или null.
-     * @private
-     */
+    /** @private */
     _parseAnchor(raw) {
         if (!raw) return null;
         if (Array.isArray(raw)) return raw;
@@ -847,14 +537,7 @@ export class GeoJSONLayer extends Layer {
         return null;
     }
 
-    /**
-     * Преобразует сырое значение тройки чисел (массив или строка с запятой) в массив трёх чисел.
-     * Используется для anchor и rotation 3D-маркеров.
-     *
-     * @param {number[]|string} raw - Исходное значение.
-     * @returns {number[]|null} Массив [x, y, z] или null.
-     * @private
-     */
+    /** @private */
     _parseTriple(raw) {
         if (!raw) return null;
         if (Array.isArray(raw)) return raw;

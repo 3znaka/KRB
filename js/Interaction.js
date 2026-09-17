@@ -1,21 +1,6 @@
 /**
  * Модуль единого менеджера взаимодействия для объектов на карте.
  *
- * Заменяет разрозненные static-реестры `Polygon._interactivePolygons` и
- * `Marker3D._mapEventHandlers` одним общим механизмом:
- *
- *  - один `THREE.Raycaster` на карту;
- *  - один throttled `pointermove` (≈30 Гц) для hover;
- *  - один `pointerdown` / `pointerup` для click/tap;
- *  - broad-phase через bounding sphere, чтобы не гонять полный
- *    raycast по всему миру на каждый чих;
- *  - отсечение «клика после драга» по порогу смещения указателя;
- *  - мобильный режим: hover не обновляется на `pointermove`,
- *    tooltip переключается тапом, пустой тап сбрасывает активный hover.
- *
- * Публичный API рассчитан на регистрацию любого объекта, у которого есть
- * 3D-представление (Mesh/Group/…). Полигон, 3D-маркер, Area3D — все они
- * регистрируются здесь, передавая одинаковый набор колбэков.
  *
  * @example
  * // Регистрация полигона
@@ -284,19 +269,19 @@ export class InteractionManager {
 
         this._resolveMobileFlag();
 
-        this._handlers = {
-            pointerdown: (e) => this._onPointerDown(e),
-            pointermove: (e) => this._onPointerMove(e),
-            pointerup: (e) => this._onPointerUp(e),
-            pointerleave: (e) => this._onPointerLeave(e)
-        };
+this._handlers = {
+    pointerdown:   (e) => this._onPointerDown(e),
+    pointermove:   (e) => this._onPointerMove(e),
+    pointerup:     (e) => this._onPointerUp(e),
+    pointercancel: (e) => this._onPointerCancel(e),
+    pointerleave:  (e) => this._onPointerLeave(e)
+};
 
-        // capture=true — гарантированно до OrbitControls, чтобы hover
-        // не сбивался при начале панорамирования.
-        canvas.addEventListener('pointerdown', this._handlers.pointerdown, true);
-        canvas.addEventListener('pointermove', this._handlers.pointermove, true);
-        canvas.addEventListener('pointerup', this._handlers.pointerup, true);
-        canvas.addEventListener('pointerleave', this._handlers.pointerleave, true);
+canvas.addEventListener('pointerdown',   this._handlers.pointerdown,   true);
+canvas.addEventListener('pointermove',   this._handlers.pointermove,   true);
+canvas.addEventListener('pointerup',     this._handlers.pointerup,     true);
+canvas.addEventListener('pointercancel', this._handlers.pointercancel, true);
+canvas.addEventListener('pointerleave',  this._handlers.pointerleave,  true);
         this._attached = true;
     }
 
@@ -308,10 +293,11 @@ export class InteractionManager {
         if (!this._attached) return;
         const canvas = this._map.renderer?.domElement;
         if (canvas && this._handlers) {
-            canvas.removeEventListener('pointerdown', this._handlers.pointerdown, true);
-            canvas.removeEventListener('pointermove', this._handlers.pointermove, true);
-            canvas.removeEventListener('pointerup', this._handlers.pointerup, true);
-            canvas.removeEventListener('pointerleave', this._handlers.pointerleave, true);
+canvas.removeEventListener('pointerdown',   this._handlers.pointerdown,   true);
+canvas.removeEventListener('pointermove',   this._handlers.pointermove,   true);
+canvas.removeEventListener('pointerup',     this._handlers.pointerup,     true);
+canvas.removeEventListener('pointercancel', this._handlers.pointercancel, true);
+canvas.removeEventListener('pointerleave',  this._handlers.pointerleave,  true);
         }
         this._handlers = null;
         this._attached = false;
@@ -329,6 +315,20 @@ export class InteractionManager {
             -((event.clientY - rect.top) / rect.height) * 2 + 1
         );
     }
+
+    /**
+ * Сброс состояния при отмене pointer-сессии (жест системы, scroll
+ * родителя и т.п.). Без него `_pointerDownActive` может «зависнуть»
+ * в true, и следующий pointerup без pointerdown будет воспринят как
+ * клик.
+ *
+ * @private
+ * @param {PointerEvent} e
+ */
+_onPointerCancel(e) {
+    this._pointerDownActive = false;
+    this._pressedEntry = null;
+}
 
     /**
      * Собирает меши всех видимых записей, прошедших broad-phase.
@@ -500,69 +500,75 @@ export class InteractionManager {
         this._applyHover(result ? result.entry : null);
     }
 
-    /**
-     * @private
-     * @param {PointerEvent} e
-     */
-    _onPointerUp(e) {
-        const hadPointerDown = this._pointerDownActive;
-        const pressedEntry = this._pressedEntry;
-        this._pointerDownActive = false;
-        this._pressedEntry = null;
+/**
+ * @private
+ * @param {PointerEvent} e
+ */
+_onPointerUp(e) {
+    const hadPointerDown = this._pointerDownActive;
+    const pressedEntry = this._pressedEntry;
+    this._pointerDownActive = false;
+    this._pressedEntry = null;
 
-        if (!hadPointerDown) return;
+    if (!hadPointerDown) return;
 
-        // Отсечение «клик после драга».
-        const dx = e.clientX - this._pointerDownX;
-        const dy = e.clientY - this._pointerDownY;
-        const threshold = this._clickMoveThreshold;
-        if (dx * dx + dy * dy > threshold * threshold) {
-            return;
+    // Отсечение «клик после драга».
+    const dx = e.clientX - this._pointerDownX;
+    const dy = e.clientY - this._pointerDownY;
+    const threshold = this._clickMoveThreshold;
+    if (dx * dx + dy * dy > threshold * threshold) {
+        return;
+    }
+
+    // Определяем, по кому клик.
+    let entry = null;
+    if (this._isMobile) {
+        entry = pressedEntry;
+    } else {
+        this._setNDCFromEvent(e);
+        const result = this._raycast();
+        entry = result ? result.entry : null;
+    }
+
+    if (!entry) {
+        // Клик по пустому месту. На мобильном сбрасываем активный hover,
+        // чтобы «залипший» тултип/подсветка исчезли.
+        if (this._isMobile && this._hoveredEntry) {
+            this._applyHover(null);
         }
+        return;
+    }
 
-        // Определяем, по кому клик.
-        let entry = null;
-        if (this._isMobile) {
-            entry = pressedEntry;
+    // 1) onClick имеет наивысший приоритет. Если он задан — никакой
+    //    hover-логики поверх, чтобы не было двойных вызовов.
+    if (entry.onClick) {
+        try {
+            entry.onClick(e, entry.obj);
+        } catch (err) {
+            console.error('InteractionManager.onClick threw:', err);
+        }
+        return;
+    }
+
+    // 2) Ни onHover, ни tooltip — объекту нечего делать в hover-режиме.
+    const hasHover = !!(entry.onHover || (entry.getTooltip && this._map.popupManager));
+    if (!hasHover) return;
+
+    // 3) Мобильный: тап переключает hover (toggle).
+    //    Десктоп: hover обычно уже применён через pointermove, но
+    //    подстрахуемся на случай «щелчка без предварительного движения».
+    if (this._isMobile) {
+        if (this._hoveredEntry === entry) {
+            this._applyHover(null);
         } else {
-            this._setNDCFromEvent(e);
-            const result = this._raycast();
-            entry = result ? result.entry : null;
+            this._applyHover(entry);
         }
-
-        if (!entry) {
-            // Клик по пустому месту.
-            if (this._isMobile && this._hoveredEntry) {
-                this._applyHover(null);
-            }
-            return;
-        }
-
-        // Приоритет: onClick → tooltip-тап (mobile) → hover (desktop,
-        // если почему-то hover ещё не был выставлен).
-        if (entry.onClick) {
-            try { entry.onClick(e, entry.obj); } catch (err) {
-                console.error('InteractionManager.onClick threw:', err);
-            }
-            return;
-        }
-
-        if (entry.getTooltip && this._map.popupManager) {
-            if (this._isMobile) {
-                // Тап — тумблер: если уже открыт — закрыть, иначе открыть.
-                if (this._hoveredEntry === entry) {
-                    this._applyHover(null);
-                } else {
-                    this._applyHover(entry);
-                }
-            } else {
-                // На десктопе tooltip обычно уже показан через hover.
-                if (this._hoveredEntry !== entry) {
-                    this._applyHover(entry);
-                }
-            }
+    } else {
+        if (this._hoveredEntry !== entry) {
+            this._applyHover(entry);
         }
     }
+}
 
     /**
      * @private

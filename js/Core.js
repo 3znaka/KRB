@@ -1157,17 +1157,17 @@ this.tileManager = new TileManager(this);
         }
     }
 
-    /**
-     * Обрабатывает отпускание кнопки мыши.
-     *
-     * @returns {void}
-     */
-    onMouseUp() {
-        if (this._cameraAnimation) return;
-        if (!this.isDragging) return;
-        this.isDragging = false;
-        this.syncControlsTarget();
-    }
+/**
+ * Обрабатывает отпускание кнопки мыши.
+ *
+ * @returns {void}
+ */
+onMouseUp() {
+    if (!this.isDragging) return;
+    this.isDragging = false;
+    if (this._cameraAnimation) return;
+    this.syncControlsTarget();
+}
 
     /**
      * Обрабатывает прокрутку колеса мыши.
@@ -1286,14 +1286,14 @@ this.tileManager = new TileManager(this);
      * @param {TouchEvent} e - Событие касания.
      * @returns {void}
      */
-    onTouchEnd(e) {
+onTouchEnd(e) {
+    if (e.touches.length < 2) this.touchState.isPinching = false;
+    if (e.touches.length === 0 && this.touchDragActive) {
+        this.touchDragActive = false;
         if (this._cameraAnimation) return;
-        if (e.touches.length < 2) this.touchState.isPinching = false;
-        if (e.touches.length === 0 && this.touchDragActive) {
-            this.touchDragActive = false;
-            this.syncControlsTarget();
-        }
+        this.syncControlsTarget();
     }
+}
 
     /**
      * Обрабатывает изменение размера элемента.

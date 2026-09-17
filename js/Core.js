@@ -11,121 +11,54 @@ import { PopupManager } from './PopupManager.js';
 import { InteractionManager } from './Interaction.js';
 
 /**
- * Представление карты, хранящее параметры центра, масштаба и углов обзора.
+ * Параметры камеры/зума, которые пользователь задаёт при создании карты.
+ * Хранит центр (в градусах или world-метрах), zoom, minZoom/maxZoom,
+ * чувствительность зума, pitch и bearing.
  *
  * @example
- * // Обычный случай: центр в градусах, Web Mercator
- * const view = new View({
- *     centerLonLat: [37.6178, 55.7558],
- *     zoom: 10,
- *     minZoom: 2,
- *     maxZoom: 18,
- *     zoomSensitivity: 0.1,
- *     pitch: 30,
- *     bearing: 45
- * });
- *
- * @example
- * // Готовые world-метры Web Mercator (backward-compat)
- * // (Z север = −Z; для Москвы это [4187596, -7509138])
- * const view = new View({ center: [4187596, -7509138], zoom: 3 });
- *
- * @example
- * // Градусы, но карта в Яндекс-проекции (EPSG:3395)
- * const view = new View({
- *     centerLonLat: [37.6178, 55.7558],
- *     projection: 'EPSG:3395',
- *     zoom: 10
- * });
+ * new View({ centerLonLat: [37.6178, 55.7558], zoom: 10 });
+ * new View({ center: [4187596, -7509138], zoom: 3 });
+ * new View({ centerLonLat: [37.6178, 55.7558], projection: 'EPSG:3395', zoom: 10 });
  */
 export class View {
     /**
-     * Создаёт представление карты.
-     *
-     * @param {Object} options - Объект параметров представления.
-     * @param {Array.<number>} [options.centerLonLat] - Центр карты в WGS84
-     *     [долгота, широта] в градусах. Взаимоисключающий с `options.center`.
-     * @param {Array.<number>} [options.center] - Центр карты в **мировых**
-     *     метрах проекции `options.projection` — [x, z]. Ось Z направлена
-     *     на юг (север = отрицательные Z). Взаимоисключающий с `options.centerLonLat`.
-     * @param {string} [options.projection='EPSG:3857'] - Код проекции, в метрах
-     *     которой хранится `this.center`. Должен совпадать с `options.projection`,
-     *     передаваемым в `KrbMap`. По умолчанию Web Mercator (EPSG:3857) —
-     *     именно то, что используют Google Maps, OSM, 2GIS, Mapbox.
-     *     Для Яндекс.Карт укажите 'EPSG:3395'.
-     * @param {number} options.zoom - Начальный масштаб (в единицах библиотеки).
-     * @param {number} [options.minZoom] - Минимальный масштаб.
-     * @param {number} [options.maxZoom] - Максимальный масштаб.
-     * @param {number} [options.zoomSensitivity] - Чувствительность зума.
-     * @param {number} [options.pitch] - Угол наклона камеры в градусах.
-     * @param {number} [options.bearing] - Угол поворота камеры в градусах.
-     * @throws {Error} Если не задан ни `center`, ни `centerLonLat`.
-     * @throws {Error} Если код проекции не зарегистрирован в `Projections`.
+     * @param {Object} options
+     * @param {Array<number>} [options.centerLonLat] - [lon, lat] в градусах.
+     * @param {Array<number>} [options.center] - [x, z] в метрах проекции (Z на юг).
+     * @param {string} [options.projection='EPSG:3857'] - Код проекции центра.
+     * @param {number} options.zoom
+     * @param {number} [options.minZoom]
+     * @param {number} [options.maxZoom]
+     * @param {number} [options.zoomSensitivity]
+     * @param {number} [options.pitch]
+     * @param {number} [options.bearing]
+     * @throws {Error} Если не задан ни center, ни centerLonLat.
      */
     constructor(options) {
-        // Резолвим проекцию, в метрах которой задан/будет вычислен центр.
-        // По умолчанию — Web Mercator (как и в KrbMap).
         const projectionCode = options.projection ?? 'EPSG:3857';
         const projection = Projections.get(projectionCode);
 
-        /**
-         * Код проекции, в метрах которой хранится `this.center`.
-         * Должен совпадать с `KrbMap.options.projection`.
-         *
-         * @type {string}
-         */
+        /** @type {string} */
         this.projection = projectionCode;
 
         if (options.centerLonLat && options.center) {
-            console.warn(
-                'View: одновременно заданы centerLonLat и center — ' +
-                'приоритет отдан centerLonLat.'
-            );
+            console.warn('View: одновременно заданы centerLonLat и center — приоритет centerLonLat.');
         }
 
         if (options.centerLonLat) {
-            /**
-             * Центр карты в WGS84 — [долгота, широта] в градусах.
-             * Ровно то, что было передано.
-             *
-             * @type {Array.<number>}
-             */
+            /** @type {Array<number>} */
             this.centerLonLat = options.centerLonLat.slice();
-
-            /**
-             * Центр карты в **мировых** метрах проекции `this.projection` — [x, z].
-             * Обратите внимание: вторая координата — Z, а не «Y из мира».
-             * Север = отрицательные Z (для EPSG:3857/3395).
-             *
-             * ВАЖНО: `Projection.fromLonLat` возвращает стандартные
-             * CRS-координаты (Y направлен на север), а мир карты использует
-             * Z-на-юг, поэтому знак Y инвертируется.
-             *
-             * @type {Array.<number>}
-             */
+            // fromLonLat → [x, y], а в мире карты ось Z смотрит на юг.
             const [x, y] = projection.fromLonLat(this.centerLonLat);
+            /** @type {Array<number>} */
             this.center = [x, -y];
         } else if (options.center) {
-            /**
-             * Центр карты в **мировых** метрах проекции `this.projection` — [x, z].
-             * Север = отрицательные Z.
-             *
-             * @type {Array.<number>}
-             */
+            /** @type {Array<number>} */
             this.center = options.center.slice();
-
-            /**
-             * Обратно вычисленные WGS84-координаты центра — [lon, lat].
-             * Удобно для UI/отладки; всегда согласованы с `this.center`.
-             * Из world-Z восстанавливаем стандартный CRS-Y (флип знака).
-             *
-             * @type {Array.<number>}
-             */
+            /** @type {Array<number>} */
             this.centerLonLat = projection.toLonLat([this.center[0], -this.center[1]]);
         } else {
-            throw new Error(
-                'View: options.center или options.centerLonLat обязательны'
-            );
+            throw new Error('View: options.center или options.centerLonLat обязательны');
         }
 
         this.zoom = options.zoom;
@@ -138,113 +71,63 @@ export class View {
 }
 
 /**
- * Основной класс карты, управляющий Three.js сценой, тайлами, камерой и взаимодействием.
+ * Основной класс карты: Three.js-сцена, тайлы, камера, ввод.
  *
  * @example
  * const map = new KrbMap({
  *     target: 'map',
- *     layers: [
- *         {
- *             texture: 'https://example.com/tiles/{z}/{x}/{y}.png',
- *             elevation: 'https://example.com/elevation/{z}/{x}/{y}.png',
- *             heightScale: 1.0
- *         }
- *     ],
+ *     layers: [{ texture: '.../{z}/{x}/{y}.png', elevation: '...', heightScale: 1 }],
  *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 3 }),
  *     projection: 'EPSG:3857',
  *     inputCRS: 'EPSG:4326',
- *     R: 6378137,
- *     segments: 32,
- *     animDuration: 0.3,
- *     minReliefZ: 0,
- *     maxReliefZ: 15,
- *     tileMargin: 0.1,
- *     tileMarginBg: 0.2,
- *     visibleUpdateThrottle: 100,
- *     maxWorkerRequests: 4,
- *     baseZoom: 0,
- *     baseDistance: 1000000,
- *     objectRenderDistanceFactor: 2,
- *     staticBgZoom: 0,
- *     minCameraHeightOffset: 200
+ *     R: 6378137
  * });
- * map.setPitch(30, 0.5);
- * map.setBearing(90, 0.5);
- * map.moveCameraTo(37.6173, 55.7558);
- * map.moveCameraToSlow(30.0, 50.0, 1.0, 5);
- * map.rotateToNorth();
- * map.fitToBounds([[37.5, 55.7], [37.7, 55.8]], { padding: 80, duration: 0.6 });
- * map.fitTo(polygon, { padding: 40 });
- * const height = map.getSurfaceHeightAt(1000, 2000);
- * const maxHeight = map.getSurfaceMaxHeight(1000, 2000);
- * const url = map.getTextureUrl(3, 1, 2);
- * map.ensureTileForPoint(1000, 2000);
  */
 export class KrbMap {
     /**
-     * Создаёт экземпляр карты.
-     *
-     * @param {Object} options - Объект параметров карты.
-     * @param {string} options.target - Идентификатор DOM-элемента для вставки карты.
-     * @param {Array.<Object>} options.layers - Массив слоёв карты. Каждый слой может содержать свойства:
-     *   texture (URL текстуры), elevation (URL карты высот), heightScale (масштаб высот).
-     * @param {View} options.view - Представление карты с параметрами центра, масштаба и углов.
-     * @param {string} [options.projection='EPSG:3857'] - Код проекции мира карты.
-     *   Определяет систему координат тайлов и метрическое пространство, в котором
-     *   отрисовываются все объекты. Для Google/OSM/2GIS — `EPSG:3857`,
-     *   для Яндекс.Карт — `EPSG:3395`.
-     * @param {string} [options.inputCRS='EPSG:4326'] - Код входной системы координат
-     *   по умолчанию. Все методы и объекты, принимающие «географические» координаты
-     *   без явного `crs`, интерпретируют их в этой СК.
-     * @param {number} [options.R] - Радиус мира (полуось эллипсоида). Должен совпадать
-     *   с эллипсоидом проекции; для EPSG:3857 и EPSG:3395 равен 6378137.
-     * @param {number} [options.segments] - Количество сегментов сетки рельефа.
-     * @param {number} [options.animDuration] - Длительность анимации камеры в секундах.
-     * @param {number} [options.minReliefZ] - Минимальный уровень зума для рельефа.
-     * @param {number} [options.maxReliefZ] - Максимальный уровень зума для рельефа.
-     * @param {number} [options.tileMargin] - Отступ для тайлов.
-     * @param {number} [options.tileMarginBg] - Отступ для фоновых тайлов.
-     * @param {number} [options.visibleUpdateThrottle] - Минимальный интервал между обновлениями видимых тайлов в мс.
-     * @param {number} [options.maxWorkerRequests] - Максимальное количество одновременных запросов к воркерам.
-     * @param {number} [options.baseZoom] - Базовый уровень зума для расчёта дистанции.
-     * @param {number} [options.baseDistance] - Базовое расстояние камеры при базовом зуме.
-     * @param {number} [options.objectRenderDistanceFactor] - Фактор дальности отрисовки объектов.
-     * @param {number} [options.staticBgZoom] - Уровень зума для статического фона.
-     * @param {number} [options.minCameraHeightOffset] - Минимальный отступ камеры от поверхности.
-     * @param {boolean} [options.antialias=true] - Включает сглаживание (антиалиасинг) рендерера.
-     * @throws {Error} Если options не передан.
-     * @throws {Error} Если целевой элемент не найден.
-     * @throws {Error} Если view не передан.
-     * @throws {Error} Если проекция не зарегистрирована в Projections.
+     * @param {Object} options
+     * @param {string} options.target - ID DOM-элемента.
+     * @param {Array<Object>} options.layers - Слои (texture / elevation / heightScale).
+     * @param {View} options.view
+     * @param {string} [options.projection='EPSG:3857']
+     * @param {string} [options.inputCRS='EPSG:4326']
+     * @param {number} [options.R]
+     * @param {number} [options.segments]
+     * @param {number} [options.animDuration]
+     * @param {number} [options.minReliefZ]
+     * @param {number} [options.maxReliefZ]
+     * @param {number} [options.tileMargin]
+     * @param {number} [options.tileMarginBg]
+     * @param {number} [options.visibleUpdateThrottle]
+     * @param {number} [options.maxWorkerRequests]
+     * @param {number} [options.baseZoom]
+     * @param {number} [options.baseDistance]
+     * @param {number} [options.objectRenderDistanceFactor]
+     * @param {number} [options.staticBgZoom]
+     * @param {number} [options.minCameraHeightOffset]
+     * @param {boolean} [options.antialias=true]
      */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
 
         this.targetElement = document.getElementById(options.target);
         if (!this.targetElement) throw new Error('Target element not found');
-        const tileLayers = options.layers || [];
-        this.layers = tileLayers;
+        this.layers = options.layers || [];
         if (!options.view) throw new Error('View required');
         this.globalElevCache = new Map();
         this.view = options.view;
-        const hasElevation = options.layers.some(layer => !!layer.elevation);
-        this.hasElevation = hasElevation;
+        this.hasElevation = options.layers.some(layer => !!layer.elevation);
 
-        // --- Проекции ---
-        // Мир карты задаётся в метрическом пространстве этой проекции.
-        // Тайловые URL должны отдавать сетку XYZ именно в этой проекции.
+        // Мир карты в метрах этой проекции.
         this.projection = Projections.get(options.projection ?? 'EPSG:3857');
-        // Система координат по умолчанию для «географических» входных данных.
+        // СК по умолчанию для «географических» входных данных.
         this.inputCRS = options.inputCRS
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
 
-        // Предупреждение о рассогласовании проекций View и Map.
         if (this.view.projection && this.view.projection !== this.projection.code) {
             console.warn(
-                `KrbMap: view.projection (${this.view.projection}) не совпадает ` +
-                `с map.projection (${this.projection.code}). ` +
-                `Камера может смотреть не туда.`
+                `KrbMap: view.projection (${this.view.projection}) != map.projection (${this.projection.code}).`
             );
         }
 
@@ -270,9 +153,8 @@ export class KrbMap {
         this.antialias = options.antialias ?? true;
 
         const elevLayer = this.layers.find(l => l.elevation);
-        const effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
-        this.effectiveHeightScale = effectiveHeightScale;
-        this.MIN_CAMERA_HEIGHT_OFFSET = options.minCameraHeightOffset ?? (200 * effectiveHeightScale);
+        this.effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
+        this.MIN_CAMERA_HEIGHT_OFFSET = options.minCameraHeightOffset ?? (200 * this.effectiveHeightScale);
 
         this.continuousZoom = this.view.zoom;
         this.targetContinuousZoom = this.view.zoom;
@@ -286,9 +168,7 @@ export class KrbMap {
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
 
-        // --- Временные объекты для уменьшения аллокаций ---
-        // Именованные слоты — для удержания между кадрами в анимационных циклах.
-        // Пул ниже — для короткоживущих операций в hot path.
+        // Переиспользуемые векторы (коротко- и долгоживущие).
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();
@@ -296,32 +176,21 @@ export class KrbMap {
         this._tempTarget = new THREE.Vector3();
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
-        // --------------------------------------------------
 
-        // --- Пул временных векторов для hot-path операций ---
-        // 16 слотов на каждый тип — компромисс между безопасностью и памятью.
-        // Слоты циклически переиспользуются (idx & 15), поэтому полученный
-        // вектор нужно использовать немедленно и не удерживать ссылку между
-        // вызовами getVec3()/getVec2().
-        //
-        // Пример:
-        //   const v = map.getVec3().set(x, y, z);
-        //   doSomething(v);  // ← сразу используем
+        // Пул временных векторов. Слоты циклически переиспользуются:
+        // ссылку нельзя удерживать между вызовами getVec3()/getVec2().
         this._tempPool = {
             v3: Array.from({ length: 16 }, () => new THREE.Vector3()),
             v2: Array.from({ length: 16 }, () => new THREE.Vector2()),
             idx: 0
         };
-        // --------------------------------------------------
 
         const [cx, cz] = this.view.center;
-        const initialZoom = this.view.zoom;
         const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
         const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
 
         this.controls.target.set(cx, 0, cz);
-        const dist = this.getTargetDistanceForZoom(initialZoom);
-
+        const dist = this.getTargetDistanceForZoom(this.view.zoom);
         const sinP = Math.sin(initialPitchRad);
         const cosP = Math.cos(initialPitchRad);
         this.camera.position.set(
@@ -339,14 +208,12 @@ export class KrbMap {
         this._cameraAnimFrame = null;
         this._controlsDampingWasEnabled = true;
         this._dynamicLayers = [];
-this.textManager = new TextManager(this);
-this.popupManager = new PopupManager(this);
+        this.textManager = new TextManager(this);
+        this.popupManager = new PopupManager(this);
+        this.interaction = new InteractionManager(this);
+        this.tileManager = new TileManager(this);
 
-this.interaction = new InteractionManager(this);
-
-this.tileManager = new TileManager(this);
-
-        // Кэш максимальной высоты поверхности (LRU, ограничен по размеру)
+        // LRU-кэш максимальной высоты поверхности; сбрасывается при новых тайлах.
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
         this.tileManager.onTileHeightAppliedCallbacks.push(() => {
@@ -370,50 +237,13 @@ this.tileManager = new TileManager(this);
         requestAnimationFrame(() => initUI(this));
     }
 
-    /**
-     * Возвращает временный {@link THREE.Vector3} из пула карты.
-     *
-     * Слоты циклически переиспользуются (16 штук), поэтому полученный
-     * вектор нужно использовать немедленно и **не удерживать** ссылку
-     * между вызовами: следующий вызов `getVec3()` через 16 итераций
-     * вернёт тот же объект.
-     *
-     * Предназначен для hot-path операций: позиционирование объектов,
-     * промежуточные вычисления в `_update`, raycast-вспомогательные
-     * векторы и т.п. Если вектор нужно удержать между кадрами — заведите
-     * именованное поле класса, а не берите из пула.
-     *
-     * @returns {THREE.Vector3} Временный вектор.
-     *
-     * @example
-     * const worldPos = map.getVec3().set(x, y, z);
-     * map.camera.lookAt(worldPos);
-     */
-    getVec3() {
-        return this._tempPool.v3[this._tempPool.idx++ & 15];
-    }
+    /** Временный Vector3 из пула. Ссылку удерживать нельзя. */
+    getVec3() { return this._tempPool.v3[this._tempPool.idx++ & 15]; }
 
-    /**
-     * Возвращает временный {@link THREE.Vector2} из пула карты.
-     *
-     * Семантика полностью аналогична {@link KrbMap#getVec3}: слоты
-     * циклически переиспользуются, ссылку нельзя удерживать.
-     *
-     * @returns {THREE.Vector2} Временный двумерный вектор.
-     *
-     * @example
-     * const ndc = map.getVec2().set(ndcX, ndcY);
-     * raycaster.setFromCamera(ndc, map.camera);
-     */
-    getVec2() {
-        return this._tempPool.v2[this._tempPool.idx++ & 15];
-    }
+    /** Временный Vector2 из пула. Ссылку удерживать нельзя. */
+    getVec2() { return this._tempPool.v2[this._tempPool.idx++ & 15]; }
 
-    /**
-     * Инициализирует Three.js сцену, камеру, рендерер и освещение.
-     *
-     * @private
-     */
+    /** Инициализация сцены, камеры, рендерера и освещения. @private */
     initThree() {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
@@ -437,44 +267,26 @@ this.tileManager = new TileManager(this);
     }
 
     /* ================================================================
-       Управление освещением (публичные методы)
+       Освещение
        ================================================================ */
 
     /**
-     * Устанавливает параметры окружающего (ambient) света.
-     *
-     * @param {number|string} color - Цвет света в формате числа (0xffffff) или CSS-строки.
-     * @param {number} [intensity] - Интенсивность света (по умолчанию 0.8).
-     * @returns {void}
-     *
-     * @example
-     * map.setAmbientLight(0x404040, 0.5);
+     * @param {number|string} color
+     * @param {number} [intensity=0.8]
      */
     setAmbientLight(color, intensity = 0.8) {
-        if (!this.ambientLight) {
-            console.warn('Ambient light is not initialized.');
-            return;
-        }
+        if (!this.ambientLight) { console.warn('Ambient light is not initialized.'); return; }
         this.ambientLight.color.set(color);
         this.ambientLight.intensity = intensity;
     }
 
     /**
-     * Устанавливает параметры направленного солнечного света.
-     *
-     * @param {number|string} color - Цвет света.
-     * @param {number} [intensity] - Интенсивность света (по умолчанию 1.3).
-     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [position] - Позиция источника света (направление).
-     * @returns {void}
-     *
-     * @example
-     * map.setSunLight(0xffeedd, 1.5, { x: 1, y: -1, z: 1 });
+     * @param {number|string} color
+     * @param {number} [intensity=1.3]
+     * @param {THREE.Vector3|{x:number,y:number,z:number}|Array<number>} [position]
      */
     setSunLight(color, intensity = 1.3, position = null) {
-        if (!this.sunLight) {
-            console.warn('Directional (sun) light is not initialized.');
-            return;
-        }
+        if (!this.sunLight) { console.warn('Directional (sun) light is not initialized.'); return; }
         this.sunLight.color.set(color);
         this.sunLight.intensity = intensity;
         if (position) {
@@ -491,32 +303,10 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Устанавливает оба источника света одновременно.
-     *
-     * @param {Object} params - Параметры освещения.
-     * @param {number|string} [params.ambientColor] - Цвет окружающего света.
-     * @param {number} [params.ambientIntensity] - Интенсивность окружающего света.
-     * @param {number|string} [params.sunColor] - Цвет солнечного света.
-     * @param {number} [params.sunIntensity] - Интенсивность солнечного света.
-     * @param {THREE.Vector3|{x:number, y:number, z:number}|Array<number>} [params.sunPosition] - Позиция солнечного света.
-     * @returns {void}
-     *
-     * @example
-     * map.setLighting({
-     *     ambientColor: 0xffffff,
-     *     ambientIntensity: 0.6,
-     *     sunColor: 0xfff5e6,
-     *     sunIntensity: 1.2,
-     *     sunPosition: [1, -1, 1]
-     * });
+     * Устанавливает оба источника света за один вызов.
+     * @param {{ambientColor?:*, ambientIntensity?:number, sunColor?:*, sunIntensity?:number, sunPosition?:*}} params
      */
-    setLighting({
-        ambientColor,
-        ambientIntensity,
-        sunColor,
-        sunIntensity,
-        sunPosition
-    } = {}) {
+    setLighting({ ambientColor, ambientIntensity, sunColor, sunIntensity, sunPosition } = {}) {
         if (ambientColor !== undefined) {
             this.setAmbientLight(ambientColor, ambientIntensity);
         } else if (ambientIntensity !== undefined) {
@@ -525,68 +315,41 @@ this.tileManager = new TileManager(this);
 
         if (sunColor !== undefined) {
             this.setSunLight(sunColor, sunIntensity, sunPosition);
-        } else {
-            if (sunIntensity !== undefined) {
-                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, sunIntensity, sunPosition);
-            } else if (sunPosition !== undefined) {
-                this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, this.sunLight ? this.sunLight.intensity : 1.3, sunPosition);
-            }
+        } else if (sunIntensity !== undefined) {
+            this.setSunLight(this.sunLight ? this.sunLight.color.getHex() : 0xffffff, sunIntensity, sunPosition);
+        } else if (sunPosition !== undefined) {
+            this.setSunLight(
+                this.sunLight ? this.sunLight.color.getHex() : 0xffffff,
+                this.sunLight ? this.sunLight.intensity : 1.3,
+                sunPosition
+            );
         }
     }
 
-    /**
-     * Возвращает объект окружающего света для прямого доступа.
-     *
-     * @returns {THREE.AmbientLight|null} Объект ambient-света или null, если не создан.
-     */
-    getAmbientLight() {
-        return this.ambientLight || null;
-    }
+    /** @returns {THREE.AmbientLight|null} */
+    getAmbientLight() { return this.ambientLight || null; }
 
-    /**
-     * Возвращает объект направленного солнечного света для прямого доступа.
-     *
-     * @returns {THREE.DirectionalLight|null} Объект directional-света или null, если не создан.
-     */
-    getSunLight() {
-        return this.sunLight || null;
-    }
+    /** @returns {THREE.DirectionalLight|null} */
+    getSunLight() { return this.sunLight || null; }
 
     /* ================================================================
-       Проекции: преобразование координат
+       Преобразование координат
        ================================================================ */
 
     /**
-     * Преобразует координаты из внешней системы координат во внутренние
-     * мировые координаты карты (метры проекции `this.projection`).
+     * Координаты из `fromCrs` в world-метры карты. Без валидации —
+     * за пределами области определения proj4 может вернуть NaN/Infinity;
+     * для безопасного варианта используйте {@link KrbMap#projectSafe}.
      *
-     * Возвращаемые координаты — в «мировой» конвенции KrbMap: ось Z
-     * направлена на юг (север = −Z). Входные координаты — в стандартной
-     * конвенции CRS (для EPSG:3857/3395 Y направлен на север); знак Y
-     * автоматически инвертируется.
-     *
-     * ВНИМАНИЕ: этот метод не проверяет область определения проекции.
-     * Если точка заведомо может оказаться вне зоны (например, мировой
-     * GeoJSON в Gauss-Kruger), используйте {@link KrbMap#projectSafe} —
-     * он вернёт null вместо бесконечности/NaN.
-     *
-     * @param {Array.<number>} coord - Координаты [x, y] в СК `fromCrs`.
-     * @param {Projection|string} [fromCrs=this.inputCRS] - Проекция входных данных
-     *     (объект Projection или код вроде 'EPSG:4326').
-     * @returns {Array.<number>} Мировые координаты [x, z] (север = −Z).
-     *
-     * @example
-     * const [x, z] = map.project([37.6173, 55.7558]);           // WGS84 → мир
-     * const [x2, z2] = map.project([1000, 2000], 'EPSG:32637'); // UTM → мир
+     * @param {Array<number>} coord - [x, y] в СК `fromCrs`.
+     * @param {Projection|string} [fromCrs=this.inputCRS]
+     * @returns {Array<number>} [x, z], Z на юг.
      */
     project(coord, fromCrs = this.inputCRS) {
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
         if (src === this.projection) {
-            // Пользователь дал координаты в стандартной CRS проекции карты —
-            // остаётся только перевернуть Y (север) в world-Z (юг).
             return [coord[0], -coord[1]];
         }
-        // Через WGS84: src → lon/lat → this.projection → world.
         const lonLat = src.toLonLat(coord);
         const [x, y] = this.projection.fromLonLat(lonLat);
         return [x, -y];
@@ -594,27 +357,14 @@ this.tileManager = new TileManager(this);
 
     /**
      * Безопасная версия {@link KrbMap#project}: возвращает `null` вместо
-     * невалидных координат (Infinity / NaN) и вместо точек, лежащих вне
-     * области определения проекции карты.
+     * невалидных координат. Доменных проверок нет — прижимается только
+     * широта для Mercator (внутри `fromLonLatSafe`), чтобы не получить
+     * бесконечность на полюсах. Далеко от осевого меридиана UTM/GK
+     * координаты остаются большими — пусть полигон искажается, как в QGIS.
      *
-     * Именно этим методом должны пользоваться потребители (Polygon,
-     * Polyline, Marker3D, Area3D, …), чтобы координаты не попадали в
-     * BufferGeometry и не превращались в «усы» через всю сцену.
-     *
-     * Логика:
-     *   1. Если `fromCrs === this.projection` — только флип Y (без проверок,
-     *      т.к. пользователь сам отвечает за корректность).
-     *   2. Иначе — конвертация в WGS84, проверка `projection.isValidLonLat`,
-     *      конвертация в целевую проекцию, проверка `projection.isValidCoord`.
-     *
-     * @param {Array.<number>} coord - Координаты [x, y] в СК `fromCrs`.
-     * @param {Projection|string} [fromCrs=this.inputCRS] - Проекция входных данных.
-     * @returns {Array.<number>|null} Мировые координаты [x, z] (север = −Z)
-     *     или `null`, если точка невалидна/вне области определения.
-     *
-     * @example
-     * const p = map.projectSafe([37.6173, 55.7558]);        // [x, z] или null
-     * const q = map.projectSafe([-120, 40], 'EPSG:4326');   // null в Gauss-Kruger
+     * @param {Array<number>} coord
+     * @param {Projection|string} [fromCrs=this.inputCRS]
+     * @returns {Array<number>|null} [x, z] или null.
      */
     projectSafe(coord, fromCrs = this.inputCRS) {
         if (!coord || coord.length < 2) return null;
@@ -622,58 +372,32 @@ this.tileManager = new TileManager(this);
 
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
 
-        if (src === this.projection) {
-            // Пользователь дал координаты в СК самой карты — только флип Y.
-            // Доменные проверки в этом случае не имеют смысла: это уже метры.
-            return [coord[0], -coord[1]];
-        }
+        // Координаты уже в СК карты — только флип Y.
+        if (src === this.projection) return [coord[0], -coord[1]];
 
-        // src → WGS84 (используем безопасную версию, если доступна).
+        // src → lon/lat.
         const lonLat = typeof src.toLonLatSafe === 'function'
             ? src.toLonLatSafe(coord)
             : src.toLonLat(coord);
-        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
-            return null;
-        }
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
 
-        // Проверка домена целевой проекции карты по lon/lat.
-        if (typeof this.projection.isValidLonLat === 'function'
-            && !this.projection.isValidLonLat(lonLat)) {
-            return null;
-        }
-
-        // WGS84 → целевая проекция карты.
-        const proj = this.projection.fromLonLat(lonLat);
-        if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) {
-            return null;
-        }
-
-        // Финальная проверка численной валидности спроецированных координат.
-        if (typeof this.projection.isValidCoord === 'function'
-            && !this.projection.isValidCoord(proj)) {
-            return null;
-        }
+        // lon/lat → метры проекции карты (с клампом широты для Mercator).
+        const proj = typeof this.projection.fromLonLatSafe === 'function'
+            ? this.projection.fromLonLatSafe(lonLat)
+            : this.projection.fromLonLat(lonLat);
+        if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) return null;
 
         return [proj[0], -proj[1]];
     }
 
     /**
-     * Преобразует мировые координаты карты во внешнюю систему координат.
-     *
-     * Входные `worldCoord` — в «мировой» конвенции (север = −Z).
-     * Возвращаемые — в стандартной конвенции CRS (Y направлен на север).
-     *
-     * @param {Array.<number>} worldCoord - Мировые координаты [x, z].
-     * @param {Projection|string} [toCrs=this.inputCRS] - Целевая проекция.
-     * @returns {Array.<number>} Координаты [x, y] в целевой СК.
-     *
-     * @example
-     * const lonLat = map.unproject([x, z]);                  // мир → WGS84
-     * const utm    = map.unproject([x, z], 'EPSG:32637');    // мир → UTM
+     * World-метры карты → координаты в `toCrs`.
+     * @param {Array<number>} worldCoord - [x, z].
+     * @param {Projection|string} [toCrs=this.inputCRS]
+     * @returns {Array<number>} [x, y] в целевой СК.
      */
     unproject(worldCoord, toCrs = this.inputCRS) {
         const dst = typeof toCrs === 'string' ? Projections.get(toCrs) : toCrs;
-        // [x, world-Z] → [x, CRS-Y] (флип знака).
         const std = [worldCoord[0], -worldCoord[1]];
         if (dst === this.projection) return std;
         const lonLat = this.projection.toLonLat(std);
@@ -681,11 +405,8 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Шорткат: пара (lon, lat) в WGS84 → мировые координаты карты.
-     *
-     * @param {number} lon - Долгота в градусах.
-     * @param {number} lat - Широта в градусах.
-     * @returns {Array.<number>} Мировые координаты [x, z] (север = −Z).
+     * Шорткат: (lon, lat) → [x, z].
+     * @param {number} lon @param {number} lat @returns {Array<number>}
      */
     projectLonLat(lon, lat) {
         const [x, y] = this.projection.fromLonLat([lon, lat]);
@@ -693,40 +414,24 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Шорткат: мировые координаты карты → пара (lon, lat) в WGS84.
-     *
-     * @param {number} x - Мировая координата X.
-     * @param {number} z - Мировая координата Z (север = −Z).
-     * @returns {Array.<number>} [долгота, широта] в градусах.
+     * Шорткат: (x, z) → [lon, lat].
+     * @param {number} x @param {number} z @returns {Array<number>}
      */
     unprojectToLonLat(x, z) {
         return this.projection.toLonLat([x, -z]);
     }
 
-    /**
-     * Возвращает true, если текущая проекция — цилиндрическая Меркатора
-     * (или близкая к ней). Такие проекции обладают циклической долготой,
-     * и для них имеет смысл «перескок» через антимеридиан.
-     *
-     * @private
-     * @returns {boolean}
-     */
+    /** true, если проекция циклична по долготе (Mercator, longlat). @private */
     _wrapsLongitude() {
         const def = this.projection.def || '';
-        // +proj=merc — все разновидности Меркатора (3857, 3395, ...).
-        // +proj=longlat — географическая (используется редко, но тоже циклична).
         return /\+proj=merc\b/.test(def) || /\+proj=longlat\b/.test(def);
     }
 
     /* ================================================================
-       Остальные методы (камера, тайлы, взаимодействие)
+       Управление камерой
        ================================================================ */
 
-    /**
-     * Инициализирует и настраивает управление камерой.
-     *
-     * @private
-     */
+    /** Инициализация OrbitControls. @private */
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableZoom = true;
@@ -748,11 +453,7 @@ this.tileManager = new TileManager(this);
         this.renderer.domElement.removeEventListener('wheel', this.controls.onMouseWheel);
     }
 
-    /**
-     * Инициализирует инструменты перетаскивания мира.
-     *
-     * @private
-     */
+    /** Инициализация инструментов drag-панорамирования. @private */
     initDragTools() {
         this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         this.raycasterDragger = new THREE.Raycaster();
@@ -760,18 +461,12 @@ this.tileManager = new TileManager(this);
         this.intersection = new THREE.Vector3();
         this.isDragging = false;
         this.dragLocalPoint = new THREE.Vector3();
-
-        // Состояние для отсечения клика от драга.
         this._mouseDownX = 0;
         this._mouseDownY = 0;
         this._mouseMoved = false;
     }
 
-    /**
-     * Инициализирует состояние для обработки касаний.
-     *
-     * @private
-     */
+    /** Инициализация состояния touch-жестов. @private */
     initTouchState() {
         this.touchState = {
             isPinching: false,
@@ -783,17 +478,7 @@ this.tileManager = new TileManager(this);
         };
     }
 
-    /* ================================================================
-       Утилиты камеры и URL
-       ================================================================ */
-
-    /**
-     * Устанавливает наклон камеры с анимацией.
-     *
-     * @param {number} pitchDeg - Угол наклона в градусах.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @returns {void}
-     */
+    /** @param {number} pitchDeg @param {number} [duration=0.3] */
     setPitch(pitchDeg, duration = 0.3) {
         const pitchRad = pitchDeg * Math.PI / 180;
         const maxPolarRad = this.controls.maxPolarAngle;
@@ -806,24 +491,16 @@ this.tileManager = new TileManager(this);
         if (currentDistance < 1) return;
 
         const currentPitchRad = Math.acos(dir.y / currentDistance);
-
         this._cameraAnimations.pitch = {
             start: currentPitchRad,
             end: clampedRad,
             startTime: performance.now(),
             duration
         };
-
         this._startCameraAnimationLoopIfNeeded();
     }
 
-    /**
-     * Устанавливает поворот камеры с анимацией.
-     *
-     * @param {number} bearingDeg - Угол поворота в градусах.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @returns {void}
-     */
+    /** @param {number} bearingDeg @param {number} [duration=0.3] */
     setBearing(bearingDeg, duration = 0.3) {
         const bearingRad = bearingDeg * Math.PI / 180;
         const target = this._tempVec3a.copy(this.controls.target);
@@ -844,15 +521,10 @@ this.tileManager = new TileManager(this);
             startTime: performance.now(),
             duration
         };
-
         this._startCameraAnimationLoopIfNeeded();
     }
 
-    /**
-     * Запускает общий цикл анимации для плавного изменения pitch/bearing.
-     *
-     * @private
-     */
+    /** Общий rAF-цикл для анимаций pitch/bearing. @private */
     _startCameraAnimationLoopIfNeeded() {
         if (this._cameraAnimation || this._cameraAnimFrame) return;
 
@@ -865,7 +537,7 @@ this.tileManager = new TileManager(this);
             const target = this._tempVec3a.copy(this.controls.target);
             const currentPos = this._tempVec3b.copy(this.camera.position);
             const dir = this._tempDir.subVectors(currentPos, target);
-            let currentDistance = dir.length();
+            const currentDistance = dir.length();
             if (currentDistance < 1) {
                 this._cameraAnimation = null;
                 this._cameraAnimFrame = null;
@@ -905,7 +577,6 @@ this.tileManager = new TileManager(this);
             );
             this.controls.target.copy(target);
             this.controls.update();
-
             this.maybeUpdateVisibleTiles();
 
             if (!anyActive) {
@@ -917,78 +588,56 @@ this.tileManager = new TileManager(this);
                 this.maybeUpdateVisibleTiles(true);
                 return;
             }
-
             this._cameraAnimFrame = requestAnimationFrame(animateStep);
         };
 
         this._cameraAnimFrame = requestAnimationFrame(animateStep);
     }
 
-    /**
-     * Сбрасывает поворот камеры к северу.
-     *
-     * @returns {void}
-     */
-    resetBearing() {
-        this.rotateToNorth(0.3);
-    }
+    resetBearing() { this.rotateToNorth(0.3); }
 
-    /**
-     * Рассчитывает дистанцию камеры до цели для заданного уровня зума.
-     *
-     * @param {number} z - Уровень зума.
-     * @returns {number} Дистанция в мировых единицах.
-     */
+    /** @param {number} z @returns {number} */
     getTargetDistanceForZoom(z) {
         return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
     }
 
+    /* ================================================================
+       URL-хелперы
+       ================================================================ */
+
     /**
-     * Возвращает URL текстуры для тайла по координатам.
-     *
-     * @param {number} z - Уровень зума.
-     * @param {number} x - Координата X тайла.
-     * @param {number} y - Координата Y тайла.
-     * @returns {string|null} URL текстуры или null, если слой не задан.
+     * @param {number} z @param {number} x @param {number} y
+     * @returns {string|null}
      */
     getTextureUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].texture) return null;
-        return this.layers[0].texture.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+        return this.layers[0].texture
+            .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
     /**
-     * Возвращает URL карты высот для тайла.
-     *
-     * @param {number} z - Уровень зума.
-     * @param {number} x - Координата X тайла.
-     * @param {number} y - Координата Y тайла.
-     * @returns {string|null} URL карты высот или null, если слой не задан.
+     * @param {number} z @param {number} x @param {number} y
+     * @returns {string|null}
      */
     getElevationUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].elevation) return null;
-        return this.layers[0].elevation.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+        return this.layers[0].elevation
+            .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /**
-     * Возвращает максимальное расстояние для отрисовки объектов.
-     *
-     * @returns {number} Максимальное расстояние или Infinity, если фактор не задан.
-     */
+    /** @returns {number} */
     get maxObjectDistance() {
         if (!this.objectRenderDistanceFactor) return Infinity;
         const distToTarget = this.camera.position.distanceTo(this.controls.target);
         return distToTarget * this.objectRenderDistanceFactor;
     }
 
-    /**
-     * Записывает значение в LRU-кэш максимальной высоты поверхности.
-     *
-     * @private
-     * @param {string} key - Ключ тайла.
-     * @param {number} value - Максимальная высота.
-     */
+    /* ================================================================
+       Высоты поверхности
+       ================================================================ */
+
+    /** LRU-обновление кэша max height. @private */
     _setSurfaceMaxHeight(key, value) {
-        // Перезапись перемещает ключ в конец (как «свежий»).
         this._surfaceMaxHeightCache.delete(key);
         this._surfaceMaxHeightCache.set(key, value);
         while (this._surfaceMaxHeightCache.size > this._surfaceMaxHeightCacheMaxSize) {
@@ -998,12 +647,8 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Возвращает максимальную высоту поверхности в заданной мировой точке.
-     * Использует кэш; инвалидация происходит при применении новых высот.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {number} Максимальная высота поверхности.
+     * Максимальная высота рельефа в тайле под точкой.
+     * @param {number} worldX @param {number} worldZ @returns {number}
      */
     getSurfaceMaxHeight(worldX, worldZ) {
         if (!this.hasElevation) return 0;
@@ -1017,9 +662,7 @@ this.tileManager = new TileManager(this);
         if (y < 0 || y > maxTile) return 0;
         const vk = getVirtKey(z, virtX, y);
 
-        if (this._surfaceMaxHeightCache.has(vk)) {
-            return this._surfaceMaxHeightCache.get(vk);
-        }
+        if (this._surfaceMaxHeightCache.has(vk)) return this._surfaceMaxHeightCache.get(vk);
 
         const inst = this.tileManager.tiles.get(vk);
         let maxY = 0;
@@ -1036,11 +679,8 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Возвращает интерполированную высоту поверхности в заданной мировой точке.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {number} Высота поверхности.
+     * Интерполированная высота рельефа в точке.
+     * @param {number} worldX @param {number} worldZ @returns {number}
      */
     getSurfaceHeightAt(worldX, worldZ) {
         if (!this.hasElevation) return 0;
@@ -1082,11 +722,8 @@ this.tileManager = new TileManager(this);
     }
 
     /**
-     * Обеспечивает загрузку тайла для заданной мировой точки.
-     *
-     * @param {number} worldX - Мировая координата X.
-     * @param {number} worldZ - Мировая координата Z.
-     * @returns {void}
+     * Гарантирует загрузку тайла под точкой.
+     * @param {number} worldX @param {number} worldZ
      */
     ensureTileForPoint(worldX, worldZ) {
         const z = this.currentDiscreteZoom;
@@ -1100,11 +737,7 @@ this.tileManager = new TileManager(this);
         this.tileManager.ensureTile(z, virtX, y);
     }
 
-    /**
-     * Создаёт статический фоновый слой из текстурных тайлов.
-     *
-     * @returns {void}
-     */
+    /** Статический фоновый слой из текстур. */
     createStaticBackgroundLayer() {
         if (!this.layers.length || !this.layers.some(l => l.texture)) return;
         while (this.staticBgGroup.children.length > 0) {
@@ -1141,26 +774,16 @@ this.tileManager = new TileManager(this);
     }
 
     /* ================================================================
-       Перемещение мира и синхронизация контролов
+       Сдвиг мира
        ================================================================ */
 
-    /**
-     * Сдвигает мировую группу на заданные смещения.
-     *
-     * @param {number} dx - Смещение по X.
-     * @param {number} dz - Смещение по Z.
-     * @returns {void}
-     */
+    /** @param {number} dx @param {number} dz */
     shiftWorld(dx, dz) {
         this.worldGroup.position.x -= dx;
         this.worldGroup.position.z -= dz;
     }
 
-    /**
-     * Синхронизирует цель контролов с точкой пересечения луча из центра экрана с плоскостью земли.
-     *
-     * @returns {void}
-     */
+    /** Ставит controls.target в центр экрана на плоскости земли. */
     syncControlsTarget() {
         this._tempMouse.set(0, 0);
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
@@ -1171,15 +794,10 @@ this.tileManager = new TileManager(this);
     }
 
     /* ================================================================
-       Ввод: мышь, колёсико, касания
+       Мышь
        ================================================================ */
 
-    /**
-     * Обрабатывает нажатие кнопки мыши.
-     *
-     * @param {MouseEvent} e - Событие мыши.
-     * @returns {void}
-     */
+    /** @param {MouseEvent} e */
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
@@ -1198,22 +816,14 @@ this.tileManager = new TileManager(this);
         }
     }
 
-    /**
-     * Обрабатывает перемещение мыши.
-     *
-     * @param {MouseEvent} e - Событие мыши.
-     * @returns {void}
-     */
+    /** @param {MouseEvent} e */
     onMouseMove(e) {
         if (this._cameraAnimation) return;
 
-        // Отслеживание факта сдвига для отсечения клика от драга.
         if (!this._mouseMoved) {
             const dx = e.clientX - this._mouseDownX;
             const dy = e.clientY - this._mouseDownY;
-            if (dx * dx + dy * dy > 9) { // порог ~3px
-                this._mouseMoved = true;
-            }
+            if (dx * dx + dy * dy > 9) this._mouseMoved = true;
         }
 
         if (!this.isDragging) return;
@@ -1227,24 +837,14 @@ this.tileManager = new TileManager(this);
         }
     }
 
-/**
- * Обрабатывает отпускание кнопки мыши.
- *
- * @returns {void}
- */
-onMouseUp() {
-    if (!this.isDragging) return;
-    this.isDragging = false;
-    if (this._cameraAnimation) return;
-    this.syncControlsTarget();
-}
+    onMouseUp() {
+        if (!this.isDragging) return;
+        this.isDragging = false;
+        if (this._cameraAnimation) return;
+        this.syncControlsTarget();
+    }
 
-    /**
-     * Обрабатывает прокрутку колеса мыши.
-     *
-     * @param {WheelEvent} e - Событие колеса.
-     * @returns {void}
-     */
+    /** @param {WheelEvent} e */
     onWheel(e) {
         if (this._cameraAnimation) return;
         e.preventDefault();
@@ -1252,24 +852,18 @@ onMouseUp() {
         this.applyZoomDelta(delta);
     }
 
-    /**
-     * Вычисляет расстояние между двумя касаниями.
-     *
-     * @param {TouchList} touches - Список касаний.
-     * @returns {number} Расстояние в пикселях.
-     */
+    /* ================================================================
+       Тач
+       ================================================================ */
+
+    /** @param {TouchList} touches @returns {number} */
     getTouchDistance(touches) {
         const dx = touches[0].clientX - touches[1].clientX;
         const dy = touches[0].clientY - touches[1].clientY;
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    /**
-     * Обрабатывает начало касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
+    /** @param {TouchEvent} e */
     onTouchStart(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length === 1) {
@@ -1300,13 +894,7 @@ onMouseUp() {
         }
     }
 
-    /**
-     * Находит касание по идентификатору.
-     *
-     * @param {TouchList} touches - Список касаний.
-     * @param {number} id - Идентификатор касания.
-     * @returns {Touch|null} Найденное касание или null.
-     */
+    /** @param {TouchList} touches @param {number} id @returns {Touch|null} */
     findTouchById(touches, id) {
         for (let i = 0; i < touches.length; i++) {
             if (touches[i].identifier === id) return touches[i];
@@ -1314,12 +902,7 @@ onMouseUp() {
         return null;
     }
 
-    /**
-     * Обрабатывает перемещение касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
+    /** @param {TouchEvent} e */
     onTouchMove(e) {
         if (this._cameraAnimation) return;
         if (this.touchDragActive && e.touches.length === 1) {
@@ -1350,26 +933,16 @@ onMouseUp() {
         }
     }
 
-    /**
-     * Обрабатывает окончание касания.
-     *
-     * @param {TouchEvent} e - Событие касания.
-     * @returns {void}
-     */
-onTouchEnd(e) {
-    if (e.touches.length < 2) this.touchState.isPinching = false;
-    if (e.touches.length === 0 && this.touchDragActive) {
-        this.touchDragActive = false;
-        if (this._cameraAnimation) return;
-        this.syncControlsTarget();
+    /** @param {TouchEvent} e */
+    onTouchEnd(e) {
+        if (e.touches.length < 2) this.touchState.isPinching = false;
+        if (e.touches.length === 0 && this.touchDragActive) {
+            this.touchDragActive = false;
+            if (this._cameraAnimation) return;
+            this.syncControlsTarget();
+        }
     }
-}
 
-    /**
-     * Обрабатывает изменение размера элемента.
-     *
-     * @returns {void}
-     */
     onResize() {
         const w = this.targetElement.clientWidth;
         const h = this.targetElement.clientHeight;
@@ -1379,17 +952,7 @@ onTouchEnd(e) {
         this.maybeUpdateVisibleTiles();
     }
 
-    /**
-     * Обрабатывает клик по карте с зажатой клавишей Shift.
-     * Определяет точку пересечения луча с видимыми тайлами,
-     * преобразует её в географические координаты и выводит их в консоль.
-     *
-     * Игнорируется, если мышь сдвинулась между mousedown и mouseup
-     * (чтобы клик не срабатывал после драга).
-     *
-     * @param {MouseEvent} e - Событие клика.
-     * @returns {void}
-     */
+    /** Shift+Click: лог координат точки под курсором. @param {MouseEvent} e */
     onClick(e) {
         if (!e.shiftKey) return;
         if (this._mouseMoved) return;
@@ -1399,12 +962,9 @@ onTouchEnd(e) {
         this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
 
-        // Собираем все видимые меши тайлов из менеджера тайлов
         const meshes = [];
         for (const inst of this.tileManager.tiles.values()) {
-            if (inst.mesh && inst.mesh.visible) {
-                meshes.push(inst.mesh);
-            }
+            if (inst.mesh && inst.mesh.visible) meshes.push(inst.mesh);
         }
 
         const intersects = this._tempRaycaster.intersectObjects(meshes, false);
@@ -1415,7 +975,6 @@ onTouchEnd(e) {
         const localZ = point.z - this.worldGroup.position.z;
         const [lon, lat] = this.unprojectToLonLat(localX, localZ);
 
-        // Высота доступна только при наличии рельефа
         const height = this.hasElevation ? point.y : null;
         if (height !== null) {
             console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
@@ -1424,11 +983,6 @@ onTouchEnd(e) {
         }
     }
 
-    /**
-     * Привязывает обработчики событий к элементам.
-     *
-     * @returns {void}
-     */
     bindEvents() {
         this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
         window.addEventListener('mousemove', (e) => this.onMouseMove(e));
@@ -1443,14 +997,10 @@ onTouchEnd(e) {
     }
 
     /* ================================================================
-       Механика зума и видимости
+       Зум и видимость
        ================================================================ */
 
-    /**
-     * Применяет дистанцию камеры в соответствии с текущим непрерывным зумом.
-     *
-     * @returns {void}
-     */
+    /** Применяет дистанцию камеры по текущему непрерывному зуму. */
     applyZoomDistance() {
         if (this._cameraAnimation) return;
         const target = this._tempTarget.copy(this.controls.target);
@@ -1475,12 +1025,7 @@ onTouchEnd(e) {
         this.camera.lookAt(target);
     }
 
-    /**
-     * Применяет изменение зума на заданную величину.
-     *
-     * @param {number} delta - Величина изменения зума.
-     * @returns {void}
-     */
+    /** @param {number} delta */
     applyZoomDelta(delta) {
         this.targetContinuousZoom += delta;
         this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
@@ -1492,10 +1037,8 @@ onTouchEnd(e) {
     }
 
     /**
-     * Возвращает идеальный дискретный уровень зума на основе непрерывного с учётом гистерезиса.
-     *
-     * @param {number} continuousZoom - Непрерывный уровень зума.
-     * @returns {number} Дискретный уровень зума.
+     * Идеальный дискретный zoom с гистерезисом.
+     * @param {number} continuousZoom @returns {number}
      */
     peekIdealZoom(continuousZoom) {
         const prev = this.currentDiscreteZoom;
@@ -1505,21 +1048,14 @@ onTouchEnd(e) {
         return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, idealZ));
     }
 
-    /**
-     * Обновляет видимые тайлы, если прошло достаточно времени или принудительно.
-     *
-     * @param {boolean} [force] - Принудительное обновление.
-     * @returns {void}
-     */
+    /** @param {boolean} [force] */
     maybeUpdateVisibleTiles(force = false) {
         const now = performance.now();
         if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
         this.lastVisibleUpdateTime = now;
 
         const newZ = this.peekIdealZoom(this.continuousZoom);
-        if (newZ !== this.currentDiscreteZoom) {
-            this.currentDiscreteZoom = newZ;
-        }
+        if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
 
         this.tileManager.update(
             this.camera, this.controls.target,
@@ -1527,13 +1063,7 @@ onTouchEnd(e) {
         );
     }
 
-    /**
-     * Перемещает камеру к указанным географическим координатам (WGS84).
-     *
-     * @param {number} lon - Долгота.
-     * @param {number} lat - Широта.
-     * @returns {void}
-     */
+    /** @param {number} lon @param {number} lat */
     moveCameraTo(lon, lat) {
         const [cx, cz] = this.projectLonLat(lon, lat);
         const z = this.currentDiscreteZoom;
@@ -1550,13 +1080,7 @@ onTouchEnd(e) {
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /**
-     * Корректирует мировую позицию при пересечении антимеридиана.
-     * Имеет смысл только для проекций с циклической долготой
-     * (цилиндрический Меркатор, географическая и т. п.).
-     *
-     * @private
-     */
+    /** Перескок через антимеридиан для цикличных по долготе проекций. @private */
     _wrapLongitudeIfNeeded() {
         if (!this._wrapsLongitude()) return;
 
@@ -1570,11 +1094,8 @@ onTouchEnd(e) {
         const [lon, lat] = this.unprojectToLonLat(centerX, centerZ);
 
         let newLon = lon;
-        if (lon < -180) {
-            newLon = lon + 360;
-        } else if (lon > 180) {
-            newLon = lon - 360;
-        }
+        if (lon < -180) newLon = lon + 360;
+        else if (lon > 180) newLon = lon - 360;
         if (newLon === lon) return;
 
         const [newCenterX, newCenterZ] = this.projectLonLat(newLon, lat);
@@ -1584,13 +1105,10 @@ onTouchEnd(e) {
     }
 
     /**
-     * Плавно перемещает камеру к указанным географическим координатам (WGS84) с анимацией.
-     *
-     * @param {number} lon - Долгота.
-     * @param {number} lat - Широта.
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @param {number|null} [targetZoom] - Целевой уровень зума или null для сохранения текущего.
-     * @returns {void}
+     * Анимированный перелёт к (lon, lat).
+     * @param {number} lon @param {number} lat
+     * @param {number} [duration=1.0]
+     * @param {number|null} [targetZoom=null]
      */
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         if (this._cameraAnimation) return;
@@ -1640,7 +1158,6 @@ onTouchEnd(e) {
 
             this.continuousZoom = currentZoom;
             this.targetContinuousZoom = currentZoom;
-
             this.maybeUpdateVisibleTiles();
 
             if (t >= 1.0) {
@@ -1666,11 +1183,8 @@ onTouchEnd(e) {
     }
 
     /**
-     * Поворачивает камеру к северу и, при необходимости, сбрасывает наклон.
-     *
-     * @param {number} [duration] - Длительность анимации в секундах.
-     * @param {boolean} [resetPitch] - Сбросить ли наклон камеры.
-     * @returns {void}
+     * Поворот к северу (и сброс pitch, если надо).
+     * @param {number} [duration=0.3] @param {boolean} [resetPitch=true]
      */
     rotateToNorth(duration = 0.3, resetPitch = true) {
         if (this._cameraAnimation) return;
@@ -1730,7 +1244,6 @@ onTouchEnd(e) {
             this.camera.position.set(x, y, z);
             this.controls.target.copy(anim.startTarget);
             this.controls.update();
-
             this.maybeUpdateVisibleTiles();
 
             if (t >= 1.0) {
@@ -1748,35 +1261,17 @@ onTouchEnd(e) {
     }
 
     /* ================================================================
-       Подгонка вида под bounds / объект
+       fitToBounds / fitTo
        ================================================================ */
 
     /**
-     * Подгоняет вид так, чтобы прямоугольник `bounds` целиком попал в кадр
-     * с учётом отступов. Корректно работает при любых текущих наклонах
-     * и поворотах камеры (pitch/bearing сохраняются).
-     *
-     * Как это работает: расстояние до цели вычисляется аналитически из
-     * того факта, что при изменении дистанции камеры (при фиксированном
-     * направлении target→camera) лучи через углы экрана пересекают плоскость
-     * земли в точках, линейно зависящих от дистанции. Решая неравенства
-     * «углы bounds внутри кадра», получаем минимально необходимую дистанцию.
-     *
-     * @param {Array.<Array.<number>>} bounds - Прямоугольник в СК `options.crs`:
-     *     [[minX, minY], [maxX, maxY]] (порядок углов нормализуется).
-     * @param {Object} [options] - Дополнительные параметры.
-     * @param {Projection|string} [options.crs=this.inputCRS] - СК прямоугольника.
-     * @param {number|Array.<number>} [options.padding=0] - Отступ в пикселях:
-     *     число — одинаково со всех сторон; [x, y] — по горизонтали и вертикали.
-     * @param {number} [options.duration=0.5] - Длительность анимации в секундах.
-     *     0 — мгновенный переход.
-     * @param {number} [options.maxZoom=this.MAX_ZOOM] - Верхняя граница зума
-     *     (не позволяет «залипнуть» на слишком близком расстоянии для точек
-     *     и маленьких bounds).
-     * @returns {void}
-     *
-     * @example
-     * map.fitToBounds([[37.5, 55.7], [37.7, 55.8]], { padding: 80, duration: 0.6 });
+     * Подгоняет вид под прямоугольник. Сохраняет текущий pitch/bearing.
+     * @param {Array<Array<number>>} bounds - [[minX, minY], [maxX, maxY]].
+     * @param {Object} [options]
+     * @param {Projection|string} [options.crs=this.inputCRS]
+     * @param {number|Array<number>} [options.padding=0]
+     * @param {number} [options.duration=0.5]
+     * @param {number} [options.maxZoom=this.MAX_ZOOM]
      */
     fitToBounds(bounds, options = {}) {
         if (!bounds || !bounds[0] || !bounds[1]) {
@@ -1800,9 +1295,6 @@ onTouchEnd(e) {
 
         const srcCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
 
-        // Проецируем все 4 угла в world-координаты карты (в локальных координатах
-        // worldGroup — трансляция worldGroup не влияет на дальнейшие вычисления,
-        // т.к. они инвариантны относительно сдвига).
         let minWX = Infinity, maxWX = -Infinity, minWZ = Infinity, maxWZ = -Infinity;
         const corners = [
             [minInX, minInY], [maxInX, minInY],
@@ -1825,18 +1317,14 @@ onTouchEnd(e) {
 
         const [targetLon, targetLat] = this.projection.toLonLat([targetX, -targetZ]);
 
-        // Degenerate case: bounds-точка → просто центрируем, зум не меняем.
         const epsilon = 1e-6;
         if (halfW < epsilon && halfH < epsilon) {
             const currentZoom = this.continuousZoom;
-            this.moveCameraToSlow(targetLon, targetLat, duration,
-                Math.min(currentZoom, maxZoom));
+            this.moveCameraToSlow(targetLon, targetLat, duration, Math.min(currentZoom, maxZoom));
             return;
         }
 
         const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
-
-        // D → zoom: getTargetDistanceForZoom(z) = BASE_DISTANCE * 2^(BASE_ZOOM - z)
         let z = this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / D);
         if (!isFinite(z)) z = this.continuousZoom;
         z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
@@ -1845,23 +1333,9 @@ onTouchEnd(e) {
     }
 
     /**
-     * Подгоняет вид под один или несколько объектов, реализующих метод
-     * `getBounds(crs)` (возвращает [[minX, minY], [maxX, maxY]] или null).
-     * Прямоугольники всех объектов объединяются, затем вызывается
-     * {@link KrbMap#fitToBounds}.
-     *
-     * Соглашение о `getBounds(crs)`: объект возвращает прямоугольник в СК `crs`
-     * (по умолчанию — WGS84). Это позволяет объединять результаты от объектов
-     * с разными собственными СК.
-     *
-     * @param {Object|Array.<Object>} objectOrArray - Объект или массив объектов
-     *     с методом `getBounds`.
-     * @param {Object} [options] - Те же, что у {@link KrbMap#fitToBounds}.
-     * @returns {void}
-     *
-     * @example
-     * map.fitTo(polygon, { padding: 60 });
-     * map.fitTo([marker1, polygon1, polyline1], { duration: 1.0, maxZoom: 16 });
+     * Подгоняет вид под объект(ы) с методом `getBounds(crs)`.
+     * @param {Object|Array<Object>} objectOrArray
+     * @param {Object} [options]
      */
     fitTo(objectOrArray, options = {}) {
         const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
@@ -1890,17 +1364,8 @@ onTouchEnd(e) {
     }
 
     /**
-     * Вычисляет минимальную дистанцию камеры до цели, при которой bounds
-     * `[targetX ± halfW] × [targetZ ± halfH]` целиком попадает в кадр.
-     *
+     * Минимальная дистанция, при которой bounds влезает в кадр.
      * @private
-     * @param {number} targetX - X-координата центра bounds (мир карты, без worldGroup).
-     * @param {number} targetZ - Z-координата центра bounds.
-     * @param {number} halfW - Полуширина bounds в метрах.
-     * @param {number} halfH - Полувысота bounds в метрах.
-     * @param {number} padX - Отступ по горизонтали в пикселях.
-     * @param {number} padY - Отступ по вертикали в пикселях.
-     * @returns {number} Минимальная дистанция камеры до цели.
      */
     _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
         const canvas = this.renderer.domElement;
@@ -1909,31 +1374,22 @@ onTouchEnd(e) {
         if (W <= 0 || H <= 0) return this.BASE_DISTANCE;
 
         const camera = this.camera;
-        // Гарантируем актуальность матрицы мира (после controls.update() она уже
-        // актуальна, но лишний вызов дешёв и защищает от нестандартных сценариев).
         camera.updateMatrixWorld();
 
-        // Полууглы обзора в тангенсах.
         const fovYRad = camera.fov * Math.PI / 180;
         const ty = Math.tan(fovYRad / 2);
         const tx = ty * camera.aspect;
         if (ty <= 0 || tx <= 0) return this.BASE_DISTANCE;
 
-        // NDC-границы с учётом padding.
         const ndcXMax = 1 - (2 * padX) / W;
         const ndcYMax = 1 - (2 * padY) / H;
-        if (ndcXMax <= 0 || ndcYMax <= 0) {
-            // Отступы «съели» экран целиком — фолбэк на базовую дистанцию.
-            return this.BASE_DISTANCE;
-        }
+        if (ndcXMax <= 0 || ndcYMax <= 0) return this.BASE_DISTANCE;
 
-        // Столбцы матрицы мира (right, up, backward камеры в world-координатах).
         const e = camera.matrixWorld.elements;
-        const m1x = e[0], m1y = e[1], m1z = e[2]; // right
-        const m2x = e[4], m2y = e[5], m2z = e[6]; // up
-        const m3x = e[8], m3y = e[9], m3z = e[10]; // backward
+        const m1x = e[0], m1y = e[1], m1z = e[2];
+        const m2x = e[4], m2y = e[5], m2z = e[6];
+        const m3x = e[8], m3y = e[9], m3z = e[10];
 
-        // 4 угла bounds (y = 0, на плоскости земли).
         const corners = [
             [targetX - halfW, 0, targetZ - halfH],
             [targetX + halfW, 0, targetZ - halfH],
@@ -1954,25 +1410,18 @@ onTouchEnd(e) {
             const dX = r3 + Math.abs(r1) / (ndcXMax * tx);
             const dY = r3 + Math.abs(r2) / (ndcYMax * ty);
             const dCorner = Math.max(dX, dY);
-
             if (dCorner > dRequired) dRequired = dCorner;
         }
 
-        if (!isFinite(dRequired) || dRequired <= 0) {
-            return this.BASE_DISTANCE;
-        }
+        if (!isFinite(dRequired) || dRequired <= 0) return this.BASE_DISTANCE;
         return dRequired;
     }
 
     /* ================================================================
-       Главный цикл анимации
+       Главный цикл
        ================================================================ */
 
-    /**
-     * Главный цикл анимации, обновляющий камеру, тайлы и рендеринг.
-     *
-     * @private
-     */
+    /** @private */
     animate() {
         requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
@@ -1990,9 +1439,7 @@ onTouchEnd(e) {
         this.controls.update();
         this._wrapLongitudeIfNeeded();
 
-        if (!this._cameraAnimation) {
-            this.applyZoomDistance();
-        }
+        if (!this._cameraAnimation) this.applyZoomDistance();
 
         this.maybeUpdateVisibleTiles();
 
@@ -2000,11 +1447,8 @@ onTouchEnd(e) {
             if (layer._postUpdate) layer._postUpdate(this);
         }
 
-        if (this.textManager) {
-            this.textManager.update();
-        }
+        if (this.textManager) this.textManager.update();
 
-        // Рендерим сцену
         this.renderer.render(this.scene, this.camera);
     }
 }

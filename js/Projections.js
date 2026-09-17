@@ -8,12 +8,26 @@ const HARDCODED = {
 };
 
 /**
- * Обёртка над проекцией proj4 с информацией об области определения.
+ * Обёртка над проекцией proj4 с минимальной валидацией.
+ *
+ * Идея: proj4 возвращает либо конечные координаты (возможно, очень
+ * большие — это нормально для точек далеко от зоны определения
+ * проекции, и такие искажения нужно сохранять), либо NaN / Infinity
+ * (вот это уже «мусор» — он и рисует «усы» через всю сцену).
+ *
+ * Projection умеет:
+ *  - сказать, конечны ли входные lon/lat или спроецированные координаты;
+ *  - для Mercator — «прижать» широту к ±85.05°, чтобы proj4 не вернул
+ *    Infinity на полюсах (стандартный приём Leaflet/Mapbox/Google).
+ *
+ * Никаких «зон действия», никакого клиппинга. Точки далеко от зоны
+ * UTM/Gauss-Kruger проецируются как есть — пусть искажаются, как в QGIS.
+ *
  * @example
- * const gk = Projections.get('EPSG:28407');
- * const ok = gk.isValidLonLat([37.6, 55.7]);   // true — внутри зоны
- * const bad = gk.isValidLonLat([-120, 40]);    // false — далеко от lon_0
- * const xy = gk.fromLonLatSafe([37.6, 55.7]);  // [x, y] или null
+ * const utm = Projections.get('EPSG:32637');
+ * utm.isValidLonLat([37.6, 55.7]);  // true — просто проверка на конечность
+ * const merc = Projections.get('EPSG:3857');
+ * merc.clampLonLat([0, 89]);        // [0, 85.05112878] — прижали к пределу
  */
 export class Projection {
     /**
@@ -39,7 +53,7 @@ export class Projection {
          */
         this.isGeographic = /\+proj=longlat/.test(def);
 
-        // --- Разбор PROJ-строки для определения области определения ---
+        // --- Разбор PROJ-строки (только для определения типа проекции) ---
 
         const projMatch = def.match(/\+proj=(\w+)/);
         /**
@@ -49,126 +63,97 @@ export class Projection {
          */
         this.projName = projMatch ? projMatch[1].toLowerCase() : null;
 
-        const lon0Match = def.match(/\+lon_0=([-\d.]+)/);
         /**
-         * Осевой меридиан проекции в градусах (для tmerc/utm — центральный
-         * меридиан зоны; для merc — 0; если не задан — 0).
-         * @type {number}
+         * Является ли проекция разновидностью Меркатора (merc).
+         * Для них есть смысл в ограничении широты — см. `maxLatDeg`.
+         * @type {boolean}
          */
-        this.lon0 = lon0Match ? parseFloat(lon0Match[1]) : 0;
-
-        if (this.projName === 'merc') {
-            // Web Mercator / World Mercator: широта ограничена ±85.051129°
-            // (для квадрата). Берём 85.0 — численно устойчивее.
-            /**
-             * Максимальная абсолютная широта в градусах, при которой
-             * проекция даёт «разумные» координаты.
-             * @type {number}
-             */
-            this.maxLatDeg = 85.0;
-
-            /**
-             * Максимальное отклонение долготы от осевого меридиана
-             * (в градусах). 180 = без ограничений.
-             * @type {number}
-             */
-            this.maxLonOffsetDeg = 180;
-        } else if (this.projName === 'tmerc' || this.projName === 'utm') {
-            // Поперечная Меркатора / UTM / Gauss-Kruger: ряд Тейлора
-            // расходится далеко от осевого меридиана. ±6° — комфортный
-            // диапазон для визуализации (координаты остаются «человеческими»).
-            this.maxLatDeg = 84.0;
-            this.maxLonOffsetDeg = 6.0;
-        } else if (this.projName === 'longlat') {
-            // Географическая: без ограничений по смыслу.
-            this.maxLatDeg = 90.0;
-            this.maxLonOffsetDeg = 180.0;
-        } else {
-            // Неизвестная проекция: не ограничиваем по lon/lat,
-            // но численно валидируем результат.
-            this.maxLatDeg = 90.0;
-            this.maxLonOffsetDeg = 180.0;
-        }
+        this.isMercator = this.projName === 'merc';
 
         /**
-         * Численный порог для спроецированных координат (в метрах).
-         * Диаметр Земли ~ 4·10⁷ м; всё, что больше 10⁹ м — заведомая
-         * «бесконечность» от proj4.
-         * @type {number}
+         * Предельная широта (по модулю) для проекций Меркатора, до которой
+         * потребитель должен «прижимать» точки перед проецированием, чтобы
+         * не получить Infinity на полюсах.
+         *
+         * Стандартное значение ±85.05112878° — именно оно даёт квадратную
+         * карту Web Mercator, и именно так поступают Leaflet, Mapbox, Google.
+         *
+         * `null` — проекция не требует ограничения широты (UTM, Gauss-Kruger,
+         * WGS84, …). Заметьте: у UTM/GK область определения формально тоже
+         * ограничена, но мы её НЕ проверяем — далёкие точки просто
+         * проецируются с большими искажениями (как в QGIS), а не
+         * отбрасываются и не клиппуются.
+         *
+         * @type {number|null}
          */
-        this.maxAbsCoord = 1e9;
+        this.maxLatDeg = this.isMercator ? 85.05112878 : null;
     }
 
     /**
-     * Проверяет, лежит ли пара (lon, lat) в области определения проекции.
+     * Проверяет, что пара (lon, lat) — конечные числа.
      *
-     * Учитывает:
-     *  - конечность значений;
-     *  - ограничение по широте (`maxLatDeg`) — критично для Mercator;
-     *  - ограничение по долготе относительно `lon0` (`maxLonOffsetDeg`) —
-     *    критично для Gauss-Kruger / UTM.
+     * НЕ проверяет принадлежность «зоне действия» проекции: точки далеко
+     * от центрального меридиана UTM/GK считаются валидными, потому что
+     * мы хотим их проецировать и рисовать с естественными искажениями.
      *
      * @param {Array.<number>} lonLat - [долгота, широта] в градусах.
-     * @returns {boolean} true, если точка допустима.
+     * @returns {boolean} true, если оба значения конечны.
      *
      * @example
-     * Projections.get('EPSG:3857').isValidLonLat([0, 89]); // false
-     * Projections.get('EPSG:3857').isValidLonLat([0, 80]); // true
+     * Projections.get('EPSG:32637').isValidLonLat([37.6, 55.7]);   // true
+     * Projections.get('EPSG:32637').isValidLonLat([NaN, 55.7]);    // false
      */
     isValidLonLat(lonLat) {
         if (!lonLat || lonLat.length < 2) return false;
-        const lon = lonLat[0], lat = lonLat[1];
-        if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
-        if (Math.abs(lat) > this.maxLatDeg) return false;
-        if (this.maxLonOffsetDeg < 180) {
-            // Нормализуем разницу в (-180, 180].
-            const d = ((lon - this.lon0 + 540) % 360) - 180;
-            if (Math.abs(d) > this.maxLonOffsetDeg) return false;
-        }
-        return true;
+        return Number.isFinite(lonLat[0]) && Number.isFinite(lonLat[1]);
     }
 
     /**
-     * Проверяет, что спроецированные координаты конечны и «разумны».
+     * Проверяет, что спроецированные координаты — конечные числа.
+     *
+     * НЕ проверяет «разумность» величины: большие числа (1e9+, 1e12+)
+     * считаются валидными, потому что за границей зоны UTM/GK они
+     * «закономерно» возникают и должны отображаться как искажения.
+     * Отбрасываются только NaN и ±Infinity — именно они рисуют «усы».
      *
      * @param {Array.<number>} coord - [x, y] в метрах проекции.
-     * @returns {boolean} true, если координаты допустимы.
+     * @returns {boolean} true, если оба значения конечны.
      *
      * @example
-     * Projections.get('EPSG:3857').isValidCoord([1e6, 2e6]); // true
-     * Projections.get('EPSG:3857').isValidCoord([Infinity, 0]); // false
+     * Projections.get('EPSG:3857').isValidCoord([1e6, 2e6]);        // true
+     * Projections.get('EPSG:3857').isValidCoord([Infinity, 0]);     // false
      */
     isValidCoord(coord) {
         if (!coord || coord.length < 2) return false;
-        const x = coord[0], y = coord[1];
-        if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-        if (Math.abs(x) > this.maxAbsCoord || Math.abs(y) > this.maxAbsCoord) return false;
-        return true;
+        return Number.isFinite(coord[0]) && Number.isFinite(coord[1]);
     }
 
     /**
-     * Возвращает прямоугольник области определения проекции в lon/lat
-     * или null, если проекция безгранична (например, WGS84).
+     * Прижимает широту к предельной, если проекция этого требует.
      *
-     * Используется потребителями (Polygon) для клиппинга геометрии
-     * в lon/lat перед проецированием — это позволяет корректно отсечь
-     * часть полигона, выходящую за пределы области определения.
+     * Для Mercator: |lat| > 85.05° → прижимаем к ±85.05°.
+     * Для остальных проекций: возвращает входной массив без изменений.
      *
-     * @returns {{lonMin:number, lonMax:number, latMin:number, latMax:number}|null}
+     * Возвращает либо исходный массив (если изменения не требуются),
+     * либо новый — вызывающая сторона не должна полагаться на идентичность
+     * ссылок.
+     *
+     * @param {Array.<number>} lonLat - [долгота, широта] в градусах.
+     * @returns {Array.<number>} [долгота, широта] с прижатой широтой.
      *
      * @example
-     * const b = Projections.get('EPSG:28407').getValidLonLatBounds();
-     * // → { lonMin: 33, lonMax: 45, latMin: -84, latMax: 84 } для lon_0=39
+     * Projections.get('EPSG:3857').clampLonLat([0, 89]);   // [0, 85.05112878]
+     * Projections.get('EPSG:3857').clampLonLat([0, -88]);  // [0, -85.05112878]
+     * Projections.get('EPSG:3857').clampLonLat([0, 55]);   // [0, 55] (без изменений)
+     * Projections.get('EPSG:32637').clampLonLat([0, 89]);  // [0, 89] (без ограничений)
      */
-    getValidLonLatBounds() {
-        if (this.maxLatDeg >= 90 && this.maxLonOffsetDeg >= 180) return null;
-        const halfLon = Math.min(this.maxLonOffsetDeg, 180);
-        return {
-            lonMin: this.lon0 - halfLon,
-            lonMax: this.lon0 + halfLon,
-            latMin: -this.maxLatDeg,
-            latMax: this.maxLatDeg
-        };
+    clampLonLat(lonLat) {
+        if (this.maxLatDeg === null) return lonLat;
+        const lon = lonLat[0];
+        const lat = lonLat[1];
+        if (!Number.isFinite(lat)) return lonLat;
+        if (Math.abs(lat) <= this.maxLatDeg) return lonLat;
+        return [lon, Math.sign(lat) * this.maxLatDeg];
     }
 
     /**
@@ -182,6 +167,9 @@ export class Projection {
 
     /**
      * Проецирует WGS84 (lon/lat) в эту проекцию.
+     *
+     * Без клампа и проверок — «сырой» proj4. Может вернуть NaN/Infinity.
+     * Для безопасной версии см. {@link Projection#fromLonLatSafe}.
      *
      * @param {Array.<number>} coord - [долгота, широта] в градусах.
      * @returns {Array.<number>} [x, y] в метрах проекции.
@@ -197,15 +185,31 @@ export class Projection {
     toLonLat(coord)   { return proj4(this.def, HARDCODED['EPSG:4326'], coord); }
 
     /**
-     * Безопасная версия {@link Projection#fromLonLat}: возвращает null,
-     * если точка вне области определения или результат невалиден.
+     * Безопасная версия {@link Projection#fromLonLat}.
+     *
+     * Что делает:
+     *  1. Проверяет конечность входных lon/lat.
+     *  2. Применяет {@link Projection#clampLonLat} — прижимает широту
+     *     к пределу для Mercator (для UTM/GK — no-op).
+     *  3. Проецирует через proj4.
+     *  4. Возвращает `null`, если результат не конечен (NaN/Infinity).
+     *
+     * Именно этой функцией должны пользоваться потребители, чтобы
+     * гарантированно не получить «мусор» в буфере вершин.
      *
      * @param {Array.<number>} coord - [долгота, широта] в градусах.
-     * @returns {Array.<number>|null} [x, y] или null.
+     * @returns {Array.<number>|null} [x, y] в метрах или null.
+     *
+     * @example
+     * const merc = Projections.get('EPSG:3857');
+     * merc.fromLonLatSafe([0, 89]);   // [0, 1.99e7] — прижали к 85.05°
+     * const utm = Projections.get('EPSG:32637');
+     * utm.fromLonLatSafe([-120, 40]); // [огромное число, ...] — как есть
      */
     fromLonLatSafe(coord) {
         if (!this.isValidLonLat(coord)) return null;
-        const out = this.fromLonLat(coord);
+        const clamped = this.clampLonLat(coord);
+        const out = this.fromLonLat(clamped);
         return this.isValidCoord(out) ? out : null;
     }
 

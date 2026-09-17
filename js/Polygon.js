@@ -9,9 +9,10 @@
  * Оптимизирован для большого количества полигонов: кэширование
  * преобразованных координат, dirty-флаги для высот, bounding sphere
  * для отсечения по расстоянию и быстрый предварительный raycasting.
- * Дополнительно: единый обработчик событий мыши для всех полигонов,
- * переиспользование массивов, опция использования обычных линий,
- * а также (опционально) встроенный Web Worker для триангуляции.
+ * Дополнительно: единый обработчик событий мыши для всех полигонов
+ * (батчевый raycast с троттлингом), переиспользование массивов,
+ * frustum culling по умолчанию, fast-path для статичных высот,
+ * опция использования обычных линий для обводки.
  *
  * Экструдированные полигоны (extruded: true) используют MeshStandardMaterial
  * и участвуют в shadow mapping (castShadow/receiveShadow), поэтому на них
@@ -29,6 +30,10 @@
  *  4) Для отображения теней у рендера должно быть включено
  *     `renderer.shadowMap.enabled = true`, и хотя бы один источник света
  *     должен иметь `castShadow = true`.
+ *  5) Меши полигонов оставляют `frustumCulled = true` — это безопасно,
+ *     потому что bounding sphere пересчитывается после каждого изменения
+ *     высот. Раньше culling отключался из-за отсутствия пересчёта сферы,
+ *     но теперь эта проблема устранена.
  */
 
 import { Projections } from './Projections.js';
@@ -186,7 +191,7 @@ export class Polygon {
      * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
      * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
      * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML), показывается через PopupManager при наведении или клике (если не задан onClick/onHover).
-     * @param {boolean} [options.useSimpleStroke=false] - Использовать обычный THREE.Line вместо Line2 для обводки (быстрее, но ширина 1px).
+     * @param {boolean} [options.useSimpleStroke=false] - Использовать обычный THREE.Line вместо Line2 для обводки (быстрее, но ширина 1px). Для массовых полигонов настоятельно рекомендуется `true`.
      * @param {boolean} [options.useWorkerForTriangulation=false] - Выполнять триангуляцию в Web Worker (экспериментально, требует асинхронной инициализации).
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
@@ -289,6 +294,15 @@ export class Polygon {
         /** @private */ this._lastHeightUpdateTime = 0;
         /** @private */ this._heightUpdateInterval = 500;
 
+        /**
+         * Флаг, что высоты окончательно зафиксированы для случая, когда
+         * они не зависят от рельефа (нет elevation у карты или altitudeMode
+         * 'absolute'). Позволяет избежать бесполезных пересчётов в _update.
+         * @private
+         * @type {boolean}
+         */
+        this._heightsFinalized = false;
+
         // Центроид
         /** @private */ this._vertices2D = [];
         /** @private */ this._centroidWorld = new THREE.Vector3();
@@ -331,6 +345,9 @@ export class Polygon {
     /** @private */ static _interactivePolygons = new Set();
     /** @private */ static _eventListenersAttached = false;
     /** @private */ static _delegatedHandlers = null;
+    /** @private */ static _raycaster = new THREE.Raycaster();
+    /** @private */ static _mouseNDC = new THREE.Vector2();
+    /** @private */ static _lastRaycastTime = 0;
 
     /**
      * Регистрирует полигон для обработки событий мыши через общий обработчик.
@@ -360,6 +377,8 @@ export class Polygon {
 
     /**
      * Добавляет глобальные обработчики событий на canvas.
+     * Раньше вешался также mousedown, но он не делал ничего осмысленного,
+     * поэтому убран. Остались только mousemove (для hover) и click.
      *
      * @private
      */
@@ -368,12 +387,10 @@ export class Polygon {
         if (!canvas) return;
 
         Polygon._delegatedHandlers = {
-            mousedown: (e) => Polygon._handleGlobalMouseDown(e),
             mousemove: (e) => Polygon._handleGlobalMouseMove(e),
             click: (e) => Polygon._handleGlobalClick(e)
         };
 
-        canvas.addEventListener('mousedown', Polygon._delegatedHandlers.mousedown, true);
         canvas.addEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
         canvas.addEventListener('click', Polygon._delegatedHandlers.click, true);
         Polygon._eventListenersAttached = true;
@@ -388,7 +405,6 @@ export class Polygon {
         const canvas = Polygon._getCanvas();
         if (!canvas || !Polygon._delegatedHandlers) return;
 
-        canvas.removeEventListener('mousedown', Polygon._delegatedHandlers.mousedown, true);
         canvas.removeEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
         canvas.removeEventListener('click', Polygon._delegatedHandlers.click, true);
         Polygon._delegatedHandlers = null;
@@ -396,7 +412,8 @@ export class Polygon {
     }
 
     /**
-     * Возвращает canvas, к которому привязаны обработчики.
+     * Возвращает canvas, к которому привязаны обработчики (первой карты
+     * из реестра).
      *
      * @returns {HTMLCanvasElement|null}
      * @private
@@ -411,40 +428,135 @@ export class Polygon {
     }
 
     /**
-     * Глобальный обработчик mousedown.
+     * Группирует полигоны по картам, к которым они привязаны.
+     * Нужно для корректной работы при нескольких картах одновременно.
      *
-     * @param {MouseEvent} event - Событие мыши.
+     * @returns {Map<Object, Polygon[]>} Карта → массив полигонов.
      * @private
      */
-    static _handleGlobalMouseDown(event) {
+    static _groupByMap() {
+        const byMap = new Map();
         for (const poly of Polygon._interactivePolygons) {
-            if (poly._raycastPolygon(event, poly._map)) {
-                // Событие обрабатываем, но всплытие не останавливаем.
-            }
+            if (!poly._map) continue;
+            let arr = byMap.get(poly._map);
+            if (!arr) { arr = []; byMap.set(poly._map, arr); }
+            arr.push(poly);
         }
+        return byMap;
+    }
+
+    /**
+     * Переводит экранные координаты события в NDC для указанной карты.
+     *
+     * @param {MouseEvent} event
+     * @param {Object} map
+     * @private
+     */
+    static _setNDCFromEvent(event, map) {
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        Polygon._mouseNDC.set(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+    }
+
+    /**
+     * Собирает меши видимых полигонов, чья bounding sphere пересекается
+     * с лучом, и заодно сбрасывает hover у отсечённых. Возвращает
+     * массив { meshes, polys }.
+     *
+     * @param {Object} map - Карта.
+     * @param {Polygon[]} polys - Полигоны, привязанные к этой карте.
+     * @returns {{meshes: THREE.Object3D[], polys: Polygon[]}}
+     * @private
+     */
+    static _collectRaycastCandidates(map, polys) {
+        const meshes = [];
+        const visiblePolys = [];
+        for (const poly of polys) {
+            if (!poly._group.visible || poly._boundingSphereRadius === 0) {
+                poly._applyHover(false, map);
+                continue;
+            }
+            const worldCenter = poly._tempVec3
+                .copy(poly._group.position)
+                .add(map.worldGroup.position);
+            poly._boundingSphereWorld.set(worldCenter, poly._boundingSphereRadius);
+            if (!Polygon._raycaster.ray.intersectsSphere(poly._boundingSphereWorld)) {
+                poly._applyHover(false, map);
+                continue;
+            }
+            visiblePolys.push(poly);
+            if (poly._fillMesh) meshes.push(poly._fillMesh);
+            if (poly._sideMesh) meshes.push(poly._sideMesh);
+            if (poly._bottomMesh) meshes.push(poly._bottomMesh);
+        }
+        return { meshes, polys: visiblePolys };
     }
 
     /**
      * Глобальный обработчик mousemove.
      *
+     * Один raycast на все полигоны вместо N независимых.
+     * Троттлинг 30 Гц — выше смысла нет, мышь всё равно шлёт чаще,
+     * а результат между кадрами не меняется.
+     *
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     static _handleGlobalMouseMove(event) {
-        for (const poly of Polygon._interactivePolygons) {
-            poly._handleMouseMove(event, poly._map);
+        if (Polygon._interactivePolygons.size === 0) return;
+
+        const now = performance.now();
+        if (now - Polygon._lastRaycastTime < 33) return;
+        Polygon._lastRaycastTime = now;
+
+        const byMap = Polygon._groupByMap();
+        for (const [map, polys] of byMap) {
+            Polygon._setNDCFromEvent(event, map);
+            Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
+
+            const { meshes, polys: visiblePolys } = Polygon._collectRaycastCandidates(map, polys);
+
+            const hits = meshes.length > 0
+                ? Polygon._raycaster.intersectObjects(meshes, false)
+                : [];
+            const topPoly = hits.length > 0 ? hits[0].object.userData.polygon : null;
+
+            for (const poly of visiblePolys) {
+                poly._applyHover(topPoly === poly, map);
+            }
         }
     }
 
     /**
-     * Глобальный обработчик click.
+     * Глобальный обработчик click. Один raycast на все полигоны.
      *
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     static _handleGlobalClick(event) {
-        for (const poly of Polygon._interactivePolygons) {
-            poly._handleClick(event, poly._map);
+        if (Polygon._interactivePolygons.size === 0) return;
+
+        const byMap = Polygon._groupByMap();
+        for (const [map, polys] of byMap) {
+            Polygon._setNDCFromEvent(event, map);
+            Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
+
+            const { meshes } = Polygon._collectRaycastCandidates(map, polys);
+            const hits = meshes.length > 0
+                ? Polygon._raycaster.intersectObjects(meshes, false)
+                : [];
+            if (hits.length === 0) continue;
+
+            const poly = hits[0].object.userData.polygon;
+            if (!poly) continue;
+
+            if (poly._onClick) {
+                poly._onClick(event, poly);
+            } else if (poly._tooltipText && map.popupManager) {
+                map.popupManager.show(poly, poly._tooltipText);
+            }
         }
     }
 
@@ -502,6 +614,7 @@ export class Polygon {
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
         this._heightsDirty = true;
+        this._heightsFinalized = false;
     }
 
     /**
@@ -523,41 +636,43 @@ export class Polygon {
      * Для экструдированных полигонов используется MeshStandardMaterial
      * (участвует в освещении и shadow mapping). Для плоских — MeshBasicMaterial.
      *
+     * Прозрачность включается только если `fillOpacity < 1`. При opacity === 1
+     * материал рендерится без alpha-blending, что заметно ускоряет
+     * фрагментный шейдер и убирает сортировку прозрачных объектов.
+     *
      * @returns {THREE.Material} Материал поверхности.
      * @private
      */
-_createSurfaceMaterial() {
-    const forceTransparent = true;
+    _createSurfaceMaterial() {
+        const isTransparent = this._fillOpacity < 1;
 
-    if (this._extruded) {
-        return new THREE.MeshStandardMaterial({
+        if (this._extruded) {
+            return new THREE.MeshStandardMaterial({
+                color: this._fillColor,
+                opacity: this._fillOpacity,
+                transparent: isTransparent,
+                side: THREE.DoubleSide,
+                roughness: this._roughness,
+                metalness: this._metalness,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite,
+                polygonOffset: true,
+                polygonOffsetFactor: -1,
+                polygonOffsetUnits: -1
+            });
+        }
+        return new THREE.MeshBasicMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
-            transparent: forceTransparent,
+            transparent: isTransparent,
             side: THREE.DoubleSide,
-            roughness: this._roughness,
-            metalness: this._metalness,
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
-            // Сдвигаем polygon глубже/ближе к камере, чтобы при extruded=true
-            // низ/верх не z-fight'ил с копланарной геометрией тайлов.
             polygonOffset: true,
             polygonOffsetFactor: -1,
             polygonOffsetUnits: -1
         });
     }
-    return new THREE.MeshBasicMaterial({
-        color: this._fillColor,
-        opacity: this._fillOpacity,
-        transparent: forceTransparent,
-        side: THREE.DoubleSide,
-        depthTest: this._depthTest,
-        depthWrite: this._depthWrite,
-        polygonOffset: true,
-        polygonOffsetFactor: -1,
-        polygonOffsetUnits: -1
-    });
-}
 
     /**
      * Применяет флаги теней к мешу, если полигон экструдированный.
@@ -598,6 +713,11 @@ _createSurfaceMaterial() {
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
+     *
+     * Все меши получают `frustumCulled = true` (bounding sphere валидна и
+     * пересчитывается в `_updateHeights`) и ссылку `userData.polygon` — она
+     * нужна батчевому raycast-обработчику, чтобы определить, какому
+     * полигону принадлежит попавший под луч меш.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -715,14 +835,15 @@ _createSurfaceMaterial() {
             topNormals[i * 3 + 1] = 1;
         }
         topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
-        topGeometry.computeBoundingSphere(); // сразу валидная сфера
+        topGeometry.computeBoundingSphere();
 
         const topMaterial = this._createSurfaceMaterial();
 
         const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-topMesh.renderOrder    = POLYGON_RENDER_ORDER.TOP;
-
-        topMesh.frustumCulled = false;
+        topMesh.renderOrder = POLYGON_RENDER_ORDER.TOP;
+        // Bounding sphere валидна → frustum culling безопасен и полезен.
+        topMesh.frustumCulled = true;
+        topMesh.userData.polygon = this;
         this._applyShadowFlags(topMesh);
         this._fillMesh = topMesh;
         this._fillGeometry = topGeometry;
@@ -753,8 +874,9 @@ topMesh.renderOrder    = POLYGON_RENDER_ORDER.TOP;
             const bottomMaterial = this._createSurfaceMaterial();
 
             const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
-            bottomMesh.frustumCulled = false;
+            bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
+            bottomMesh.frustumCulled = true;
+            bottomMesh.userData.polygon = this;
             this._applyShadowFlags(bottomMesh);
             this._bottomMesh = bottomMesh;
             this._bottomGeometry = bottomGeometry;
@@ -805,14 +927,15 @@ bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
             sideGeometry.setIndex(sideIndices);
-            sideGeometry.computeVertexNormals(); // теперь нормали валидны
+            sideGeometry.computeVertexNormals();
             sideGeometry.computeBoundingSphere();
 
             const sideMaterial = this._createSurfaceMaterial();
 
             const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-sideMesh.renderOrder   = POLYGON_RENDER_ORDER.SIDE;
-            sideMesh.frustumCulled = false;
+            sideMesh.renderOrder = POLYGON_RENDER_ORDER.SIDE;
+            sideMesh.frustumCulled = true;
+            sideMesh.userData.polygon = this;
             this._applyShadowFlags(sideMesh);
             this._sideMesh = sideMesh;
             this._sideGeometry = sideGeometry;
@@ -848,15 +971,15 @@ sideMesh.renderOrder   = POLYGON_RENDER_ORDER.SIDE;
 
             const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
 
-const lineMaterial = new THREE.LineBasicMaterial({
-    color: this._strokeColor,
-    opacity: this._strokeOpacity,
-    transparent: true,             // ← было: this._strokeOpacity < 1
-    depthTest: this._depthTest,
-    depthWrite: this._depthWrite
-});
+            const lineMaterial = new THREE.LineBasicMaterial({
+                color: this._strokeColor,
+                opacity: this._strokeOpacity,
+                transparent: this._strokeOpacity < 1,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite
+            });
             const line = new THREE.Line(lineGeometry, lineMaterial);
-line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
+            line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._strokeGeometry = lineGeometry;
             this._strokeMaterial = lineMaterial;
@@ -870,17 +993,17 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
         } else {
             this._strokeGeometry = new LineGeometry();
 
-this._strokeMaterial = new LineMaterial({
-    color: this._strokeColor,
-    linewidth: this._strokeWidth,
-    opacity: this._strokeOpacity,
-    transparent: true,
-    depthTest: this._depthTest,
-    depthWrite: this._depthWrite,
-    resolution: new THREE.Vector2(canvas.width, canvas.height)
-});
+            this._strokeMaterial = new LineMaterial({
+                color: this._strokeColor,
+                linewidth: this._strokeWidth,
+                opacity: this._strokeOpacity,
+                transparent: this._strokeOpacity < 1,
+                depthTest: this._depthTest,
+                depthWrite: this._depthWrite,
+                resolution: new THREE.Vector2(canvas.width, canvas.height)
+            });
             const line = new Line2(this._strokeGeometry, this._strokeMaterial);
-line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
+            line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._group.add(line);
 
@@ -895,91 +1018,31 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
     }
 
     /**
-     * Обрабатывает mousemove для делегированного события.
+     * Применяет новое состояние hover. Вызывается из батчевого raycast'а.
+     * Если состояние не изменилось — ничего не делает.
      *
-     * @param {MouseEvent} event - Событие мыши.
+     * @param {boolean} isHovered - Новое состояние наведения.
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
      * @private
      */
-    _handleMouseMove(event, map) {
-        if (!this._map || this._map !== map) return;
-        const hit = this._raycastPolygon(event, map);
-        if (hit) {
-            if (!this._isHovered) {
-                this._isHovered = true;
-                if (this._onHover) {
-                    this._onHover(true);
-                } else if (this._tooltipText && map.popupManager) {
-                    map.popupManager.show(this, this._tooltipText);
-                }
+    _applyHover(isHovered, map) {
+        if (isHovered === this._isHovered) return;
+        this._isHovered = isHovered;
+
+        if (isHovered) {
+            if (this._onHover) {
+                this._onHover(true);
+            } else if (this._tooltipText && map.popupManager) {
+                map.popupManager.show(this, this._tooltipText);
             }
         } else {
-            if (this._isHovered) {
-                this._isHovered = false;
-                if (this._onHover) {
-                    this._onHover(false);
-                } else if (this._tooltipText && map.popupManager) {
-                    map.popupManager.hide();
-                }
+            if (this._onHover) {
+                this._onHover(false);
+            } else if (this._tooltipText && map.popupManager) {
+                map.popupManager.hide();
             }
         }
-    }
-
-    /**
-     * Обрабатывает click для делегированного события.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @param {Object} map - Экземпляр карты.
-     * @returns {void}
-     * @private
-     */
-    _handleClick(event, map) {
-        if (!this._map || this._map !== map) return;
-        if (!this._raycastPolygon(event, map)) return;
-
-        if (this._onClick) {
-            this._onClick(event, this);
-        } else if (this._tooltipText && map.popupManager) {
-            map.popupManager.show(this, this._tooltipText);
-        }
-    }
-
-    /**
-     * Проверяет, находится ли точка экрана над геометрией полигона.
-     * Использует предварительную проверку bounding sphere.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @param {Object} map - Экземпляр карты.
-     * @returns {boolean} true, если луч пересекает хотя бы один меш полигона.
-     * @private
-     */
-    _raycastPolygon(event, map) {
-        if (!this._group.visible || this._boundingSphereRadius === 0) return false;
-
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        const mouse = new THREE.Vector2(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
-            -((event.clientY - rect.top) / rect.height) * 2 + 1
-        );
-
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(mouse, map.camera);
-
-        const worldCenter = this._tempVec3.copy(this._group.position).add(map.worldGroup.position);
-        this._boundingSphereWorld.set(worldCenter, this._boundingSphereRadius);
-        if (!raycaster.ray.intersectsSphere(this._boundingSphereWorld)) {
-            return false;
-        }
-
-        const objects = [];
-        if (this._fillMesh) objects.push(this._fillMesh);
-        if (this._sideMesh) objects.push(this._sideMesh);
-        if (this._bottomMesh) objects.push(this._bottomMesh);
-        if (objects.length === 0) return false;
-
-        const intersects = raycaster.intersectObjects(objects, false);
-        return intersects.length > 0;
     }
 
     /**
@@ -1034,7 +1097,17 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
     }
 
     /**
-     * Обновляет состояние полигона на каждом кадре: видимость по зуму, высоты и позицию центроида.
+     * Обновляет состояние полигона на каждом кадре: видимость по зуму,
+     * высоты и позицию центроида.
+     *
+     * Оптимизации:
+     *  - `_updateHeights` вызывается только при реальной необходимости:
+     *    либо при изменении позиции мира / зума (для загрузки новых тайлов),
+     *    либо по таймеру — и то только если у карты есть рельеф.
+     *  - Для статичных высот (нет elevation или режим absolute) после
+     *    первого прохода `_updateHeights` мгновенно возвращает false,
+     *    и геометрия больше не перезаписывается.
+     *  - `_updateStroke` вызывается только если высоты реально менялись.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -1083,7 +1156,6 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;
-        const timeExpired = (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
 
         if (worldGroupPosChanged || discreteZoomChanged) {
             this._heightsDirty = true;
@@ -1091,9 +1163,17 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             this._lastDiscreteZoom = map.currentDiscreteZoom;
         }
 
+        // Таймерный пересчёт высот имеет смысл, только если высоты
+        // действительно меняются (есть рельеф и режим clampToGround).
+        // Иначе после первого прохода полигон сам себя зафиксирует
+        // (см. _heightsFinalized внутри _updateHeights).
+        const isDynamicHeight = map.hasElevation && this._altitudeMode === 'clampToGround';
+        const timeExpired = isDynamicHeight
+            && (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
+
         if (this._heightsDirty || timeExpired) {
-            this._updateHeights();
-            this._updateStroke();
+            const changed = this._updateHeights();
+            if (changed) this._updateStroke();
             this._heightsDirty = false;
             this._lastHeightUpdateTime = now;
         }
@@ -1106,19 +1186,28 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
      * После изменения позиций принудительно пересчитывает bounding sphere каждой
      * геометрии — иначе frustum culling отсекает меши, «уехавшие» по Y.
      *
-     * @returns {void}
+     * Возвращает `true`, если реально что-то поменялось. Для случая, когда
+     * высоты не зависят от рельефа (нет elevation у карты или режим absolute),
+     * после первого прохода метод фиксирует состояние и больше не работает.
+     *
+     * @returns {boolean} true, если высоты были пересчитаны.
      * @private
      */
     _updateHeights() {
-        if (!this._fillGeometry || !this._vertices2D.length) return;
+        if (!this._fillGeometry || !this._vertices2D.length) return false;
         const map = this._map;
+
+        // Fast-path: если высоты статичны и уже зафиксированы — не тратим CPU.
+        const isDynamic = map.hasElevation && this._altitudeMode === 'clampToGround';
+        if (!isDynamic && this._heightsFinalized) return false;
+
         const wgPos = map.worldGroup.position;
 
         for (let i = 0; i < this._vertices2D.length; i++) {
             const worldCoord = this._worldCoords[i];
             if (!worldCoord) continue;
             let base = this._altitudeOffset;
-            if (this._altitudeMode === 'clampToGround') {
+            if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
                 const worldZ = worldCoord[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
@@ -1136,7 +1225,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             const worldCoord = this._strokeWorldCoords[i];
             if (!worldCoord) continue;
             let base = this._altitudeOffset;
-            if (this._altitudeMode === 'clampToGround') {
+            if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
                 const worldZ = worldCoord[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
@@ -1151,7 +1240,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             topPos[i * 3 + 1] = this._cachedHeights[i];
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
-        this._fillGeometry.computeBoundingSphere(); // ← критично
+        this._fillGeometry.computeBoundingSphere();
 
         // Нижняя крышка
         if (this._bottomGeometry) {
@@ -1160,7 +1249,7 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
                 bottomPos[i * 3 + 1] = this._cachedHeights[i] - this._height;
             }
             this._bottomGeometry.attributes.position.needsUpdate = true;
-            this._bottomGeometry.computeBoundingSphere(); // ← критично
+            this._bottomGeometry.computeBoundingSphere();
         }
 
         // Боковые стенки
@@ -1185,10 +1274,12 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
                 idx++;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
-            // Пересчитываем нормали и сферу после изменения высот.
             this._sideGeometry.computeVertexNormals();
-            this._sideGeometry.computeBoundingSphere(); // ← критично
+            this._sideGeometry.computeBoundingSphere();
         }
+
+        if (!isDynamic) this._heightsFinalized = true;
+        return true;
     }
 
     /**
@@ -1240,16 +1331,17 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
             this._centroidScreenPos = null;
             return;
         }
-        const wgPos = this._map.worldGroup.position;
+        const map = this._map;
+        const wgPos = map.worldGroup.position;
         const worldX = this._centroidWorld.x + wgPos.x;
         const worldZ = this._centroidWorld.z + wgPos.z;
 
         let worldY = this._altitudeOffset;
-        if (this._altitudeMode === 'clampToGround') {
+        if (this._altitudeMode === 'clampToGround' && map.hasElevation) {
             const now = performance.now();
             if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
-                this._map.ensureTileForPoint(worldX, worldZ);
-                this._cachedCentroidHeight = this._map.getSurfaceHeightAt(worldX, worldZ);
+                map.ensureTileForPoint(worldX, worldZ);
+                this._cachedCentroidHeight = map.getSurfaceHeightAt(worldX, worldZ);
                 this._lastCentroidHeightUpdateTime = now;
             }
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
@@ -1257,11 +1349,11 @@ line.renderOrder       = POLYGON_RENDER_ORDER.STROKE;
         worldY += this._minHeight + (this._extruded ? this._height : 0);
 
         const worldPos = this._tempVec3.set(worldX, worldY + wgPos.y, worldZ);
-        const screenPos = worldPos.clone().project(this._map.camera);
+        const screenPos = worldPos.clone().project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;
         } else {
-            const canvas = this._map.renderer.domElement;
+            const canvas = map.renderer.domElement;
             this._centroidScreenPos = {
                 x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
                 y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight

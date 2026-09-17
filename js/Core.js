@@ -18,9 +18,11 @@ import { PopupManager } from './PopupManager.js';
  *    Удобно для обычного кода: не нужно самостоятельно конвертировать
  *    градусы в метры. View сам преобразует их в метры `options.projection`.
  *
- * 2. `options.center` — координаты [x, z] сразу в метрах проекции
- *    `options.projection`. Используется, когда уже есть готовые метровые
- *    координаты (например, сохранённое состояние карты).
+ * 2. `options.center` — координаты [x, z] сразу в **мировых** метрах проекции
+ *    `options.projection`. Обратите внимание: это world-координаты KrbMap,
+ *    где ось Z направлена на юг (север = −Z). Используйте этот вариант,
+ *    только если у вас уже есть готовые world-координаты (например,
+ *    сохранённое состояние карты или результат `KrbMap#project`).
  *
  * Приоритет: если заданы оба, используется `centerLonLat`, а в консоль
  * выводится предупреждение.
@@ -42,7 +44,8 @@ import { PopupManager } from './PopupManager.js';
  * });
  *
  * @example
- * // Готовые метры Web Mercator (backward-compat)
+ * // Готовые world-метры Web Mercator (backward-compat)
+ * // (Z север = −Z; для Москвы это [4187596, -7509138])
  * const view = new View({ center: [4187596, -7509138], zoom: 3 });
  *
  * @example
@@ -60,10 +63,9 @@ export class View {
      * @param {Object} options - Объект параметров представления.
      * @param {Array.<number>} [options.centerLonLat] - Центр карты в WGS84
      *     [долгота, широта] в градусах. Взаимоисключающий с `options.center`.
-     * @param {Array.<number>} [options.center] - Центр карты в метрах проекции
-     *     `options.projection` — [x, z]. Взаимоисключающий с `options.centerLonLat`.
-     *     Обратите внимание: ось «y» мира карты — это Z (север = отрицательные Z),
-     *     поэтому вторым элементом идёт Z, а не «y из мира».
+     * @param {Array.<number>} [options.center] - Центр карты в **мировых**
+     *     метрах проекции `options.projection` — [x, z]. Ось Z направлена
+     *     на юг (север = отрицательные Z). Взаимоисключающий с `options.centerLonLat`.
      * @param {string} [options.projection='EPSG:3857'] - Код проекции, в метрах
      *     которой хранится `this.center`. Должен совпадать с `options.projection`,
      *     передаваемым в `KrbMap`. По умолчанию Web Mercator (EPSG:3857) —
@@ -102,23 +104,29 @@ export class View {
         if (options.centerLonLat) {
             /**
              * Центр карты в WGS84 — [долгота, широта] в градусах.
-             * Ровно то, что было передано (или восстановлено из `center`).
+             * Ровно то, что было передано.
              *
              * @type {Array.<number>}
              */
             this.centerLonLat = options.centerLonLat.slice();
 
             /**
-             * Центр карты в метрах проекции `this.projection` — [x, z].
-             * Обратите внимание: вторая координата — Z (север = −Z),
-             * а не «Y» из мира карты.
+             * Центр карты в **мировых** метрах проекции `this.projection` — [x, z].
+             * Обратите внимание: вторая координата — Z, а не «Y из мира».
+             * Север = отрицательные Z (для EPSG:3857/3395).
+             *
+             * ВАЖНО: `Projection.fromLonLat` возвращает стандартные
+             * CRS-координаты (Y направлен на север), а мир карты использует
+             * Z-на-юг, поэтому знак Y инвертируется.
              *
              * @type {Array.<number>}
              */
-            this.center = projection.fromLonLat(this.centerLonLat);
+            const [x, y] = projection.fromLonLat(this.centerLonLat);
+            this.center = [x, -y];
         } else if (options.center) {
             /**
-             * Центр карты в метрах проекции `this.projection` — [x, z].
+             * Центр карты в **мировых** метрах проекции `this.projection` — [x, z].
+             * Север = отрицательные Z.
              *
              * @type {Array.<number>}
              */
@@ -127,10 +135,11 @@ export class View {
             /**
              * Обратно вычисленные WGS84-координаты центра — [lon, lat].
              * Удобно для UI/отладки; всегда согласованы с `this.center`.
+             * Из world-Z восстанавливаем стандартный CRS-Y (флип знака).
              *
              * @type {Array.<number>}
              */
-            this.centerLonLat = projection.toLonLat(this.center);
+            this.centerLonLat = projection.toLonLat([this.center[0], -this.center[1]]);
         } else {
             throw new Error(
                 'View: options.center или options.centerLonLat обязательны'
@@ -154,6 +163,12 @@ export class View {
  * полигоны и т. п.) задаются в своей системе координат — по умолчанию WGS84 —
  * и преобразуются в мир карты через {@link KrbMap#project}.
  *
+ * ВАЖНО про конвенцию мира:
+ *  - Мир карты использует трёхмерную систему координат Three.js: X, Y (высота), Z.
+ *  - Ось Z направлена на юг (север = −Z). Это отличается от стандартной
+ *    конвенции проекций Меркатора, где Y направлен на север. Флип знака
+ *    выполняется автоматически в {@link KrbMap#project} / {@link KrbMap#unproject}.
+ *
  * @example
  * const map = new KrbMap({
  *     target: 'map',
@@ -164,7 +179,7 @@ export class View {
  *             heightScale: 1.0
  *         }
  *     ],
- *     view: new View({ center: [0, 0], zoom: 3 }),
+ *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 3 }),
  *     projection: 'EPSG:3857',
  *     inputCRS: 'EPSG:4326',
  *     R: 6378137,
@@ -251,6 +266,15 @@ export class KrbMap {
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
 
+        // Предупреждение о рассогласовании проекций View и Map.
+        if (this.view.projection && this.view.projection !== this.projection.code) {
+            console.warn(
+                `KrbMap: view.projection (${this.view.projection}) не совпадает ` +
+                `с map.projection (${this.projection.code}). ` +
+                `Камера может смотреть не туда.`
+            );
+        }
+
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
         this.MAX_MERCATOR = this.WORLD_SIZE / 2;
@@ -299,12 +323,12 @@ export class KrbMap {
         this._tempMouse = new THREE.Vector2();
         // --------------------------------------------------
 
-        const [cx, cy] = this.view.center;
+        const [cx, cz] = this.view.center;
         const initialZoom = this.view.zoom;
         const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
         const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
 
-        this.controls.target.set(cx, 0, cy);
+        this.controls.target.set(cx, 0, cz);
         const dist = this.getTargetDistanceForZoom(initialZoom);
 
         const sinP = Math.sin(initialPitchRad);
@@ -312,7 +336,7 @@ export class KrbMap {
         this.camera.position.set(
             cx - dist * sinP * Math.sin(initialBearingRad),
             dist * cosP,
-            cy + dist * sinP * Math.cos(initialBearingRad)
+            cz + dist * sinP * Math.cos(initialBearingRad)
         );
         this.controls.update();
 
@@ -504,10 +528,15 @@ export class KrbMap {
      * Преобразует координаты из внешней системы координат во внутренние
      * мировые координаты карты (метры проекции `this.projection`).
      *
+     * Возвращаемые координаты — в «мировой» конвенции KrbMap: ось Z
+     * направлена на юг (север = −Z). Входные координаты — в стандартной
+     * конвенции CRS (для EPSG:3857/3395 Y направлен на север); знак Y
+     * автоматически инвертируется.
+     *
      * @param {Array.<number>} coord - Координаты [x, y] в СК `fromCrs`.
      * @param {Projection|string} [fromCrs=this.inputCRS] - Проекция входных данных
      *     (объект Projection или код вроде 'EPSG:4326').
-     * @returns {Array.<number>} Мировые координаты [x, z].
+     * @returns {Array.<number>} Мировые координаты [x, z] (север = −Z).
      *
      * @example
      * const [x, z] = map.project([37.6173, 55.7558]);           // WGS84 → мир
@@ -515,14 +544,22 @@ export class KrbMap {
      */
     project(coord, fromCrs = this.inputCRS) {
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
-        if (src === this.projection) return coord.slice();
-        // Через WGS84: src → lon/lat → map.projection
+        if (src === this.projection) {
+            // Пользователь дал координаты в стандартной CRS проекции карты —
+            // остаётся только перевернуть Y (север) в world-Z (юг).
+            return [coord[0], -coord[1]];
+        }
+        // Через WGS84: src → lon/lat → this.projection → world.
         const lonLat = src.toLonLat(coord);
-        return this.projection.fromLonLat(lonLat);
+        const [x, y] = this.projection.fromLonLat(lonLat);
+        return [x, -y];
     }
 
     /**
      * Преобразует мировые координаты карты во внешнюю систему координат.
+     *
+     * Входные `worldCoord` — в «мировой» конвенции (север = −Z).
+     * Возвращаемые — в стандартной конвенции CRS (Y направлен на север).
      *
      * @param {Array.<number>} worldCoord - Мировые координаты [x, z].
      * @param {Projection|string} [toCrs=this.inputCRS] - Целевая проекция.
@@ -534,8 +571,10 @@ export class KrbMap {
      */
     unproject(worldCoord, toCrs = this.inputCRS) {
         const dst = typeof toCrs === 'string' ? Projections.get(toCrs) : toCrs;
-        if (dst === this.projection) return worldCoord.slice();
-        const lonLat = this.projection.toLonLat(worldCoord);
+        // [x, world-Z] → [x, CRS-Y] (флип знака).
+        const std = [worldCoord[0], -worldCoord[1]];
+        if (dst === this.projection) return std;
+        const lonLat = this.projection.toLonLat(std);
         return dst.fromLonLat(lonLat);
     }
 
@@ -544,21 +583,22 @@ export class KrbMap {
      *
      * @param {number} lon - Долгота в градусах.
      * @param {number} lat - Широта в градусах.
-     * @returns {Array.<number>} Мировые координаты [x, z].
+     * @returns {Array.<number>} Мировые координаты [x, z] (север = −Z).
      */
     projectLonLat(lon, lat) {
-        return this.projection.fromLonLat([lon, lat]);
+        const [x, y] = this.projection.fromLonLat([lon, lat]);
+        return [x, -y];
     }
 
     /**
      * Шорткат: мировые координаты карты → пара (lon, lat) в WGS84.
      *
      * @param {number} x - Мировая координата X.
-     * @param {number} z - Мировая координата Z.
+     * @param {number} z - Мировая координата Z (север = −Z).
      * @returns {Array.<number>} [долгота, широта] в градусах.
      */
     unprojectToLonLat(x, z) {
-        return this.projection.toLonLat([x, z]);
+        return this.projection.toLonLat([x, -z]);
     }
 
     /**
@@ -1393,11 +1433,11 @@ export class KrbMap {
      * @returns {void}
      */
     moveCameraTo(lon, lat) {
-        const [cx, cy] = this.projectLonLat(lon, lat);
+        const [cx, cz] = this.projectLonLat(lon, lat);
         const z = this.currentDiscreteZoom;
         const worldOffset = this.worldGroup.position;
         const targetX = cx + worldOffset.x;
-        const targetZ = cy + worldOffset.z;
+        const targetZ = cz + worldOffset.z;
 
         this.controls.target.set(targetX, 0, targetZ);
         this.camera.position.set(targetX, this.getTargetDistanceForZoom(z), targetZ);
@@ -1457,9 +1497,9 @@ export class KrbMap {
         const startPos = this._tempVec3b.copy(this.camera.position);
         const startZoom = this.continuousZoom;
 
-        const [cx, cy] = this.projectLonLat(lon, lat);
+        const [cx, cz] = this.projectLonLat(lon, lat);
         const worldOffset = this.worldGroup.position;
-        const endTarget = this._tempVec3c.set(cx + worldOffset.x, 0, cy + worldOffset.z);
+        const endTarget = this._tempVec3c.set(cx + worldOffset.x, 0, cz + worldOffset.z);
 
         const currentDir = this._tempDir.subVectors(startPos, startTarget).normalize();
         const endZoom = targetZoom !== null ? targetZoom : startZoom;

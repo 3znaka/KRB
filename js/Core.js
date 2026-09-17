@@ -286,6 +286,8 @@ export class KrbMap {
         this.initTouchState();
 
         // --- Временные объекты для уменьшения аллокаций ---
+        // Именованные слоты — для удержания между кадрами в анимационных циклах.
+        // Пул ниже — для короткоживущих операций в hot path.
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();
@@ -293,6 +295,22 @@ export class KrbMap {
         this._tempTarget = new THREE.Vector3();
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
+        // --------------------------------------------------
+
+        // --- Пул временных векторов для hot-path операций ---
+        // 16 слотов на каждый тип — компромисс между безопасностью и памятью.
+        // Слоты циклически переиспользуются (idx & 15), поэтому полученный
+        // вектор нужно использовать немедленно и не удерживать ссылку между
+        // вызовами getVec3()/getVec2().
+        //
+        // Пример:
+        //   const v = map.getVec3().set(x, y, z);
+        //   doSomething(v);  // ← сразу используем
+        this._tempPool = {
+            v3: Array.from({ length: 16 }, () => new THREE.Vector3()),
+            v2: Array.from({ length: 16 }, () => new THREE.Vector2()),
+            idx: 0
+        };
         // --------------------------------------------------
 
         const [cx, cz] = this.view.center;
@@ -347,6 +365,45 @@ export class KrbMap {
 
         this.animate();
         requestAnimationFrame(() => initUI(this));
+    }
+
+    /**
+     * Возвращает временный {@link THREE.Vector3} из пула карты.
+     *
+     * Слоты циклически переиспользуются (16 штук), поэтому полученный
+     * вектор нужно использовать немедленно и **не удерживать** ссылку
+     * между вызовами: следующий вызов `getVec3()` через 16 итераций
+     * вернёт тот же объект.
+     *
+     * Предназначен для hot-path операций: позиционирование объектов,
+     * промежуточные вычисления в `_update`, raycast-вспомогательные
+     * векторы и т.п. Если вектор нужно удержать между кадрами — заведите
+     * именованное поле класса, а не берите из пула.
+     *
+     * @returns {THREE.Vector3} Временный вектор.
+     *
+     * @example
+     * const worldPos = map.getVec3().set(x, y, z);
+     * map.camera.lookAt(worldPos);
+     */
+    getVec3() {
+        return this._tempPool.v3[this._tempPool.idx++ & 15];
+    }
+
+    /**
+     * Возвращает временный {@link THREE.Vector2} из пула карты.
+     *
+     * Семантика полностью аналогична {@link KrbMap#getVec3}: слоты
+     * циклически переиспользуются, ссылку нельзя удерживать.
+     *
+     * @returns {THREE.Vector2} Временный двумерный вектор.
+     *
+     * @example
+     * const ndc = map.getVec2().set(ndcX, ndcY);
+     * raycaster.setFromCamera(ndc, map.camera);
+     */
+    getVec2() {
+        return this._tempPool.v2[this._tempPool.idx++ & 15];
     }
 
     /**

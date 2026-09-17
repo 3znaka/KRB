@@ -1,12 +1,16 @@
 /**
  * Модуль Area3D — 3D-объект, привязанный к площадной геометрии (полигону).
- * Позволяет размещать GLB-модели или примитивы внутри четырёхугольного полигона
- * с возможностью растягивания/вписывания, поворота и учётом рельефа.
+ * Позволяет размещать GLB-модели или примитивы внутри четырёхугольного
+ * полигона с возможностью растягивания/вписывания, поворота и учётом рельефа.
  *
  * Координаты колец задаются в системе координат `options.crs`.
  * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
  * Внутри карты координаты автоматически преобразуются в метры проекции
  * карты (`map.projection`) через {@link KrbMap#project}.
+ *
+ * Взаимодействие с указателем (hover / click / tooltip) делегировано
+ * {@link InteractionManager} — единому менеджеру карты. Area3D лишь
+ * регистрирует колбэки при `_attach` и снимает регистрацию в `remove`.
  *
  * @example
  * const area = new Area3D({
@@ -21,43 +25,56 @@
  * });
  * area.addTo(map);
  */
+
 import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 
+/**
+ * Render order, при котором Area3D рисуется поверх тайлов любого уровня.
+ *
+ * @private
+ * @type {number}
+ */
 const AREA3D_RENDER_ORDER = 1000;
 
+/**
+ * 3D-объект на площадной геометрии (полигоне).
+ *
+ * Отличается от {@link Marker3D} тем, что модель/примитив не привязывается
+ * к точке, а «растягивается» или «вписывается» в четырёхугольный полигон,
+ * повёрнутый вдоль его самой длинной стороны. Поддерживает GLB-модели
+ * (с анимациями) и примитивы (box/sphere/cylinder/cone).
+ */
 export class Area3D {
-    static _idCounter = 0;
-    static _activeAreas = new Set();
-    static _hoveredArea = null;
-    static _pressedArea = null;
-    static _pressStart = null;
-    static _raycaster = new THREE.Raycaster();
-    static _mapEventHandlers = new WeakMap();
-
     /**
      * Создаёт Area3D.
      *
      * @param {Object} options - Настройки.
-     * @param {Array<Array<[number,number]>>} options.rings - Кольца полигона в СК `options.crs`
-     *     (по умолчанию — [долгота, широта] в градусах WGS84). Первое кольцо — внешний контур,
-     *     минимум 3 точки.
-     * @param {string} [options.crs] - Код СК координат `rings` (например, 'EPSG:4326',
-     *     'EPSG:3857', 'EPSG:32637'). Если не указан — используется `map.inputCRS`.
-     *     Перед созданием объекта соответствующая проекция должна быть зарегистрирована
-     *     в `Projections` (см. `Projections.ensure`).
-     * @param {string} [options.modelUrl] - URL GLB-модели (если не задан — строится примитив).
-     * @param {string} [options.primitiveType='box'] - Тип примитива: 'box', 'sphere', 'cylinder', 'cone'.
+     * @param {Array<Array<[number,number]>>} options.rings - Кольца полигона
+     *     в СК `options.crs` (по умолчанию — [долгота, широта] в градусах WGS84).
+     *     Первое кольцо — внешний контур, минимум 3 точки.
+     * @param {string} [options.crs] - Код СК координат `rings` (например,
+     *     'EPSG:4326', 'EPSG:3857', 'EPSG:32637'). Если не указан —
+     *     используется `map.inputCRS`. Перед созданием объекта соответствующая
+     *     проекция должна быть зарегистрирована в `Projections`.
+     * @param {string} [options.modelUrl] - URL GLB-модели (если не задан —
+     *     строится примитив).
+     * @param {string} [options.primitiveType='box'] - Тип примитива:
+     *     'box', 'sphere', 'cylinder', 'cone'.
      * @param {number|number[]} [options.size] - Размеры примитива.
-     * @param {string} [options.fit='stretch'] - Режим вписывания модели в полигон: 'stretch' или 'contain'.
+     * @param {string} [options.fit='stretch'] - Режим вписывания модели
+     *     в полигон: 'stretch' или 'contain'.
      * @param {number} [options.rotate=0] - Поворот модели (0-3, кратно 90°).
-     * @param {number} [options.altitude=0] - Высота над поверхностью (для clampToGround) или абсолютная (для absolute).
+     * @param {number} [options.altitude=0] - Высота над поверхностью
+     *     (для clampToGround) или абсолютная (для absolute).
      * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты.
-     * @param {[number, number, number]} [options.anchor=[0.5,0,0.5]] - Точка привязки.
+     * @param {[number, number, number]} [options.anchor=[0.5,0,0.5]] -
+     *     Точка привязки.
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум видимости.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум видимости.
-     * @param {boolean} [options.playAnimation=true] - Воспроизводить ли встроенные анимации GLB.
+     * @param {boolean} [options.playAnimation=true] - Воспроизводить ли
+     *     встроенные анимации GLB.
      * @param {string|number} [options.color=0x3388ff] - Цвет примитива.
      * @param {boolean} [options.depthTest=true] - Тест глубины.
      * @param {boolean} [options.depthWrite=true] - Запись глубины.
@@ -65,25 +82,32 @@ export class Area3D {
      * @param {Object} [options.titleStyle] - CSS-стили подписи.
      * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум подписи.
      * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум подписи.
-     * @param {string} [options.titlePlacement='top'] - Положение подписи: 'top', 'bottom', 'left', 'right'.
-     * @param {string} [options.titleAlign] - Горизонтальное выравнивание подписи (по умолчанию зависит от placement).
-     * @param {[number, number]} [options.titleOffset] - Смещение подписи в пикселях (по умолчанию зависит от placement).
+     * @param {string} [options.titlePlacement='top'] - Положение подписи:
+     *     'top', 'bottom', 'left', 'right'.
+     * @param {string} [options.titleAlign] - Горизонтальное выравнивание
+     *     подписи (по умолчанию зависит от placement).
+     * @param {[number, number]} [options.titleOffset] - Смещение подписи
+     *     в пикселях (по умолчанию зависит от placement).
      * @param {string} [options.tooltip=''] - HTML-текст всплывающей подсказки.
      * @param {Function} [options.onClick] - Обработчик клика.
      * @param {Function} [options.onHover] - Обработчик наведения.
+     * @throws {Error} Если `options.rings` не задан или первое кольцо
+     *     содержит менее 3 точек.
      */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }
 
-        this._rings = options.rings;
+        /** @private @type {Array<Array<[number,number]>>} */ this._rings = options.rings;
+
         /**
          * Код СК колец; null — использовать `map.inputCRS`.
          * @private
          * @type {string|null}
          */
         this._crsCode = options.crs ?? null;
+
         /**
          * Зарезолвленный объект Projection. Устанавливается в `_attach`.
          * @private
@@ -91,94 +115,165 @@ export class Area3D {
          */
         this._crs = null;
 
-        this._modelUrl = options.modelUrl || null;
-        this._primitiveType = options.primitiveType || 'box';
-        this._size = options.size || null;
-        this._fit = options.fit || 'stretch';
-        this._rotate = options.rotate || 0;
-        this._altitude = options.altitude ?? 0;
-        this._altitudeMode = options.altitudeMode || 'clampToGround';
-        this._anchor = options.anchor || [0.5, 0, 0.5];
-        this._minZoom = options.minZoom ?? -Infinity;
-        this._maxZoom = options.maxZoom ?? Infinity;
-        this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
-        this._color = options.color || 0x3388ff;
-        this._depthTest = options.depthTest ?? true;
-        this._depthWrite = options.depthWrite ?? true;
+        /** @private @type {string|null} */  this._modelUrl = options.modelUrl || null;
+        /** @private @type {string} */       this._primitiveType = options.primitiveType || 'box';
+        /** @private @type {number|number[]|null} */ this._size = options.size || null;
+        /** @private @type {string} */       this._fit = options.fit || 'stretch';
+        /** @private @type {number} */       this._rotate = options.rotate || 0;
+        /** @private @type {number} */       this._altitude = options.altitude ?? 0;
+        /** @private @type {string} */       this._altitudeMode = options.altitudeMode || 'clampToGround';
+        /** @private @type {[number,number,number]} */ this._anchor = options.anchor || [0.5, 0, 0.5];
+        /** @private @type {number} */       this._minZoom = options.minZoom ?? -Infinity;
+        /** @private @type {number} */       this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private @type {boolean} */      this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
+        /** @private @type {string|number} */ this._color = options.color || 0x3388ff;
+        /** @private @type {boolean} */      this._depthTest = options.depthTest ?? true;
+        /** @private @type {boolean} */      this._depthWrite = options.depthWrite ?? true;
 
-        this._title = options.title || '';
-        this._titleStyle = options.titleStyle || {};
-        this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        this._titlePlacement = options.titlePlacement || 'top';
-        this._titleAlign = options.titleAlign || this._defaultTitleAlign();
-        this._titleOffset = options.titleOffset || this._defaultTitleOffset();
+        // Подпись
+        /** @private @type {string} */       this._title = options.title || '';
+        /** @private @type {Object} */       this._titleStyle = options.titleStyle || {};
+        /** @private @type {number} */       this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        /** @private @type {number} */       this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        /** @private @type {string} */       this._titlePlacement = options.titlePlacement || 'top';
+        /** @private @type {string} */       this._titleAlign = options.titleAlign || this._defaultTitleAlign();
+        /** @private @type {[number, number]} */ this._titleOffset = options.titleOffset || this._defaultTitleOffset();
 
-        this._tooltipText = options.tooltip || '';
-        this._onClick = options.onClick || null;
-        this._onHover = options.onHover || null;
+        // События
+        /** @private @type {string} */       this._tooltipText = options.tooltip || '';
+        /** @private @type {Function|null} */ this._onClick = options.onClick || null;
+        /** @private @type {Function|null} */ this._onHover = options.onHover || null;
 
-        this._map = null;
-        this._layer = null;
-        this._group = new THREE.Group();
-        this._modelContainer = new THREE.Group();
+        // Карта и слои
+        /** @private @type {import('./KrbMap.js').KrbMap|null} */ this._map = null;
+        /** @private @type {Layer|null} */   this._layer = null;
+
+        // Иерархия объектов: group → modelContainer → object3D
+        /** @private @type {THREE.Group} */  this._group = new THREE.Group();
+        /** @private @type {THREE.Group} */  this._modelContainer = new THREE.Group();
         this._group.add(this._modelContainer);
-        this._object3D = null;
-        this._mixer = null;
-        this._mixerClock = null;
-        this._isModelLoading = false;
-        this._modelPromise = null;
-        this._originalModelSize = null;
-        this._originalModelScale = null;
-        this._originalModelPosition = null;
-        this._modelAnchorOffset = new THREE.Vector3();
 
-        this._centroidWorld = new THREE.Vector3();
-        this._polygonAngle = 0;
-        this._polygonWidth = 0;
-        this._polygonDepth = 0;
-        this._worldCoords = [];
+        /** @private @type {THREE.Object3D|null} */ this._object3D = null;
 
-        this._cachedSurfaceHeight = 0;
-        this._lastHeightUpdateTime = 0;
-        this._heightUpdateInterval = 500;
-        this._lastWorldGroupPos = new THREE.Vector3();
+        // Анимации GLB
+        /** @private @type {THREE.AnimationMixer|null} */ this._mixer = null;
+        /** @private @type {THREE.Clock|null} */          this._mixerClock = null;
 
+        /** @private @type {boolean} */      this._isModelLoading = false;
+        /** @private @type {Promise<void>|null} */ this._modelPromise = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelSize = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelScale = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelPosition = null;
+
+        // Геометрические параметры полигона (мировые метры)
+        /** @private @type {THREE.Vector3} */ this._centroidWorld = new THREE.Vector3();
+        /** @private @type {number} */       this._polygonAngle = 0;
+        /** @private @type {number} */       this._polygonWidth = 0;
+        /** @private @type {number} */       this._polygonDepth = 0;
+        /** @private @type {Array<[number, number]>} */ this._worldCoords = [];
+
+        // Кэш высоты рельефа
+        /** @private @type {number} */       this._cachedSurfaceHeight = 0;
+        /** @private @type {number} */       this._lastHeightUpdateTime = 0;
+        /** @private @type {number} */       this._heightUpdateInterval = 500;
+        /** @private @type {THREE.Vector3} */ this._lastWorldGroupPos = new THREE.Vector3();
+
+        // Нормализуем rotate к 0..3.
         this._rotate = Math.min(3, Math.max(0, Math.floor(this._rotate)));
 
-        /**
-         * Флаг «мобильного» устройства. Определяется в `_attach` при привязке
-         * к карте (а не при загрузке модуля) — чтобы корректно реагировать на
-         * устройства с гибридным вводом и не «залипать» на устаревшем значении.
-         * @private
-         * @type {boolean}
-         */
-        this._isMobile = false;
+        // Экранная позиция подписи (кэшируется на время одного кадра).
+        /** @private @type {{x: number, y: number}|null} */ this._centroidScreenPos = null;
+        /** @private @type {Object|null} */  this._textLabel = null;
 
-        if (this._onClick || this._onHover || this._tooltipText) {
-            Area3D._activeAreas.add(this);
-        }
+        // Вспомогательные поля для InteractionManager
+        /**
+         * Радиус bounding-сферы в мировых единицах. Вычисляется в
+         * `_recomputeBoundingRadius` после сборки/загрузки модели.
+         * @private
+         * @type {number}
+         */
+        this._boundingRadius = 0;
+
+        /**
+         * Смещение центра bounding-сферы по Y в локальных координатах
+         * группы `_group`. Обычно ≈ половина высоты модели.
+         * @private
+         * @type {number}
+         */
+        this._boundingCenterYLocal = 0;
+
+        /**
+         * Переиспользуемый вектор мирового центра bounding-сферы.
+         * Каждый вызов `getBoundingSphere` пишет сюда актуальное значение
+         * и возвращает ссылку на этот же объект.
+         * @private
+         * @type {THREE.Vector3}
+         */
+        this._boundingSphereWorldCenter = new THREE.Vector3();
+
+        /**
+         * Кэш массива мешей для raycast. Пересобирается при смене `_object3D`.
+         * @private
+         * @type {THREE.Object3D[]|null}
+         */
+        this._raycastMeshesCache = null;
+
+        /**
+         * Функция отмены регистрации в `map.interaction`.
+         * @private
+         * @type {(() => void)|null}
+         */
+        this._unregisterInteraction = null;
+
+        /**
+         * Переиспользуемый Box3 для `_updateScreenPosition`.
+         * @private
+         * @type {THREE.Box3}
+         */
+        this._tempBox = new THREE.Box3();
     }
 
+    /**
+     * Возвращает горизонтальное выравнивание подписи по умолчанию
+     * для текущего `titlePlacement`.
+     *
+     * @private
+     * @returns {string} 'left' | 'center' | 'right'
+     */
     _defaultTitleAlign() {
         switch (this._titlePlacement) {
-            case 'top': case 'bottom': return 'center';
-            case 'left': return 'right';
-            case 'right': return 'left';
-            default: return 'center';
+            case 'top':
+            case 'bottom': return 'center';
+            case 'left':   return 'right';
+            case 'right':  return 'left';
+            default:       return 'center';
         }
     }
 
+    /**
+     * Возвращает смещение подписи по умолчанию (в пикселях)
+     * для текущего `titlePlacement`.
+     *
+     * @private
+     * @returns {[number, number]}
+     */
     _defaultTitleOffset() {
         switch (this._titlePlacement) {
-            case 'top': return [0, -10];
+            case 'top':    return [0, -10];
             case 'bottom': return [0, 10];
-            case 'left': return [-10, 0];
-            case 'right': return [10, 0];
-            default: return [0, -10];
+            case 'left':   return [-10, 0];
+            case 'right':  return [10, 0];
+            default:       return [0, -10];
         }
     }
 
+    /**
+     * Создаёт персональный слой, добавляет его на карту и помещает в него
+     * данный Area3D.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @returns {Area3D} this
+     */
     addTo(map) {
         if (this._map) this.remove();
         const personalLayer = new Layer();
@@ -187,50 +282,18 @@ export class Area3D {
         return this;
     }
 
-    remove() {
-        if (this._mixer) {
-            this._mixer.stopAllAction();
-            this._mixer = null;
-            this._mixerClock = null;
-        }
-        if (this._group) {
-            this._group.parent?.remove(this._group);
-            if (this._object3D) {
-                this._object3D.traverse(child => {
-                    if (child.isMesh) {
-                        child.geometry?.dispose();
-                        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
-                        else child.material?.dispose();
-                    }
-                });
-                this._object3D = null;
-            }
-        }
-        Area3D._activeAreas.delete(this);
-        if (Area3D._hoveredArea === this) Area3D._hoveredArea = null;
-        if (Area3D._pressedArea === this) Area3D._pressedArea = null;
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        if (this._layer) {
-            this._layer._removeRef(this);
-            this._layer = null;
-        }
-        this._map = null;
-        this._crs = null;
-    }
-
+    /**
+     * Внутренняя привязка Area3D к карте и слою.
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @param {Layer} layer - Слой-владелец.
+     */
     _attach(map, layer) {
         if (this._map === map && this._layer === layer) return;
         this.remove();
         this._map = map;
         this._layer = layer;
-
-        // Определяем «мобильность» в момент привязки к карте, а не при
-        // загрузке модуля: matchMedia учитывает актуальное состояние
-        // устройства (гибридные ноутбуки, изменения при повороте и т.п.).
-        this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
         // Резолвим проекцию Area3D: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
@@ -252,16 +315,97 @@ export class Area3D {
             this._textLabel = map.textManager.addLabel(this);
         }
 
-        this._registerGlobalEvents(map);
+        this._registerInteraction(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
     }
 
+    /**
+     * Регистрирует Area3D в общем InteractionManager карты.
+     *
+     * Если у объекта нет ни `onClick`, ни `onHover`, ни `tooltip` —
+     * регистрация не выполняется.
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
+    _registerInteraction(map) {
+        if (!map.interaction || typeof map.interaction.register !== 'function') return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (!this._onClick && !this._onHover && !this._tooltipText) return;
+
+        const callbacks = {
+            getMeshes: () => this._getRaycastMeshes(),
+            getBoundingSphere: () => {
+                if (this._boundingRadius <= 0) return null;
+                const wgPos = map.worldGroup.position;
+                this._boundingSphereWorldCenter.set(
+                    this._group.position.x + wgPos.x,
+                    this._group.position.y + wgPos.y + this._boundingCenterYLocal,
+                    this._group.position.z + wgPos.z
+                );
+                return {
+                    center: this._boundingSphereWorldCenter,
+                    radius: this._boundingRadius
+                };
+            },
+            isVisible: () => this._group.visible
+        };
+
+        // Пользовательский onHover имеет приоритет над tooltip.
+        if (this._onHover) {
+            callbacks.onHover = (isHovered) => this._onHover(isHovered);
+        } else if (this._tooltipText) {
+            callbacks.getTooltip = () => this._tooltipText;
+        }
+
+        if (this._onClick) {
+            callbacks.onClick = (event) => this._onClick(event, this);
+        }
+
+        this._unregisterInteraction = map.interaction.register(this, callbacks);
+    }
+
+    /**
+     * Возвращает массив мешей для raycast.
+     *
+     * Возвращает закэшированный массив (пересобирается при смене `_object3D`).
+     * Возвращаемый массив не должен мутироваться вызывающей стороной.
+     *
+     * @private
+     * @returns {THREE.Object3D[]} Массив мешей (может быть пустым).
+     */
+    _getRaycastMeshes() {
+        if (this._raycastMeshesCache) return this._raycastMeshesCache;
+        if (!this._object3D) return [];
+        const meshes = [];
+        if (this._object3D.isMesh) {
+            meshes.push(this._object3D);
+        } else {
+            this._object3D.traverse((child) => {
+                if (child.isMesh) meshes.push(child);
+            });
+        }
+        this._raycastMeshesCache = meshes;
+        return meshes;
+    }
+
+    /**
+     * Вычисляет параметры полигона: центроид, направление длинной стороны,
+     * ширину и глубину в системе координат, выровненной по длинной стороне.
+     * Результаты сохраняются в поля `_centroidWorld`, `_polygonAngle`,
+     * `_polygonWidth`, `_polygonDepth`.
+     *
+     * @private
+     */
     _calculatePolygonParams() {
         const outerRing = this._rings[0];
         this._worldCoords.length = 0;
 
         let sumX = 0, sumZ = 0;
-        let uniquePoints = [];
+        const uniquePoints = [];
         for (let i = 0; i < outerRing.length; i++) {
             // Координата кольца → метры проекции карты.
             const [absX, absZ] = this._map.project(outerRing[i], this._crs);
@@ -311,6 +455,12 @@ export class Area3D {
         this._polygonDepth = maxZ - minZ;
     }
 
+    /**
+     * Создаёт примитив (Mesh) по заданным параметрам и вписывает его
+     * в полигон в соответствии с `fit`.
+     *
+     * @private
+     */
     _createPrimitive() {
         let [w, h, d] = this._normalizeSize(this._size);
         if (this._fit === 'stretch') {
@@ -328,10 +478,11 @@ export class Area3D {
 
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
-            case 'sphere': geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
+            case 'sphere':   geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
             case 'cylinder': geometry = new THREE.CylinderGeometry(w / 2, w / 2, h, 32); break;
-            case 'cone': geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
-            case 'box': default: geometry = new THREE.BoxGeometry(w, h, d); break;
+            case 'cone':     geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
+            case 'box':
+            default:         geometry = new THREE.BoxGeometry(w, h, d); break;
         }
         const material = new THREE.MeshStandardMaterial({
             color: this._color,
@@ -344,18 +495,27 @@ export class Area3D {
         this._object3D = mesh;
         this._modelContainer.add(mesh);
         this._applyModelTransform();
+
+        // Модель сменилась — кэш мешей невалиден.
+        this._raycastMeshesCache = null;
     }
 
+    /**
+     * Асинхронно загружает GLB-модель и добавляет её в `_modelContainer`.
+     *
+     * @private
+     * @returns {Promise<void>} Промис завершения загрузки.
+     */
     async _loadModel() {
         if (this._modelPromise) return this._modelPromise;
         this._modelPromise = (async () => {
             try {
                 const loader = new GLTFLoader();
 
-                // Настройка DRACOLoader для поддержки сжатых моделей
+                // Настройка DRACOLoader для поддержки сжатых моделей.
                 const dracoLoader = new DRACOLoader();
                 dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
-                dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
+                dracoLoader.setDecoderConfig({ type: 'wasm' });
                 loader.setDRACOLoader(dracoLoader);
 
                 const gltf = await loader.loadAsync(this._modelUrl);
@@ -374,7 +534,7 @@ export class Area3D {
                 this._originalModelScale = model.scale.clone();
                 this._originalModelPosition = model.position.clone();
 
-                model.traverse(child => {
+                model.traverse((child) => {
                     if (child.isMesh) {
                         child.renderOrder = AREA3D_RENDER_ORDER;
                         child.castShadow = true;
@@ -389,6 +549,9 @@ export class Area3D {
                 this._modelContainer.add(model);
                 this._applyModelTransform();
                 this._isModelLoading = false;
+
+                // Модель сменилась — кэш мешей невалиден.
+                this._raycastMeshesCache = null;
             } catch (err) {
                 console.warn('Area3D: GLB loading failed:', err);
                 this._isModelLoading = false;
@@ -397,19 +560,34 @@ export class Area3D {
         return this._modelPromise;
     }
 
+    /**
+     * Применяет к объекту трансформации: масштаб (по `fit` и `size`),
+     * поворот по длинной стороне полигона, anchor-offset.
+     *
+     * Работает одинаково для примитивов и GLB. Порядок операций:
+     *  1. Сброс position/scale/rotation.
+     *  2. Временное отсоединение модели для честного расчёта bbox в локальных
+     *     координатах (без родителя).
+     *  3. Применение масштаба по `fit` и `size`.
+     *  4. Применение поворота вокруг Y.
+     *  5. Расчёт transformed bbox, вычисление anchor-offset, сдвиг `position`.
+     *  6. Пересчёт радиуса bounding-сферы (для InteractionManager).
+     *
+     * @private
+     */
     _applyModelTransform() {
         if (!this._object3D) return;
 
         const model = this._object3D;
         const parent = model.parent;
 
-        // Сброс трансформаций
+        // Сброс трансформаций.
         model.position.set(0, 0, 0);
         model.scale.set(1, 1, 1);
         model.rotation.set(0, 0, 0);
         model.updateMatrixWorld(true);
 
-        // Получаем локальный bounding box (без родительского поворота)
+        // Получаем локальный bounding box (без родительского поворота).
         if (parent) parent.remove(model);
         model.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(model);
@@ -431,7 +609,7 @@ export class Area3D {
                 const [, hFromSize] = this._normalizeSize(this._size);
                 targetH = hFromSize;
             } else {
-                // Равномерный масштаб contain на основе "повёрнутых" осей
+                // Равномерный масштаб contain на основе "повёрнутых" осей.
                 const containScale = Math.min(
                     this._polygonWidth / widthModel,
                     this._polygonDepth / depthModel
@@ -475,7 +653,7 @@ export class Area3D {
 
         model.updateMatrixWorld(true);
 
-        // Временно убираем модель, чтобы получить локальный transformed box
+        // Временно убираем модель, чтобы получить локальный transformed box.
         if (parent) parent.remove(model);
         model.updateMatrixWorld(true);
         const transformedBox = new THREE.Box3().setFromObject(model);
@@ -491,8 +669,45 @@ export class Area3D {
 
         model.position.sub(anchorPoint);
         model.updateMatrixWorld(true);
+
+        this._recomputeBoundingRadius();
     }
 
+    /**
+     * Пересчитывает радиус и вертикальный центр bounding-сферы,
+     * используемой InteractionManager для broad-phase.
+     *
+     * Радиус берётся как полдиагональ AABB объекта (без родительских
+     * трансформаций), центр по Y — середина AABB. Это безопасная
+     * верхняя оценка, покрывающая модель с запасом.
+     *
+     * @private
+     */
+    _recomputeBoundingRadius() {
+        if (!this._object3D) {
+            this._boundingRadius = 0;
+            this._boundingCenterYLocal = 0;
+            return;
+        }
+        const parent = this._object3D.parent;
+        if (parent) parent.remove(this._object3D);
+        this._object3D.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(this._object3D);
+        if (parent) parent.add(this._object3D);
+
+        const size = box.getSize(new THREE.Vector3());
+        this._boundingRadius = 0.5 * size.length();
+        this._boundingCenterYLocal = box.min.y + size.y / 2;
+    }
+
+    /**
+     * Приводит `size` к каноническому виду `[width, height, depth]`.
+     *
+     * @private
+     * @param {number|Array<number>|null} size - Исходное значение.
+     * @returns {[number, number, number]} Тройка размеров.
+     * @throws {Error} Если массив содержит более 3 элементов или тип неверный.
+     */
     _normalizeSize(size) {
         if (!size) return [100, 100, 100];
         if (typeof size === 'number') return [size, size, size];
@@ -505,99 +720,13 @@ export class Area3D {
         throw new Error('Area3D: invalid size type');
     }
 
-    _registerGlobalEvents(map) {
-        if (Area3D._mapEventHandlers.has(map)) return;
-        const domElement = map.renderer.domElement;
-        const handlers = {
-            pointermove: (e) => this._onPointerMove(e, map),
-            pointerdown: (e) => this._onPointerDown(e, map),
-            pointerup: (e) => this._onPointerUp(e, map),
-            pointerleave: (e) => this._onPointerLeave(e, map)
-        };
-        domElement.addEventListener('pointermove', handlers.pointermove, { capture: true });
-        domElement.addEventListener('pointerdown', handlers.pointerdown, { capture: true });
-        domElement.addEventListener('pointerup', handlers.pointerup, { capture: true });
-        domElement.addEventListener('pointerleave', handlers.pointerleave, { capture: true });
-        Area3D._mapEventHandlers.set(map, handlers);
-    }
-
-    _getNDC(e, map) {
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        return new THREE.Vector2(
-            ((e.clientX - rect.left) / rect.width) * 2 - 1,
-            -((e.clientY - rect.top) / rect.height) * 2 + 1
-        );
-    }
-
-    _getAreaUnderPointer(mouse, map) {
-        const raycaster = Area3D._raycaster;
-        raycaster.setFromCamera(mouse, map.camera);
-        const candidates = [];
-        for (const area of Area3D._activeAreas) {
-            if (area._map !== map || !area._group.visible || !area._object3D) continue;
-            const hits = raycaster.intersectObject(area._object3D, true);
-            if (hits.length) candidates.push({ area, hit: hits[0] });
-        }
-        if (!candidates.length) return null;
-        candidates.sort((a, b) => a.hit.distance - b.hit.distance);
-        return candidates[0].area;
-    }
-
-    _onPointerMove(e, map) {
-        // `this` — Area3D, зарегистрировавший обработчики для этой карты.
-        // Флаг _isMobile у всех Area3D одной карты одинаков (устройство одно).
-        if (this._isMobile) return;
-        const mouse = this._getNDC(e, map);
-        const area = this._getAreaUnderPointer(mouse, map);
-        if (area !== Area3D._hoveredArea) {
-            if (Area3D._hoveredArea) {
-                Area3D._hoveredArea._onHover?.(false) || (map.popupManager?.hide());
-            }
-            if (area) {
-                area._onHover?.(true) || (area._tooltipText && map.popupManager?.show(area, area._tooltipText));
-            }
-            Area3D._hoveredArea = area;
-        }
-    }
-
-    _onPointerDown(e, map) {
-        const mouse = this._getNDC(e, map);
-        const area = this._getAreaUnderPointer(mouse, map);
-        Area3D._pressedArea = area;
-        Area3D._pressStart = { x: e.clientX, y: e.clientY };
-    }
-
-    _onPointerUp(e, map) {
-        const pressed = Area3D._pressedArea;
-        const start = Area3D._pressStart;
-        Area3D._pressedArea = null;
-        Area3D._pressStart = null;
-        if (!start) return;
-        const dx = e.clientX - start.x;
-        const dy = e.clientY - start.y;
-        if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-
-        if (this._isMobile) {
-            if (pressed && !pressed._onClick) {
-                if (pressed._onHover) pressed._onHover(true);
-                else if (pressed._tooltipText && map.popupManager) map.popupManager.show(pressed, pressed._tooltipText);
-                Area3D._hoveredArea = pressed;
-            }
-            return;
-        }
-        if (pressed && pressed._onClick) {
-            pressed._onClick(e, pressed);
-        }
-    }
-
-    _onPointerLeave(e, map) {
-        if (this._isMobile) return;
-        if (Area3D._hoveredArea) {
-            Area3D._hoveredArea._onHover?.(false) || map.popupManager?.hide();
-            Area3D._hoveredArea = null;
-        }
-    }
-
+    /**
+     * Ежекадровое обновление: видимость по зуму и дальности, положение
+     * по рельефу, проигрывание GLB-анимаций.
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _update(map) {
         if (!this._map || !this._group) return;
         const zoom = map.continuousZoom;
@@ -612,7 +741,9 @@ export class Area3D {
         }
 
         if (map.maxObjectDistance !== Infinity && this._object3D) {
-            const worldPos = this._group.position.clone().add(map.worldGroup.position);
+            const worldPos = map.getVec3()
+                .copy(this._group.position)
+                .add(map.worldGroup.position);
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
                 this._group.visible = false;
@@ -622,7 +753,7 @@ export class Area3D {
 
         this._group.visible = true;
 
-        // Обновление высоты основания
+        // Обновление высоты основания.
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > this._heightUpdateInterval ||
@@ -647,23 +778,33 @@ export class Area3D {
         }
     }
 
+    /**
+     * Пересчитывает экранную позицию точки привязки подписи.
+     *
+     * Использует переиспользуемый `_tempBox` и пул векторов карты
+     * (`map.getVec3()`) — без аллокаций `new THREE.Vector3` в цикле
+     * по 8 углам AABB.
+     *
+     * @private
+     */
     _updateScreenPosition() {
         if (!this._map || !this._object3D) {
             this._centroidScreenPos = null;
             return;
         }
         this._object3D.updateWorldMatrix(true, true);
-        const box = new THREE.Box3().setFromObject(this._object3D);
+        const box = this._tempBox.setFromObject(this._object3D);
         const canvas = this._map.renderer.domElement;
+        const camera = this._map.camera;
         const corners = [];
         const { min, max } = box;
         for (let i = 0; i < 8; i++) {
-            const corner = new THREE.Vector3(
+            const corner = this._map.getVec3().set(
                 (i & 1) ? max.x : min.x,
                 (i & 2) ? max.y : min.y,
                 (i & 4) ? max.z : min.z
             );
-            corner.project(this._map.camera);
+            corner.project(camera);
             if (corner.z < -1 || corner.z > 1) continue;
             corners.push({
                 x: (corner.x * 0.5 + 0.5) * canvas.clientWidth,
@@ -688,13 +829,22 @@ export class Area3D {
             case 'bottom': x = centerX; y = maxY; break;
             case 'left':   x = minX;   y = centerY; break;
             case 'right':  x = maxX;   y = centerY; break;
-            case 'top': default: x = centerX; y = minY; break;
+            case 'top':
+            default:       x = centerX; y = minY; break;
         }
         this._centroidScreenPos = { x, y };
     }
 
-    // Интерфейс для TextManager
+    // ---------- Интерфейс для TextManager ----------
+
+    /**
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
+
+    /**
+     * @returns {Object} Стиль подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -703,32 +853,130 @@ export class Area3D {
             textAlign: this._titleAlign
         }, this._titleStyle);
     }
+
+    /**
+     * @returns {{min: number, max: number}} Границы зума для подписи.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
+
+    /**
+     * @returns {'area3d'} Тип метки для TextManager.
+     */
     getLabelType() { return 'area3d'; }
+
+    /**
+     * @returns {boolean} Видим ли объект в данный момент.
+     */
     isVisible() { return this._group?.visible ?? false; }
+
+    /**
+     * Возвращает экранную позицию точки привязки подписи.
+     *
+     * На каждом вызове пересчитывает bbox объекта — так же, как раньше.
+     * Если нужно реже — можно вынести вызов `_updateScreenPosition()`
+     * в `_update` и кэшировать на кадр.
+     *
+     * @returns {{x: number, y: number}|null} Экранные координаты или null.
+     */
     getScreenPosition() {
         this._updateScreenPosition();
         return this._centroidScreenPos;
     }
+
+    /**
+     * @returns {string} Горизонтальное выравнивание подписи.
+     */
     getTitleAlign() { return this._titleAlign; }
+
+    /**
+     * @returns {[number, number]} Смещение подписи в пикселях.
+     */
     getTitleOffset() { return this._titleOffset; }
+
+    /**
+     * @returns {'top'|'bottom'|'center'} Вертикальное выравнивание подписи.
+     */
     getTitleVerticalAlign() {
         switch (this._titlePlacement) {
             case 'bottom': return 'top';
-            case 'left': case 'right': return 'center';
-            case 'top': default: return 'bottom';
+            case 'left':
+            case 'right': return 'center';
+            case 'top':
+            default: return 'bottom';
         }
     }
+
+    /**
+     * @returns {boolean} Разрешать ли переполнение подписи за границы карты.
+     */
     getAllowOverflow() { return false; }
+
+    /**
+     * @returns {number} Приоритет подписи.
+     */
     getPriority() { return 0; }
+
+    /**
+     * @returns {boolean} Участвует ли объект в кластеризации.
+     */
     getClusterable() { return false; }
+
+    /**
+     * Удаляет объект с карты, освобождает ресурсы и сбрасывает состояние.
+     *
+     * @returns {void}
+     */
+    remove() {
+        // Отписываемся от InteractionManager.
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+
+        // Останавливаем и очищаем анимации.
+        if (this._mixer) {
+            this._mixer.stopAllAction();
+            this._mixer = null;
+            this._mixerClock = null;
+        }
+
+        if (this._group) {
+            this._group.parent?.remove(this._group);
+            if (this._object3D) {
+                this._object3D.traverse((child) => {
+                    if (child.isMesh) {
+                        child.geometry?.dispose();
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach((m) => m.dispose());
+                        } else {
+                            child.material?.dispose();
+                        }
+                    }
+                });
+                this._object3D = null;
+            }
+        }
+        if (this._textLabel && this._map?.textManager) {
+            this._map.textManager.removeLabel(this._textLabel);
+            this._textLabel = null;
+        }
+        if (this._layer) {
+            this._layer._removeRef(this);
+            this._layer = null;
+        }
+        this._map = null;
+        this._crs = null;
+        this._raycastMeshesCache = null;
+        this._boundingRadius = 0;
+        this._boundingCenterYLocal = 0;
+        this._centroidScreenPos = null;
+    }
 
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
 
     /**
-     * Возвращает прямоугольник (bounding box), охватывающий
-     * площадную геометрию Area3D целиком, включая все кольца
-     * (внешнее и отверстия).
+     * Возвращает прямоугольник (bounding box), охватывающий площадную
+     * геометрию Area3D целиком, включая все кольца (внешнее и отверстия).
      *
      * Используется методом {@link KrbMap#fitTo} для подгонки вида.
      * Если объект привязан к карте (`_crs` резолвлена), координаты

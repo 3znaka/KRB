@@ -3,6 +3,10 @@
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
  * для заливки и "толстые" линии для обводки, с поддержкой высот,
  * экструзии, видимости по зуму и подписей через TextManager.
+ *
+ * Взаимодействие с указателем (hover / click / tooltip) делегировано
+ * {@link InteractionManager} — единому менеджеру карты. Полигон лишь
+ * регистрирует колбэки при `_attach` и снимает регистрацию в `remove`.
  */
 
 import { Projections } from './Projections.js';
@@ -15,32 +19,17 @@ import {
 import { Layer } from './Layers.js';
 import earcut from '../js_TP/earcut.js';
 
+/**
+ * Порядок отрисовки мешей полигона.
+ *
+ * @type {{BOTTOM: number, SIDE: number, TOP: number, STROKE: number}}
+ */
 export const POLYGON_RENDER_ORDER = {
     BOTTOM: 900,
     SIDE:   901,
     TOP:    902,
     STROKE: 903
 };
-
-/**
- * Вычисляет минимальное расстояние от точки до отрезка.
- *
- * @param {THREE.Vector3} point - Точка.
- * @param {THREE.Vector3} a - Начало отрезка.
- * @param {THREE.Vector3} b - Конец отрезка.
- * @returns {number} Расстояние.
- * @private
- */
-function pointToSegmentDistance(point, a, b) {
-    const ab = new THREE.Vector3().subVectors(b, a);
-    const ap = new THREE.Vector3().subVectors(point, a);
-    const abLenSq = ab.lengthSq();
-    if (abLenSq === 0) return point.distanceTo(a);
-    let t = ap.dot(ab) / abLenSq;
-    t = Math.max(0, Math.min(1, t));
-    const closest = new THREE.Vector3().copy(a).addScaledVector(ab, t);
-    return point.distanceTo(closest);
-}
 
 /**
  * Вычисляет Y-компоненту векторного произведения (p1 - p0) × (p2 - p0)
@@ -61,11 +50,13 @@ function crossY(p0, p1, p2) {
 
 /**
  * Класс, представляющий полигон на карте.
+ *
  * Поддерживает заливку, обводку, настройку высот, экструзию (объём),
  * ограничения по зуму, текстовую подпись, а также обработчики событий
- * наведения (onHover) и клика (onClick).
- * Всплывающие подсказки обрабатываются централизованно через PopupManager
- * (доступен как `map.popupManager`).
+ * наведения (`onHover`) и клика (`onClick`). Всплывающие подсказки
+ * обрабатываются централизованно через PopupManager (доступен как
+ * `map.popupManager`), а их показ/скрытие инициируется
+ * {@link InteractionManager}.
  *
  * Координаты колец задаются в системе координат `options.crs`.
  * Если `crs` не указан, используется `map.inputCRS` (по умолчанию WGS84).
@@ -125,7 +116,10 @@ export class Polygon {
      * Инициализирует новый экземпляр полигона с заданными настройками.
      *
      * @param {Object} options - Настройки полигона.
-     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец. Первое кольцо – внешний контур, остальные (опционально) – отверстия. Каждое кольцо – массив точек [x, y] в СК `options.crs` (по умолчанию — [долгота, широта] в градусах WGS84).
+     * @param {Array.<Array.<Array.<number>>>} options.rings - Массив колец.
+     *     Первое кольцо – внешний контур, остальные (опционально) – отверстия.
+     *     Каждое кольцо – массив точек [x, y] в СК `options.crs`
+     *     (по умолчанию — [долгота, широта] в градусах WGS84).
      * @param {string} [options.crs] - Код системы координат для `rings`
      *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
      *     Если не указан — используется `map.inputCRS`.
@@ -136,32 +130,58 @@ export class Polygon {
      * @param {string} [options.strokeColor='#000000'] - Цвет обводки.
      * @param {number} [options.strokeWidth=2] - Толщина обводки в пикселях.
      * @param {number} [options.strokeOpacity=1] - Прозрачность обводки.
-     * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты: 'clampToGround' (прилегать к рельефу) или 'absolute' (постоянная высота).
-     * @param {number} [options.altitudeOffset=10] - Добавочная высота над поверхностью (или базовая высота для absolute).
+     * @param {string} [options.altitudeMode='clampToGround'] - Режим высоты:
+     *     'clampToGround' (прилегать к рельефу) или 'absolute' (постоянная высота).
+     * @param {number} [options.altitudeOffset=10] - Добавочная высота над
+     *     поверхностью (или базовая высота для `absolute`).
      * @param {boolean} [options.extruded=false] - Включить экструзию (объёмный полигон).
-     * @param {number} [options.height=0] - Толщина экструзии в метрах (только если extruded=true).
-     * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью в метрах (только если extruded=true).
-     * @param {boolean} [options.depthTest] - Включить тест глубины. По умолчанию: false для плоских, true для extruded.
-     * @param {boolean} [options.depthWrite] - Включить запись в буфер глубины. По умолчанию: false для плоских, true для extruded.
-     * @param {boolean} [options.castShadow=true] - Отбрасывать тень (применяется только к extruded=true).
-     * @param {boolean} [options.receiveShadow=true] - Принимать тень (применяется только к extruded=true).
-     * @param {number} [options.roughness=0.8] - Шероховатость PBR-материала (только для extruded=true).
-     * @param {number} [options.metalness=0.0] - Металличность PBR-материала (только для extruded=true).
-     * @param {number} [options.minZoom=-Infinity] - Минимальный зум, при котором полигон виден.
-     * @param {number} [options.maxZoom=Infinity] - Максимальный зум, при котором полигон виден.
+     * @param {number} [options.height=0] - Толщина экструзии в метрах
+     *     (только если `extruded=true`).
+     * @param {number} [options.minHeight=0] - Высота нижней грани над
+     *     поверхностью в метрах (только если `extruded=true`).
+     * @param {boolean} [options.depthTest] - Включить тест глубины.
+     *     По умолчанию: false для плоских, true для extruded.
+     * @param {boolean} [options.depthWrite] - Включить запись в буфер глубины.
+     *     По умолчанию: false для плоских, true для extruded.
+     * @param {boolean} [options.castShadow=true] - Отбрасывать тень
+     *     (применяется только к extruded=true).
+     * @param {boolean} [options.receiveShadow=true] - Принимать тень
+     *     (применяется только к extruded=true).
+     * @param {number} [options.roughness=0.8] - Шероховатость PBR-материала
+     *     (только для extruded=true).
+     * @param {number} [options.metalness=0.0] - Металличность PBR-материала
+     *     (только для extruded=true).
+     * @param {number} [options.minZoom=-Infinity] - Минимальный зум,
+     *     при котором полигон виден.
+     * @param {number} [options.maxZoom=Infinity] - Максимальный зум,
+     *     при котором полигон виден.
      * @param {string} [options.title=''] - Текст постоянной подписи.
-     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи в пикселях.
-     * @param {string} [options.titleAlign='center'] - Горизонтальное выравнивание подписи ('left', 'center', 'right').
+     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи
+     *     в пикселях.
+     * @param {string} [options.titleAlign='center'] - Горизонтальное
+     *     выравнивание подписи ('left', 'center', 'right').
      * @param {Object} [options.titleStyle={}] - CSS-стили подписи.
-     * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум для отображения подписи.
-     * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум для отображения подписи.
-     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
-     * @param {number} [options.titlePriority=0] - Приоритет подписи (чем выше, тем приоритетнее).
-     * @param {function} [options.onClick] - Callback при клике по полигону. Получает событие и экземпляр полигона.
-     * @param {function} [options.onHover] - Callback при наведении/убирании курсора. Получает `true`/`false`.
-     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML), показывается через PopupManager при наведении или клике (если не задан onClick/onHover).
-     * @param {boolean} [options.useSimpleStroke=false] - Использовать обычный THREE.Line вместо Line2 для обводки (быстрее, но ширина 1px). Для массовых полигонов настоятельно рекомендуется `true`.
-     * @param {boolean} [options.useWorkerForTriangulation=false] - Выполнять триангуляцию в Web Worker (экспериментально, требует асинхронной инициализации).
+     * @param {number} [options.titleMinZoom=-Infinity] - Минимальный зум
+     *     для отображения подписи.
+     * @param {number} [options.titleMaxZoom=Infinity] - Максимальный зум
+     *     для отображения подписи.
+     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход
+     *     подписи за границы экрана.
+     * @param {number} [options.titlePriority=0] - Приоритет подписи
+     *     (чем выше, тем приоритетнее).
+     * @param {function} [options.onClick] - Callback при клике по полигону.
+     *     Получает событие и экземпляр полигона.
+     * @param {function} [options.onHover] - Callback при наведении/убирании
+     *     курсора. Получает `true`/`false`.
+     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML),
+     *     показывается через PopupManager при наведении или клике
+     *     (если не задан onClick/onHover).
+     * @param {boolean} [options.useSimpleStroke=false] - Использовать обычный
+     *     THREE.Line вместо Line2 для обводки (быстрее, но ширина 1px).
+     *     Для массовых полигонов настоятельно рекомендуется `true`.
+     * @param {boolean} [options.useWorkerForTriangulation=false] - Выполнять
+     *     триангуляцию в Web Worker (экспериментально, требует асинхронной
+     *     инициализации).
      * @throws {Error} Если не передан массив колец или он пуст.
      * @throws {Error} Если extruded=true и height не положительное число.
      */
@@ -169,13 +189,16 @@ export class Polygon {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
             throw new Error('Polygon: options.rings required with at least one ring');
         }
-        /** @private */ this._rings = options.rings;
+
+        /** @private @type {Array.<Array.<Array.<number>>>} */ this._rings = options.rings;
+
         /**
          * Код СК колец; null — использовать `map.inputCRS`.
          * @private
          * @type {string|null}
          */
         this._crsCode = options.crs ?? null;
+
         /**
          * Зарезолвленный объект Projection. Устанавливается в `_attach`.
          * @private
@@ -183,84 +206,94 @@ export class Polygon {
          */
         this._crs = null;
 
-        /** @private */ this._fillColor = options.fillColor || '#3388ff';
-        /** @private */ this._fillOpacity = options.fillOpacity ?? 0.5;
-        /** @private */ this._strokeColor = options.strokeColor || '#000000';
-        /** @private */ this._strokeWidth = options.strokeWidth ?? 2;
-        /** @private */ this._strokeOpacity = options.strokeOpacity ?? 1;
-        /** @private */ this._altitudeMode = options.altitudeMode || 'clampToGround';
-        /** @private */ this._altitudeOffset = options.altitudeOffset ?? 10;
+        /** @private @type {string} */  this._fillColor = options.fillColor || '#3388ff';
+        /** @private @type {number} */  this._fillOpacity = options.fillOpacity ?? 0.5;
+        /** @private @type {string} */  this._strokeColor = options.strokeColor || '#000000';
+        /** @private @type {number} */  this._strokeWidth = options.strokeWidth ?? 2;
+        /** @private @type {number} */  this._strokeOpacity = options.strokeOpacity ?? 1;
+        /** @private @type {string} */  this._altitudeMode = options.altitudeMode || 'clampToGround';
+        /** @private @type {number} */  this._altitudeOffset = options.altitudeOffset ?? 10;
 
         // Экструзия
-        /** @private */ this._extruded = options.extruded ?? false;
-        /** @private */ this._height = options.height ?? 0;
-        /** @private */ this._minHeight = options.minHeight ?? 0;
+        /** @private @type {boolean} */ this._extruded = options.extruded ?? false;
+        /** @private @type {number} */  this._height = options.height ?? 0;
+        /** @private @type {number} */  this._minHeight = options.minHeight ?? 0;
         if (this._extruded && (typeof this._height !== 'number' || this._height <= 0)) {
             throw new Error('Polygon: options.height must be a positive number when extruded is true');
         }
 
-        // Depth-опции: для extruded по умолчанию true, для плоских — false
-        /** @private */ this._depthTest = options.depthTest ?? this._extruded;
-        /** @private */ this._depthWrite = options.depthWrite ?? this._extruded;
+        // Depth-опции: для extruded по умолчанию true, для плоских — false.
+        /** @private @type {boolean} */ this._depthTest = options.depthTest ?? this._extruded;
+        /** @private @type {boolean} */ this._depthWrite = options.depthWrite ?? this._extruded;
 
-        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-        /** @private */ this._useSimpleStroke = options.useSimpleStroke ?? false;
-        /** @private */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
+        /** @private @type {number} */  this._minZoom = options.minZoom ?? -Infinity;
+        /** @private @type {number} */  this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private @type {boolean} */ this._useSimpleStroke = options.useSimpleStroke ?? false;
+        /** @private @type {boolean} */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
 
         // Тени и PBR (только для extruded=true)
-        /** @private */ this._castShadow = options.castShadow ?? true;
-        /** @private */ this._receiveShadow = options.receiveShadow ?? true;
-        /** @private */ this._roughness = options.roughness ?? 0.8;
-        /** @private */ this._metalness = options.metalness ?? 0.0;
+        /** @private @type {boolean} */ this._castShadow = options.castShadow ?? true;
+        /** @private @type {boolean} */ this._receiveShadow = options.receiveShadow ?? true;
+        /** @private @type {number} */  this._roughness = options.roughness ?? 0.8;
+        /** @private @type {number} */  this._metalness = options.metalness ?? 0.0;
 
         // Подпись
-        /** @private */ this._title = options.title || '';
-        /** @private */ this._titleOffset = options.titleOffset || [0, 0];
-        /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleStyle = options.titleStyle || {};
-        /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        /** @private @type {string} */  this._title = options.title || '';
+        /** @private @type {Array.<number>} */ this._titleOffset = options.titleOffset || [0, 0];
+        /** @private @type {string} */  this._titleAlign = options.titleAlign || 'center';
+        /** @private @type {Object} */  this._titleStyle = options.titleStyle || {};
+        /** @private @type {number} */  this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        /** @private @type {number} */  this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        /** @private @type {boolean} */ this._titleAllowOverflow = options.titleAllowOverflow || false;
+        /** @private @type {number} */  this._titlePriority = options.titlePriority ?? 0;
 
         // События
-        /** @private */ this._onClick = options.onClick || null;
-        /** @private */ this._onHover = options.onHover || null;
-        /** @private */ this._isHovered = false;
+        /** @private @type {Function|null} */ this._onClick = options.onClick || null;
+        /** @private @type {Function|null} */ this._onHover = options.onHover || null;
+
+        /**
+         * Текущее состояние hover. Обновляется только если у полигона задан
+         * пользовательский `onHover` — иначе hover-логикой управляет
+         * InteractionManager через PopupManager.
+         * @private
+         * @type {boolean}
+         */
+        this._isHovered = false;
 
         // Тултип
-        /** @private */ this._tooltipText = options.tooltip || '';
+        /** @private @type {string} */  this._tooltipText = options.tooltip || '';
 
         // Структуры
-        /** @private */ this._map = null;
-        /** @private */ this._layer = null;
-        /** @private */ this._group = new THREE.Group();
+        /** @private @type {import('./KrbMap.js').KrbMap|null} */ this._map = null;
+        /** @private @type {Layer|null} */ this._layer = null;
+        /** @private @type {THREE.Group} */ this._group = new THREE.Group();
 
         // Верхняя крышка
-        /** @private */ this._fillMesh = null;
-        /** @private */ this._fillGeometry = null;
-        /** @private */ this._fillMaterial = null;
+        /** @private @type {THREE.Mesh|null} */           this._fillMesh = null;
+        /** @private @type {THREE.BufferGeometry|null} */ this._fillGeometry = null;
+        /** @private @type {THREE.Material|null} */       this._fillMaterial = null;
 
         // Нижняя крышка
-        /** @private */ this._bottomMesh = null;
-        /** @private */ this._bottomGeometry = null;
-        /** @private */ this._bottomMaterial = null;
+        /** @private @type {THREE.Mesh|null} */           this._bottomMesh = null;
+        /** @private @type {THREE.BufferGeometry|null} */ this._bottomGeometry = null;
+        /** @private @type {THREE.Material|null} */       this._bottomMaterial = null;
 
         // Боковые стенки
-        /** @private */ this._sideMesh = null;
-        /** @private */ this._sideGeometry = null;
-        /** @private */ this._sideMaterial = null;
-        /** @private */ this._sideVertexCount = 0;
+        /** @private @type {THREE.Mesh|null} */           this._sideMesh = null;
+        /** @private @type {THREE.BufferGeometry|null} */ this._sideGeometry = null;
+        /** @private @type {THREE.Material|null} */       this._sideMaterial = null;
+        /** @private @type {number} */                   this._sideVertexCount = 0;
 
         // Обводка
-        /** @private */ this._strokeLine = null;
-        /** @private */ this._strokeGeometry = null;
-        /** @private */ this._strokeMaterial = null;
+        /** @private @type {THREE.Object3D|null} */       this._strokeLine = null;
+        /** @private @type {THREE.BufferGeometry|null} */ this._strokeGeometry = null;
+        /** @private @type {THREE.Material|null} */       this._strokeMaterial = null;
 
         // Кэш высот
-        /** @private */ this._cachedHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
-        /** @private */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
-        /** @private */ this._lastHeightUpdateTime = 0;
-        /** @private */ this._heightUpdateInterval = 500;
+        /** @private @type {Array.<number>} */ this._cachedHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
+        /** @private @type {Array.<number>} */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
+        /** @private @type {number} */        this._lastHeightUpdateTime = 0;
+        /** @private @type {number} */        this._heightUpdateInterval = 500;
 
         /**
          * Флаг, что высоты окончательно зафиксированы для случая, когда
@@ -271,380 +304,67 @@ export class Polygon {
          */
         this._heightsFinalized = false;
 
-        // Центроид
-        /** @private */ this._vertices2D = [];
-        /** @private */ this._centroidWorld = new THREE.Vector3();
-        /** @private */ this._cachedCentroidHeight = 0;
-        /** @private */ this._lastCentroidHeightUpdateTime = 0;
+        // Центроид и вершины
+        /** @private @type {Array.<THREE.Vector2>} */ this._vertices2D = [];
+        /** @private @type {THREE.Vector3} */         this._centroidWorld = new THREE.Vector3();
+        /** @private @type {number} */                this._cachedCentroidHeight = 0;
+        /** @private @type {number} */                this._lastCentroidHeightUpdateTime = 0;
 
         // Мировые координаты и bounding sphere
-        /** @private */ this._worldCoords = [];
-        /** @private */ this._strokeWorldCoords = [];
-        /** @private */ this._boundingSphereRadius = 0;
-        /** @private */ this._boundingSphereWorld = new THREE.Sphere();
+        /** @private @type {Array.<[number, number]>} */ this._worldCoords = [];
+        /** @private @type {Array.<[number, number]>} */ this._strokeWorldCoords = [];
+
+        /**
+         * Радиус bounding-сферы в локальных координатах группы полигона.
+         * Используется в InteractionManager для broad-phase.
+         * @private
+         * @type {number}
+         */
+        this._boundingSphereRadius = 0;
+
+        /**
+         * Переиспользуемый вектор мирового центра bounding-сферы.
+         * Каждый вызов `getBoundingSphere` пишет сюда актуальное значение
+         * и возвращает ссылку на этот же объект. InteractionManager копирует
+         * значения в свою сферу, так что удержание ссылки не требуется.
+         * @private
+         * @type {THREE.Vector3}
+         */
+        this._boundingSphereWorldCenter = new THREE.Vector3();
+
+        /**
+         * Кэш массива мешей для raycast. Пересобирается в `_buildFillGeometry`.
+         * Используется в `getMeshes` InteractionManager.
+         * @private
+         * @type {THREE.Object3D[]|null}
+         */
+        this._raycastMeshesCache = null;
+
+        /**
+         * Функция отмены регистрации в `map.interaction`. Устанавливается
+         * в `_registerInteraction`, вызывается в `_attach` (при перерегистрации)
+         * и в `remove`.
+         * @private
+         * @type {(() => void)|null}
+         */
+        this._unregisterInteraction = null;
 
         // Dirty-флаги
-        /** @private */ this._heightsDirty = true;
-        /** @private */ this._lastWorldGroupPos = new THREE.Vector3();
-        /** @private */ this._lastDiscreteZoom = -1;
+        /** @private @type {boolean} */ this._heightsDirty = true;
+        /** @private @type {THREE.Vector3} */ this._lastWorldGroupPos = new THREE.Vector3();
+        /** @private @type {number} */ this._lastDiscreteZoom = -1;
 
         // Подпись
-        /** @private */ this._centroidScreenPos = null;
-        /** @private */ this._textLabel = null;
-        /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
-        /** @private */ this._titlePriority = options.titlePriority ?? 0;
+        /** @private @type {Object|null} */ this._centroidScreenPos = null;
+        /** @private @type {Object|null} */ this._textLabel = null;
 
         // Переиспользуемые массивы
-        /** @private */ this._strokePositionsArray = [];
-        /** @private */ this._sidePositionsArray = [];
-        /** @private */ this._sideIndicesArray = [];
-        /** @private */ this._tempVec3 = new THREE.Vector3();
+        /** @private @type {Array.<number>} */ this._strokePositionsArray = [];
+        /** @private @type {Array.<number>} */ this._sidePositionsArray = [];
+        /** @private @type {Array.<number>} */ this._sideIndicesArray = [];
 
-        // ПРИМЕЧАНИЕ: регистрация в реестре интерактивных полигонов
-        // выполняется в `_attach`, когда известна карта (`this._map`).
-    }
-
-    /* ================================================================
-       Статический реестр интерактивных полигонов (per-map)
-       ================================================================ */
-
-    /**
-     * Реестр интерактивных полигонов, сгруппированный по картам.
-     * Ключ — экземпляр карты, значение — Set<Polygon>, привязанных к ней.
-     *
-     * WeakMap обеспечивает автоматическую очистку при сборке мусора карты,
-     * а также корректную работу при нескольких картах одновременно.
-     *
-     * @private
-     * @type {WeakMap<Object, Set<Polygon>>}
-     */
-    static _interactivePolygons = new WeakMap();
-
-    /**
-     * Per-map состояние обработки событий: последняя метка времени raycast,
-     * координаты pointerdown, флаг активности pointerdown, а также ссылки
-     * на зарегистрированные обработчики и признак их установки.
-     *
-     * @private
-     * @type {WeakMap<Object, {
-     *     lastRaycastTime: number,
-     *     pointerDownX: number,
-     *     pointerDownY: number,
-     *     pointerDownActive: boolean,
-     *     handlers: ?Object,
-     *     attached: boolean
-     * }>}
-     */
-    static _mapEventState = new WeakMap();
-
-    /** @private */ static _raycaster = new THREE.Raycaster();
-    /** @private */ static _mouseNDC = new THREE.Vector2();
-
-    /**
-     * Порог смещения указателя (в пикселях) между pointerdown и click,
-     * выше которого событие click считается результатом панорамирования
-     * и отбрасывается.
-     * @private
-     * @type {number}
-     */
-    static _clickMoveThreshold = 5;
-
-    /**
-     * Возвращает (создавая при необходимости) состояние обработки событий
-     * для указанной карты.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @returns {{
-     *     lastRaycastTime: number,
-     *     pointerDownX: number,
-     *     pointerDownY: number,
-     *     pointerDownActive: boolean,
-     *     handlers: ?Object,
-     *     attached: boolean
-     * }} Состояние.
-     * @private
-     */
-    static _getOrCreateMapState(map) {
-        let state = Polygon._mapEventState.get(map);
-        if (!state) {
-            state = {
-                lastRaycastTime: 0,
-                pointerDownX: 0,
-                pointerDownY: 0,
-                pointerDownActive: false,
-                handlers: null,
-                attached: false
-            };
-            Polygon._mapEventState.set(map, state);
-        }
-        return state;
-    }
-
-    /**
-     * Регистрирует полигон для обработки событий мыши через общий обработчик,
-     * привязанный к карте `polygon._map`. Если для карты ещё нет слушателей —
-     * они устанавливаются.
-     *
-     * Должен вызываться после `_attach`, когда `polygon._map` уже установлен.
-     *
-     * @param {Polygon} polygon - Экземпляр полигона.
-     * @private
-     */
-    static _registerInteractivePolygon(polygon) {
-        const map = polygon._map;
-        if (!map) return;
-
-        let set = Polygon._interactivePolygons.get(map);
-        if (!set) {
-            set = new Set();
-            Polygon._interactivePolygons.set(map, set);
-        }
-        set.add(polygon);
-
-        Polygon._attachGlobalListeners(map);
-    }
-
-    /**
-     * Удаляет полигон из реестра интерактивных. Если после этого для карты
-     * не осталось ни одного полигона, глобальные обработчики снимаются.
-     *
-     * @param {Polygon} polygon - Экземпляр полигона.
-     * @private
-     */
-    static _unregisterInteractivePolygon(polygon) {
-        const map = polygon._map;
-        if (!map) return;
-
-        const set = Polygon._interactivePolygons.get(map);
-        if (!set) return;
-
-        set.delete(polygon);
-        if (set.size === 0) {
-            Polygon._interactivePolygons.delete(map);
-            Polygon._detachGlobalListeners(map);
-        }
-    }
-
-    /**
-     * Возвращает canvas указанной карты.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @returns {HTMLCanvasElement|null} Canvas или null.
-     * @private
-     */
-    static _getCanvas(map) {
-        if (!map || !map.renderer || !map.renderer.domElement) return null;
-        return map.renderer.domElement;
-    }
-
-    /**
-     * Устанавливает глобальные обработчики событий на canvas указанной карты.
-     *
-     * Слушаем:
-     *  - `pointerdown` — чтобы запомнить точку нажатия (для отсечения
-     *    «клика после панорамирования»);
-     *  - `mousemove` — для hover;
-     *  - `click` — для onClick и показа тултипа.
-     *
-     * Все обработчики — в фазе capture, чтобы гарантированно выполняться
-     * до OrbitControls. Для каждой карты — свой набор слушателей, замыкающий
-     * соответствующую `map`.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    static _attachGlobalListeners(map) {
-        const canvas = Polygon._getCanvas(map);
-        if (!canvas) return;
-
-        const state = Polygon._getOrCreateMapState(map);
-        if (state.attached) return;
-
-        state.handlers = {
-            pointerdown: (e) => Polygon._handleGlobalPointerDown(e, map),
-            mousemove: (e) => Polygon._handleGlobalMouseMove(e, map),
-            click: (e) => Polygon._handleGlobalClick(e, map)
-        };
-
-        canvas.addEventListener('pointerdown', state.handlers.pointerdown, true);
-        canvas.addEventListener('mousemove', state.handlers.mousemove, true);
-        canvas.addEventListener('click', state.handlers.click, true);
-        state.attached = true;
-    }
-
-    /**
-     * Удаляет глобальные обработчики событий с canvas указанной карты.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    static _detachGlobalListeners(map) {
-        const canvas = Polygon._getCanvas(map);
-        const state = Polygon._mapEventState.get(map);
-        if (!canvas || !state || !state.handlers) return;
-
-        canvas.removeEventListener('pointerdown', state.handlers.pointerdown, true);
-        canvas.removeEventListener('mousemove', state.handlers.mousemove, true);
-        canvas.removeEventListener('click', state.handlers.click, true);
-        state.handlers = null;
-        state.attached = false;
-    }
-
-    /**
-     * Переводит экранные координаты события в NDC для указанной карты.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    static _setNDCFromEvent(event, map) {
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        Polygon._mouseNDC.set(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
-            -((event.clientY - rect.top) / rect.height) * 2 + 1
-        );
-    }
-
-    /**
-     * Запоминает точку нажатия для указанной карты. Нужен, чтобы
-     * в `_handleGlobalClick` отличить реальный клик от отпускания мыши
-     * после панорамирования.
-     *
-     * @param {PointerEvent} event - Событие нажатия.
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    static _handleGlobalPointerDown(event, map) {
-        const state = Polygon._mapEventState.get(map);
-        if (!state) return;
-        state.pointerDownX = event.clientX;
-        state.pointerDownY = event.clientY;
-        state.pointerDownActive = true;
-    }
-
-    /**
-     * Собирает меши видимых полигонов, чья bounding sphere пересекается
-     * с лучом, и заодно сбрасывает hover у отсечённых. Возвращает
-     * массив { meshes, polys }.
-     *
-     * @param {Object} map - Карта.
-     * @param {Polygon[]} polys - Полигоны, привязанные к этой карте.
-     * @returns {{meshes: THREE.Object3D[], polys: Polygon[]}}
-     * @private
-     */
-    static _collectRaycastCandidates(map, polys) {
-        const meshes = [];
-        const visiblePolys = [];
-        for (const poly of polys) {
-            if (!poly._group.visible || poly._boundingSphereRadius === 0) {
-                poly._applyHover(false, map);
-                continue;
-            }
-            const worldCenter = poly._tempVec3
-                .copy(poly._group.position)
-                .add(map.worldGroup.position);
-            poly._boundingSphereWorld.set(worldCenter, poly._boundingSphereRadius);
-            if (!Polygon._raycaster.ray.intersectsSphere(poly._boundingSphereWorld)) {
-                poly._applyHover(false, map);
-                continue;
-            }
-            visiblePolys.push(poly);
-            if (poly._fillMesh) meshes.push(poly._fillMesh);
-            if (poly._sideMesh) meshes.push(poly._sideMesh);
-            if (poly._bottomMesh) meshes.push(poly._bottomMesh);
-        }
-        return { meshes, polys: visiblePolys };
-    }
-
-    /**
-     * Глобальный обработчик mousemove для указанной карты.
-     *
-     * Один raycast на все полигоны карты вместо N независимых.
-     * Троттлинг 30 Гц — выше смысла нет, мышь всё равно шлёт чаще,
-     * а результат между кадрами не меняется.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @param {Object} map - Экземпляр карты, к чьему canvas привязан обработчик.
-     * @private
-     */
-    static _handleGlobalMouseMove(event, map) {
-        const state = Polygon._mapEventState.get(map);
-        if (!state) return;
-
-        const set = Polygon._interactivePolygons.get(map);
-        if (!set || set.size === 0) return;
-
-        const now = performance.now();
-        if (now - state.lastRaycastTime < 33) return;
-        state.lastRaycastTime = now;
-
-        Polygon._setNDCFromEvent(event, map);
-        Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
-
-        const polys = Array.from(set);
-        const { meshes, polys: visiblePolys } = Polygon._collectRaycastCandidates(map, polys);
-
-        const hits = meshes.length > 0
-            ? Polygon._raycaster.intersectObjects(meshes, false)
-            : [];
-        const topPoly = hits.length > 0 ? hits[0].object.userData.polygon : null;
-
-        for (const poly of visiblePolys) {
-            poly._applyHover(topPoly === poly, map);
-        }
-    }
-
-    /**
-     * Глобальный обработчик click для указанной карты. Один raycast на все
-     * полигоны карты.
-     *
-     * Перед обработкой проверяется, не было ли между pointerdown и click
-     * заметного смещения указателя — если да, клик отбрасывается как
-     * результат панорамирования. Это устраняет ложные срабатывания
-     * onClick при перетаскивании карты, начатом и законченном внутри
-     * контура полигона.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @param {Object} map - Экземпляр карты, к чьему canvas привязан обработчик.
-     * @private
-     */
-    static _handleGlobalClick(event, map) {
-        const state = Polygon._mapEventState.get(map);
-        if (!state) return;
-
-        const set = Polygon._interactivePolygons.get(map);
-        if (!set || set.size === 0) return;
-
-        // Проверка «это точно клик, а не конец драга?»
-        const hadPointerDown = state.pointerDownActive;
-        state.pointerDownActive = false;
-        if (hadPointerDown) {
-            const dx = event.clientX - state.pointerDownX;
-            const dy = event.clientY - state.pointerDownY;
-            const threshold = Polygon._clickMoveThreshold;
-            if (dx * dx + dy * dy > threshold * threshold) {
-                return; // было панорамирование, не клик
-            }
-        }
-
-        Polygon._setNDCFromEvent(event, map);
-        Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
-
-        const polys = Array.from(set);
-        const { meshes } = Polygon._collectRaycastCandidates(map, polys);
-        const hits = meshes.length > 0
-            ? Polygon._raycaster.intersectObjects(meshes, false)
-            : [];
-        if (hits.length === 0) return;
-
-        const poly = hits[0].object.userData.polygon;
-        if (!poly) return;
-
-        if (poly._onClick) {
-            poly._onClick(event, poly);
-        } else if (poly._tooltipText && map.popupManager) {
-            map.popupManager.show(poly, poly._tooltipText);
-        }
+        // Регистрация в реестре интерактивных выполняется в `_attach`,
+        // когда известна карта (`this._map`).
     }
 
     /* ================================================================
@@ -652,9 +372,10 @@ export class Polygon {
        ================================================================ */
 
     /**
-     * Создаёт персональный слой, добавляет его на карту и помещает в него данный полигон.
+     * Создаёт персональный слой, добавляет его на карту и помещает в него
+     * данный полигон.
      *
-     * @param {Object} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {Polygon} Текущий экземпляр полигона.
      */
     addTo(map) {
@@ -666,9 +387,10 @@ export class Polygon {
     }
 
     /**
-     * Вызывается слоем при добавлении, строит геометрию и регистрирует подпись.
+     * Вызывается слоем при добавлении: строит геометрию, регистрирует
+     * подпись и интерактивность.
      *
-     * @param {Object} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @param {Layer} layer - Слой-владелец.
      * @returns {void}
      * @private
@@ -692,16 +414,85 @@ export class Polygon {
             this._textLabel = map.textManager.addLabel(this);
         }
 
-        // Регистрация в per-map реестре интерактивных — только теперь,
-        // когда известна карта.
-        if (this._onClick || this._onHover || this._tooltipText) {
-            Polygon._registerInteractivePolygon(this);
-        }
+        this._registerInteraction(map);
 
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
         this._heightsDirty = true;
         this._heightsFinalized = false;
+    }
+
+    /**
+     * Регистрирует полигон в общем InteractionManager карты.
+     *
+     * Если у полигона нет ни `onClick`, ни `onHover`, ни `tooltip` —
+     * регистрация не выполняется (объект не интерактивен).
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
+    _registerInteraction(map) {
+        if (!map.interaction || typeof map.interaction.register !== 'function') return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (!this._onClick && !this._onHover && !this._tooltipText) return;
+
+        const callbacks = {
+            getMeshes: () => this._getRaycastMeshes(),
+            getBoundingSphere: () => {
+                if (this._boundingSphereRadius <= 0) return null;
+                const wgPos = map.worldGroup.position;
+                this._boundingSphereWorldCenter.set(
+                    this._group.position.x + wgPos.x,
+                    this._group.position.y + wgPos.y,
+                    this._group.position.z + wgPos.z
+                );
+                return {
+                    center: this._boundingSphereWorldCenter,
+                    radius: this._boundingSphereRadius
+                };
+            },
+            isVisible: () => this._group.visible
+        };
+
+        // Hover: пользовательский onHover имеет приоритет над tooltip —
+        // если он задан, PopupManager в hover-логике не участвует.
+        if (this._onHover) {
+            callbacks.onHover = (isHovered) => {
+                this._isHovered = isHovered;
+                this._onHover(isHovered);
+            };
+        } else if (this._tooltipText) {
+            callbacks.getTooltip = () => this._tooltipText;
+        }
+
+        if (this._onClick) {
+            callbacks.onClick = (event) => this._onClick(event, this);
+        }
+
+        this._unregisterInteraction = map.interaction.register(this, callbacks);
+    }
+
+    /**
+     * Возвращает массив мешей для raycast.
+     *
+     * Возвращает закэшированный массив (пересобирается при перестройке
+     * геометрии в `_buildFillGeometry`). Возвращаемый массив не должен
+     * мутироваться вызывающей стороной.
+     *
+     * @private
+     * @returns {THREE.Object3D[]} Массив мешей (может быть пустым).
+     */
+    _getRaycastMeshes() {
+        if (this._raycastMeshesCache) return this._raycastMeshesCache;
+        const meshes = [];
+        if (this._fillMesh) meshes.push(this._fillMesh);
+        if (this._sideMesh) meshes.push(this._sideMesh);
+        if (this._bottomMesh) meshes.push(this._bottomMesh);
+        this._raycastMeshesCache = meshes;
+        return meshes;
     }
 
     /**
@@ -720,8 +511,10 @@ export class Polygon {
 
     /**
      * Создаёт материал для поверхности полигона.
-     * Для экструдированных полигонов используется MeshStandardMaterial
-     * (участвует в освещении и shadow mapping). Для плоских — MeshBasicMaterial.
+     *
+     * Для экструдированных полигонов используется `MeshStandardMaterial`
+     * (участвует в освещении и shadow mapping). Для плоских —
+     * `MeshBasicMaterial`.
      *
      * Прозрачность включается только если `fillOpacity < 1`. При opacity === 1
      * материал рендерится без alpha-blending, что заметно ускоряет
@@ -780,8 +573,8 @@ export class Polygon {
     }
 
     /**
-     * Инвертирует обход треугольников (swap 2-го и 3-го индексов в каждом треугольнике).
-     * Возвращает новый массив, исходный не изменяется.
+     * Инвертирует обход треугольников (swap 2-го и 3-го индексов в каждом
+     * треугольнике). Возвращает новый массив, исходный не изменяется.
      *
      * @param {Array.<number>|Uint32Array} indices - Индексы треугольников.
      * @returns {Array.<number>} Новый массив индексов с инвертированным обходом.
@@ -799,9 +592,10 @@ export class Polygon {
 
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
-     * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
+     * Для экструдированных полигонов дополнительно создаёт нижнюю крышку
+     * и боковые стенки.
      *
-     * @param {Object} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
      * @private
      */
@@ -855,7 +649,7 @@ export class Polygon {
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
 
-        // Триангуляция
+        // Триангуляция.
         let indices;
         if (this._useWorkerForTriangulation && typeof Worker !== 'undefined') {
             console.warn('Worker triangulation is experimental, falling back to sync');
@@ -875,7 +669,7 @@ export class Polygon {
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
 
-        // Центроид
+        // Центроид.
         let cx = 0, cy = 0;
         for (const pt of points2D) {
             cx += pt.x;
@@ -980,7 +774,9 @@ export class Polygon {
                 if (ringStartIndices[ringIdx] === undefined) continue;
 
                 const start = ringStartIndices[ringIdx];
-                const nextRingStart = (ringIdx + 1 < ringStartIndices.length) ? ringStartIndices[ringIdx + 1] : points2D.length;
+                const nextRingStart = (ringIdx + 1 < ringStartIndices.length)
+                    ? ringStartIndices[ringIdx + 1]
+                    : points2D.length;
                 const count = nextRingStart - start;
 
                 if (count < 2) continue;
@@ -1025,10 +821,14 @@ export class Polygon {
             this._sideVertexCount = sidePositions.length / 3;
             this._group.add(sideMesh);
         }
+
+        // Меши пересозданы — кэш для raycast невалиден.
+        this._raycastMeshesCache = null;
     }
 
     /**
-     * Строит геометрию обводки полигона. В зависимости от опций использует Line2 или обычный THREE.Line.
+     * Строит геометрию обводки полигона. В зависимости от опций использует
+     * Line2 или обычный THREE.Line.
      *
      * ВАЖНО: `_strokeWorldCoords` заполняется координатами внешнего кольца
      * без замыкающей точки (если последняя совпадает с первой — она
@@ -1037,7 +837,7 @@ export class Polygon {
      * (`_cachedStrokeHeights`) должны инициализироваться по фактической
      * длине `_strokeWorldCoords`, а не по длине исходного кольца.
      *
-     * @param {Object} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
      * @private
      */
@@ -1066,17 +866,22 @@ export class Polygon {
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
 
         if (this._useSimpleStroke) {
-            const points = [];
+            const positions = [];
             for (let i = 0; i < this._strokeWorldCoords.length; i++) {
                 const wc = this._strokeWorldCoords[i];
-                points.push(new THREE.Vector3(wc[0], 0, wc[1]));
+                positions.push(wc[0], 0, wc[1]);
             }
             if (this._strokeWorldCoords.length > 0) {
                 const first = this._strokeWorldCoords[0];
-                points.push(new THREE.Vector3(first[0], 0, first[1]));
+                positions.push(first[0], 0, first[1]);
             }
 
-            const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+            const lineGeometry = new THREE.BufferGeometry();
+            lineGeometry.setAttribute(
+                'position',
+                new THREE.BufferAttribute(new Float32Array(positions), 3)
+            );
+            lineGeometry.computeBoundingSphere();
 
             const lineMaterial = new THREE.LineBasicMaterial({
                 color: this._strokeColor,
@@ -1111,41 +916,15 @@ export class Polygon {
     }
 
     /**
-     * Применяет новое состояние hover. Вызывается из батчевого raycast'а.
-     * Если состояние не изменилось — ничего не делает.
-     *
-     * @param {boolean} isHovered - Новое состояние наведения.
-     * @param {Object} map - Экземпляр карты.
-     * @returns {void}
-     * @private
-     */
-    _applyHover(isHovered, map) {
-        if (isHovered === this._isHovered) return;
-        this._isHovered = isHovered;
-
-        if (isHovered) {
-            if (this._onHover) {
-                this._onHover(true);
-            } else if (this._tooltipText && map.popupManager) {
-                map.popupManager.show(this, this._tooltipText);
-            }
-        } else {
-            if (this._onHover) {
-                this._onHover(false);
-            } else if (this._tooltipText && map.popupManager) {
-                map.popupManager.hide();
-            }
-        }
-    }
-
-    /**
      * Удаляет полигон с карты, освобождает все ресурсы и удаляет подпись.
      *
      * @returns {void}
      */
     remove() {
-        if (this._map) {
-            Polygon._unregisterInteractivePolygon(this);
+        // Отписываемся от InteractionManager.
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
         }
 
         if (this._group) {
@@ -1182,6 +961,7 @@ export class Polygon {
         this._cachedHeights.length = 0;
         this._cachedStrokeHeights.length = 0;
         this._isHovered = false;
+        this._raycastMeshesCache = null;
 
         this._layer?._removeRef(this);
         this._layer = null;
@@ -1193,7 +973,7 @@ export class Polygon {
      * Обновляет состояние полигона на каждом кадре: видимость по зуму,
      * высоты и позицию центроида.
      *
-     * @param {Object} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
      * @private
      */
@@ -1215,18 +995,20 @@ export class Polygon {
             this._map.worldGroup.add(this._group);
         }
 
-        if (this._strokeMaterial) {
+        if (this._strokeMaterial && this._strokeMaterial.resolution) {
             const canvas = this._map.renderer.domElement;
             const res = this._strokeMaterial.resolution;
-            if (res && (res.x !== canvas.width || res.y !== canvas.height)) {
-                this._strokeMaterial.resolution.set(canvas.width, canvas.height);
+            if (res.x !== canvas.width || res.y !== canvas.height) {
+                res.set(canvas.width, canvas.height);
             }
         }
 
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
-                const worldCenter = this._tempVec3.copy(this._group.position).add(map.worldGroup.position);
+                const worldCenter = map.getVec3()
+                    .copy(this._group.position)
+                    .add(map.worldGroup.position);
                 const distToCenter = map.camera.position.distanceTo(worldCenter);
                 if (distToCenter - this._boundingSphereRadius > maxDist) {
                     this._group.visible = false;
@@ -1266,11 +1048,12 @@ export class Polygon {
     }
 
     /**
-     * Обновляет высоты вершин всех геометрий в соответствии с режимом высоты и экструзией.
-     * После изменения позиций принудительно пересчитывает bounding sphere каждой
-     * геометрии — иначе frustum culling отсекает меши, «уехавшие» по Y.
+     * Обновляет высоты вершин всех геометрий в соответствии с режимом
+     * высоты и экструзией. После изменения позиций принудительно
+     * пересчитывает bounding sphere каждой геометрии — иначе frustum
+     * culling отсекает меши, «уехавшие» по Y.
      *
-     * @returns {boolean} true, если высоты были пересчитаны.
+     * @returns {boolean} `true`, если высоты были пересчитаны.
      * @private
      */
     _updateHeights() {
@@ -1317,7 +1100,7 @@ export class Polygon {
             this._cachedStrokeHeights[i] = base + this._minHeight + (this._extruded ? this._height : 0);
         }
 
-        // Верхняя крышка
+        // Верхняя крышка.
         const topPos = this._fillGeometry.attributes.position.array;
         for (let i = 0; i < this._vertices2D.length; i++) {
             topPos[i * 3 + 1] = this._cachedHeights[i];
@@ -1325,7 +1108,7 @@ export class Polygon {
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
 
-        // Нижняя крышка
+        // Нижняя крышка.
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
             for (let i = 0; i < this._vertices2D.length; i++) {
@@ -1335,7 +1118,7 @@ export class Polygon {
             this._bottomGeometry.computeBoundingSphere();
         }
 
-        // Боковые стенки
+        // Боковые стенки.
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
             let idx = 0;
@@ -1373,6 +1156,9 @@ export class Polygon {
      * замыкающей точки отбрасывается в `_buildStrokeGeometry`.
      * Замыкающий сегмент добавляется отдельно в конце.
      *
+     * Для `useSimpleStroke` атрибут `position` переиспользуется между
+     * вызовами (обновляется in-place), если его размер не изменился.
+     *
      * @returns {void}
      * @private
      */
@@ -1398,11 +1184,19 @@ export class Polygon {
         }
 
         if (this._useSimpleStroke) {
-            const pointArray = [];
-            for (let i = 0; i < positions.length; i += 3) {
-                pointArray.push(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]));
+            const count = positions.length / 3;
+            const existing = this._strokeGeometry.getAttribute('position');
+            if (existing && existing.count === count) {
+                existing.array.set(positions);
+                existing.needsUpdate = true;
+                this._strokeGeometry.computeBoundingSphere();
+            } else {
+                this._strokeGeometry.setAttribute(
+                    'position',
+                    new THREE.BufferAttribute(new Float32Array(positions), 3)
+                );
+                this._strokeGeometry.computeBoundingSphere();
             }
-            this._strokeGeometry.setFromPoints(pointArray);
         } else {
             this._strokeGeometry.setPositions(positions);
             this._strokeLine.computeLineDistances();
@@ -1411,6 +1205,9 @@ export class Polygon {
 
     /**
      * Пересчитывает экранную позицию центроида полигона для подписи.
+     *
+     * Использует пул временных векторов карты (`map.getVec3()`) —
+     * без аллокаций `new THREE.Vector3` в горячем пути.
      *
      * @returns {void}
      * @private
@@ -1428,7 +1225,7 @@ export class Polygon {
         let worldY = this._altitudeOffset;
         if (this._altitudeMode === 'clampToGround' && map.hasElevation) {
             const now = performance.now();
-            if (now - (this._lastCentroidHeightUpdateTime || 0) > this._heightUpdateInterval) {
+            if (now - this._lastCentroidHeightUpdateTime > this._heightUpdateInterval) {
                 map.ensureTileForPoint(worldX, worldZ);
                 this._cachedCentroidHeight = map.getSurfaceHeightAt(worldX, worldZ);
                 this._lastCentroidHeightUpdateTime = now;
@@ -1437,8 +1234,9 @@ export class Polygon {
         }
         worldY += this._minHeight + (this._extruded ? this._height : 0);
 
-        const worldPos = this._tempVec3.set(worldX, worldY + wgPos.y, worldZ);
-        const screenPos = worldPos.clone().project(map.camera);
+        // Проекция выполняется in-place над вектором из пула.
+        const screenPos = map.getVec3().set(worldX, worldY + wgPos.y, worldZ);
+        screenPos.project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;
         } else {
@@ -1476,9 +1274,7 @@ export class Polygon {
     /**
      * Возвращает границы зума для отображения подписи.
      *
-     * @property {number} min - Минимальный зум.
-     * @property {number} max - Максимальный зум.
-     * @returns {Object} Границы зума.
+     * @returns {{min: number, max: number}} Границы зума.
      */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
 
@@ -1499,9 +1295,7 @@ export class Polygon {
     /**
      * Возвращает экранную позицию центроида.
      *
-     * @property {number} x - Координата X.
-     * @property {number} y - Координата Y.
-     * @returns {Object|null} Экранная позиция центроида (или null).
+     * @returns {{x: number, y: number}|null} Экранная позиция центроида (или null).
      */
     getScreenPosition() { return this._centroidScreenPos; }
 

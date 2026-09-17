@@ -13,3 +13,4 @@ export { Area3D } from './Area3D.js';
 export { Image } from './Image.js';
 export { Projections } from './Projections.js';
 export { exportToGLB } from './Exporter.js';
+export { Interaction } from './Interaction.js';

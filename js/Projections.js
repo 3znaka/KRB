@@ -1,7 +1,5 @@
 // Projections.js
-import {
-proj4
-} from '../js_TP/proj4.js';
+import proj4 from '../js_TP/proj4.js';
 
 const HARDCODED = {
     'EPSG:4326': '+proj=longlat +datum=WGS84 +no_defs +type=crs',

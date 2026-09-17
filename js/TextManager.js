@@ -169,34 +169,42 @@ export class TextManager {
          */
         this._gridIndex = new _GridIndex(128);
 
+        // --- НОВЫЕ ПОЛЯ ДЛЯ ОПТИМИЗАЦИИ ---
+        
         /**
-         * Карта для переиспользования DOM-элементов (stableId -> label).
-         * @type {Map<any, Object>}
+         * Карта для переиспользования DOM-элементов (дедупликация по stableId).
+         * @type {Map<*, Object>}
          * @private
          */
         this._labelMap = new Map();
 
         /**
-         * Флаг изменений (добавление/удаление/обновление текста).
-         * Используется для троттлинга метода update().
+         * Флаг изменений для троттлинга update().
          * @type {boolean}
          * @private
          */
         this._dirty = false;
 
         /**
-         * Кэш мировой позиции X для троттлинга update().
+         * Кэш позиции мира для троттлинга update().
          * @type {number|null}
          * @private
          */
-        this._lastWorldX = null;
-
+        this._lastThrottleWorldX = null;
+        
         /**
-         * Кэш мировой позиции Z для троттлинга update().
+         * Кэш позиции мира для троттлинга update().
          * @type {number|null}
          * @private
          */
-        this._lastWorldZ = null;
+        this._lastThrottleWorldZ = null;
+        
+        /**
+         * Кэш зума для троттлинга update().
+         * @type {number|null}
+         * @private
+         */
+        this._lastThrottleZoom = null;
 
         this._initPane();
     }
@@ -281,24 +289,28 @@ export class TextManager {
         }
         this.labels.length = 0;
         this._labelMap.clear();
+        
         if (this.pane && this.pane.parentNode) {
             this.pane.parentNode.removeChild(this.pane);
         }
         this.pane = null;
         this._lastVisibleIds = null;
         this._lastZoom = null;
-        this._lastWorldX = null;
-        this._lastWorldZ = null;
+        this._lastThrottleZoom = null;
+        this._lastThrottleWorldX = null;
+        this._lastThrottleWorldZ = null;
         this._dirty = false;
         this._gridIndex.clear();
     }
 
     /**
-     * Добавляет новую подпись на карту на основе объекта-источника.
+     * Добавляет новую подпись на карту на основе объекта-источника или переиспользует
+     * существующую, если передан совпадающий stableId.
      * Создаёт DOM-элемент, измеряет его размеры и сохраняет во внутренний массив.
-     * Если элемент с таким stableId уже существует, переиспользует его.
      *
      * @param {Object} source - Объект-источник подписи.
+     * @param {*} [stableId] - Стабильный идентификатор для дедупликации и переиспользования DOM-элемента.
+     * @param {boolean} [skipMeasure=false] - Пропустить немедленное измерение (используется при батчинге).
      * @property {Function} source.getText - Возвращает текст подписи.
      * @property {Function} source.getTextStyle - Возвращает стили текста.
      * @property {Function} source.getPriority - Возвращает приоритет подписи.
@@ -316,13 +328,11 @@ export class TextManager {
      * @property {Function} source.getLabelParameter - Возвращает текущий параметр линии.
      * @property {Function} source.setLabelParameter - Устанавливает параметр линии.
      * @property {Function} source.getPlacement - Возвращает режим размещения вдоль линии.
-     * @param {*} stableId - Стабильный идентификатор для переиспользования DOM-элемента (например, ссылка на объект данных).
-     * @param {boolean} [skipMeasure=false] - Пропустить немедленное измерение (используется для батчинга).
      * @returns {Object} Объект label, содержащий ссылки на source и элемент, а также метаданные (t, размеры, флаги и т.д.).
      */
     addLabel(source, stableId, skipMeasure = false) {
         // 1. Переиспользование существующего элемента
-        if (this._labelMap.has(stableId)) {
+        if (stableId !== undefined && this._labelMap.has(stableId)) {
             const label = this._labelMap.get(stableId);
             label.source = source;
             label.stuck = false;
@@ -330,22 +340,32 @@ export class TextManager {
             label.priority = source.getPriority ? source.getPriority() : 0;
             label.allowOverflow = source.getAllowOverflow ? source.getAllowOverflow() : false;
 
-            // Обновляем текст только если он изменился
+            let textChanged = false;
             const newText = source.getText();
-            if (label.element.textContent !== newText) {
-                if (source.getLabelType() === 'point') {
-                    label.element.style.whiteSpace = 'pre-line';
-                    label.element.textContent = this._wrapPointText(newText, label.element.style.fontSize);
-                } else {
-                    label.element.textContent = newText;
+            if (source.getLabelType() === 'point') {
+                Object.assign(label.element.style, source.getTextStyle());
+                label.element.style.whiteSpace = 'pre-line';
+                const wrapped = this._wrapPointText(newText, label.element.style.fontSize);
+                if (label.element.textContent !== wrapped) {
+                    label.element.textContent = wrapped;
+                    textChanged = true;
                 }
-                // Если текст изменился, измерить необходимо, игнорируем skipMeasure
-                this._measureLabel(label); 
+            } else {
+                Object.assign(label.element.style, source.getTextStyle());
+                if (label.element.textContent !== newText) {
+                    label.element.textContent = newText;
+                    textChanged = true;
+                }
             }
 
             if (!this.labels.includes(label)) {
                 this.labels.push(label);
             }
+            
+            if (textChanged && !skipMeasure) {
+                this._measureLabel(label);
+            }
+            
             this._dirty = true;
             return label;
         }
@@ -387,7 +407,7 @@ export class TextManager {
         const label = {
             source,
             element: el,
-            stableId,
+            stableId, // <--- СОХРАНЯЕМ ID
             t: 0,
             width: 0,
             height: 0,
@@ -399,8 +419,11 @@ export class TextManager {
             _fontSize: 12,
             _bbox: null
         };
+        
         this.labels.push(label);
-        this._labelMap.set(stableId, label);
+        if (stableId !== undefined) {
+            this._labelMap.set(stableId, label);
+        }
         
         if (!skipMeasure) {
             this._measureLabel(label);
@@ -421,6 +444,7 @@ export class TextManager {
      */
     removeLabel(label) {
         if (!label) return;
+        
         if (label.stableId !== undefined) {
             this._labelMap.delete(label.stableId);
         }
@@ -438,6 +462,48 @@ export class TextManager {
         // Инвалидация снимка прошлого кадра.
         this._lastVisibleIds = null;
         this._dirty = true;
+    }
+
+    /**
+     * Батчит измерение размеров DOM-элементов, выполняя ОДИН reflow 
+     * вместо N reflow при вызове по отдельности.
+     *
+     * @param {Object[]} labels - Массив объектов подписей для измерения.
+     */
+    _measureLabelsBatch(labels) {
+        if (!labels || labels.length === 0) return;
+        
+        for (const label of labels) {
+            const el = label.element;
+            el.style.display = 'block';
+            el.style.visibility = 'hidden';
+        }
+        // Чтение свойств после массового изменения стилей вызывает один reflow
+        for (const label of labels) {
+            const el = label.element;
+            label.width = el.offsetWidth;
+            label.height = el.offsetHeight;
+            const style = window.getComputedStyle(el);
+            label._fontSize = parseFloat(style.fontSize) || 12;
+            
+            el.style.display = 'none';
+            el.style.visibility = 'visible';
+        }
+        this._dirty = true;
+    }
+
+    /**
+     * Удаляет подписи, которых нет в списке активных идентификаторов.
+     *
+     * @param {Array} activeIds - Массив активных stableId.
+     */
+    pruneStaleLabels(activeIds) {
+        const activeSet = new Set(activeIds);
+        for (const [stableId, label] of this._labelMap.entries()) {
+            if (!activeSet.has(stableId)) {
+                this.removeLabel(label);
+            }
+        }
     }
 
     /**
@@ -530,47 +596,6 @@ export class TextManager {
         label._fontSize = parseFloat(style.fontSize) || 12;
         el.style.display = prevDisplay;
         el.style.visibility = prevVisibility;
-    }
-
-    /**
-     * Батчит измерение размеров DOM-элементов, выполняя ОДИН reflow 
-     * вместо N reflow при вызове по отдельности.
-     *
-     * @param {Object[]} labels - Массив объектов подписей.
-     * @private
-     */
-    _measureLabelsBatch(labels) {
-        if (!labels || labels.length === 0) return;
-        for (const label of labels) {
-            const el = label.element;
-            el.style.display = 'block';
-            el.style.visibility = 'hidden';
-        }
-        // Чтение свойств после массового изменения стилей вызывает один reflow
-        for (const label of labels) {
-            const el = label.element;
-            label.width = el.offsetWidth;
-            label.height = el.offsetHeight;
-            const style = window.getComputedStyle(el);
-            label._fontSize = parseFloat(style.fontSize) || 12;
-            
-            el.style.display = 'none';
-            el.style.visibility = 'visible';
-        }
-    }
-
-    /**
-     * Удаляет подписи, которых нет в списке активных идентификаторов.
-     *
-     * @param {Array<any>} activeIds - Массив стабильных идентификаторов, которые должны остаться.
-     */
-    pruneStaleLabels(activeIds) {
-        const activeSet = new Set(activeIds);
-        for (const [stableId, label] of this._labelMap.entries()) {
-            if (!activeSet.has(stableId)) {
-                this.removeLabel(label);
-            }
-        }
     }
 
     /**
@@ -805,23 +830,24 @@ export class TextManager {
     update() {
         const map = this.map;
         const zoom = map.continuousZoom;
-        const wx = map.worldGroup.position.x;
-        const wz = map.worldGroup.position.z;
+        
+        // Безопасное чтение позиции мира (может быть null на ранних этапах инициализации)
+        const wx = map.worldGroup ? map.worldGroup.position.x : 0;
+        const wz = map.worldGroup ? map.worldGroup.position.z : 0;
 
         // ТРОТТЛИНГ: если камера не двигалась, зум не менялся и не было добавлений/удалений
         if (!this._dirty &&
-            this._lastZoom === zoom &&
-            this._lastWorldX === wx &&
-            this._lastWorldZ === wz) {
+            this._lastThrottleZoom === zoom &&
+            this._lastThrottleWorldX === wx &&
+            this._lastThrottleWorldZ === wz) {
             return;
         }
 
-        const prevZoom = this._lastZoom;
-
+        // Сбрасываем флаг и обновляем кэш состояния
         this._dirty = false;
-        this._lastZoom = zoom;
-        this._lastWorldX = wx;
-        this._lastWorldZ = wz;
+        this._lastThrottleZoom = zoom;
+        this._lastThrottleWorldX = wx;
+        this._lastThrottleWorldZ = wz;
 
         // Сброс stuck при изменении состава или зума.
         // Используем Set<source>, чтобы не материализовать промежуточный массив дважды.
@@ -834,8 +860,8 @@ export class TextManager {
             }
         }
         if (this._lastVisibleIds === null ||
-            prevZoom === null ||
-            prevZoom !== zoom ||
+            this._lastZoom === null ||
+            this._lastZoom !== zoom ||
             this._lastVisibleIds.size !== idSet.size ||
             this._setDiffers(this._lastVisibleIds, idSet)) {
             for (const lbl of this.labels) {
@@ -844,6 +870,7 @@ export class TextManager {
             }
         }
         this._lastVisibleIds = idSet;
+        this._lastZoom = zoom;
 
         // 1. Сбор видимых подписей
         const visibleLabels = [];

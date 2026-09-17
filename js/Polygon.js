@@ -1,11 +1,13 @@
 /**
- * Модуль для рисования полигонов (многоугольников) на карте.
- * Предоставляет класс Polygon, использующий триангуляцию Earcut
- * для заливки и "толстые" линии для обводки, с поддержкой высот,
- * экструзии, видимости по зуму и подписей через TextManager.
+ * Полигон на карте: заливка (Earcut), обводка (Line2 / THREE.Line),
+ * экструзия, высоты рельефа, подписи, hover/click через InteractionManager.
  *
- * Взаимодействие с указателем (hover / click / tooltip) делегировано
- * {@link InteractionManager} — единому менеджеру карты.
+ * Координаты колец задаются в СК `options.crs` (по умолчанию — map.inputCRS).
+ * Проецирование идёт через `map.projectSafe`, который:
+ *  - прижимает широту к ±85.05° для Mercator (иначе Антарктида даст Infinity),
+ *  - отсеивает мусор от proj4 (NaN / Infinity / |coord| > 1e8 м).
+ * Невалидные точки кольца заменяются ближайшей валидной точкой — так
+ * не рисуются «усы» через сцену, но кольцо и клиппинг не трогаются.
  */
 
 import { Projections } from './Projections.js';
@@ -26,40 +28,18 @@ export const POLYGON_RENDER_ORDER = {
     STROKE: 903
 };
 
-/**
- * Y-компонента векторного произведения (p1-p0) × (p2-p0) в плоскости XZ.
- * Используется для определения winding треугольников Earcut.
- * @private
- */
+/** Y-компонента векторного произведения (p1-p0) × (p2-p0) в плоскости XZ. @private */
 function crossY(p0, p1, p2) {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
     const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
     return dz1 * dx2 - dx1 * dz2;
 }
 
-/**
- * Полигон на карте: заливка, обводка, высоты, экструзия, подписи,
- * hover/click через InteractionManager.
- *
- * Координаты колец задаются в СК `options.crs` (по умолчанию —
- * `map.inputCRS`). Точки, для которых proj4 вернул NaN/Infinity,
- * заменяются на ближайшую валидную точку кольца — так избегаем
- * «усов» через всю сцену, но не клиппуем и не отбрасываем полигон
- * целиком. Для Mercator широта прижимается к ±85° (внутри
- * `Projection.fromLonLatSafe`), чтобы Антарктида отображалась
- * ровной линией, как в QGIS/Leaflet.
- *
- * @example
- * new Polygon({
- *     rings: [[[30.5, 50.4], [31.0, 50.5], [30.8, 50.7]]],
- *     fillColor: '#ff0000', fillOpacity: 0.3, strokeWidth: 2
- * }).addTo(map);
- */
 export class Polygon {
     /**
      * @param {Object} options
      * @param {Array<Array<Array<number>>>} options.rings - [внешнее, ...отверстия], каждое — [ [x,y], ... ].
-     * @param {string} [options.crs] - Код СК колец; по умолчанию `map.inputCRS`.
+     * @param {string} [options.crs] - Код СК колец; по умолчанию map.inputCRS.
      * @param {string} [options.fillColor='#3388ff']
      * @param {number} [options.fillOpacity=0.5]
      * @param {string} [options.strokeColor='#000000']
@@ -98,9 +78,7 @@ export class Polygon {
         }
 
         /** @private @type {Array<Array<Array<number>>>} */ this._rings = options.rings;
-
         /** @private @type {string|null} */ this._crsCode = options.crs ?? null;
-
         /** @private @type {import('./Projections.js').Projection|null} */ this._crs = null;
 
         /** @private @type {string} */  this._fillColor = options.fillColor || '#3388ff';
@@ -149,7 +127,7 @@ export class Polygon {
         /** @private @type {Layer|null} */ this._layer = null;
         /** @private @type {THREE.Group} */ this._group = new THREE.Group();
 
-        // Меши и ресурсы.
+        // Меши и материалы.
         /** @private @type {THREE.Mesh|null} */           this._fillMesh = null;
         /** @private @type {THREE.BufferGeometry|null} */ this._fillGeometry = null;
         /** @private @type {THREE.Material|null} */       this._fillMaterial = null;
@@ -178,11 +156,8 @@ export class Polygon {
         /** @private @type {Array<[number, number]>} */ this._worldCoords = [];
         /** @private @type {Array<[number, number]>} */ this._strokeWorldCoords = [];
 
-        /**
-         * Спроецированное внешнее кольцо (world-метры). Заполняется в
-         * `_buildFillGeometry`, переиспользуется в `_buildStrokeGeometry`.
-         * @private @type {Array<[number, number]>|null}
-         */
+        /** Спроецированное внешнее кольцо; переиспользуется для обводки.
+         *  @private @type {Array<[number, number]>|null} */
         this._projectedOuterRing = null;
 
         /** @private @type {number} */ this._boundingSphereRadius = 0;
@@ -359,10 +334,14 @@ export class Polygon {
     /**
      * Проецирует кольцо в world-метры карты.
      *
-     * Невалидные точки (proj4 вернул NaN/Infinity, например для
-     * Антарктиды за 85° до клампа) заменяются ближайшей валидной
-     * точкой кольца — так «усы» через сцену не появляются, но и
-     * клиппинг не выполняется. Если невалидны все точки — null.
+     * `map.projectSafe` прижимает широту к ±85.05° для Mercator (внутри
+     * `fromLonLatSafe`) и отсеивает мусор от proj4 (NaN, Infinity,
+     * координаты за 1e8 м — типичный результат Transverse Mercator
+     * за сингулярностью). Если для какой-то точки `projectSafe` вернул
+     * null — подставляем предыдущую валидную точку кольца. Это убирает
+     * «усы» из Infinity/NaN, не клиппуя и не отбрасывая кольцо целиком.
+     *
+     * Если невалидны все точки — возвращаем null (кольцо не рисуется).
      *
      * @param {Array<Array<number>>} ring
      * @param {import('./KrbMap.js').KrbMap} map
@@ -393,10 +372,7 @@ export class Polygon {
         return out;
     }
 
-    /**
-     * Строит заливку (Earcut) и — для extruded — нижнюю крышку и стенки.
-     * @private
-     */
+    /** Строит заливку (Earcut) и — для extruded — нижнюю крышку и стенки. @private */
     _buildFillGeometry(map) {
         const rings = this._rings;
         if (!rings || !rings.length || rings[0].length < 3) {
@@ -602,10 +578,7 @@ export class Polygon {
         this._raycastMeshesCache = null;
     }
 
-    /**
-     * Строит обводку по внешнему кольцу (тот же projection, что и заливка).
-     * @private
-     */
+    /** Строит обводку по `_projectedOuterRing` (то же кольцо, что и заливка). @private */
     _buildStrokeGeometry(map) {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
 
@@ -618,7 +591,7 @@ export class Polygon {
             return;
         }
 
-        // Замыкающую точку (совпадающую с первой) отбрасываем.
+        // Отбрасываем замыкающую точку, если она совпадает с первой.
         this._strokeWorldCoords.length = 0;
         const first = projected[0];
         for (let i = 0; i < projected.length; i++) {

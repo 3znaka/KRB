@@ -337,9 +337,9 @@ export class KrbMap {
        ================================================================ */
 
     /**
-     * Координаты из `fromCrs` в world-метры карты. Без валидации —
-     * за пределами области определения proj4 может вернуть NaN/Infinity;
-     * для безопасного варианта используйте {@link KrbMap#projectSafe}.
+     * Координаты из `fromCrs` в world-метры карты. Без валидации — за
+     * пределами области определения proj4 может вернуть NaN/Infinity.
+     * Для безопасного варианта используйте {@link KrbMap#projectSafe}.
      *
      * @param {Array<number>} coord - [x, y] в СК `fromCrs`.
      * @param {Projection|string} [fromCrs=this.inputCRS]
@@ -357,10 +357,22 @@ export class KrbMap {
 
     /**
      * Безопасная версия {@link KrbMap#project}: возвращает `null` вместо
-     * невалидных координат. Доменных проверок нет — прижимается только
-     * широта для Mercator (внутри `fromLonLatSafe`), чтобы не получить
-     * бесконечность на полюсах. Далеко от осевого меридиана UTM/GK
-     * координаты остаются большими — пусть полигон искажается, как в QGIS.
+     * невалидных координат.
+     *
+     * Что делается:
+     *   1. `src → lon/lat` (через `toLonLatSafe`, если доступно).
+     *   2. `lon/lat → метры проекции карты` через `fromLonLatSafe`, который
+     *      внутри:
+     *      - для Mercator прижимает широту к ±85.05°;
+     *      - отсеивает мусор от proj4 (NaN, Infinity, а также координаты
+     *        с модулем больше `projection.maxAbsCoord` — обычно 1e8 м,
+     *        то есть результаты деления на ноль за сингулярностью
+     *        Transverse Mercator).
+     *
+     * Зоны UTM/GK никак не проверяются: точка в Перу при карте в UTM 37N
+     * даст «мусорные» координаты, они будут отсеяны как выброс, а
+     * потребитель (Polygon) подставит на её место соседнюю валидную
+     * точку кольца, чтобы не рисовать «ус» через всю сцену.
      *
      * @param {Array<number>} coord
      * @param {Projection|string} [fromCrs=this.inputCRS]
@@ -381,7 +393,7 @@ export class KrbMap {
             : src.toLonLat(coord);
         if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
 
-        // lon/lat → метры проекции карты (с клампом широты для Mercator).
+        // lon/lat → метры проекции карты (кламп широты + отсев мусора).
         const proj = typeof this.projection.fromLonLatSafe === 'function'
             ? this.projection.fromLonLatSafe(lonLat)
             : this.projection.fromLonLat(lonLat);

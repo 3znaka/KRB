@@ -12,6 +12,25 @@ import { PopupManager } from './PopupManager.js';
 /**
  * Представление карты, хранящее параметры центра, масштаба и углов обзора.
  *
+ * Центр карты можно задать одним из двух способов:
+ *
+ * 1. `options.centerLonLat` — координаты [lon, lat] в WGS84 (EPSG:4326).
+ *    Удобно для обычного кода: не нужно самостоятельно конвертировать
+ *    градусы в метры. View сам преобразует их в метры `options.projection`.
+ *
+ * 2. `options.center` — координаты [x, z] сразу в **мировых** метрах проекции
+ *    `options.projection`. Обратите внимание: это world-координаты KrbMap,
+ *    где ось Z направлена на юг (север = −Z). Используйте этот вариант,
+ *    только если у вас уже есть готовые world-координаты (например,
+ *    сохранённое состояние карты или результат `KrbMap#project`).
+ *
+ * Приоритет: если заданы оба, используется `centerLonLat`, а в консоль
+ * выводится предупреждение.
+ *
+ * Поле `this.projection` содержит код проекции, в метрах которой хранится
+ * `this.center`. Он должен совпадать с `KrbMap.options.projection` — иначе
+ * карта будет смотреть не туда.
+ *
  * @example
  * // Обычный случай: центр в градусах, Web Mercator
  * const view = new View({
@@ -222,9 +241,6 @@ export class KrbMap {
      * @param {number} [options.staticBgZoom] - Уровень зума для статического фона.
      * @param {number} [options.minCameraHeightOffset] - Минимальный отступ камеры от поверхности.
      * @param {boolean} [options.antialias=true] - Включает сглаживание (антиалиасинг) рендерера.
-     * @param {boolean} [options.zoomToCursor=true] - Зуммировать к позиции курсора (как в
-     *   Google Maps / OSM / 2GIS). При `false` зум всегда центрируется на текущей цели
-     *   камеры. Также управляется в рантайме через {@link KrbMap#setZoomToCursor}.
      * @throws {Error} Если options не передан.
      * @throws {Error} Если целевой элемент не найден.
      * @throws {Error} Если view не передан.
@@ -282,14 +298,6 @@ export class KrbMap {
         this.staticBgZoom = options.staticBgZoom ?? DEFAULTS.STATIC_BG_ZOOM;
         this.antialias = options.antialias ?? true;
 
-        /**
-         * Включён ли режим зуммирования к позиции курсора.
-         * Можно менять в рантайме через {@link KrbMap#setZoomToCursor}.
-         *
-         * @type {boolean}
-         */
-        this.zoomToCursor = options.zoomToCursor ?? true;
-
         const elevLayer = this.layers.find(l => l.elevation);
         const effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
         this.effectiveHeightScale = effectiveHeightScale;
@@ -316,36 +324,6 @@ export class KrbMap {
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
         // --------------------------------------------------
-
-        // --- Состояние zoom-to-cursor ---
-        /**
-         * Активный якорь zoom-to-cursor или null.
-         * Пока якорь не null, каждый кадр мира сдвигается так, чтобы точка
-         * поверхности под якорем оставалась под указанным NDC-курсором.
-         *
-         * @type {{ndcX: number, ndcY: number, localX: number, localY: number, localZ: number}|null}
-         * @private
-         */
-        this._zoomCursorAnchor = null;
-
-        /**
-         * Точка пересечения луча с плоскостью земли при установке якоря.
-         * Переиспользуется для уменьшения аллокаций.
-         *
-         * @type {THREE.Vector3}
-         * @private
-         */
-        this._zoomAnchorHit = new THREE.Vector3();
-
-        /**
-         * Идёт ли сейчас плавная интерполяция continuousZoom → targetContinuousZoom.
-         * Используется для снятия якоря после завершения зума.
-         *
-         * @type {boolean}
-         * @private
-         */
-        this._isZooming = false;
-        // ---------------------------------
 
         const [cx, cz] = this.view.center;
         const initialZoom = this.view.zoom;
@@ -651,7 +629,7 @@ export class KrbMap {
      */
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        
+        this.controls.zoomToCursor = true;
         this.controls.enableZoom = true;
         this.controls.enablePan = false;
         this.controls.mouseButtons = {
@@ -709,34 +687,6 @@ export class KrbMap {
     /* ================================================================
        Утилиты камеры и URL
        ================================================================ */
-
-    /**
-     * Включает или выключает зуммирование к позиции курсора.
-     *
-     * При включении при каждом колесе мыши или pinch-жесте карта будет
-     * смещаться так, чтобы точка поверхности под курсором (или под
-     * серединой между пальцами) оставалась на месте. При выключении
-     * поведение откатывается к зуму относительно центра экрана.
-     *
-     * @param {boolean} enabled - Новая настройка.
-     * @returns {void}
-     *
-     * @example
-     * map.setZoomToCursor(false);
-     */
-    setZoomToCursor(enabled) {
-        this.zoomToCursor = !!enabled;
-        if (!this.zoomToCursor) this._zoomCursorAnchor = null;
-    }
-
-    /**
-     * Возвращает текущий режим зуммирования к курсору.
-     *
-     * @returns {boolean} True, если zoom-to-cursor включён.
-     */
-    getZoomToCursor() {
-        return this.zoomToCursor;
-    }
 
     /**
      * Устанавливает наклон камеры с анимацией.
@@ -1122,105 +1072,6 @@ export class KrbMap {
     }
 
     /* ================================================================
-       Zoom-to-cursor: якорь и сдвиг мира
-       ================================================================ */
-
-    /**
-     * Запоминает точку поверхности под курсором как якорь zoom-to-cursor.
-     *
-     * Дальнейшие шаги зума будут сопровождаться сдвигом `worldGroup` так,
-     * чтобы эта точка оставалась под указанным NDC-курсором. Координаты
-     * точки сохраняются в **локальных** координатах мира (без учёта
-     * текущего смещения `worldGroup`), поэтому якорь корректно работает
-     * при любых последующих сдвигах мира.
-     *
-     * @param {number} ndcX - X курсора в NDC ([-1, 1]).
-     * @param {number} ndcY - Y курсора в NDC ([-1, 1], «вверх» положительный).
-     * @returns {void}
-     * @private
-     */
-    _setZoomCursorAnchor(ndcX, ndcY) {
-        this.camera.updateMatrixWorld();
-        this._tempMouse.set(ndcX, ndcY);
-        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
-        if (this._tempRaycaster.ray.intersectPlane(this.groundPlane, this._zoomAnchorHit)) {
-            const wg = this.worldGroup.position;
-            this._zoomCursorAnchor = {
-                ndcX,
-                ndcY,
-                localX: this._zoomAnchorHit.x - wg.x,
-                localY: this._zoomAnchorHit.y - wg.y,
-                localZ: this._zoomAnchorHit.z - wg.z
-            };
-        } else {
-            this._zoomCursorAnchor = null;
-        }
-    }
-
-    /**
-     * Сдвигает `worldGroup` так, чтобы якорная точка zoom-to-cursor снова
-     * проецировалась в NDC курсора. Сдвиг выполняется только по X/Z
-     * (по горизонтальной плоскости) — высота якоря не корректируется.
-     *
-     * @returns {void}
-     * @private
-     */
-    _applyZoomCursorShift() {
-        const anchor = this._zoomCursorAnchor;
-        if (!anchor) return;
-
-        // Матрица камеры должна быть свежей: applyZoomDistance() только что
-        // менял position/quaternion.
-        this.camera.updateMatrixWorld();
-        this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
-
-        const wg = this.worldGroup.position;
-        const px = anchor.localX + wg.x;
-        const py = anchor.localY + wg.y;
-        const pz = anchor.localZ + wg.z;
-
-        const cam = this.camera.position;
-        const dx = px - cam.x;
-        const dy = py - cam.y;
-        const dz = pz - cam.z;
-
-        const m = this.camera.matrixWorldInverse.elements;
-        // three.js хранит элементы по столбцам: строки 3×3-ротации —
-        // (m[0],m[4],m[8]), (m[1],m[5],m[9]), (m[2],m[6],m[10]).
-        const r1x = m[0], r1y = m[4], r1z = m[8];
-        const r2x = m[1], r2y = m[5], r2z = m[9];
-        const r3x = m[2], r3y = m[6], r3z = m[10];
-
-        // V = R · (P − C)
-        const Vx = r1x * dx + r1y * dy + r1z * dz;
-        const Vy = r2x * dx + r2y * dy + r2z * dz;
-        const Vz = r3x * dx + r3y * dy + r3z * dz;
-
-        const fovYRad = (this.camera.fov * Math.PI) / 180;
-        const ty = Math.tan(fovYRad / 2);
-        const tx = ty * this.camera.aspect;
-
-        const u = anchor.ndcX;
-        const v = anchor.ndcY;
-
-        const A11 = r1x + u * tx * r3x;
-        const A12 = r1z + u * tx * r3z;
-        const A21 = r2x + v * ty * r3x;
-        const A22 = r2z + v * ty * r3z;
-        const B1 = -u * tx * Vz - Vx;
-        const B2 = -v * ty * Vz - Vy;
-
-        const det = A11 * A22 - A12 * A21;
-        if (Math.abs(det) < 1e-12) return;
-
-        const sdx = (B1 * A22 - B2 * A12) / det;
-        const sdz = (A11 * B2 - A21 * B1) / det;
-
-        this.worldGroup.position.x += sdx;
-        this.worldGroup.position.z += sdz;
-    }
-
-    /* ================================================================
        Ввод: мышь, колёсико, касания
        ================================================================ */
 
@@ -1233,10 +1084,6 @@ export class KrbMap {
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
-
-        // Драг левой кнопкой конфликтует с агентом zoom-to-cursor за
-        // worldGroup — сбрасываем якорь, чтобы не «дёрнуло» мир.
-        this._zoomCursorAnchor = null;
 
         this._mouseDownX = e.clientX;
         this._mouseDownY = e.clientY;
@@ -1303,16 +1150,6 @@ export class KrbMap {
         if (this._cameraAnimation) return;
         e.preventDefault();
         const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
-
-        // Ставим якорь под курсором до начала изменения зума, чтобы затем
-        // сдвигать мир и удерживать точку под курсором.
-        if (this.zoomToCursor) {
-            const rect = this.renderer.domElement.getBoundingClientRect();
-            const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-            const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-            this._setZoomCursorAnchor(ndcX, ndcY);
-        }
-
         this.applyZoomDelta(delta);
     }
 
@@ -1337,9 +1174,6 @@ export class KrbMap {
     onTouchStart(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length === 1) {
-            // Однопальцевое панорамирование конфликтует с якорем zoom-to-cursor.
-            this._zoomCursorAnchor = null;
-
             const rect = this.renderer.domElement.getBoundingClientRect();
             const touch = e.touches[0];
             this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1364,16 +1198,6 @@ export class KrbMap {
             const dx = e.touches[0].clientX - e.touches[1].clientX;
             const dy = e.touches[0].clientY - e.touches[1].clientY;
             this.touchState.accumulatedLineAngle = Math.atan2(dy, dx);
-
-            // Якорь zoom-to-cursor для pinch — в стартовой середине между пальцами.
-            if (this.zoomToCursor) {
-                const rect = this.renderer.domElement.getBoundingClientRect();
-                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                const ndcX = ((midX - rect.left) / rect.width) * 2 - 1;
-                const ndcY = -((midY - rect.top) / rect.height) * 2 + 1;
-                this._setZoomCursorAnchor(ndcX, ndcY);
-            }
         }
     }
 
@@ -1422,17 +1246,6 @@ export class KrbMap {
                 this.MIN_ZOOM,
                 Math.min(this.MAX_ZOOM, this.touchState.startZoom + zoomDelta)
             );
-
-            // Обновляем NDC якоря под текущую середину между пальцами:
-            // карта как бы «прилипает» к пальцам, а не к их стартовой позиции.
-            if (this._zoomCursorAnchor) {
-                const rect = this.renderer.domElement.getBoundingClientRect();
-                const midX = (t0.clientX + t1.clientX) / 2;
-                const midY = (t0.clientY + t1.clientY) / 2;
-                this._zoomCursorAnchor.ndcX = ((midX - rect.left) / rect.width) * 2 - 1;
-                this._zoomCursorAnchor.ndcY = -((midY - rect.top) / rect.height) * 2 + 1;
-            }
-
             this.controls.update();
             this.maybeUpdateVisibleTiles();
         }
@@ -1844,6 +1657,12 @@ export class KrbMap {
      * с учётом отступов. Корректно работает при любых текущих наклонах
      * и поворотах камеры (pitch/bearing сохраняются).
      *
+     * Как это работает: расстояние до цели вычисляется аналитически из
+     * того факта, что при изменении дистанции камеры (при фиксированном
+     * направлении target→camera) лучи через углы экрана пересекают плоскость
+     * земли в точках, линейно зависящих от дистанции. Решая неравенства
+     * «углы bounds внутри кадра», получаем минимально необходимую дистанцию.
+     *
      * @param {Array.<Array.<number>>} bounds - Прямоугольник в СК `options.crs`:
      *     [[minX, minY], [maxX, maxY]] (порядок углов нормализуется).
      * @param {Object} [options] - Дополнительные параметры.
@@ -1975,6 +1794,29 @@ export class KrbMap {
      * Вычисляет минимальную дистанцию камеры до цели, при которой bounds
      * `[targetX ± halfW] × [targetZ ± halfH]` целиком попадает в кадр.
      *
+     * Математика (кратко). Пусть:
+     *   - T = (targetX, 0, targetZ) — новая цель;
+     *   - dir — единичный вектор от текущей цели к текущей камере
+     *     (сохраняется в moveCameraToSlow);
+     *   - D — искомая дистанция (камера будет в T + dir·D);
+     *   - M = R_cam^T — матрица перехода world→view (R_cam — ориентация камеры,
+     *     сохраняется при движении камеры вдоль dir);
+     *   - m1, m2, m3 — строки M (то есть столбцы R_cam), т.е. right/up/backward
+     *     камеры в мировых координатах;
+     *   - tx = tan(fovY/2)·aspect, ty = tan(fovY/2).
+     *
+     * Для точки P на плоскости земли O = P − T. В view-пространстве:
+     *   R.x = m1·O, R.y = m2·O, R.z = m3·O − D
+     * (использовано, что M·dir = (0, 0, 1), так как dir направлен «назад» камеры).
+     *
+     * NDC: ndc.x = R.x / (−R.z·tx), ndc.y = R.y / (−R.z·ty).
+     * Условие «точка внутри кадра с учётом padding»:
+     *   |ndc.x| ≤ ndcXMax,  |ndc.y| ≤ ndcYMax,
+     *   где ndcXMax = 1 − 2·padX/W, ndcYMax = 1 − 2·padY/H.
+     *
+     * Из |ndc.x| ≤ ndcXMax:
+     *   D ≥ m3·O + |m1·O| / (ndcXMax·tx)
+     * Аналогично для y. Итоговое D = max по 4 углам bounds от этих величин.
      *
      * @private
      * @param {number} targetX - X-координата центра bounds (мир карты, без worldGroup).
@@ -2065,10 +1907,8 @@ export class KrbMap {
             if (Math.abs(diff) > 0.001) {
                 this.continuousZoom += diff * Math.min(1, 10 * deltaTime);
                 this.continuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.continuousZoom));
-                this._isZooming = true;
             } else {
                 this.continuousZoom = this.targetContinuousZoom;
-                this._isZooming = false;
             }
         }
 
@@ -2078,24 +1918,6 @@ export class KrbMap {
         if (!this._cameraAnimation) {
             this.applyZoomDistance();
         }
-
-        // --- Zoom-to-cursor: каждый кадр удерживаем якорь под курсором ---
-        if (this._zoomCursorAnchor) {
-            if (this._cameraAnimation) {
-                // Программная анимация камеры (moveCameraToSlow / rotateToNorth /
-                // setPitch / setBearing) отменяет пользовательский якорь,
-                // т.к. она сама управляет положением камеры и мира.
-                this._zoomCursorAnchor = null;
-            } else {
-                this._applyZoomCursorShift();
-                // Когда и зум, и pinch завершены — снимаем якорь: дальнейшее
-                // движение курсора без зума не должно сдвигать мир.
-                if (!this._isZooming && !this.touchState.isPinching) {
-                    this._zoomCursorAnchor = null;
-                }
-            }
-        }
-        // -----------------------------------------------------------------
 
         this.maybeUpdateVisibleTiles();
 

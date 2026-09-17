@@ -599,7 +599,6 @@ export class KrbMap {
      */
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.zoomToCursor = true;
         this.controls.enableZoom = true;
         this.controls.enablePan = false;
         this.controls.mouseButtons = {

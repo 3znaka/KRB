@@ -35,7 +35,6 @@ export class Area3D {
     static _pressStart = null;
     static _raycaster = new THREE.Raycaster();
     static _mapEventHandlers = new WeakMap();
-    static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
     /**
      * Создаёт Area3D.
@@ -147,6 +146,15 @@ export class Area3D {
 
         this._rotate = Math.min(3, Math.max(0, Math.floor(this._rotate)));
 
+        /**
+         * Флаг «мобильного» устройства. Определяется в `_attach` при привязке
+         * к карте (а не при загрузке модуля) — чтобы корректно реагировать на
+         * устройства с гибридным вводом и не «залипать» на устаревшем значении.
+         * @private
+         * @type {boolean}
+         */
+        this._isMobile = false;
+
         if (this._onClick || this._onHover || this._tooltipText) {
             Area3D._activeAreas.add(this);
         }
@@ -218,6 +226,11 @@ export class Area3D {
         this.remove();
         this._map = map;
         this._layer = layer;
+
+        // Определяем «мобильность» в момент привязки к карте, а не при
+        // загрузке модуля: matchMedia учитывает актуальное состояние
+        // устройства (гибридные ноутбуки, изменения при повороте и т.п.).
+        this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
         // Резолвим проекцию Area3D: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
@@ -333,19 +346,19 @@ export class Area3D {
         this._applyModelTransform();
     }
 
-async _loadModel() {
-    if (this._modelPromise) return this._modelPromise;
-    this._modelPromise = (async () => {
-        try {
-            const loader = new GLTFLoader();
+    async _loadModel() {
+        if (this._modelPromise) return this._modelPromise;
+        this._modelPromise = (async () => {
+            try {
+                const loader = new GLTFLoader();
 
-            // Настройка DRACOLoader для поддержки сжатых моделей
-            const dracoLoader = new DRACOLoader();
-            dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
-            dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
-            loader.setDRACOLoader(dracoLoader);
+                // Настройка DRACOLoader для поддержки сжатых моделей
+                const dracoLoader = new DRACOLoader();
+                dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
+                dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
+                loader.setDRACOLoader(dracoLoader);
 
-            const gltf = await loader.loadAsync(this._modelUrl);
+                const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
 
                 if (this._playAnimation && gltf.animations?.length) {
@@ -384,101 +397,102 @@ async _loadModel() {
         return this._modelPromise;
     }
 
-_applyModelTransform() {
-    if (!this._object3D) return;
+    _applyModelTransform() {
+        if (!this._object3D) return;
 
-    const model = this._object3D;
-    const parent = model.parent;
+        const model = this._object3D;
+        const parent = model.parent;
 
-    // Сброс трансформаций
-    model.position.set(0, 0, 0);
-    model.scale.set(1, 1, 1);
-    model.rotation.set(0, 0, 0);
-    model.updateMatrixWorld(true);
+        // Сброс трансформаций
+        model.position.set(0, 0, 0);
+        model.scale.set(1, 1, 1);
+        model.rotation.set(0, 0, 0);
+        model.updateMatrixWorld(true);
 
-    // Получаем локальный bounding box (без родительского поворота)
-    if (parent) parent.remove(model);
-    model.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    if (parent) parent.add(model);
+        // Получаем локальный bounding box (без родительского поворота)
+        if (parent) parent.remove(model);
+        model.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        if (parent) parent.add(model);
 
-    const rotate = this._rotate; // 0..3
+        const rotate = this._rotate; // 0..3
 
-    // Определяем, какие исходные оси модели после поворота rotate*90°
-    // будут соответствовать ширине и глубине полигона.
-    const widthModel = (rotate % 2 === 0) ? size.x : size.z;
-    const depthModel = (rotate % 2 === 0) ? size.z : size.x;
+        // Определяем, какие исходные оси модели после поворота rotate*90°
+        // будут соответствовать ширине и глубине полигона.
+        const widthModel = (rotate % 2 === 0) ? size.x : size.z;
+        const depthModel = (rotate % 2 === 0) ? size.z : size.x;
 
-    let targetW, targetH, targetD;
-    if (this._fit === 'stretch') {
-        targetW = this._polygonWidth;
-        targetD = this._polygonDepth;
-        if (this._size) {
-            const [, hFromSize] = this._normalizeSize(this._size);
-            targetH = hFromSize;
-        } else {
-            // Равномерный масштаб contain на основе "повёрнутых" осей
+        let targetW, targetH, targetD;
+        if (this._fit === 'stretch') {
+            targetW = this._polygonWidth;
+            targetD = this._polygonDepth;
+            if (this._size) {
+                const [, hFromSize] = this._normalizeSize(this._size);
+                targetH = hFromSize;
+            } else {
+                // Равномерный масштаб contain на основе "повёрнутых" осей
+                const containScale = Math.min(
+                    this._polygonWidth / widthModel,
+                    this._polygonDepth / depthModel
+                );
+                targetH = size.y * containScale;
+            }
+        } else if (this._fit === 'contain') {
             const containScale = Math.min(
                 this._polygonWidth / widthModel,
                 this._polygonDepth / depthModel
             );
+            targetW = widthModel * containScale;
             targetH = size.y * containScale;
-        }
-    } else if (this._fit === 'contain') {
-        const containScale = Math.min(
-            this._polygonWidth / widthModel,
-            this._polygonDepth / depthModel
-        );
-        targetW = widthModel * containScale;
-        targetH = size.y * containScale;
-        targetD = depthModel * containScale;
-    } else {
-        if (this._size) {
-            [targetW, targetH, targetD] = this._normalizeSize(this._size);
+            targetD = depthModel * containScale;
         } else {
-            targetW = size.x;
-            targetH = size.y;
-            targetD = size.z;
+            if (this._size) {
+                [targetW, targetH, targetD] = this._normalizeSize(this._size);
+            } else {
+                targetW = size.x;
+                targetH = size.y;
+                targetD = size.z;
+            }
         }
+
+        // Вычисляем масштабы с учётом rotate: при нечётном повороте
+        // оси X и Z меняются местами.
+        let scaleX, scaleZ;
+        if (rotate % 2 === 0) {
+            scaleX = targetW / size.x;
+            scaleZ = targetD / size.z;
+        } else {
+            scaleX = targetD / size.x;
+            scaleZ = targetW / size.z;
+        }
+        const scaleY = targetH / size.y;
+
+        model.scale.set(scaleX, scaleY, scaleZ);
+
+        const totalAngle = this._polygonAngle + rotate * Math.PI / 2;
+        model.rotation.y = totalAngle;
+
+        model.updateMatrixWorld(true);
+
+        // Временно убираем модель, чтобы получить локальный transformed box
+        if (parent) parent.remove(model);
+        model.updateMatrixWorld(true);
+        const transformedBox = new THREE.Box3().setFromObject(model);
+        const transformedSize = transformedBox.getSize(new THREE.Vector3());
+        const transformedMin = transformedBox.min.clone();
+        if (parent) parent.add(model);
+
+        const anchorPoint = new THREE.Vector3(
+            transformedMin.x + this._anchor[0] * transformedSize.x,
+            transformedMin.y + this._anchor[1] * transformedSize.y,
+            transformedMin.z + this._anchor[2] * transformedSize.z
+        );
+
+        model.position.sub(anchorPoint);
+        model.updateMatrixWorld(true);
     }
 
-    // Вычисляем масштабы с учётом rotate: при нечётном повороте
-    // оси X и Z меняются местами.
-    let scaleX, scaleZ;
-    if (rotate % 2 === 0) {
-        scaleX = targetW / size.x;
-        scaleZ = targetD / size.z;
-    } else {
-        scaleX = targetD / size.x;
-        scaleZ = targetW / size.z;
-    }
-    const scaleY = targetH / size.y;
-
-    model.scale.set(scaleX, scaleY, scaleZ);
-
-    const totalAngle = this._polygonAngle + rotate * Math.PI / 2;
-    model.rotation.y = totalAngle;
-
-    model.updateMatrixWorld(true);
-
-    // Временно убираем модель, чтобы получить локальный transformed box
-    if (parent) parent.remove(model);
-    model.updateMatrixWorld(true);
-    const transformedBox = new THREE.Box3().setFromObject(model);
-    const transformedSize = transformedBox.getSize(new THREE.Vector3());
-    const transformedMin = transformedBox.min.clone();
-    if (parent) parent.add(model);
-
-    const anchorPoint = new THREE.Vector3(
-        transformedMin.x + this._anchor[0] * transformedSize.x,
-        transformedMin.y + this._anchor[1] * transformedSize.y,
-        transformedMin.z + this._anchor[2] * transformedSize.z
-    );
-
-    model.position.sub(anchorPoint);
-    model.updateMatrixWorld(true);
-}
     _normalizeSize(size) {
         if (!size) return [100, 100, 100];
         if (typeof size === 'number') return [size, size, size];
@@ -500,10 +514,10 @@ _applyModelTransform() {
             pointerup: (e) => this._onPointerUp(e, map),
             pointerleave: (e) => this._onPointerLeave(e, map)
         };
-        domElement.addEventListener('pointermove', handlers.pointermove);
-        domElement.addEventListener('pointerdown', handlers.pointerdown);
-        domElement.addEventListener('pointerup', handlers.pointerup);
-        domElement.addEventListener('pointerleave', handlers.pointerleave);
+        domElement.addEventListener('pointermove', handlers.pointermove, { capture: true });
+        domElement.addEventListener('pointerdown', handlers.pointerdown, { capture: true });
+        domElement.addEventListener('pointerup', handlers.pointerup, { capture: true });
+        domElement.addEventListener('pointerleave', handlers.pointerleave, { capture: true });
         Area3D._mapEventHandlers.set(map, handlers);
     }
 
@@ -530,7 +544,9 @@ _applyModelTransform() {
     }
 
     _onPointerMove(e, map) {
-        if (Area3D._isMobile) return;
+        // `this` — Area3D, зарегистрировавший обработчики для этой карты.
+        // Флаг _isMobile у всех Area3D одной карты одинаков (устройство одно).
+        if (this._isMobile) return;
         const mouse = this._getNDC(e, map);
         const area = this._getAreaUnderPointer(mouse, map);
         if (area !== Area3D._hoveredArea) {
@@ -559,9 +575,9 @@ _applyModelTransform() {
         if (!start) return;
         const dx = e.clientX - start.x;
         const dy = e.clientY - start.y;
-        if (Math.sqrt(dx*dx + dy*dy) > 5) return;
+        if (Math.sqrt(dx * dx + dy * dy) > 5) return;
 
-        if (Area3D._isMobile) {
+        if (this._isMobile) {
             if (pressed && !pressed._onClick) {
                 if (pressed._onHover) pressed._onHover(true);
                 else if (pressed._tooltipText && map.popupManager) map.popupManager.show(pressed, pressed._tooltipText);
@@ -575,7 +591,7 @@ _applyModelTransform() {
     }
 
     _onPointerLeave(e, map) {
-        if (Area3D._isMobile) return;
+        if (this._isMobile) return;
         if (Area3D._hoveredArea) {
             Area3D._hoveredArea._onHover?.(false) || map.popupManager?.hide();
             Area3D._hoveredArea = null;
@@ -636,7 +652,7 @@ _applyModelTransform() {
             this._centroidScreenPos = null;
             return;
         }
-this._object3D.updateWorldMatrix(true, true);
+        this._object3D.updateWorldMatrix(true, true);
         const box = new THREE.Box3().setFromObject(this._object3D);
         const canvas = this._map.renderer.domElement;
         const corners = [];
@@ -690,10 +706,10 @@ this._object3D.updateWorldMatrix(true, true);
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
     getLabelType() { return 'area3d'; }
     isVisible() { return this._group?.visible ?? false; }
-getScreenPosition() {
-    this._updateScreenPosition();
-    return this._centroidScreenPos;
-}
+    getScreenPosition() {
+        this._updateScreenPosition();
+        return this._centroidScreenPos;
+    }
     getTitleAlign() { return this._titleAlign; }
     getTitleOffset() { return this._titleOffset; }
     getTitleVerticalAlign() {

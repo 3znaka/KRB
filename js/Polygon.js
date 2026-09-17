@@ -226,7 +226,6 @@ export class Polygon {
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
-        /** @private */ this._boundHandlers = null;
 
         // Тултип
         /** @private */ this._tooltipText = options.tooltip || '';
@@ -301,64 +300,145 @@ export class Polygon {
         /** @private */ this._sideIndicesArray = [];
         /** @private */ this._tempVec3 = new THREE.Vector3();
 
-        // Реестр интерактивных
-        if (this._onClick || this._onHover || this._tooltipText) {
-            Polygon._registerInteractivePolygon(this);
-        }
+        // ПРИМЕЧАНИЕ: регистрация в реестре интерактивных полигонов
+        // выполняется в `_attach`, когда известна карта (`this._map`).
     }
 
     /* ================================================================
-       Статический реестр интерактивных полигонов
+       Статический реестр интерактивных полигонов (per-map)
        ================================================================ */
 
-    /** @private */ static _interactivePolygons = new Set();
-    /** @private */ static _eventListenersAttached = false;
-    /** @private */ static _delegatedHandlers = null;
-    /** @private */ static _raycaster = new THREE.Raycaster();
-    /** @private */ static _mouseNDC = new THREE.Vector2();
-    /** @private */ static _lastRaycastTime = 0;
-
     /**
-     * Координаты последнего pointerdown и флаг его активности.
-     * Используются, чтобы отличить реальный клик от отпускания мыши
-     * после панорамирования: браузер может сгенерировать `click` даже
-     * при заметном смещении указателя между нажатием и отпусканием.
+     * Реестр интерактивных полигонов, сгруппированный по картам.
+     * Ключ — экземпляр карты, значение — Set<Polygon>, привязанных к ней.
+     *
+     * WeakMap обеспечивает автоматическую очистку при сборке мусора карты,
+     * а также корректную работу при нескольких картах одновременно.
      *
      * @private
+     * @type {WeakMap<Object, Set<Polygon>>}
      */
-    /** @private */ static _pointerDownX = 0;
-    /** @private */ static _pointerDownY = 0;
-    /** @private */ static _pointerDownActive = false;
-    /** @private */ static _clickMoveThreshold = 5;
+    static _interactivePolygons = new WeakMap();
 
     /**
-     * Регистрирует полигон для обработки событий мыши через общий обработчик.
+     * Per-map состояние обработки событий: последняя метка времени raycast,
+     * координаты pointerdown, флаг активности pointerdown, а также ссылки
+     * на зарегистрированные обработчики и признак их установки.
+     *
+     * @private
+     * @type {WeakMap<Object, {
+     *     lastRaycastTime: number,
+     *     pointerDownX: number,
+     *     pointerDownY: number,
+     *     pointerDownActive: boolean,
+     *     handlers: ?Object,
+     *     attached: boolean
+     * }>}
+     */
+    static _mapEventState = new WeakMap();
+
+    /** @private */ static _raycaster = new THREE.Raycaster();
+    /** @private */ static _mouseNDC = new THREE.Vector2();
+
+    /**
+     * Порог смещения указателя (в пикселях) между pointerdown и click,
+     * выше которого событие click считается результатом панорамирования
+     * и отбрасывается.
+     * @private
+     * @type {number}
+     */
+    static _clickMoveThreshold = 5;
+
+    /**
+     * Возвращает (создавая при необходимости) состояние обработки событий
+     * для указанной карты.
+     *
+     * @param {Object} map - Экземпляр карты.
+     * @returns {{
+     *     lastRaycastTime: number,
+     *     pointerDownX: number,
+     *     pointerDownY: number,
+     *     pointerDownActive: boolean,
+     *     handlers: ?Object,
+     *     attached: boolean
+     * }} Состояние.
+     * @private
+     */
+    static _getOrCreateMapState(map) {
+        let state = Polygon._mapEventState.get(map);
+        if (!state) {
+            state = {
+                lastRaycastTime: 0,
+                pointerDownX: 0,
+                pointerDownY: 0,
+                pointerDownActive: false,
+                handlers: null,
+                attached: false
+            };
+            Polygon._mapEventState.set(map, state);
+        }
+        return state;
+    }
+
+    /**
+     * Регистрирует полигон для обработки событий мыши через общий обработчик,
+     * привязанный к карте `polygon._map`. Если для карты ещё нет слушателей —
+     * они устанавливаются.
+     *
+     * Должен вызываться после `_attach`, когда `polygon._map` уже установлен.
      *
      * @param {Polygon} polygon - Экземпляр полигона.
      * @private
      */
     static _registerInteractivePolygon(polygon) {
-        Polygon._interactivePolygons.add(polygon);
-        if (!Polygon._eventListenersAttached) {
-            Polygon._attachGlobalListeners();
+        const map = polygon._map;
+        if (!map) return;
+
+        let set = Polygon._interactivePolygons.get(map);
+        if (!set) {
+            set = new Set();
+            Polygon._interactivePolygons.set(map, set);
         }
+        set.add(polygon);
+
+        Polygon._attachGlobalListeners(map);
     }
 
     /**
-     * Удаляет полигон из реестра интерактивных.
+     * Удаляет полигон из реестра интерактивных. Если после этого для карты
+     * не осталось ни одного полигона, глобальные обработчики снимаются.
      *
      * @param {Polygon} polygon - Экземпляр полигона.
      * @private
      */
     static _unregisterInteractivePolygon(polygon) {
-        Polygon._interactivePolygons.delete(polygon);
-        if (Polygon._interactivePolygons.size === 0 && Polygon._eventListenersAttached) {
-            Polygon._detachGlobalListeners();
+        const map = polygon._map;
+        if (!map) return;
+
+        const set = Polygon._interactivePolygons.get(map);
+        if (!set) return;
+
+        set.delete(polygon);
+        if (set.size === 0) {
+            Polygon._interactivePolygons.delete(map);
+            Polygon._detachGlobalListeners(map);
         }
     }
 
     /**
-     * Добавляет глобальные обработчики событий на canvas.
+     * Возвращает canvas указанной карты.
+     *
+     * @param {Object} map - Экземпляр карты.
+     * @returns {HTMLCanvasElement|null} Canvas или null.
+     * @private
+     */
+    static _getCanvas(map) {
+        if (!map || !map.renderer || !map.renderer.domElement) return null;
+        return map.renderer.domElement;
+    }
+
+    /**
+     * Устанавливает глобальные обработчики событий на canvas указанной карты.
      *
      * Слушаем:
      *  - `pointerdown` — чтобы запомнить точку нажатия (для отсечения
@@ -367,81 +447,54 @@ export class Polygon {
      *  - `click` — для onClick и показа тултипа.
      *
      * Все обработчики — в фазе capture, чтобы гарантированно выполняться
-     * до OrbitControls.
+     * до OrbitControls. Для каждой карты — свой набор слушателей, замыкающий
+     * соответствующую `map`.
      *
+     * @param {Object} map - Экземпляр карты.
      * @private
      */
-    static _attachGlobalListeners() {
-        const canvas = Polygon._getCanvas();
+    static _attachGlobalListeners(map) {
+        const canvas = Polygon._getCanvas(map);
         if (!canvas) return;
 
-        Polygon._delegatedHandlers = {
-            pointerdown: (e) => Polygon._handleGlobalPointerDown(e),
-            mousemove: (e) => Polygon._handleGlobalMouseMove(e),
-            click: (e) => Polygon._handleGlobalClick(e)
+        const state = Polygon._getOrCreateMapState(map);
+        if (state.attached) return;
+
+        state.handlers = {
+            pointerdown: (e) => Polygon._handleGlobalPointerDown(e, map),
+            mousemove: (e) => Polygon._handleGlobalMouseMove(e, map),
+            click: (e) => Polygon._handleGlobalClick(e, map)
         };
 
-        canvas.addEventListener('pointerdown', Polygon._delegatedHandlers.pointerdown, true);
-        canvas.addEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
-        canvas.addEventListener('click', Polygon._delegatedHandlers.click, true);
-        Polygon._eventListenersAttached = true;
+        canvas.addEventListener('pointerdown', state.handlers.pointerdown, true);
+        canvas.addEventListener('mousemove', state.handlers.mousemove, true);
+        canvas.addEventListener('click', state.handlers.click, true);
+        state.attached = true;
     }
 
     /**
-     * Удаляет глобальные обработчики.
+     * Удаляет глобальные обработчики событий с canvas указанной карты.
      *
+     * @param {Object} map - Экземпляр карты.
      * @private
      */
-    static _detachGlobalListeners() {
-        const canvas = Polygon._getCanvas();
-        if (!canvas || !Polygon._delegatedHandlers) return;
+    static _detachGlobalListeners(map) {
+        const canvas = Polygon._getCanvas(map);
+        const state = Polygon._mapEventState.get(map);
+        if (!canvas || !state || !state.handlers) return;
 
-        canvas.removeEventListener('pointerdown', Polygon._delegatedHandlers.pointerdown, true);
-        canvas.removeEventListener('mousemove', Polygon._delegatedHandlers.mousemove, true);
-        canvas.removeEventListener('click', Polygon._delegatedHandlers.click, true);
-        Polygon._delegatedHandlers = null;
-        Polygon._eventListenersAttached = false;
-    }
-
-    /**
-     * Возвращает canvas, к которому привязаны обработчики (первой карты
-     * из реестра).
-     *
-     * @returns {HTMLCanvasElement|null}
-     * @private
-     */
-    static _getCanvas() {
-        for (const poly of Polygon._interactivePolygons) {
-            if (poly._map && poly._map.renderer && poly._map.renderer.domElement) {
-                return poly._map.renderer.domElement;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Группирует полигоны по картам, к которым они привязаны.
-     * Нужно для корректной работы при нескольких картах одновременно.
-     *
-     * @returns {Map<Object, Polygon[]>} Карта → массив полигонов.
-     * @private
-     */
-    static _groupByMap() {
-        const byMap = new Map();
-        for (const poly of Polygon._interactivePolygons) {
-            if (!poly._map) continue;
-            let arr = byMap.get(poly._map);
-            if (!arr) { arr = []; byMap.set(poly._map, arr); }
-            arr.push(poly);
-        }
-        return byMap;
+        canvas.removeEventListener('pointerdown', state.handlers.pointerdown, true);
+        canvas.removeEventListener('mousemove', state.handlers.mousemove, true);
+        canvas.removeEventListener('click', state.handlers.click, true);
+        state.handlers = null;
+        state.attached = false;
     }
 
     /**
      * Переводит экранные координаты события в NDC для указанной карты.
      *
-     * @param {MouseEvent} event
-     * @param {Object} map
+     * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты.
      * @private
      */
     static _setNDCFromEvent(event, map) {
@@ -453,16 +506,20 @@ export class Polygon {
     }
 
     /**
-     * Запоминает точку нажатия. Нужен, чтобы в `_handleGlobalClick`
-     * отличить реальный клик от отпускания мыши после панорамирования.
+     * Запоминает точку нажатия для указанной карты. Нужен, чтобы
+     * в `_handleGlobalClick` отличить реальный клик от отпускания мыши
+     * после панорамирования.
      *
      * @param {PointerEvent} event - Событие нажатия.
+     * @param {Object} map - Экземпляр карты.
      * @private
      */
-    static _handleGlobalPointerDown(event) {
-        Polygon._pointerDownX = event.clientX;
-        Polygon._pointerDownY = event.clientY;
-        Polygon._pointerDownActive = true;
+    static _handleGlobalPointerDown(event, map) {
+        const state = Polygon._mapEventState.get(map);
+        if (!state) return;
+        state.pointerDownX = event.clientX;
+        state.pointerDownY = event.clientY;
+        state.pointerDownActive = true;
     }
 
     /**
@@ -500,42 +557,46 @@ export class Polygon {
     }
 
     /**
-     * Глобальный обработчик mousemove.
+     * Глобальный обработчик mousemove для указанной карты.
      *
-     * Один raycast на все полигоны вместо N независимых.
+     * Один raycast на все полигоны карты вместо N независимых.
      * Троттлинг 30 Гц — выше смысла нет, мышь всё равно шлёт чаще,
      * а результат между кадрами не меняется.
      *
      * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты, к чьему canvas привязан обработчик.
      * @private
      */
-    static _handleGlobalMouseMove(event) {
-        if (Polygon._interactivePolygons.size === 0) return;
+    static _handleGlobalMouseMove(event, map) {
+        const state = Polygon._mapEventState.get(map);
+        if (!state) return;
+
+        const set = Polygon._interactivePolygons.get(map);
+        if (!set || set.size === 0) return;
 
         const now = performance.now();
-        if (now - Polygon._lastRaycastTime < 33) return;
-        Polygon._lastRaycastTime = now;
+        if (now - state.lastRaycastTime < 33) return;
+        state.lastRaycastTime = now;
 
-        const byMap = Polygon._groupByMap();
-        for (const [map, polys] of byMap) {
-            Polygon._setNDCFromEvent(event, map);
-            Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
+        Polygon._setNDCFromEvent(event, map);
+        Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
 
-            const { meshes, polys: visiblePolys } = Polygon._collectRaycastCandidates(map, polys);
+        const polys = Array.from(set);
+        const { meshes, polys: visiblePolys } = Polygon._collectRaycastCandidates(map, polys);
 
-            const hits = meshes.length > 0
-                ? Polygon._raycaster.intersectObjects(meshes, false)
-                : [];
-            const topPoly = hits.length > 0 ? hits[0].object.userData.polygon : null;
+        const hits = meshes.length > 0
+            ? Polygon._raycaster.intersectObjects(meshes, false)
+            : [];
+        const topPoly = hits.length > 0 ? hits[0].object.userData.polygon : null;
 
-            for (const poly of visiblePolys) {
-                poly._applyHover(topPoly === poly, map);
-            }
+        for (const poly of visiblePolys) {
+            poly._applyHover(topPoly === poly, map);
         }
     }
 
     /**
-     * Глобальный обработчик click. Один raycast на все полигоны.
+     * Глобальный обработчик click для указанной карты. Один raycast на все
+     * полигоны карты.
      *
      * Перед обработкой проверяется, не было ли между pointerdown и click
      * заметного смещения указателя — если да, клик отбрасывается как
@@ -544,42 +605,45 @@ export class Polygon {
      * контура полигона.
      *
      * @param {MouseEvent} event - Событие мыши.
+     * @param {Object} map - Экземпляр карты, к чьему canvas привязан обработчик.
      * @private
      */
-    static _handleGlobalClick(event) {
-        if (Polygon._interactivePolygons.size === 0) return;
+    static _handleGlobalClick(event, map) {
+        const state = Polygon._mapEventState.get(map);
+        if (!state) return;
+
+        const set = Polygon._interactivePolygons.get(map);
+        if (!set || set.size === 0) return;
 
         // Проверка «это точно клик, а не конец драга?»
-        const hadPointerDown = Polygon._pointerDownActive;
-        Polygon._pointerDownActive = false;
+        const hadPointerDown = state.pointerDownActive;
+        state.pointerDownActive = false;
         if (hadPointerDown) {
-            const dx = event.clientX - Polygon._pointerDownX;
-            const dy = event.clientY - Polygon._pointerDownY;
+            const dx = event.clientX - state.pointerDownX;
+            const dy = event.clientY - state.pointerDownY;
             const threshold = Polygon._clickMoveThreshold;
             if (dx * dx + dy * dy > threshold * threshold) {
                 return; // было панорамирование, не клик
             }
         }
 
-        const byMap = Polygon._groupByMap();
-        for (const [map, polys] of byMap) {
-            Polygon._setNDCFromEvent(event, map);
-            Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
+        Polygon._setNDCFromEvent(event, map);
+        Polygon._raycaster.setFromCamera(Polygon._mouseNDC, map.camera);
 
-            const { meshes } = Polygon._collectRaycastCandidates(map, polys);
-            const hits = meshes.length > 0
-                ? Polygon._raycaster.intersectObjects(meshes, false)
-                : [];
-            if (hits.length === 0) continue;
+        const polys = Array.from(set);
+        const { meshes } = Polygon._collectRaycastCandidates(map, polys);
+        const hits = meshes.length > 0
+            ? Polygon._raycaster.intersectObjects(meshes, false)
+            : [];
+        if (hits.length === 0) return;
 
-            const poly = hits[0].object.userData.polygon;
-            if (!poly) continue;
+        const poly = hits[0].object.userData.polygon;
+        if (!poly) return;
 
-            if (poly._onClick) {
-                poly._onClick(event, poly);
-            } else if (poly._tooltipText && map.popupManager) {
-                map.popupManager.show(poly, poly._tooltipText);
-            }
+        if (poly._onClick) {
+            poly._onClick(event, poly);
+        } else if (poly._tooltipText && map.popupManager) {
+            map.popupManager.show(poly, poly._tooltipText);
         }
     }
 
@@ -628,10 +692,10 @@ export class Polygon {
             this._textLabel = map.textManager.addLabel(this);
         }
 
+        // Регистрация в per-map реестре интерактивных — только теперь,
+        // когда известна карта.
         if (this._onClick || this._onHover || this._tooltipText) {
-            if (!Polygon._eventListenersAttached) {
-                Polygon._attachGlobalListeners();
-            }
+            Polygon._registerInteractivePolygon(this);
         }
 
         this._lastWorldGroupPos.copy(map.worldGroup.position);
@@ -736,11 +800,6 @@ export class Polygon {
     /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку и боковые стенки.
-     *
-     * Все меши получают `frustumCulled = true` (bounding sphere валидна и
-     * пересчитывается в `_updateHeights`) и ссылку `userData.polygon` — она
-     * нужна батчевому raycast-обработчику, чтобы определить, какому
-     * полигону принадлежит попавший под луч меш.
      *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
@@ -971,6 +1030,13 @@ export class Polygon {
     /**
      * Строит геометрию обводки полигона. В зависимости от опций использует Line2 или обычный THREE.Line.
      *
+     * ВАЖНО: `_strokeWorldCoords` заполняется координатами внешнего кольца
+     * без замыкающей точки (если последняя совпадает с первой — она
+     * отбрасывается). Это значит, что длина `_strokeWorldCoords` может
+     * отличаться от `this._rings[0].length`. Все связанные массивы
+     * (`_cachedStrokeHeights`) должны инициализироваться по фактической
+     * длине `_strokeWorldCoords`, а не по длине исходного кольца.
+     *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
      * @private
@@ -979,17 +1045,35 @@ export class Polygon {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
 
         const canvas = map.renderer.domElement;
+        const outerRing = this._rings[0];
+
+        // Заполняем _strokeWorldCoords без дубликата замыкающей точки
+        // (совпадающей с первой) — так длины массивов остаются
+        // согласованными между собой и с _cachedStrokeHeights.
+        this._strokeWorldCoords.length = 0;
+        let firstStrokePoint = null;
+        for (let i = 0; i < outerRing.length; i++) {
+            const [absX, absZ] = map.project(outerRing[i], this._crs);
+            if (i === 0) {
+                firstStrokePoint = [absX, absZ];
+            } else if (absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) {
+                continue;
+            }
+            this._strokeWorldCoords.push([absX, absZ]);
+        }
+
+        // _cachedStrokeHeights всегда согласован по длине с _strokeWorldCoords.
+        this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
 
         if (this._useSimpleStroke) {
             const points = [];
-            const outerRing = this._rings[0];
-            for (let i = 0; i < outerRing.length; i++) {
-                const [absX, absZ] = map.project(outerRing[i], this._crs);
-                points.push(new THREE.Vector3(absX, 0, absZ));
+            for (let i = 0; i < this._strokeWorldCoords.length; i++) {
+                const wc = this._strokeWorldCoords[i];
+                points.push(new THREE.Vector3(wc[0], 0, wc[1]));
             }
-            if (outerRing.length > 0) {
-                const [absX, absZ] = map.project(outerRing[0], this._crs);
-                points.push(new THREE.Vector3(absX, 0, absZ));
+            if (this._strokeWorldCoords.length > 0) {
+                const first = this._strokeWorldCoords[0];
+                points.push(new THREE.Vector3(first[0], 0, first[1]));
             }
 
             const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
@@ -1007,12 +1091,6 @@ export class Polygon {
             this._strokeGeometry = lineGeometry;
             this._strokeMaterial = lineMaterial;
             this._group.add(line);
-
-            this._strokeWorldCoords.length = 0;
-            for (let i = 0; i < outerRing.length; i++) {
-                const [absX, absZ] = map.project(outerRing[i], this._crs);
-                this._strokeWorldCoords.push([absX, absZ]);
-            }
         } else {
             this._strokeGeometry = new LineGeometry();
 
@@ -1029,14 +1107,6 @@ export class Polygon {
             line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._group.add(line);
-
-            this._strokeWorldCoords.length = 0;
-            const outerRing = this._rings[0];
-            for (let i = 0; i < outerRing.length; i++) {
-                const [absX, absZ] = map.project(outerRing[i], this._crs);
-                this._strokeWorldCoords.push([absX, absZ]);
-            }
-            this._cachedStrokeHeights = new Array(outerRing.length).fill(0);
         }
     }
 
@@ -1123,15 +1193,6 @@ export class Polygon {
      * Обновляет состояние полигона на каждом кадре: видимость по зуму,
      * высоты и позицию центроида.
      *
-     * Оптимизации:
-     *  - `_updateHeights` вызывается только при реальной необходимости:
-     *    либо при изменении позиции мира / зума (для загрузки новых тайлов),
-     *    либо по таймеру — и то только если у карты есть рельеф.
-     *  - Для статичных высот (нет elevation или режим absolute) после
-     *    первого прохода `_updateHeights` мгновенно возвращает false,
-     *    и геометрия больше не перезаписывается.
-     *  - `_updateStroke` вызывается только если высоты реально менялись.
-     *
      * @param {Object} map - Экземпляр карты.
      * @returns {void}
      * @private
@@ -1209,10 +1270,6 @@ export class Polygon {
      * После изменения позиций принудительно пересчитывает bounding sphere каждой
      * геометрии — иначе frustum culling отсекает меши, «уехавшие» по Y.
      *
-     * Возвращает `true`, если реально что-то поменялось. Для случая, когда
-     * высоты не зависят от рельефа (нет elevation у карты или режим absolute),
-     * после первого прохода метод фиксирует состояние и больше не работает.
-     *
      * @returns {boolean} true, если высоты были пересчитаны.
      * @private
      */
@@ -1240,11 +1297,14 @@ export class Polygon {
             this._cachedHeights[i] = upperY;
         }
 
-        const outerRingLen = this._rings[0].length;
-        if (this._cachedStrokeHeights.length !== outerRingLen) {
-            this._cachedStrokeHeights = new Array(outerRingLen).fill(0);
+        // Согласуем длину _cachedStrokeHeights с фактической длиной
+        // _strokeWorldCoords (а не с длиной исходного внешнего кольца,
+        // которая может быть больше из-за замыкающей точки).
+        const strokeLen = this._strokeWorldCoords.length;
+        if (this._cachedStrokeHeights.length !== strokeLen) {
+            this._cachedStrokeHeights = new Array(strokeLen).fill(0);
         }
-        for (let i = 0; i < outerRingLen; i++) {
+        for (let i = 0; i < strokeLen; i++) {
             const worldCoord = this._strokeWorldCoords[i];
             if (!worldCoord) continue;
             let base = this._altitudeOffset;
@@ -1308,24 +1368,30 @@ export class Polygon {
     /**
      * Обновляет позиции вершин обводки.
      *
+     * Обход ведётся по фактической длине `_strokeWorldCoords`
+     * (а не по длине исходного внешнего кольца), так как дубликат
+     * замыкающей точки отбрасывается в `_buildStrokeGeometry`.
+     * Замыкающий сегмент добавляется отдельно в конце.
+     *
      * @returns {void}
      * @private
      */
     _updateStroke() {
         if (!this._strokeLine || !this._strokeGeometry) return;
-        const outerRing = this._rings[0];
         const positions = this._strokePositionsArray;
         positions.length = 0;
         const groupPos = this._group.position;
+        const strokeLen = this._strokeWorldCoords.length;
 
-        for (let i = 0; i < outerRing.length; i++) {
+        for (let i = 0; i < strokeLen; i++) {
             const worldCoord = this._strokeWorldCoords[i];
             if (!worldCoord) continue;
             const y = this._cachedStrokeHeights[i] ?? this._altitudeOffset;
             positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
         }
 
-        if (outerRing.length > 0 && this._strokeWorldCoords.length > 0) {
+        // Замыкающая точка (визуально соединяет последнюю вершину с первой).
+        if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
             const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
             positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);

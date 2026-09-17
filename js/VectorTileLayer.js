@@ -257,6 +257,30 @@ export class VectorTileLayer {
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
 
+        /**
+         * Множество материалов, владение которыми принадлежит этому слою и
+         * которые живут в `_fillMaterialCache`/`_lineMaterialCache`. Такие
+         * материалы НЕ должны диспозиться при уничтожении отдельного тайла
+         * (`_disposeTile`) — они разделяются между тайлами и освобождаются
+         * централизованно в `removeFromMap`. Материалы, которых нет в этом
+         * множестве (например, созданные извне), будут диспозиться вместе
+         * с тайлом.
+         * @private
+         * @type {WeakSet<THREE.Material>}
+         */
+        this._managedMaterials = new WeakSet();
+
+        /**
+         * Множество геометрий, владение которыми принадлежит этому слою и
+         * которые живут в `_pointGeometryCache` (шарики/точки переиспользуются
+         * между тайлами). Их нельзя диспозить в `_disposeTile` — иначе
+         * сломается отрисовка точек в других тайлах. Освобождаются
+         * централизованно в `removeFromMap`.
+         * @private
+         * @type {WeakSet<THREE.BufferGeometry>}
+         */
+        this._managedGeometries = new WeakSet();
+
         this._pointGeometryCache = new Map();
 
         // Exclusion areas
@@ -415,9 +439,16 @@ export class VectorTileLayer {
             group.position.set(result.centerX, 0, result.centerZ);
         }
 
+        // Освобождаем старые ресурсы перед пересборкой. Управляемые материалы
+        // и геометрии (_managedMaterials/_managedGeometries) не трогаем.
         while (group.children.length) {
             const child = group.children[0];
-            if (child.geometry) child.geometry.dispose();
+            if (child.geometry && !this._managedGeometries.has(child.geometry)) {
+                child.geometry.dispose();
+            }
+            if (child.material && !this._managedMaterials.has(child.material)) {
+                child.material.dispose?.();
+            }
             group.remove(child);
         }
 
@@ -919,12 +950,44 @@ export class VectorTileLayer {
         }
     }
 
+    /**
+     * Полностью освобождает ресурсы тайла: подписи, геометрии и материалы.
+     *
+     * Геометрии и материалы, помеченные как «управляемые»
+     * (`_managedGeometries` / `_managedMaterials`), НЕ диспозятся — они
+     * разделяются между тайлами (например, кэш точек `_pointGeometryCache`,
+     * материалы из `_fillMaterialCache`/`_lineMaterialCache`) и будут
+     * освобождены централизованно в {@link VectorTileLayer#removeFromMap}.
+     * Всё остальное (обычно созданное персонально для этого тайла в
+     * {@link VectorTileLayer#_buildGroupFromWorkerResult}) — диспозится.
+     *
+     * @private
+     * @param {THREE.Group} group - Группа тайла, подлежащая уничтожению.
+     */
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
+
+        // Обходим всё дерево: у группы теоретически могут быть вложенные
+        // узлы, и мы не хотим оставить висящие GPU-ресурсы.
+        group.traverse(child => {
+            if (child === group) return;
+
+            const geom = child.geometry;
+            if (geom && !this._managedGeometries.has(geom)) {
+                geom.dispose();
+            }
+
+            const mat = child.material;
+            if (mat && !this._managedMaterials.has(mat)) {
+                // LineMaterial/MeshBasicMaterial/MeshLambertMaterial/
+                // LineBasicMaterial — все наследуют Material.dispose().
+                // Опциональный вызов на случай экзотических реализаций.
+                mat.dispose?.();
+            }
+        });
+
         while (group.children.length) {
-            const child = group.children[0];
-            if (child.geometry) child.geometry.dispose();
-            group.remove(child);
+            group.remove(group.children[0]);
         }
         this._rootGroup.remove(group);
     }
@@ -1371,6 +1434,15 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
     // Кеширование материалов
     // -------------------------------------------------------------------------
+    /**
+     * Возвращает (при необходимости создаёт) разделяемый материал заливки.
+     * Созданный материал регистрируется в `_managedMaterials` — он общий
+     * для всех тайлов и не должен диспозиться в `_disposeTile`.
+     *
+     * @private
+     * @param {string} styleKey - Ключ вида `fill:<layer>:<hex>:<opacity>`.
+     * @returns {THREE.MeshBasicMaterial}
+     */
     _getFillMaterial(styleKey) {
         if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1389,9 +1461,21 @@ export class VectorTileLayer {
             polygonOffsetUnits: 1
         });
         this._fillMaterialCache.set(styleKey, mat);
+        this._managedMaterials.add(mat);
         return mat;
     }
 
+    /**
+     * Возвращает (при необходимости создаёт) разделяемый материал линии.
+     * Созданный материал регистрируется в `_managedMaterials` и добавляется
+     * в `_lineMaterialsSet` для централизованного обновления `resolution`
+     * при изменении размера канваса.
+     *
+     * @private
+     * @param {string} styleKey - Ключ вида `line:<layer>:<hex>:<width>:<dash>`.
+     * @param {number[]} [dash] - Опциональный массив [dashSize, gapSize].
+     * @returns {LineMaterial}
+     */
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1416,15 +1500,28 @@ export class VectorTileLayer {
         const mat = new LineMaterial(matOpts);
         this._lineMaterialCache.set(styleKey, mat);
         this._lineMaterialsSet.add(mat);
+        this._managedMaterials.add(mat);
         return mat;
     }
 
+    /**
+     * Возвращает (при необходимости создаёт) разделяемую геометрию точки
+     * (горизонтальный круг радиуса `radius`). Геометрия кэшируется и
+     * регистрируется в `_managedGeometries` — её нельзя диспозить в
+     * `_disposeTile`, потому что она используется во всех тайлах
+     * с точками того же радиуса.
+     *
+     * @private
+     * @param {number} radius - Радиус круга в метрах мира.
+     * @returns {THREE.CircleGeometry}
+     */
     _getPointGeometry(radius) {
         const key = `point_${radius}`;
         if (this._pointGeometryCache.has(key)) return this._pointGeometryCache.get(key);
         const geom = new THREE.CircleGeometry(radius, 8);
         geom.rotateX(-Math.PI / 2);
         this._pointGeometryCache.set(key, geom);
+        this._managedGeometries.add(geom);
         return geom;
     }
 
@@ -1437,6 +1534,14 @@ export class VectorTileLayer {
         return out;
     }
 
+    /**
+     * Возвращает (при необходимости создаёт) разделяемый материал 3D-здания.
+     * Хранится в `_fillMaterialCache` и регистрируется в `_managedMaterials`.
+     *
+     * @private
+     * @param {number} color - Цвет в формате 0xRRGGBB.
+     * @returns {THREE.MeshLambertMaterial}
+     */
     _getBuildingMaterial(color) {
         const key = 'bld:' + color;
         if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
@@ -1452,14 +1557,25 @@ export class VectorTileLayer {
         });
 
         this._fillMaterialCache.set(key, mat);
+        this._managedMaterials.add(mat);
         return mat;
     }
 
+    /**
+     * Возвращает (при необходимости создаёт) разделяемый материал рёбер
+     * зданий. Хранится в `_lineMaterialCache` и регистрируется в
+     * `_managedMaterials`.
+     *
+     * @private
+     * @param {number} color - Цвет в формате 0xRRGGBB.
+     * @returns {THREE.LineBasicMaterial}
+     */
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;
         if (this._lineMaterialCache.has(key)) return this._lineMaterialCache.get(key);
         const mat = new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false });
         this._lineMaterialCache.set(key, mat);
+        this._managedMaterials.add(mat);
         return mat;
     }
 }

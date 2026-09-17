@@ -24,7 +24,6 @@ export class Marker3D {
     /** @private */ static _pressStart = null;
     /** @private */ static _raycaster = new THREE.Raycaster();
     /** @private */ static _mapEventHandlers = new WeakMap();
-    /** @private */ static _isMobile = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0));
 
     /**
      * Создаёт 3D-маркер.
@@ -141,7 +140,26 @@ export class Marker3D {
 
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
-        /** @private */ this._object3D = null;
+
+        /**
+         * Корневой объект маркера, добавляемый в `map.worldGroup`.
+         * Для примитива — это `THREE.Mesh`, для GLB-модели — постоянная
+         * `THREE.Group`-обёртка. Никогда не подменяется после создания,
+         * чтобы внешние ссылки оставались валидными.
+         * @private
+         * @type {THREE.Object3D|null}
+         */
+        this._object3D = null;
+
+        /**
+         * Ссылка на загруженный `gltf.scene` (только для GLB-моделей).
+         * Является ребёнком `this._object3D`. К нему применяются
+         * rotation / scale / anchor-offset.
+         * @private
+         * @type {THREE.Object3D|null}
+         */
+        this._modelRoot = null;
+
         /** @private */ this._geometry = null;
         /** @private */ this._material = null;
         /** @private */ this._textLabel = null;
@@ -156,14 +174,28 @@ export class Marker3D {
         /** @private */ this._originalModelScale = null;
         /** @private */ this._originalModelPosition = null;
         /** @private */ this._isModel = !!this._modelUrl;
-        /** @private */ this._modelAnchorOffset = new THREE.Vector3();
         /** @private */ this._sizeAnimation = null;
 
         // Новые поля для анимаций
         /** @private */ this._mixer = null;          // AnimationMixer для GLB-модели
         /** @private */ this._mixerClock = null;     // THREE.Clock для расчёта delta
+
+        /**
+         * Флаг «мобильного» устройства. Определяется в `_attach` при привязке
+         * к карте (а не при загрузке модуля) — чтобы корректно реагировать на
+         * устройства с гибридным вводом и не «залипать» на устаревшем значении.
+         * @private
+         * @type {boolean}
+         */
+        this._isMobile = false;
     }
 
+    /**
+     * Добавляет маркер на карту, создавая для него персональный слой.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @returns {Marker3D} this
+     */
     addTo(map) {
         if (this._map) this.remove();
         const personalLayer = new Layer();
@@ -172,11 +204,23 @@ export class Marker3D {
         return this;
     }
 
+    /**
+     * Внутренняя привязка маркера к карте и слою.
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @param {Layer} layer - Слой, которому принадлежит маркер.
+     */
     _attach(map, layer) {
         if (this._map === map && this._layer === layer) return;
         this.remove();
         this._map = map;
         this._layer = layer;
+
+        // Определяем «мобильность» в момент привязки к карте, а не при
+        // загрузке модуля: matchMedia учитывает актуальное состояние
+        // устройства (гибридные ноутбуки, изменения при повороте и т.п.).
+        this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
         // Резолвим проекцию маркера: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
@@ -184,13 +228,16 @@ export class Marker3D {
             : map.inputCRS;
 
         if (this._modelUrl) {
+            // Group-обёртка создаётся один раз и никогда не подменяется.
+            // Сам gltf.scene кладётся в неё как this._modelRoot (см. _loadModel).
             this._object3D = new THREE.Group();
             this._isModelLoading = true;
             this._loadModel();
+            // rotation / scale / anchor применяются к modelRoot внутри _loadModel.
         } else {
             this._createPrimitive();
+            this._object3D.rotation.set(...this._rotation);
         }
-        this._object3D.rotation.set(...this._rotation);
         map.worldGroup.add(this._object3D);
 
         Marker3D._activeMarkers.add(this);
@@ -199,9 +246,13 @@ export class Marker3D {
         if (this._title && this._map.textManager) {
             this._textLabel = this._map.textManager.addLabel(this);
         }
-
     }
 
+    /**
+     * Создаёт примитив (Mesh) по заданным параметрам.
+     *
+     * @private
+     */
     _createPrimitive() {
         let [w, h, d] = this._normalizePrimitiveSize(this._size);
         this._height = h;
@@ -228,6 +279,14 @@ export class Marker3D {
         this._object3D = mesh;
     }
 
+    /**
+     * Приводит `size` к каноническому виду `[width, height, depth]`.
+     *
+     * @private
+     * @param {number|Array<number>|null} size - Исходное значение размеров.
+     * @returns {[number, number, number]} Тройка размеров.
+     * @throws {Error} Если массив имеет больше 3 элементов или тип неверный.
+     */
     _normalizePrimitiveSize(size) {
         if (!size) return [100, 100, 100];
         if (typeof size === 'number') return [size, size, size];
@@ -242,19 +301,30 @@ export class Marker3D {
         throw new Error('Marker3D: invalid size type');
     }
 
-async _loadModel() {
-    if (this._modelPromise) return this._modelPromise;
-    this._modelPromise = (async () => {
-        try {
-            const loader = new GLTFLoader();
+    /**
+     * Асинхронно загружает GLB-модель.
+     *
+     * `this._object3D` остаётся `THREE.Group`-обёрткой; загруженный
+     * `gltf.scene` кладётся в `this._modelRoot` и добавляется внутрь
+     * обёртки. Все трансформации (rotation, scale, anchor-offset)
+     * применяются именно к `modelRoot`, а не к обёртке — так внешние
+     * ссылки на `this._object3D` остаются валидными.
+     *
+     * @private
+     * @returns {Promise<void>} Промис завершения загрузки.
+     */
+    async _loadModel() {
+        if (this._modelPromise) return this._modelPromise;
+        this._modelPromise = (async () => {
+            try {
+                const loader = new GLTFLoader();
 
+                const dracoLoader = new DRACOLoader();
+                dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
+                dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
+                loader.setDRACOLoader(dracoLoader);
 
-const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
-dracoLoader.setDecoderConfig({ type: 'wasm' }); // или 'js'
-loader.setDRACOLoader(dracoLoader);
-
-            const gltf = await loader.loadAsync(this._modelUrl);
+                const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
 
                 // --- Настройка анимаций (если включены и есть в модели) ---
@@ -272,7 +342,12 @@ loader.setDRACOLoader(dracoLoader);
                 this._originalModelSize = originalBox.getSize(new THREE.Vector3());
                 this._originalModelScale = model.scale.clone();
                 this._originalModelPosition = model.position.clone();
+
+                // Применяем размеры, anchor-offset и rotation к самой модели.
+                // Внутри _applyModelSizeAndAnchor модель временно отсоединяется
+                // от родителей для честного расчёта bbox.
                 this._applyModelSizeAndAnchor(model);
+
                 model.traverse((child) => {
                     if (child.isMesh) {
                         child.renderOrder = MARKER_RENDER_ORDER;
@@ -280,14 +355,12 @@ loader.setDRACOLoader(dracoLoader);
                         child.receiveShadow = true;
                     }
                 });
+
+                // Кладём модель в Group-обёртку. Обёртка уже добавлена в
+                // worldGroup в _attach и больше не подменяется.
+                this._modelRoot = model;
                 if (this._object3D) {
-                    const parent = this._object3D.parent;
-                    if (parent) {
-                        parent.remove(this._object3D);
-                        this._object3D = model;
-                        model.rotation.set(...this._rotation);
-                        parent.add(model);
-                    }
+                    this._object3D.add(model);
                 }
                 this._isModelLoading = false;
             } catch (err) {
@@ -298,33 +371,73 @@ loader.setDRACOLoader(dracoLoader);
         return this._modelPromise;
     }
 
+    /**
+     * Применяет к GLB-модели размеры, поворот и смещение anchor.
+     *
+     * Все трансформации применяются к самой модели (аргумент `model`),
+     * а не к Group-обёртке `this._object3D`. Это сохраняет валидность
+     * внешних ссылок на `_object3D`.
+     *
+     * Порядок операций:
+     *  1. Сброс scale/position/rotation к оригинальным значениям.
+     *  2. Применение rotation из `options.rotation`.
+     *  3. Применение scale из `options.size`.
+     *  4. Временное отсоединение от родителя и вычисление bbox
+     *     в локальных координатах Group (родитель = null → world = local).
+     *  5. Смещение `model.position` так, чтобы точка привязки (anchor)
+     *     попала в начало координат Group.
+     *
+     * @private
+     * @param {THREE.Object3D} model - Загруженный `gltf.scene`.
+     */
     _applyModelSizeAndAnchor(model) {
+        // Временно отсоединяем модель, чтобы bbox считался без учёта
+        // мировых трансформаций Group/worldGroup.
+        const prevParent = model.parent;
+        if (prevParent) prevParent.remove(model);
+
+        // Сброс к оригинальным значениям.
         model.scale.copy(this._originalModelScale);
         model.position.copy(this._originalModelPosition);
+        model.rotation.set(...this._rotation);
+
+        // Применяем масштаб по size.
         if (this._size) {
             const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
             model.scale.copy(scaleFactors);
         }
+
+        // Обновляем мировые матрицы поддерева (родитель отсутствует → world = local).
+        model.updateMatrixWorld(true);
+
         const box = new THREE.Box3().setFromObject(model);
-        if (model.parent) {
-            model.parent.updateWorldMatrix(true, false);
-            const parentInv = new THREE.Matrix4().copy(model.parent.matrixWorld).invert();
-            box.applyMatrix4(parentInv);
-        }
         const size = box.getSize(new THREE.Vector3());
         this._height = size.y;
-        if (this._anchor) {
-            const anchorPoint = new THREE.Vector3(
-                box.min.x + this._anchor[0] * size.x,
-                box.min.y + this._anchor[1] * size.y,
-                box.min.z + this._anchor[2] * size.z
-            );
-            this._modelAnchorOffset.copy(anchorPoint);
-        } else {
-            this._modelAnchorOffset.set(0, 0, 0);
-        }
+
+        // Точка привязки в локальных координатах Group.
+        const anchorPoint = new THREE.Vector3(
+            box.min.x + this._anchor[0] * size.x,
+            box.min.y + this._anchor[1] * size.y,
+            box.min.z + this._anchor[2] * size.z
+        );
+
+        // Сдвигаем модель так, чтобы anchor оказался в начале координат Group.
+        model.position.sub(anchorPoint);
+        model.updateMatrix();
+
+        // Возвращаем модель к прежнему родителю.
+        if (prevParent) prevParent.add(model);
     }
 
+    /**
+     * Вычисляет масштаб модели по спецификации `options.size`.
+     *
+     * @private
+     * @param {number|Array<number>} size - Спецификация размера.
+     * @param {THREE.Vector3} originalSize - Оригинальные габариты модели.
+     * @returns {THREE.Vector3} Вектор масштабирования по осям.
+     * @throws {Error} Если массив имеет больше 3 элементов или тип неверный.
+     */
     _calculateModelScale(size, originalSize) {
         if (typeof size === 'number') {
             const targetMaxDim = size;
@@ -361,13 +474,25 @@ loader.setDRACOLoader(dracoLoader);
         throw new Error('Marker3D: invalid size type');
     }
 
+    /**
+     * Меняет размер маркера.
+     *
+     * Для примитивов пересоздаётся геометрия с сохранением текущей
+     * позиции и поворота Mesh. Для GLB-моделей пересчитывается
+     * масштаб и anchor-offset самого `_modelRoot` (Group-обёртка
+     * остаётся нетронутой).
+     *
+     * @param {number|Array<number>} size - Новые размеры.
+     * @returns {Marker3D} this
+     */
     setSize(size) {
         this._size = size;
         if (!this._object3D) return this;
         if (this._modelUrl) {
-            if (this._isModelLoading) return this;
-            this._applyModelSizeAndAnchor(this._object3D);
-            this._object3D.rotation.set(...this._rotation);
+            // Пока модель не загрузилась (или загрузка не удалась) —
+            // просто запоминаем новый размер; он применится в _loadModel.
+            if (this._isModelLoading || !this._modelRoot) return this;
+            this._applyModelSizeAndAnchor(this._modelRoot);
         } else {
             if (this._object3D.parent) {
                 const oldObject = this._object3D;
@@ -383,6 +508,14 @@ loader.setDRACOLoader(dracoLoader);
         return this;
     }
 
+    /**
+     * Запускает анимацию изменения размера.
+     *
+     * @param {number|Array<number>} newSize - Конечный размер.
+     * @param {number} [duration=1000] - Длительность анимации в миллисекундах.
+     * @param {'linear'|'easeIn'|'easeOut'|'easeInOut'} [easing='linear'] - Функция плавности.
+     * @returns {Marker3D} this
+     */
     animateSize(newSize, duration = 1000, easing = 'linear') {
         let startSize = this._size;
         if (startSize === null) {
@@ -406,38 +539,68 @@ loader.setDRACOLoader(dracoLoader);
         return this;
     }
 
+    /**
+     * Возвращает текущую спецификацию размера.
+     *
+     * @returns {number|Array<number>|null}
+     */
     getSize() { return this._size; }
 
-_registerGlobalEvents(map) {
-    if (Marker3D._mapEventHandlers.has(map)) return;
-    const domElement = map.renderer.domElement;
-    const handlers = {
-        pointermove: (e) => this._onPointerMove(e, map),
-        pointerdown: (e) => this._onPointerDown(e, map),
-        pointerup: (e) => this._onPointerUp(e, map),
-        pointercancel: (e) => this._onPointerCancel(e, map),
-        pointerleave: (e) => this._onPointerLeave(e, map)
-    };
-    // Используем фазу захвата, чтобы гарантировать выполнение до OrbitControls
-    domElement.addEventListener('pointermove', handlers.pointermove, { capture: true });
-    domElement.addEventListener('pointerdown', handlers.pointerdown, { capture: true });
-    domElement.addEventListener('pointerup', handlers.pointerup, { capture: true });
-    domElement.addEventListener('pointercancel', handlers.pointercancel, { capture: true });
-    domElement.addEventListener('pointerleave', handlers.pointerleave, { capture: true });
-    Marker3D._mapEventHandlers.set(map, handlers);
-}
+    /**
+     * Регистрирует глобальные обработчики указателя для карты.
+     * Обработчики создаются один раз на карту (WeakMap).
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
+    _registerGlobalEvents(map) {
+        if (Marker3D._mapEventHandlers.has(map)) return;
+        const domElement = map.renderer.domElement;
+        const handlers = {
+            pointermove: (e) => this._onPointerMove(e, map),
+            pointerdown: (e) => this._onPointerDown(e, map),
+            pointerup: (e) => this._onPointerUp(e, map),
+            pointercancel: (e) => this._onPointerCancel(e, map),
+            pointerleave: (e) => this._onPointerLeave(e, map)
+        };
+        // Используем фазу захвата, чтобы гарантировать выполнение до OrbitControls
+        domElement.addEventListener('pointermove', handlers.pointermove, { capture: true });
+        domElement.addEventListener('pointerdown', handlers.pointerdown, { capture: true });
+        domElement.addEventListener('pointerup', handlers.pointerup, { capture: true });
+        domElement.addEventListener('pointercancel', handlers.pointercancel, { capture: true });
+        domElement.addEventListener('pointerleave', handlers.pointerleave, { capture: true });
+        Marker3D._mapEventHandlers.set(map, handlers);
+    }
 
+    /**
+     * Сбрасывает состояние наведения при скрытии popup.
+     *
+     * @private
+     */
+    _onPopupHide() {
+        Marker3D._hoveredMarker = null;
+    }
 
-_onPopupHide() {
-    Marker3D._hoveredMarker = null;
-}
+    /**
+     * Обработчик отмены нажатия указателя.
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
+    _onPointerCancel(e, map) {
+        Marker3D._pressedMarker = null;
+        Marker3D._pressStart = null;
+    }
 
-
-_onPointerCancel(e, map) {
-    Marker3D._pressedMarker = null;
-    Marker3D._pressStart = null;
-}
-
+    /**
+     * Преобразует координаты события в нормализованные координаты устройства (NDC).
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @returns {THREE.Vector2} Координаты в NDC.
+     */
     _getNDC(e, map) {
         const rect = map.renderer.domElement.getBoundingClientRect();
         const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -445,6 +608,14 @@ _onPointerCancel(e, map) {
         return new THREE.Vector2(x, y);
     }
 
+    /**
+     * Находит ближайший маркер под указателем с помощью raycaster.
+     *
+     * @private
+     * @param {THREE.Vector2} mouse - Координаты в NDC.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @returns {Marker3D|null} Маркер под указателем или null.
+     */
     _getMarkerUnderPointer(mouse, map) {
         const raycaster = Marker3D._raycaster;
         raycaster.setFromCamera(mouse, map.camera);
@@ -459,8 +630,17 @@ _onPointerCancel(e, map) {
         return candidates[0].marker;
     }
 
+    /**
+     * Обработчик движения указателя: hover + tooltip.
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _onPointerMove(e, map) {
-        if (Marker3D._isMobile) return;
+        // `this` — маркер, зарегистрировавший обработчики для этой карты.
+        // Флаг _isMobile у всех маркеров одной карты одинаков (устройство одно).
+        if (this._isMobile) return;
         const mouse = this._getNDC(e, map);
         const marker = this._getMarkerUnderPointer(mouse, map);
         if (marker !== Marker3D._hoveredMarker) {
@@ -483,6 +663,13 @@ _onPointerCancel(e, map) {
         }
     }
 
+    /**
+     * Обработчик нажатия указателя.
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _onPointerDown(e, map) {
         const mouse = this._getNDC(e, map);
         const marker = this._getMarkerUnderPointer(mouse, map);
@@ -490,6 +677,13 @@ _onPointerCancel(e, map) {
         Marker3D._pressStart = { x: e.clientX, y: e.clientY };
     }
 
+    /**
+     * Обработчик отпускания указателя: click / tap / hover на мобильных.
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _onPointerUp(e, map) {
         const pressed = Marker3D._pressedMarker;
         const start = Marker3D._pressStart;
@@ -501,7 +695,7 @@ _onPointerCancel(e, map) {
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist > 5) return;
 
-        if (Marker3D._isMobile) {
+        if (this._isMobile) {
             if (!pressed) {
                 if (Marker3D._hoveredMarker) {
                     if (Marker3D._hoveredMarker._onHover) Marker3D._hoveredMarker._onHover(false);
@@ -532,8 +726,15 @@ _onPointerCancel(e, map) {
         }
     }
 
+    /**
+     * Обработчик ухода указателя с canvas.
+     *
+     * @private
+     * @param {PointerEvent} e - Событие указателя.
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _onPointerLeave(e, map) {
-        if (Marker3D._isMobile) return;
+        if (this._isMobile) return;
         if (Marker3D._hoveredMarker) {
             if (Marker3D._hoveredMarker._onHover) {
                 Marker3D._hoveredMarker._onHover(false);
@@ -544,6 +745,9 @@ _onPointerCancel(e, map) {
         }
     }
 
+    /**
+     * Удаляет маркер с карты, освобождает ресурсы и сбрасывает состояние.
+     */
     remove() {
         // Останавливаем и очищаем анимации
         if (this._mixer) {
@@ -557,6 +761,7 @@ _onPointerCancel(e, map) {
             if (this._geometry) this._geometry.dispose();
             if (this._material) this._material.dispose();
             this._object3D = null;
+            this._modelRoot = null;
             this._geometry = null;
             this._material = null;
         }
@@ -584,6 +789,12 @@ _onPointerCancel(e, map) {
         this._localBox = null;
     }
 
+    /**
+     * Обновляет анимацию размера (если активна).
+     *
+     * @private
+     * @param {number} now - Текущее время в мс (performance.now()).
+     */
     _updateSizeAnimation(now) {
         if (!this._sizeAnimation) return;
         const anim = this._sizeAnimation;
@@ -604,6 +815,15 @@ _onPointerCancel(e, map) {
         }
     }
 
+    /**
+     * Линейная интерполяция двух спецификаций размера.
+     *
+     * @private
+     * @param {number|Array<number>} start - Начальное значение.
+     * @param {number|Array<number>} end - Конечное значение.
+     * @param {number} t - Прогресс [0..1].
+     * @returns {number|Array<number>} Интерполированное значение.
+     */
     _lerpSize(start, end, t) {
         if (typeof start === 'number' && typeof end === 'number') return start + (end - start) * t;
         if (Array.isArray(start) && Array.isArray(end)) {
@@ -615,6 +835,13 @@ _onPointerCancel(e, map) {
         return end;
     }
 
+    /**
+     * Ежекадровое обновление маркера: позиционирование, видимость,
+     * проигрывание анимаций.
+     *
+     * @private
+     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     */
     _update(map) {
         if (!this._map || !this._object3D) return;
         const mapInstance = this._map;
@@ -654,17 +881,14 @@ _onPointerCancel(e, map) {
         } else {
             worldY = this._altitude;
         }
-        if (this._isModel && this._modelAnchorOffset) {
-            this._object3D.position.set(
-                absWorldX + this._modelAnchorOffset.x,
-                worldY + this._modelAnchorOffset.y,
-                absWorldZ + this._modelAnchorOffset.z
-            );
-        } else {
-            this._object3D.position.set(absWorldX, worldY, absWorldZ);
-        }
+
+        // Позиция Group-обёртки (или Mesh для примитива) — чисто географическая.
+        // Anchor-offset для моделей уже применён к _modelRoot внутри Group,
+        // для примитивов — к геометрии.
+        this._object3D.position.set(absWorldX, worldY, absWorldZ);
         this._worldPosition.set(worldX, worldY, worldZ);
-        if (mapInstance.view.objectDistanceFactor > 0) {
+
+        if (mapInstance.view.objectRenderDistanceFactor > 0) {
             const dist = mapInstance.camera.position.distanceTo(this._worldPosition);
             if (dist > mapInstance.maxObjectDistance) {
                 this._object3D.visible = false;
@@ -672,6 +896,7 @@ _onPointerCancel(e, map) {
                 return;
             }
         }
+
         // Проверка видимости bounding box
         if (this._isModel) {
             const worldBox = new THREE.Box3().setFromObject(this._object3D);
@@ -704,7 +929,15 @@ _onPointerCancel(e, map) {
     }
 
     // ---------- Интерфейс для TextManager ----------
+
+    /**
+     * @returns {string} Текст подписи.
+     */
     getText() { return this._title; }
+
+    /**
+     * @returns {Object} Стиль подписи.
+     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -713,10 +946,27 @@ _onPointerCancel(e, map) {
             textAlign: this._titleAlign
         }, this._titleStyle);
     }
+
+    /**
+     * @returns {{min: number, max: number}} Границы зума для подписи.
+     */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
+
+    /**
+     * @returns {'point'} Тип метки для TextManager.
+     */
     getLabelType() { return 'point'; }
+
+    /**
+     * @returns {boolean} Видим ли маркер в данный момент.
+     */
     isVisible() { return this._isVisible; }
 
+    /**
+     * Возвращает экранные координаты точки привязки подписи.
+     *
+     * @returns {{x: number, y: number}|null} Экранные координаты или null.
+     */
     getScreenPosition() {
         if (!this._isVisible || !this._object3D) return null;
         const canvas = this._map.renderer.domElement;
@@ -772,8 +1022,19 @@ _onPointerCancel(e, map) {
         return { x, y };
     }
 
+    /**
+     * @returns {string} Горизонтальное выравнивание подписи.
+     */
     getTitleAlign() { return this._titleAlign; }
+
+    /**
+     * @returns {[number, number]} Смещение подписи в пикселях.
+     */
     getTitleOffset() { return this._titleOffset; }
+
+    /**
+     * @returns {'top'|'bottom'|'center'} Вертикальное выравнивание подписи.
+     */
     getTitleVerticalAlign() {
         switch (this._titlePlacement) {
             case 'bottom': return 'top';
@@ -781,10 +1042,27 @@ _onPointerCancel(e, map) {
             case 'top': default: return 'bottom';
         }
     }
+
+    /**
+     * @returns {boolean} Разрешать ли переполнение подписи за границы карты.
+     */
     getAllowOverflow() { return false; }
+
+    /**
+     * @returns {number} Приоритет подписи (для разрешения коллизий).
+     */
     getPriority() { return 0; }
+
+    /**
+     * @returns {boolean} Участвует ли маркер в кластеризации.
+     */
     getClusterable() { return this._clusterable; }
 
+    /**
+     * Устанавливает цвет примитива или всех материалов модели.
+     *
+     * @param {string|number} color - Цвет в формате, поддерживаемом THREE.Color.
+     */
     setColor(color) {
         this._color = color;
         if (this._object3D && this._object3D.material) {

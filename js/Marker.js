@@ -490,7 +490,7 @@ export class Marker {
         const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
 
         // Дальность отрисовки
-        if (map.view.objectDistanceFactor > 0) {
+        if (map.view.objectRenderDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
                 this._setVisible(false);

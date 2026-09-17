@@ -127,6 +127,13 @@ class _GridIndex {
  *    если с момента предыдущего вызова не изменились ни зум, ни положение
  *    мира, ни положение камеры, ни состав подписей. Состав помечается флагом
  *    `_dirty` при любой мутации (addLabel/removeLabel/pruneStaleLabels).
+ *
+ *  - **Защита от реентерабельности `_flushMeasurements`.** Проход по очереди
+ *    измерений обёрнут в try/finally. Если во время измерения (например, из
+ *    пользовательского геттера `source.getText()`) произойдёт исключение или
+ *    реентерабельный вызов `addLabel`, очередь и её служебные флаги корректно
+ *    восстанавливаются, а необработанные подписи возвращаются в очередь и
+ *    гарантированно получают повторный проход.
  */
 export class TextManager {
     /**
@@ -649,6 +656,11 @@ export class TextManager {
      * {@link TextManager#update}, чтобы размеры были гарантированно
      * доступны уже в текущем кадре.
      *
+     * Если этот метод вызывается реентерабельно из середины
+     * {@link TextManager#_flushMeasurements}, подпись попадёт в «следующую»
+     * очередь (`this._measureQueue`), а новый проход будет запланирован
+     * отдельным rAF — текущий проход не пострадает.
+     *
      * @param {Object} label - Объект подписи.
      * @private
      */
@@ -677,40 +689,121 @@ export class TextManager {
      *
      * Такая схема даёт **один reflow на пачку** вместо N.
      *
+     * Метод защищён от реентерабельности:
+     *
+     *  - В начале проверяется `_measureScheduled`. Если он уже сброшен —
+     *    значит, синхронный flush произошёл раньше (например, из `update()`),
+     *    и текущий вызов — «запоздавший» rAF. Ранний выход.
+     *
+     *  - Обработка обёрнута в `try/finally`. При исключении (в том числе
+     *    выброшенном пользовательским геттером `source`) восстанавливаются
+     *    стили всех элементов, а подписи, не успевшие пройти read-фазу,
+     *    возвращаются в `_measureQueue` и планируется повторный flush.
+     *    Это гарантирует, что ни одна подпись не «застрянет» с флагом
+     *    `_queuedForMeasure = true` и что новый проход будет выполнен.
+     *
+     *  - Реентерабельный вызов {@link TextManager#_scheduleMeasure} во время
+     *    обработки (например, из `addLabel`) безопасен: он кладёт подпись
+     *    в новый массив `_measureQueue` и запрашивает отдельный rAF, не
+     *    нарушая текущий проход.
+     *
      * @private
      */
     _flushMeasurements() {
+        // Ранний выход, если «синхронный» flush уже состоялся (например,
+        // из update()) и сбросил флаг. В этом случае запоздавший rAF-колбэк
+        // не должен повторно обрабатывать очередь.
+        if (!this._measureScheduled) return;
         this._measureScheduled = false;
+
         const queue = this._measureQueue;
         if (queue.length === 0) return;
+
+        // Забираем очередь в локальную переменную и подменяем поле на новый
+        // массив. Всё, что будет добавлено через `_scheduleMeasure` во время
+        // обработки (в том числе реентерабельно — из пользовательских
+        // геттеров или из `addLabel`), попадёт в этот новый массив и будет
+        // обработано отдельным проходом, не разрушая текущий.
         this._measureQueue = [];
 
-        // Фаза 1: write. Показываем все скрытые элементы как visibility:hidden —
-        // браузер сможет их измерить, но пользователь их не увидит.
-        for (let i = 0; i < queue.length; i++) {
-            const label = queue[i];
-            const el = label.element;
-            el.style.display = 'block';
-            el.style.visibility = 'hidden';
-        }
+        let allMeasured = false;
+        let allRestored = false;
 
-        // Фаза 2: read. Один layout на всю пачку.
-        for (let i = 0; i < queue.length; i++) {
-            const label = queue[i];
-            const el = label.element;
-            label.width = el.offsetWidth;
-            label.height = el.offsetHeight;
-            const cs = window.getComputedStyle(el);
-            label._fontSize = parseFloat(cs.fontSize) || 12;
-            label._needsMeasure = false;
-            label._queuedForMeasure = false;
-        }
+        try {
+            // --- Фаза 1: write ----------------------------------------------
+            // Показываем все скрытые элементы как visibility:hidden —
+            // браузер сможет их измерить, но пользователь их не увидит.
+            for (let i = 0; i < queue.length; i++) {
+                const el = queue[i].element;
+                if (!el) continue;
+                el.style.display = 'block';
+                el.style.visibility = 'hidden';
+            }
 
-        // Фаза 3: restore. Возвращаем исходное скрытое состояние.
-        for (let i = 0; i < queue.length; i++) {
-            const el = queue[i].element;
-            el.style.visibility = '';
-            el.style.display = 'none';
+            // --- Фаза 2: read -----------------------------------------------
+            // Один layout на всю пачку.
+            for (let i = 0; i < queue.length; i++) {
+                const label = queue[i];
+                const el = label.element;
+                if (!el) {
+                    // Страховка от рассинхронизации: подпись без элемента
+                    // не может быть измерена — считаем её «обработанной»,
+                    // чтобы не зацикливаться.
+                    label._needsMeasure = false;
+                    label._queuedForMeasure = false;
+                    continue;
+                }
+                label.width = el.offsetWidth;
+                label.height = el.offsetHeight;
+                const cs = window.getComputedStyle(el);
+                label._fontSize = parseFloat(cs.fontSize) || 12;
+                label._needsMeasure = false;
+                label._queuedForMeasure = false;
+            }
+            allMeasured = true;
+
+            // --- Фаза 3: restore --------------------------------------------
+            // Возвращаем исходное скрытое состояние.
+            for (let i = 0; i < queue.length; i++) {
+                const el = queue[i].element;
+                if (!el) continue;
+                el.style.visibility = '';
+                el.style.display = 'none';
+            }
+            allRestored = true;
+        } finally {
+            // Если restore-фаза не доехала до конца — восстанавливаем стили
+            // всех элементов пачки, чтобы не оставить их в «измерительном»
+            // состоянии (display:block; visibility:hidden).
+            if (!allRestored) {
+                for (let i = 0; i < queue.length; i++) {
+                    const el = queue[i].element;
+                    if (!el) continue;
+                    el.style.visibility = '';
+                    el.style.display = 'none';
+                }
+            }
+
+            // Если read-фаза не завершилась — часть подписей осталась
+            // с `_queuedForMeasure = true`. Возвращаем их в очередь, чтобы
+            // повторный проход гарантированно снял размеры.
+            if (!allMeasured) {
+                for (let i = 0; i < queue.length; i++) {
+                    const label = queue[i];
+                    if (label._queuedForMeasure) {
+                        this._measureQueue.push(label);
+                    }
+                }
+
+                // Планируем повторный flush, если он ещё не запланирован
+                // (реентерабельный `_scheduleMeasure` мог его уже запросить).
+                if (this._measureQueue.length > 0 && !this._measureScheduled) {
+                    this._measureScheduled = true;
+                    if (typeof requestAnimationFrame === 'function') {
+                        requestAnimationFrame(() => this._flushMeasurements());
+                    }
+                }
+            }
         }
     }
 
@@ -953,6 +1046,11 @@ export class TextManager {
     update() {
         // --- 0. Форсируем измерения до любых вычислений ----------------------
         if (this._measureQueue.length > 0) {
+            // Синхронный flush: гарантирует, что _measureScheduled выставлен
+            // в правильное состояние и не «зависнет» между кадрами.
+            if (!this._measureScheduled) {
+                this._measureScheduled = true;
+            }
             this._flushMeasurements();
         }
 

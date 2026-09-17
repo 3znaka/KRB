@@ -8,6 +8,7 @@ import { TileManager } from './Tiles.js';
 import { TextManager } from './TextManager.js';
 import { initUI } from './Ui.js';
 import { PopupManager } from './PopupManager.js';
+import { InteractionManager } from './Interaction.js';
 
 /**
  * Представление карты, хранящее параметры центра, масштаба и углов обзора.
@@ -338,10 +339,12 @@ export class KrbMap {
         this._cameraAnimFrame = null;
         this._controlsDampingWasEnabled = true;
         this._dynamicLayers = [];
-        this.textManager = new TextManager(this);
-        this.popupManager = new PopupManager(this);
+this.textManager = new TextManager(this);
+this.popupManager = new PopupManager(this);
 
-        this.tileManager = new TileManager(this);
+this.interaction = new InteractionManager(this);
+
+this.tileManager = new TileManager(this);
 
         // Кэш максимальной высоты поверхности (LRU, ограничен по размеру)
         this._surfaceMaxHeightCache = new Map();

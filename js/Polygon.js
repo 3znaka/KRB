@@ -5,35 +5,6 @@
  * экструзии, видимости по зуму и подписей через TextManager.
  * Добавлена поддержка событий onHover и onClick через raycasting,
  * а также возможность отображения HTML-тултипа через PopupManager.
- *
- * Оптимизирован для большого количества полигонов: кэширование
- * преобразованных координат, dirty-флаги для высот, bounding sphere
- * для отсечения по расстоянию и быстрый предварительный raycasting.
- * Дополнительно: единый обработчик событий мыши для всех полигонов
- * (батчевый raycast с троттлингом), переиспользование массивов,
- * frustum culling по умолчанию, fast-path для статичных высот,
- * опция использования обычных линий для обводки.
- *
- * Экструдированные полигоны (extruded: true) используют MeshStandardMaterial
- * и участвуют в shadow mapping (castShadow/receiveShadow), поэтому на них
- * работают тени так же, как на Marker3D.
- *
- * ВАЖНО про корректность рендеринга:
- *  1) Нормали верхней/нижней крышек задаются явно ((0,1,0) и (0,-1,0)),
- *     а обход треугольников Earcut согласуется с этими нормалями — иначе
- *     DoubleSide + шейдерный флип нормалей дают неверное освещение.
- *  2) Bounding sphere всех трёх геометрий пересчитывается после каждого
- *     обновления высот — иначе three.js отсекает «уехавшие» вверх крышки
- *     по frustum culling, и они становятся невидимыми.
- *  3) Для экструдированных полигонов depthTest/depthWrite по умолчанию true,
- *     чтобы прозрачные стенки не просвечивали сквозь друг друга.
- *  4) Для отображения теней у рендера должно быть включено
- *     `renderer.shadowMap.enabled = true`, и хотя бы один источник света
- *     должен иметь `castShadow = true`.
- *  5) Меши полигонов оставляют `frustumCulled = true` — это безопасно,
- *     потому что bounding sphere пересчитывается после каждого изменения
- *     высот. Раньше culling отключался из-за отсутствия пересчёта сферы,
- *     но теперь эта проблема устранена.
  */
 
 import { Projections } from './Projections.js';
@@ -1450,4 +1421,64 @@ export class Polygon {
      * @returns {number} Приоритет подписи.
      */
     getPriority() { return this._titlePriority; }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает прямоугольник (bounding box), охватывающий полигон
+     * целиком, включая все кольца (внешнее и отверстия).
+     *
+     * Используется методом {@link KrbMap#fitTo} для подгонки вида.
+     * Если полигон привязан к карте (`_crs` резолвлена), координаты
+     * преобразуются из его СК. Если не привязан, но задан `_crsCode` —
+     * из него. В остальных случаях исходные координаты считаются уже
+     * в WGS84 (это соответствует поведению конструктора по умолчанию,
+     * где `map.inputCRS` = EPSG:4326).
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
+     *     или null, если у полигона нет колец или преобразование невозможно.
+     *
+     * @example
+     * const b = polygon.getBounds();                 // → [[30.5, 50.4], [31.0, 50.7]]
+     * const bUtm = polygon.getBounds('EPSG:32637');  // → [[413500, 6178000], ...]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        if (!this._rings || !this._rings.length) return null;
+
+        const src = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+        if (!src || !dst) return null;
+
+        const sameProjection = src === dst;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let count = 0;
+
+        for (const ring of this._rings) {
+            if (!ring) continue;
+            for (let i = 0; i < ring.length; i++) {
+                const pt = ring[i];
+                if (!pt || pt.length < 2) continue;
+                let x, y;
+                if (sameProjection) {
+                    x = pt[0];
+                    y = pt[1];
+                } else {
+                    const lonLat = src.toLonLat(pt);
+                    const converted = dst.fromLonLat(lonLat);
+                    x = converted[0];
+                    y = converted[1];
+                }
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                count++;
+            }
+        }
+        if (count === 0 || !isFinite(minX)) return null;
+        return [[minX, minY], [maxX, maxY]];
+    }
 }

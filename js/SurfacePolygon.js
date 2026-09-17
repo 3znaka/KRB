@@ -310,4 +310,64 @@ export class SurfacePolygon {
         this._map = null;
         this._crs = null;
     }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает прямоугольник (bounding box), охватывающий полигон
+     * целиком, включая все кольца (внешнее и отверстия).
+     *
+     * Используется методом {@link KrbMap#fitTo} для подгонки вида.
+     * Если полигон привязан к карте (`_crs` резолвлена), координаты
+     * преобразуются из его СК. Если не привязан, но задан `_crsCode` —
+     * из него. В остальных случаях исходные координаты считаются уже
+     * в WGS84 (это соответствует поведению конструктора по умолчанию,
+     * где `map.inputCRS` = EPSG:4326).
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
+     *     или null, если у полигона нет колец или преобразование невозможно.
+     *
+     * @example
+     * const b = poly.getBounds();                 // → [[30.5, 50.4], [31.0, 50.7]]
+     * const bUtm = poly.getBounds('EPSG:32637');  // → [[413500, 6178000], ...]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        if (!this._rings || !this._rings.length) return null;
+
+        const src = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+        if (!src || !dst) return null;
+
+        const sameProjection = src === dst;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let count = 0;
+
+        for (const ring of this._rings) {
+            if (!ring) continue;
+            for (let i = 0; i < ring.length; i++) {
+                const pt = ring[i];
+                if (!pt || pt.length < 2) continue;
+                let x, y;
+                if (sameProjection) {
+                    x = pt[0];
+                    y = pt[1];
+                } else {
+                    const lonLat = src.toLonLat(pt);
+                    const converted = dst.fromLonLat(lonLat);
+                    x = converted[0];
+                    y = converted[1];
+                }
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                count++;
+            }
+        }
+        if (count === 0 || !isFinite(minX)) return null;
+        return [[minX, minY], [maxX, maxY]];
+    }
 }

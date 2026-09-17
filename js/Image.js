@@ -909,4 +909,100 @@ _computeWorldPositionsFromAnchor() {
      * @returns {number}
      */
     getPriority() { return this._titlePriority; }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает прямоугольник (bounding box), охватывающий изображение.
+     *
+     * Логика зависит от способа позиционирования:
+     *  - Если заданы `nodes`, прямоугольник считается по «сырым»
+     *    координатам всех узлов (в СК `options.crs`); карта не требуется.
+     *  - Если заданы `position` + `size` + `anchor` + `rotation`,
+     *    и изображение уже добавлено на карту (`_map` доступен), берутся
+     *    4 мировые вершины через `_computeWorldPositionsFromAnchor()`
+     *    и переводятся в целевую СК через `map.unproject`. Если карта
+     *    ещё не привязана, возвращается вырожденный прямоугольник по
+     *    точке `position` (без карты размер в метрах и поворот однозначно
+     *    в градусы не выражаются).
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
+     *     или null, если изображение не имеет ни узлов, ни позиции.
+     *
+     * @example
+     * const b = img.getBounds();                 // → [[30.0, 50.0], [30.1, 50.1]]
+     * const bUtm = img.getBounds('EPSG:32637');  // → [[..., ...], [..., ...]]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        const srcCrs = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        const dstCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
+        if (!srcCrs || !dstCrs) return null;
+
+        // --- Режим 1: nodes — считаем по «сырым» координатам ---
+        if (this._nodes && this._nodes.length >= 3) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            let count = 0;
+            for (const node of this._nodes) {
+                if (!node) continue;
+                const px = node.lon, py = node.lat;
+                if (!isFinite(px) || !isFinite(py)) continue;
+                let x, y;
+                if (srcCrs === dstCrs) {
+                    x = px; y = py;
+                } else {
+                    const lonLat = srcCrs.toLonLat([px, py]);
+                    const converted = dstCrs.fromLonLat(lonLat);
+                    x = converted[0]; y = converted[1];
+                }
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                count++;
+            }
+            if (count === 0 || !isFinite(minX)) return null;
+            return [[minX, minY], [maxX, maxY]];
+        }
+
+        // --- Режим 2: position + size + anchor + rotation ---
+        if (this._position) {
+            if (this._map) {
+                // Считаем 4 мировые вершины (без worldGroup) и переводим в target CRS.
+                const worldCorners = this._computeWorldPositionsFromAnchor();
+                if (worldCorners.length >= 3) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    let count = 0;
+                    for (const v of worldCorners) {
+                        const coord = this._map.unproject([v.x, v.z], dstCrs);
+                        if (!coord || !isFinite(coord[0]) || !isFinite(coord[1])) continue;
+                        if (coord[0] < minX) minX = coord[0];
+                        if (coord[0] > maxX) maxX = coord[0];
+                        if (coord[1] < minY) minY = coord[1];
+                        if (coord[1] > maxY) maxY = coord[1];
+                        count++;
+                    }
+                    if (count > 0 && isFinite(minX)) {
+                        return [[minX, minY], [maxX, maxY]];
+                    }
+                }
+            }
+            // Fallback: карта ещё не привязана — возвращаем точку position.
+            const px = this._position[0], py = this._position[1];
+            if (!isFinite(px) || !isFinite(py)) return null;
+            let x, y;
+            if (srcCrs === dstCrs) {
+                x = px; y = py;
+            } else {
+                const lonLat = srcCrs.toLonLat([px, py]);
+                const converted = dstCrs.fromLonLat(lonLat);
+                x = converted[0]; y = converted[1];
+            }
+            return [[x, y], [x, y]];
+        }
+
+        return null;
+    }
 }

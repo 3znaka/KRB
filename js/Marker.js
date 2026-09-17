@@ -629,4 +629,46 @@ export class Marker {
         if (!this._crs) return null;
         return this._crs.toLonLat(this._coord);
     }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает прямоугольник (bounding box), охватывающий маркер.
+     * Для точечного объекта это вырожденный прямоугольник:
+     * `[[x, y], [x, y]]` с одинаковыми углами.
+     *
+     * Используется методом {@link KrbMap#fitTo} для подгонки вида.
+     * Если маркер привязан к карте (`_crs` резолвлена), преобразование
+     * выполняется из его СК. Если не привязан, но задан `_crsCode` —
+     * из него. В остальных случаях координаты считаются уже в WGS84
+     * (это соответствует поведению конструктора по умолчанию, где
+     * `map.inputCRS` = EPSG:4326).
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[x, y], [x, y]] или null,
+     *     если преобразование невозможно.
+     *
+     * @example
+     * const b = marker.getBounds();               // → [[37.662039, 55.763493], [37.662039, 55.763493]]
+     * const bUtm = marker.getBounds('EPSG:32637'); // → [[413500, 6178000], [413500, 6178000]]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        const src = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+        if (!src || !dst) return null;
+
+        let x, y;
+        if (src === dst) {
+            x = this._coord[0];
+            y = this._coord[1];
+        } else {
+            const lonLat = src.toLonLat(this._coord);
+            const converted = dst.fromLonLat(lonLat);
+            x = converted[0];
+            y = converted[1];
+        }
+        return [[x, y], [x, y]];
+    }
 }

@@ -707,4 +707,61 @@ export class Polyline {
      * @returns {[number, number]} Смещение подписи.
      */
     getTitleOffset() { return this._titleOffset; }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает прямоугольник (bounding box), охватывающий все точки
+     * полилинии.
+     *
+     * Используется методом {@link KrbMap#fitTo} для подгонки вида.
+     * Если полилиния привязана к карте (`_crs` резолвлена), координаты
+     * преобразуются из её СК. Если не привязана, но задан `_crsCode` —
+     * из него. В остальных случаях исходные координаты считаются уже
+     * в WGS84 (это соответствует поведению конструктора по умолчанию,
+     * где `map.inputCRS` = EPSG:4326).
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
+     *     или null, если у полилинии нет точек или преобразование невозможно.
+     *
+     * @example
+     * const b = line.getBounds();               // → [[30.5, 50.4], [31.0, 50.5]]
+     * const bUtm = line.getBounds('EPSG:32637'); // → [[413500, 6178000], ...]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        if (!this._positions || !this._positions.length) return null;
+
+        const src = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+        if (!src || !dst) return null;
+
+        const sameProjection = src === dst;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let count = 0;
+
+        for (let i = 0; i < this._positions.length; i++) {
+            const pt = this._positions[i];
+            if (!pt || pt.length < 2) continue;
+            let x, y;
+            if (sameProjection) {
+                x = pt[0];
+                y = pt[1];
+            } else {
+                const lonLat = src.toLonLat(pt);
+                const converted = dst.fromLonLat(lonLat);
+                x = converted[0];
+                y = converted[1];
+            }
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            count++;
+        }
+        if (count === 0 || !isFinite(minX)) return null;
+        return [[minX, minY], [maxX, maxY]];
+    }
 }

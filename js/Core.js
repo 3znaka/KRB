@@ -202,6 +202,8 @@ export class View {
  * map.moveCameraTo(37.6173, 55.7558);
  * map.moveCameraToSlow(30.0, 50.0, 1.0, 5);
  * map.rotateToNorth();
+ * map.fitToBounds([[37.5, 55.7], [37.7, 55.8]], { padding: 80, duration: 0.6 });
+ * map.fitTo(polygon, { padding: 40 });
  * const height = map.getSurfaceHeightAt(1000, 2000);
  * const maxHeight = map.getSurfaceMaxHeight(1000, 2000);
  * const url = map.getTextureUrl(3, 1, 2);
@@ -1643,6 +1645,247 @@ export class KrbMap {
             requestAnimationFrame(animateStep);
         };
         requestAnimationFrame(animateStep);
+    }
+
+    /* ================================================================
+       Подгонка вида под bounds / объект
+       ================================================================ */
+
+    /**
+     * Подгоняет вид так, чтобы прямоугольник `bounds` целиком попал в кадр
+     * с учётом отступов. Корректно работает при любых текущих наклонах
+     * и поворотах камеры (pitch/bearing сохраняются).
+     *
+     * Как это работает: расстояние до цели вычисляется аналитически из
+     * того факта, что при изменении дистанции камеры (при фиксированном
+     * направлении target→camera) лучи через углы экрана пересекают плоскость
+     * земли в точках, линейно зависящих от дистанции. Решая неравенства
+     * «углы bounds внутри кадра», получаем минимально необходимую дистанцию.
+     *
+     * @param {Array.<Array.<number>>} bounds - Прямоугольник в СК `options.crs`:
+     *     [[minX, minY], [maxX, maxY]] (порядок углов нормализуется).
+     * @param {Object} [options] - Дополнительные параметры.
+     * @param {Projection|string} [options.crs=this.inputCRS] - СК прямоугольника.
+     * @param {number|Array.<number>} [options.padding=0] - Отступ в пикселях:
+     *     число — одинаково со всех сторон; [x, y] — по горизонтали и вертикали.
+     * @param {number} [options.duration=0.5] - Длительность анимации в секундах.
+     *     0 — мгновенный переход.
+     * @param {number} [options.maxZoom=this.MAX_ZOOM] - Верхняя граница зума
+     *     (не позволяет «залипнуть» на слишком близком расстоянии для точек
+     *     и маленьких bounds).
+     * @returns {void}
+     *
+     * @example
+     * map.fitToBounds([[37.5, 55.7], [37.7, 55.8]], { padding: 80, duration: 0.6 });
+     */
+    fitToBounds(bounds, options = {}) {
+        if (!bounds || !bounds[0] || !bounds[1]) {
+            console.warn('fitToBounds: bounds must be [[minX, minY], [maxX, maxY]]');
+            return;
+        }
+        const {
+            crs = this.inputCRS,
+            padding = 0,
+            duration = 0.5,
+            maxZoom = this.MAX_ZOOM
+        } = options;
+
+        const [[ax, ay], [bx, by]] = bounds;
+        const minInX = Math.min(ax, bx), maxInX = Math.max(ax, bx);
+        const minInY = Math.min(ay, by), maxInY = Math.max(ay, by);
+
+        const [padX, padY] = Array.isArray(padding)
+            ? [padding[0], padding[1]]
+            : [padding, padding];
+
+        const srcCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
+
+        // Проецируем все 4 угла в world-координаты карты (в локальных координатах
+        // worldGroup — трансляция worldGroup не влияет на дальнейшие вычисления,
+        // т.к. они инвариантны относительно сдвига).
+        let minWX = Infinity, maxWX = -Infinity, minWZ = Infinity, maxWZ = -Infinity;
+        const corners = [
+            [minInX, minInY], [maxInX, minInY],
+            [minInX, maxInY], [maxInX, maxInY]
+        ];
+        for (const [px, py] of corners) {
+            const lonLat = srcCrs.toLonLat([px, py]);
+            const [wx, wy] = this.projection.fromLonLat(lonLat);
+            const wz = -wy;
+            if (wx < minWX) minWX = wx;
+            if (wx > maxWX) maxWX = wx;
+            if (wz < minWZ) minWZ = wz;
+            if (wz > maxWZ) maxWZ = wz;
+        }
+
+        const targetX = (minWX + maxWX) / 2;
+        const targetZ = (minWZ + maxWZ) / 2;
+        const halfW = (maxWX - minWX) / 2;
+        const halfH = (maxWZ - minWZ) / 2;
+
+        const [targetLon, targetLat] = this.projection.toLonLat([targetX, -targetZ]);
+
+        // Degenerate case: bounds-точка → просто центрируем, зум не меняем.
+        const epsilon = 1e-6;
+        if (halfW < epsilon && halfH < epsilon) {
+            const currentZoom = this.continuousZoom;
+            this.moveCameraToSlow(targetLon, targetLat, duration,
+                Math.min(currentZoom, maxZoom));
+            return;
+        }
+
+        const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
+
+        // D → zoom: getTargetDistanceForZoom(z) = BASE_DISTANCE * 2^(BASE_ZOOM - z)
+        let z = this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / D);
+        if (!isFinite(z)) z = this.continuousZoom;
+        z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
+
+        this.moveCameraToSlow(targetLon, targetLat, duration, z);
+    }
+
+    /**
+     * Подгоняет вид под один или несколько объектов, реализующих метод
+     * `getBounds(crs)` (возвращает [[minX, minY], [maxX, maxY]] или null).
+     * Прямоугольники всех объектов объединяются, затем вызывается
+     * {@link KrbMap#fitToBounds}.
+     *
+     * Соглашение о `getBounds(crs)`: объект возвращает прямоугольник в СК `crs`
+     * (по умолчанию — WGS84). Это позволяет объединять результаты от объектов
+     * с разными собственными СК.
+     *
+     * @param {Object|Array.<Object>} objectOrArray - Объект или массив объектов
+     *     с методом `getBounds`.
+     * @param {Object} [options] - Те же, что у {@link KrbMap#fitToBounds}.
+     * @returns {void}
+     *
+     * @example
+     * map.fitTo(polygon, { padding: 60 });
+     * map.fitTo([marker1, polygon1, polyline1], { duration: 1.0, maxZoom: 16 });
+     */
+    fitTo(objectOrArray, options = {}) {
+        const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
+        const crsCode = options.crs ?? 'EPSG:4326';
+        const crs = typeof crsCode === 'string' ? Projections.get(crsCode) : crsCode;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const obj of objs) {
+            if (!obj || typeof obj.getBounds !== 'function') continue;
+            let b;
+            try {
+                b = obj.getBounds(crsCode);
+            } catch (err) {
+                console.warn('fitTo: getBounds() threw an error for', obj, err);
+                continue;
+            }
+            if (!b) continue;
+            if (b[0][0] < minX) minX = b[0][0];
+            if (b[0][1] < minY) minY = b[0][1];
+            if (b[1][0] > maxX) maxX = b[1][0];
+            if (b[1][1] > maxY) maxY = b[1][1];
+        }
+        if (!isFinite(minX)) return;
+
+        this.fitToBounds([[minX, minY], [maxX, maxY]], { ...options, crs });
+    }
+
+    /**
+     * Вычисляет минимальную дистанцию камеры до цели, при которой bounds
+     * `[targetX ± halfW] × [targetZ ± halfH]` целиком попадает в кадр.
+     *
+     * Математика (кратко). Пусть:
+     *   - T = (targetX, 0, targetZ) — новая цель;
+     *   - dir — единичный вектор от текущей цели к текущей камере
+     *     (сохраняется в moveCameraToSlow);
+     *   - D — искомая дистанция (камера будет в T + dir·D);
+     *   - M = R_cam^T — матрица перехода world→view (R_cam — ориентация камеры,
+     *     сохраняется при движении камеры вдоль dir);
+     *   - m1, m2, m3 — строки M (то есть столбцы R_cam), т.е. right/up/backward
+     *     камеры в мировых координатах;
+     *   - tx = tan(fovY/2)·aspect, ty = tan(fovY/2).
+     *
+     * Для точки P на плоскости земли O = P − T. В view-пространстве:
+     *   R.x = m1·O, R.y = m2·O, R.z = m3·O − D
+     * (использовано, что M·dir = (0, 0, 1), так как dir направлен «назад» камеры).
+     *
+     * NDC: ndc.x = R.x / (−R.z·tx), ndc.y = R.y / (−R.z·ty).
+     * Условие «точка внутри кадра с учётом padding»:
+     *   |ndc.x| ≤ ndcXMax,  |ndc.y| ≤ ndcYMax,
+     *   где ndcXMax = 1 − 2·padX/W, ndcYMax = 1 − 2·padY/H.
+     *
+     * Из |ndc.x| ≤ ndcXMax:
+     *   D ≥ m3·O + |m1·O| / (ndcXMax·tx)
+     * Аналогично для y. Итоговое D = max по 4 углам bounds от этих величин.
+     *
+     * @private
+     * @param {number} targetX - X-координата центра bounds (мир карты, без worldGroup).
+     * @param {number} targetZ - Z-координата центра bounds.
+     * @param {number} halfW - Полуширина bounds в метрах.
+     * @param {number} halfH - Полувысота bounds в метрах.
+     * @param {number} padX - Отступ по горизонтали в пикселях.
+     * @param {number} padY - Отступ по вертикали в пикселях.
+     * @returns {number} Минимальная дистанция камеры до цели.
+     */
+    _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
+        const canvas = this.renderer.domElement;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        if (W <= 0 || H <= 0) return this.BASE_DISTANCE;
+
+        const camera = this.camera;
+        // Гарантируем актуальность матрицы мира (после controls.update() она уже
+        // актуальна, но лишний вызов дешёв и защищает от нестандартных сценариев).
+        camera.updateMatrixWorld();
+
+        // Полууглы обзора в тангенсах.
+        const fovYRad = camera.fov * Math.PI / 180;
+        const ty = Math.tan(fovYRad / 2);
+        const tx = ty * camera.aspect;
+        if (ty <= 0 || tx <= 0) return this.BASE_DISTANCE;
+
+        // NDC-границы с учётом padding.
+        const ndcXMax = 1 - (2 * padX) / W;
+        const ndcYMax = 1 - (2 * padY) / H;
+        if (ndcXMax <= 0 || ndcYMax <= 0) {
+            // Отступы «съели» экран целиком — фолбэк на базовую дистанцию.
+            return this.BASE_DISTANCE;
+        }
+
+        // Столбцы матрицы мира (right, up, backward камеры в world-координатах).
+        const e = camera.matrixWorld.elements;
+        const m1x = e[0], m1y = e[1], m1z = e[2]; // right
+        const m2x = e[4], m2y = e[5], m2z = e[6]; // up
+        const m3x = e[8], m3y = e[9], m3z = e[10]; // backward
+
+        // 4 угла bounds (y = 0, на плоскости земли).
+        const corners = [
+            [targetX - halfW, 0, targetZ - halfH],
+            [targetX + halfW, 0, targetZ - halfH],
+            [targetX - halfW, 0, targetZ + halfH],
+            [targetX + halfW, 0, targetZ + halfH]
+        ];
+
+        let dRequired = 0;
+        for (const [px, py, pz] of corners) {
+            const ox = px - targetX;
+            const oy = py;
+            const oz = pz - targetZ;
+
+            const r1 = m1x * ox + m1y * oy + m1z * oz;
+            const r2 = m2x * ox + m2y * oy + m2z * oz;
+            const r3 = m3x * ox + m3y * oy + m3z * oz;
+
+            const dX = r3 + Math.abs(r1) / (ndcXMax * tx);
+            const dY = r3 + Math.abs(r2) / (ndcYMax * ty);
+            const dCorner = Math.max(dX, dY);
+
+            if (dCorner > dRequired) dRequired = dCorner;
+        }
+
+        if (!isFinite(dRequired) || dRequired <= 0) {
+            return this.BASE_DISTANCE;
+        }
+        return dRequired;
     }
 
     /* ================================================================

@@ -146,6 +146,50 @@ export class Layer {
             if (obj._update) obj._update(map);
         }
     }
+
+    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
+
+    /**
+     * Возвращает объединённый прямоугольник (bounding box),
+     * охватывающий все объекты слоя, у которых есть метод `getBounds(crs)`.
+     *
+     * Используется методом {@link KrbMap#fitTo} для подгонки вида.
+     * Объекты без `getBounds` (или вернувшие null) молча пропускаются.
+     * Если ни один объект не дал валидного прямоугольника — возвращается null.
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
+     *     Целевая СК для результата (код или объект Projection).
+     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
+     *     или null, если у слоя нет подходящих объектов.
+     *
+     * @example
+     * const bounds = layer.getBounds();             // → [[30.5, 50.4], [31.0, 50.7]]
+     * const bUtm = layer.getBounds('EPSG:32637');   // → [[413500, 6178000], ...]
+     */
+    getBounds(crs = 'EPSG:4326') {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let count = 0;
+
+        for (const obj of this._objects) {
+            if (!obj || typeof obj.getBounds !== 'function') continue;
+            let b;
+            try {
+                b = obj.getBounds(crs);
+            } catch (err) {
+                console.warn('Layer.getBounds(): getBounds() threw an error for', obj, err);
+                continue;
+            }
+            if (!b || !b[0] || !b[1]) continue;
+            if (b[0][0] < minX) minX = b[0][0];
+            if (b[0][1] < minY) minY = b[0][1];
+            if (b[1][0] > maxX) maxX = b[1][0];
+            if (b[1][1] > maxY) maxY = b[1][1];
+            count++;
+        }
+
+        if (count === 0 || !isFinite(minX)) return null;
+        return [[minX, minY], [maxX, maxY]];
+    }
 }
 
 /**

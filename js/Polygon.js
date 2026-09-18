@@ -327,72 +327,61 @@ export class Polygon {
         }
         return result;
     }
+/**
+ * Проецирует кольцо в world-метры карты с un-wrap долготы.
+ *
+ * @param {Array<Array<number>>} ring
+ * @param {import('./KrbMap.js').KrbMap} map
+ * @returns {Array<[number, number]>|null}
+ * @private
+ */
+_projectRing(ring, map) {
+    const n = ring.length;
+    if (n < 3) return null;
 
-    /**
-     * Проецирует кольцо в world-метры карты с un-wrap долготы.
-     *
-     * 1) Кольцо переводится в lon/lat.
-     * 2) Долгота разворачивается по обходу: если скачок > 180°, к
-     *    последующей точке прибавляется ±360°. Это склеивает обход
-     *    через антимеридиан (Антарктида и т.п.) в непрерывную кривую.
-     * 3) Каждая точка проецируется через `map.projectSafe`.
-     * 4) Невалидные точки заменяются предыдущей валидной (циклически).
-     *
-     * @param {Array<Array<number>>} ring
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @returns {Array<[number, number]>|null}
-     * @private
-     */
-    _projectRing(ring, map) {
-        const n = ring.length;
-        if (n < 3) return null;
+    // 1) Проекция без un-wrap. Если точки уже в СК карты — тоже ок,
+    //    un-wrap ниже применится в любом случае.
+    const projected = new Array(n);
+    let firstValid = -1;
+    for (let i = 0; i < n; i++) {
+        const p = map.projectSafe(ring[i], this._crs);
+        projected[i] = p;
+        if (p && firstValid === -1) firstValid = i;
+    }
+    if (firstValid === -1) return null;
 
-        const srcCrs = this._crs;
-
-        // 1) В lon/lat с un-wrap долготы.
-        const lonLat = [];
-        let prevLon = null;
-        for (let i = 0; i < n; i++) {
-            const ll = typeof srcCrs.toLonLatSafe === 'function'
-                ? srcCrs.toLonLatSafe(ring[i])
-                : srcCrs.toLonLat(ring[i]);
-            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
-
-            let lon = ll[0];
-            if (prevLon !== null) {
-                while (lon - prevLon > 180)  lon -= 360;
-                while (lon - prevLon < -180) lon += 360;
-            }
-            lonLat.push([lon, ll[1]]);
-            prevLon = lon;
-        }
-        if (lonLat.length < 3) return null;
-
-        // 2) Проекция. Если точки уже в СК карты — широту всё равно
-        //    разворачивать не надо, а вот долготу — возможно.
-        const m = lonLat.length;
-        const projected = new Array(m);
-        let firstValid = -1;
-        for (let i = 0; i < m; i++) {
-            const p = map.projectSafe(lonLat[i], WGS84);
-            projected[i] = p;
-            if (p && firstValid === -1) firstValid = i;
-        }
-        if (firstValid === -1) return null;
-
-        // 3) Замена невалидных.
-        const out = new Array(m);
-        let lastValid = projected[firstValid];
-        for (let k = 0; k < m; k++) {
-            const idx = (firstValid + k) % m;
-            const p = projected[idx];
-            if (p) lastValid = p;
-            out[idx] = lastValid;
-        }
-
-        return out;
+    // 2) Замена невалидных точек предыдущей валидной (циклически).
+    const filled = new Array(n);
+    let lastValid = projected[firstValid];
+    for (let k = 0; k < n; k++) {
+        const idx = (firstValid + k) % n;
+        const p = projected[idx];
+        if (p) lastValid = p;
+        filled[idx] = [lastValid[0], lastValid[1]];
     }
 
+    // 3) Un-wrap по X в world-координатах.
+    const WORLD = (typeof map.WORLD_SIZE === 'number') ? map.WORLD_SIZE : 4e7;
+    const HALF  = WORLD * 0.5;
+
+    const out = new Array(n);
+    out[0] = filled[0];
+    let prevX = filled[0][0];
+    for (let i = 1; i < n; i++) {
+        let x = filled[i][0];
+        const z = filled[i][1];
+        let dx = x - prevX;
+        if (dx > HALF) {
+            x -= WORLD;
+        } else if (dx < -HALF) {
+            x += WORLD;
+        }
+        out[i] = [x, z];
+        prevX = x;
+    }
+
+    return out;
+}
     /** Строит заливку (Earcut) и — для extruded — нижнюю крышку и стенки. @private */
     _buildFillGeometry(map) {
         const rings = this._rings;

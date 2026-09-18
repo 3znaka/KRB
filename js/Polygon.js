@@ -327,8 +327,20 @@ export class Polygon {
         }
         return result;
     }
+
+
 /**
  * Проецирует кольцо в world-метры карты с un-wrap долготы.
+ *
+ * 1) Точки проецируются через `map.projectSafe`.
+ * 2) Невалидные заменяются предыдущей валидной (циклически).
+ * 3) X-координаты разворачиваются (un-wrap): точки за антимеридианом
+ *    переносятся на ±WORLD_SIZE, чтобы кольцо стало непрерывным в
+ *    мировых координатах.
+ * 4) Если после un-wrap замыкающее ребро (последняя → первая) огромное,
+ *    кольцо замыкается через полюс двумя точками на z = ±MAX_MERCATOR.
+ *    Это спасает «полярные» кольца (Антарктида и т.п.), которые в
+ *    lon/lat обвивают полюс и не могут быть замкнуты иначе.
  *
  * @param {Array<Array<number>>} ring
  * @param {import('./KrbMap.js').KrbMap} map
@@ -339,8 +351,7 @@ _projectRing(ring, map) {
     const n = ring.length;
     if (n < 3) return null;
 
-    // 1) Проекция без un-wrap. Если точки уже в СК карты — тоже ок,
-    //    un-wrap ниже применится в любом случае.
+    // 1. Проекция.
     const projected = new Array(n);
     let firstValid = -1;
     for (let i = 0; i < n; i++) {
@@ -350,7 +361,7 @@ _projectRing(ring, map) {
     }
     if (firstValid === -1) return null;
 
-    // 2) Замена невалидных точек предыдущей валидной (циклически).
+    // 2. Замена невалидных.
     const filled = new Array(n);
     let lastValid = projected[firstValid];
     for (let k = 0; k < n; k++) {
@@ -360,28 +371,41 @@ _projectRing(ring, map) {
         filled[idx] = [lastValid[0], lastValid[1]];
     }
 
-    // 3) Un-wrap по X в world-координатах.
+    // 3. Un-wrap X.
     const WORLD = (typeof map.WORLD_SIZE === 'number') ? map.WORLD_SIZE : 4e7;
-    const HALF  = WORLD * 0.5;
+    const HALF = WORLD * 0.5;
 
     const out = new Array(n);
-    out[0] = filled[0];
-    let prevX = filled[0][0];
+    out[0] = [filled[0][0], filled[0][1]];
+    let prevX = out[0][0];
     for (let i = 1; i < n; i++) {
         let x = filled[i][0];
         const z = filled[i][1];
-        let dx = x - prevX;
-        if (dx > HALF) {
-            x -= WORLD;
-        } else if (dx < -HALF) {
-            x += WORLD;
-        }
+        const dx = x - prevX;
+        if (dx > HALF) x -= WORLD;
+        else if (dx < -HALF) x += WORLD;
         out[i] = [x, z];
         prevX = x;
     }
 
+    // 4. Если замыкание разъехалось — закрываем через полюс.
+    const dxClose = out[0][0] - out[n - 1][0];
+    if (Math.abs(dxClose) > HALF * 0.9) {
+        let minZ = Infinity, maxZ = -Infinity;
+        for (const p of out) {
+            if (p[1] < minZ) minZ = p[1];
+            if (p[1] > maxZ) maxZ = p[1];
+        }
+        const avgZ = (minZ + maxZ) * 0.5;
+        const polarZ = Math.sign(avgZ) * (map.MAX_MERCATOR || HALF);
+
+        out.push([out[n - 1][0], polarZ]);
+        out.push([out[0][0], polarZ]);
+    }
+
     return out;
 }
+
     /** Строит заливку (Earcut) и — для extruded — нижнюю крышку и стенки. @private */
     _buildFillGeometry(map) {
         const rings = this._rings;

@@ -11,17 +11,17 @@ const HARDCODED = {
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
  * Proj4 не сигнализирует об ошибке: за пределами области определения
- * он молча возвращает либо NaN/Infinity, либо огромные числа (1e15+).
- * Всё это, попав в буфер вершин, даёт артефакты рендера.
+ * он молча возвращает NaN/Infinity или огромные числа. Всё это,
+ * попав в буфер вершин, даёт артефакты рендера.
  *
  * Projection умеет:
- *  1. Отделять «нормальные» результаты от «мусора» через `isValidCoord`
- *     (порог `maxAbsCoord` — не клиппинг зоны, а отсев явных выбросов).
+ *  1. Отсеивать мусор через `isValidCoord` (порог `maxAbsCoord`).
  *  2. Для Mercator — прижимать широту к ±85.05°, чтобы proj4 не
- *     возвращал Infinity на полюсах (стандартный приём Leaflet/Mapbox).
+ *     возвращал Infinity на полюсах.
  *
- * Никаких «зон действия» UTM/GK. Точки за границей зоны проецируются
- * как есть — с закономерными искажениями, как в QGIS.
+ * ВАЖНО: разрывы из-за пересечения антимеридиана (например, кольцо
+ * Антарктиды, где lon прыгает с +180 на −180) Projections не чинит —
+ * это задача потребителя (Polygon._projectRing).
  */
 export class Projection {
     /**
@@ -40,32 +40,28 @@ export class Projection {
         /** @type {boolean} */
         this.isMercator = this.projName === 'merc';
 
-        // Осевой меридиан: +lon_0=… для merc/tmerc, либо вычисление
-        // из +zone=N (UTM/GK). Формула UTM: lon0 = 6*N − 183.
+        // Осевой меридиан: +lon_0=… либо из +zone=N (UTM/GK).
         this.lon0 = this._parseLon0(def);
 
-        /**
-         * Предельная широта для Mercator (для клампа). null — не ограничиваем.
-         * @type {number|null}
-         */
+        /** Предельная широта для Mercator. null — не ограничиваем.
+         *  @type {number|null} */
         this.maxLatDeg = this.isMercator ? 85.05112878 : null;
 
         /**
          * Порог «мусора» для спроецированных координат (метры).
-         * Всё, что больше по модулю — почти наверняка результат деления
-         * на ноль в proj4 (Transverse Mercator за сингулярностью).
-         * 1e8 м = 100 000 км — вчетверо больше диаметра Земли.
-         * Это НЕ клиппинг зоны: точки с меньшими координатами (в том
-         * числе «искажённые» за границей зоны) проходят как есть.
+         *
+         * 2.5e7 = 25 000 км ≈ 1.25 ширины мира. Легитимные координаты
+         * Web Mercator (до 2e7) и UTM (до ~1e7) сюда влезают с запасом,
+         * а результаты деления на ноль в proj4 (Перу в UTM 37N и т.п.) —
+         * нет. Это НЕ клиппинг зоны: точки с умеренными координатами
+         * (десятки тысяч км) проходят как есть.
+         *
          * @type {number}
          */
-        this.maxAbsCoord = 1e8;
+        this.maxAbsCoord = 2.5e7;
     }
 
-    /**
-     * Парсит осевой меридиан: сначала из +lon_0=, иначе из +zone=N.
-     * @private
-     */
+    /** @private */
     _parseLon0(def) {
         const lon0Match = def.match(/\+lon_0=(-?[\d.]+)/);
         if (lon0Match) return parseFloat(lon0Match[1]);
@@ -79,10 +75,7 @@ export class Projection {
         return 0;
     }
 
-    /**
-     * Конечны ли lon/lat. Никакой проверки «зоны действия».
-     * @param {Array<number>} lonLat @returns {boolean}
-     */
+    /** Конечны ли lon/lat. @param {Array<number>} lonLat @returns {boolean} */
     isValidLonLat(lonLat) {
         if (!lonLat || lonLat.length < 2) return false;
         return Number.isFinite(lonLat[0]) && Number.isFinite(lonLat[1]);
@@ -90,11 +83,6 @@ export class Projection {
 
     /**
      * Конечны ли спроецированные координаты и не «мусор» ли это.
-     *
-     * Отбрасываем NaN/Infinity и всё, что больше `maxAbsCoord` по модулю.
-     * Точки, искажённые за границей зоны, но с умеренными координатами
-     * (десятки-сотни тысяч км) проходят — их рисуем как есть.
-     *
      * @param {Array<number>} coord @returns {boolean}
      */
     isValidCoord(coord) {
@@ -106,7 +94,7 @@ export class Projection {
     }
 
     /**
-     * Прижимает широту к пределу (только для Mercator). Для остальных — no-op.
+     * Прижимает широту к пределу (только для Mercator).
      * @param {Array<number>} lonLat @returns {Array<number>}
      */
     clampLonLat(lonLat) {
@@ -125,7 +113,7 @@ export class Projection {
     toLonLat(coord)   { return proj4(this.def, HARDCODED['EPSG:4326'], coord); }
 
     /**
-     * Безопасная проекция: кламп широты (Mercator) + отсев мусора.
+     * Безопасная проекция: кламп широты + отсев мусора.
      * @param {Array<number>} coord @returns {Array<number>|null}
      */
     fromLonLatSafe(coord) {

@@ -2,12 +2,13 @@
  * Полигон на карте: заливка (Earcut), обводка (Line2 / THREE.Line),
  * экструзия, высоты рельефа, подписи, hover/click через InteractionManager.
  *
- * Координаты колец задаются в СК `options.crs` (по умолчанию — map.inputCRS).
- * Проецирование идёт через `map.projectSafe`, который:
- *  - прижимает широту к ±85.05° для Mercator (иначе Антарктида даст Infinity),
- *  - отсеивает мусор от proj4 (NaN / Infinity / |coord| > 1e8 м).
- * Невалидные точки кольца заменяются ближайшей валидной точкой — так
- * не рисуются «усы» через сцену, но кольцо и клиппинг не трогаются.
+ * Проецирование идёт через `map.projectSafe` (кламп широты для Mercator,
+ * отсев NaN/Infinity и координат за 1e8 м). После проекции кольцо проходит
+ * дистанционный фильтр: сегменты длиннее `maxSegmentLength` (по умолчанию
+ * `map.WORLD_SIZE * 1.5 ≈ 6·10⁷ м`) сворачиваются в точку. Это убирает
+ * «усы» — сегменты от точки, спроецированной далеко за пределы мира,
+ * к нормальному кольцу. Фильтр не трогает нормальную геометрию (включая
+ * верхнюю/нижнюю границы Антарктиды шириной ровно в мир, 4·10⁷ м).
  */
 
 import { Projections } from './Projections.js';
@@ -38,20 +39,20 @@ function crossY(p0, p1, p2) {
 export class Polygon {
     /**
      * @param {Object} options
-     * @param {Array<Array<Array<number>>>} options.rings - [внешнее, ...отверстия], каждое — [ [x,y], ... ].
-     * @param {string} [options.crs] - Код СК колец; по умолчанию map.inputCRS.
+     * @param {Array<Array<Array<number>>>} options.rings
+     * @param {string} [options.crs]
      * @param {string} [options.fillColor='#3388ff']
      * @param {number} [options.fillOpacity=0.5]
      * @param {string} [options.strokeColor='#000000']
      * @param {number} [options.strokeWidth=2]
      * @param {number} [options.strokeOpacity=1]
-     * @param {string} [options.altitudeMode='clampToGround'] - 'clampToGround' | 'absolute'.
+     * @param {string} [options.altitudeMode='clampToGround']
      * @param {number} [options.altitudeOffset=10]
      * @param {boolean} [options.extruded=false]
-     * @param {number} [options.height=0] - Толщина экструзии (при extruded=true).
-     * @param {number} [options.minHeight=0] - Высота нижней грани над поверхностью.
-     * @param {boolean} [options.depthTest] - По умолчанию false / true (extruded).
-     * @param {boolean} [options.depthWrite] - По умолчанию false / true (extruded).
+     * @param {number} [options.height=0]
+     * @param {number} [options.minHeight=0]
+     * @param {boolean} [options.depthTest]
+     * @param {boolean} [options.depthWrite]
      * @param {boolean} [options.castShadow=true]
      * @param {boolean} [options.receiveShadow=true]
      * @param {number} [options.roughness=0.8]
@@ -71,6 +72,9 @@ export class Polygon {
      * @param {string} [options.tooltip='']
      * @param {boolean} [options.useSimpleStroke=false]
      * @param {boolean} [options.useWorkerForTriangulation=false]
+     * @param {number|null} [options.maxSegmentLength=null] - Порог длины сегмента (м).
+     *     Сегменты длиннее — сворачиваются. `null` — использовать
+     *     `map.WORLD_SIZE * 1.5`. `0` — отключить фильтр.
      */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
@@ -103,6 +107,13 @@ export class Polygon {
         /** @private @type {number} */  this._maxZoom = options.maxZoom ?? Infinity;
         /** @private @type {boolean} */ this._useSimpleStroke = options.useSimpleStroke ?? false;
         /** @private @type {boolean} */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
+
+        /**
+         * Порог длины сегмента (метры). `null` → использовать `map.WORLD_SIZE * 1.5`.
+         * `0` → фильтр отключён.
+         * @private @type {number|null}
+         */
+        this._maxSegmentLength = options.maxSegmentLength ?? null;
 
         /** @private @type {boolean} */ this._castShadow = options.castShadow ?? true;
         /** @private @type {boolean} */ this._receiveShadow = options.receiveShadow ?? true;
@@ -156,8 +167,7 @@ export class Polygon {
         /** @private @type {Array<[number, number]>} */ this._worldCoords = [];
         /** @private @type {Array<[number, number]>} */ this._strokeWorldCoords = [];
 
-        /** Спроецированное внешнее кольцо; переиспользуется для обводки.
-         *  @private @type {Array<[number, number]>|null} */
+        /** @private @type {Array<[number, number]>|null} */
         this._projectedOuterRing = null;
 
         /** @private @type {number} */ this._boundingSphereRadius = 0;
@@ -332,16 +342,18 @@ export class Polygon {
     }
 
     /**
-     * Проецирует кольцо в world-метры карты.
+     * Проецирует кольцо в world-метры карты и сворачивает «усы».
      *
-     * `map.projectSafe` прижимает широту к ±85.05° для Mercator (внутри
-     * `fromLonLatSafe`) и отсеивает мусор от proj4 (NaN, Infinity,
-     * координаты за 1e8 м — типичный результат Transverse Mercator
-     * за сингулярностью). Если для какой-то точки `projectSafe` вернул
-     * null — подставляем предыдущую валидную точку кольца. Это убирает
-     * «усы» из Infinity/NaN, не клиппуя и не отбрасывая кольцо целиком.
-     *
-     * Если невалидны все точки — возвращаем null (кольцо не рисуется).
+     * Шаги:
+     *  1. `map.projectSafe` для каждой точки (кламп широты, отсев
+     *     NaN/Infinity и координат за `maxAbsCoord`).
+     *  2. Циклическая замена невалидных точек предыдущей валидной.
+     *  3. Дистанционный фильтр: если расстояние между соседними точками
+     *     превышает `maxSegLen` (по умолчанию `map.WORLD_SIZE * 1.5`),
+     *     вторая точка сворачивается в первую. Это убирает «усы» из
+     *     сегментов от далёких точек. Порог специально больше ширины
+     *     мира, чтобы не тронуть нормальные границы (типа верхней
+     *     границы Антарктиды шириной `WORLD_SIZE`).
      *
      * @param {Array<Array<number>>} ring
      * @param {import('./KrbMap.js').KrbMap} map
@@ -352,6 +364,7 @@ export class Polygon {
         const n = ring.length;
         if (n < 3) return null;
 
+        // 1) Проекция.
         const projected = new Array(n);
         let firstValid = -1;
         for (let i = 0; i < n; i++) {
@@ -361,6 +374,7 @@ export class Polygon {
         }
         if (firstValid === -1) return null;
 
+        // 2) Замена невалидных точек предыдущей валидной (циклически).
         const out = new Array(n);
         let lastValid = projected[firstValid];
         for (let k = 0; k < n; k++) {
@@ -369,6 +383,34 @@ export class Polygon {
             if (p) lastValid = p;
             out[idx] = lastValid;
         }
+
+        // 3) Дистанционный фильтр «усов».
+        const maxSegLen = this._maxSegmentLength !== null
+            ? this._maxSegmentLength
+            : (typeof map.WORLD_SIZE === 'number' ? map.WORLD_SIZE * 1.5 : 0);
+
+        if (maxSegLen > 0) {
+            const maxSegSq = maxSegLen * maxSegLen;
+            for (let i = 1; i < n; i++) {
+                const prev = out[i - 1];
+                const cur = out[i];
+                const dx = cur[0] - prev[0];
+                const dz = cur[1] - prev[1];
+                if (dx * dx + dz * dz > maxSegSq) {
+                    out[i] = [prev[0], prev[1]];
+                }
+            }
+            // Замыкание: последняя → первая. Если разрыв — сворачиваем
+            // последнюю в первую (кольцо остаётся замкнутым через 0).
+            const last = out[n - 1];
+            const first = out[0];
+            const dx = first[0] - last[0];
+            const dz = first[1] - last[1];
+            if (dx * dx + dz * dz > maxSegSq) {
+                out[n - 1] = [first[0], first[1]];
+            }
+        }
+
         return out;
     }
 

@@ -1,19 +1,19 @@
 /**
  * Полигон на карте: заливка (Earcut), обводка (Line2 / THREE.Line),
- * экструзия, высоты, подписи, hover/click через InteractionManager.
+ * экструзия, высоты, подписи, hover/click.
  *
- * Особенности:
- *  - Проецирование через `map.projectSafe` (кламп широты для Mercator,
- *    отсев NaN/Infinity и координат за `maxAbsCoord`).
- *  - Кольцо, пересекающее антимеридиан (скачок lon > 180°), разбивается
- *    на под-кольца; каждое под-кольцо достраивается до полюса (lat=±85
- *    для Mercator) через меридиан ±180°, чтобы не рисовалась длинная
- *    прямая через весь мир.
- *  - Дополнительный дистанционный фильтр: сегменты длиннее
- *    `map.WORLD_SIZE * 0.9` сворачиваются в точку.
+ * Проецирование через `map.projectSafe` (кламп широты для Mercator,
+ * отсев NaN/Infinity и координат за `maxAbsCoord`).
+ *
+ * Дистанционный фильтр: сегменты кольца длиннее `maxSegmentLength`
+ * (по умолчанию `map.WORLD_SIZE * 0.5`, т.е. половина ширины мира)
+ * сворачиваются — вторая точка заменяется первой. Это убирает
+ * «усы» из-за пересечения антимеридиана (например, у Антарктиды
+ * сегмент от lon=+180 к lon=−180 имеет длину ровно WORLD_SIZE и
+ * без фильтра рисуется как прямая через всю карту).
  */
 
-import { Projections, WGS84 } from './Projections.js';
+import { Projections } from './Projections.js';
 import {
   THREE,
   Line2,
@@ -36,93 +36,6 @@ function crossY(p0, p1, p2) {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
     const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
     return dz1 * dx2 - dx1 * dz2;
-}
-
-/** Скачок долготы через антимеридиан. @private */
-function isAntimeridianJump(lon1, lon2) {
-    return Math.abs(lon2 - lon1) > 180;
-}
-
-/**
- * Разбивает кольцо (в lon/lat) по пересечениям антимеридиана.
- * Если polarLat !== null — достраивает каждый под-сегмент до полюса
- * через соответствующий меридиан (только для Mercator).
- *
- * @param {Array<[number,number]|null>} lonLatRing
- * @param {number|null} polarLat - Широта полюса (−85 для юга, +85 для севера)
- *     или null, если проекция не Mercator.
- * @returns {Array<Array<[number,number]|null>>}
- * @private
- */
-function splitAtAntimeridian(lonLatRing, polarLat) {
-    const n = lonLatRing.length;
-    if (n < 3) return [lonLatRing];
-
-    // Индексы сегментов-скачков.
-    const jumps = [];
-    for (let i = 0; i < n - 1; i++) {
-        const a = lonLatRing[i], b = lonLatRing[i + 1];
-        if (a && b && isAntimeridianJump(a[0], b[0])) jumps.push(i);
-    }
-    // Замыкающий сегмент.
-    const first = lonLatRing[0], last = lonLatRing[n - 1];
-    const closingJump = first && last && isAntimeridianJump(last[0], first[0]);
-
-    if (jumps.length === 0 && !closingJump) return [lonLatRing];
-
-    const segments = [];
-    let startIdx = 0;
-    for (const j of jumps) {
-        const seg = lonLatRing.slice(startIdx, j + 1);
-        if (seg.length >= 3) segments.push(seg);
-        startIdx = j + 1;
-    }
-    const tail = lonLatRing.slice(startIdx);
-    if (tail.length >= 3) segments.push(tail);
-
-    if (polarLat === null || segments.length === 0) return segments;
-
-    return segments.map(seg => extendToPolar(seg, polarLat));
-}
-
-/**
- * Достраивает под-сегмент до polarLat через меридиан ±180.
- *
- * Если сегмент примыкает к антимеридиану только с одной стороны —
- * достраивает её. Если с обеих — достраивает обе, соединяя по polarLat.
- *
- * @private
- */
-function extendToPolar(segment, polarLat) {
-    if (segment.length < 3) return segment;
-
-    const nearMeridian = (lon) => Math.abs(Math.abs(lon) - 180) < 30;
-
-    const findFirst = (arr) => { for (const p of arr) if (p) return p; return null; };
-    const findLast = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (arr[i]) return arr[i]; return null; };
-
-    let result = segment.slice();
-    let first = findFirst(result);
-    let last = findLast(result);
-    if (!first || !last) return result;
-
-    const firstNearM = nearMeridian(first[0]);
-    const lastNearM = nearMeridian(last[0]);
-
-    // Поворачиваем так, чтобы meridian-adjacent конец оказался в конце.
-    if (firstNearM && !lastNearM) {
-        result.push(result.shift());
-        first = findFirst(result);
-        last = findLast(result);
-    }
-
-    if (first && last && nearMeridian(last[0])) {
-        const m = last[0] > 0 ? 180 : -180;
-        result.push([m, polarLat]);
-        result.push([first[0], polarLat]);
-    }
-
-    return result;
 }
 
 export class Polygon {
@@ -161,7 +74,7 @@ export class Polygon {
      * @param {string} [options.tooltip='']
      * @param {boolean} [options.useSimpleStroke=false]
      * @param {boolean} [options.useWorkerForTriangulation=false]
-     * @param {number|null} [options.maxSegmentLength=null]
+     * @param {number|null} [options.maxSegmentLength=null] - Порог (м). null → WORLD_SIZE * 0.5. 0 → фильтр выключен.
      */
     constructor(options = {}) {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
@@ -247,8 +160,8 @@ export class Polygon {
         /** @private @type {Array<[number, number]>} */ this._worldCoords = [];
         /** @private @type {Array<[number, number]>} */ this._strokeWorldCoords = [];
 
-        /** @private @type {Array<Array<[number, number]>>|null} */
-        this._projectedOuterSubRings = null;
+        /** @private @type {Array<[number, number]>|null} */
+        this._projectedOuterRing = null;
 
         /** @private @type {number} */ this._boundingSphereRadius = 0;
         /** @private @type {THREE.Vector3} */ this._boundingSphereWorldCenter = new THREE.Vector3();
@@ -409,94 +322,6 @@ export class Polygon {
         }
     }
 
-    /**
-     * Проецирует кольцо в world-метры карты.
-     *
-     * 1. Кольцо переводится в lon/lat.
-     * 2. Разбивается по пересечениям антимеридиана (если есть) и
-     *    достраивается до полюса (для Mercator).
-     * 3. Каждое под-кольцо проецируется через `map.projectSafe`.
-     * 4. Невалидные точки заменяются предыдущей валидной.
-     * 5. Дистанционный фильтр сворачивает сегменты длиннее
-     *    `maxSegmentLength` (по умолчанию `WORLD_SIZE * 0.9`).
-     *
-     * @param {Array<Array<number>>} ring
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @returns {Array<Array<[number, number]>>}
-     * @private
-     */
-    _projectRing(ring, map) {
-        const n = ring.length;
-        if (n < 3) return [];
-
-        // 1) В lon/lat.
-        const srcCrs = this._crs;
-        const lonLat = new Array(n);
-        for (let i = 0; i < n; i++) {
-            const ll = typeof srcCrs.toLonLatSafe === 'function'
-                ? srcCrs.toLonLatSafe(ring[i])
-                : srcCrs.toLonLat(ring[i]);
-            lonLat[i] = (ll && Number.isFinite(ll[0]) && Number.isFinite(ll[1])) ? ll : null;
-        }
-
-        // 2) Разбиение по антимеридиану + достройка до полюса.
-        let polarLat = null;
-        if (map.projection.isMercator) {
-            let sumLat = 0, cnt = 0;
-            for (const ll of lonLat) if (ll) { sumLat += ll[1]; cnt++; }
-            const avgLat = cnt > 0 ? sumLat / cnt : 0;
-            if (Math.abs(avgLat) > 45) {
-                polarLat = avgLat < 0 ? -85 : 85;
-            }
-        }
-        const segments = splitAtAntimeridian(lonLat, polarLat);
-
-        // 3-5) Проекция каждого под-кольца.
-        const result = [];
-        const maxSegLen = this._maxSegmentLength !== null
-            ? this._maxSegmentLength
-            : (typeof map.WORLD_SIZE === 'number' ? map.WORLD_SIZE * 0.9 : 0);
-
-        for (const seg of segments) {
-            const m = seg.length;
-            if (m < 3) continue;
-
-            const projected = new Array(m);
-            let firstValid = -1;
-            for (let i = 0; i < m; i++) {
-                const p = seg[i] ? map.projectSafe(seg[i], WGS84) : null;
-                projected[i] = p;
-                if (p && firstValid === -1) firstValid = i;
-            }
-            if (firstValid === -1) continue;
-
-            const out = new Array(m);
-            let lastValid = projected[firstValid];
-            for (let k = 0; k < m; k++) {
-                const idx = (firstValid + k) % m;
-                const p = projected[idx];
-                if (p) lastValid = p;
-                out[idx] = lastValid;
-            }
-
-            if (maxSegLen > 0) {
-                const maxSegSq = maxSegLen * maxSegLen;
-                for (let i = 1; i < m; i++) {
-                    const prev = out[i - 1];
-                    const cur = out[i];
-                    const dx = cur[0] - prev[0];
-                    const dz = cur[1] - prev[1];
-                    if (dx * dx + dz * dz > maxSegSq) {
-                        out[i] = [prev[0], prev[1]];
-                    }
-                }
-            }
-
-            if (out.length >= 3) result.push(out);
-        }
-        return result;
-    }
-
     /** @private */
     _flipIndices(indices) {
         const result = new Array(indices.length);
@@ -508,7 +333,72 @@ export class Polygon {
         return result;
     }
 
-    /** Строит заливку. @private */
+    /**
+     * Проецирует кольцо в world-метры карты.
+     *
+     * 1) `map.projectSafe` (кламп широты, отсев NaN/Infinity и координат
+     *    за maxAbsCoord).
+     * 2) Замена невалидных точек предыдущей валидной (циклически).
+     * 3) Дистанционный фильтр: сегмент длиннее `maxSegLen` сворачивается —
+     *    вторая точка приравнивается к первой. Порог по умолчанию
+     *    `map.WORLD_SIZE * 0.5` (полширины мира). Ловит антимеридианный
+     *    сегмент длиной ровно WORLD_SIZE (Антарктида).
+     *
+     * @param {Array<Array<number>>} ring
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @returns {Array<[number, number]>|null}
+     * @private
+     */
+    _projectRing(ring, map) {
+        const n = ring.length;
+        if (n < 3) return null;
+
+        const projected = new Array(n);
+        let firstValid = -1;
+        for (let i = 0; i < n; i++) {
+            const p = map.projectSafe(ring[i], this._crs);
+            projected[i] = p;
+            if (p && firstValid === -1) firstValid = i;
+        }
+        if (firstValid === -1) return null;
+
+        const out = new Array(n);
+        let lastValid = projected[firstValid];
+        for (let k = 0; k < n; k++) {
+            const idx = (firstValid + k) % n;
+            const p = projected[idx];
+            if (p) lastValid = p;
+            out[idx] = lastValid;
+        }
+
+        const maxSegLen = this._maxSegmentLength !== null
+            ? this._maxSegmentLength
+            : (typeof map.WORLD_SIZE === 'number' ? map.WORLD_SIZE * 0.5 : 0);
+
+        if (maxSegLen > 0) {
+            const maxSegSq = maxSegLen * maxSegLen;
+            for (let i = 1; i < n; i++) {
+                const prev = out[i - 1];
+                const cur = out[i];
+                const dx = cur[0] - prev[0];
+                const dz = cur[1] - prev[1];
+                if (dx * dx + dz * dz > maxSegSq) {
+                    out[i] = [prev[0], prev[1]];
+                }
+            }
+            const first = out[0];
+            const last = out[n - 1];
+            const dx = first[0] - last[0];
+            const dz = first[1] - last[1];
+            if (dx * dx + dz * dz > maxSegSq) {
+                out[n - 1] = [first[0], first[1]];
+            }
+        }
+
+        return out;
+    }
+
+    /** Строит заливку (Earcut) и — для extruded — нижнюю крышку и стенки. @private */
     _buildFillGeometry(map) {
         const rings = this._rings;
         if (!rings || !rings.length || rings[0].length < 3) {
@@ -517,49 +407,43 @@ export class Polygon {
         }
 
         this._worldCoords.length = 0;
-        this._projectedOuterSubRings = null;
-
-        // Проекция внешнего кольца (может вернуть несколько под-колец).
-        const outerSubRings = this._projectRing(rings[0], map);
-        if (!outerSubRings || outerSubRings.length === 0) {
-            console.warn('Polygon: внешнее кольцо не спроецировалось');
-            return;
-        }
-        this._projectedOuterSubRings = outerSubRings;
-
-        // Дырки: поддерживаем только неразбитые.
-        const holeSubRings = [];
-        for (let i = 1; i < rings.length; i++) {
-            const holeSubs = this._projectRing(rings[i], map);
-            if (holeSubs.length === 1) holeSubRings.push(holeSubs[0]);
-            else if (holeSubs.length > 1) {
-                console.warn(`Polygon: hole ring ${i} разбит антимеридианом, пропуск`);
-            }
-        }
-
-        // Собираем все точки в один массив.
+        this._projectedOuterRing = null;
+        const coords = [];
         const points2D = [];
-        const worldCoords = [];
-        const outerRanges = [];
-        const holeRanges = [];
+        const holeIndices = [];
+        const ringStartIndices = [];
 
-        const addRing = (subRing, ranges) => {
-            const start = points2D.length;
-            let firstPt = null;
-            for (let i = 0; i < subRing.length; i++) {
-                const x = subRing[i][0], z = subRing[i][1];
-                if (i === 0) firstPt = [x, z];
-                if (i > 0 && x === firstPt[0] && z === firstPt[1]) continue;
-                points2D.push(new THREE.Vector2(x, z));
-                worldCoords.push([x, z]);
+        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+            const rawRing = rings[ringIdx];
+            if (rawRing.length < 3) {
+                console.warn(`Polygon: ring ${ringIdx} must have at least 3 points`);
+                if (ringIdx === 0) return;
+                continue;
             }
-            const count = points2D.length - start;
-            if (count >= 3) ranges.push({ start, count });
-            else points2D.length = start;
-        };
 
-        for (const sub of outerSubRings) addRing(sub, outerRanges);
-        for (const hole of holeSubRings) addRing(hole, holeRanges);
+            const projected = this._projectRing(rawRing, map);
+            if (!projected || projected.length < 3) {
+                console.warn(`Polygon: ring ${ringIdx} — все точки невалидны, пропуск`);
+                if (ringIdx === 0) return;
+                continue;
+            }
+
+            if (ringIdx === 0) this._projectedOuterRing = projected;
+
+            ringStartIndices.push(points2D.length);
+            if (ringIdx > 0) holeIndices.push(coords.length / 2);
+
+            let firstPoint = null;
+            for (let i = 0; i < projected.length; i++) {
+                const absX = projected[i][0];
+                const absZ = projected[i][1];
+                if (i === 0) firstPoint = [absX, absZ];
+                if (i > 0 && absX === firstPoint[0] && absZ === firstPoint[1]) continue;
+                coords.push(absX, absZ);
+                points2D.push(new THREE.Vector2(absX, absZ));
+                this._worldCoords.push([absX, absZ]);
+            }
+        }
 
         if (points2D.length < 3) {
             console.warn('Polygon: after processing rings, less than 3 vertices');
@@ -567,10 +451,25 @@ export class Polygon {
         }
 
         this._vertices2D = points2D;
-        this._worldCoords = worldCoords;
         this._cachedHeights = new Array(points2D.length).fill(0);
 
-        // Центроид и позиция группы.
+        let indices;
+        if (this._useWorkerForTriangulation && typeof Worker !== 'undefined') {
+            console.warn('Worker triangulation is experimental, falling back to sync');
+            indices = earcut(coords, holeIndices, 2);
+        } else {
+            indices = earcut(coords, holeIndices, 2);
+        }
+
+        if (indices.length === 0) {
+            console.warn('Polygon: Earcut returned no triangles');
+            return;
+        }
+
+        const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
+        const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
+        const bottomIndices = this._flipIndices(topIndices);
+
         let cx = 0, cy = 0;
         for (const pt of points2D) { cx += pt.x; cy += pt.y; }
         cx /= points2D.length;
@@ -579,81 +478,29 @@ export class Polygon {
         this._centroidWorld.set(cx, 0, cy);
         this._group.position.copy(this._centroidWorld);
 
-        for (const pt of points2D) {
-            pt.x -= cx;
-            pt.y -= cy;
+        for (let i = 0; i < points2D.length; i++) {
+            points2D[i].x -= cx;
+            points2D[i].y -= cy;
         }
 
-        let maxRSq = 0;
+        let maxRadiusSq = 0;
         for (const pt of points2D) {
             const rSq = pt.x * pt.x + pt.y * pt.y;
-            if (rSq > maxRSq) maxRSq = rSq;
+            if (rSq > maxRadiusSq) maxRadiusSq = rSq;
         }
-        this._boundingSphereRadius = Math.sqrt(maxRSq);
-
-        // Триангуляция: каждое внешнее под-кольцо отдельно.
-        const allTopIndices = [];
-        const allBottomIndices = [];
-
-        for (let r = 0; r < outerRanges.length; r++) {
-            const range = outerRanges[r];
-            const coordsLocal = [];
-            for (let i = range.start; i < range.start + range.count; i++) {
-                const pt = points2D[i];
-                coordsLocal.push(pt.x, pt.y);
-            }
-
-            // Дырки только к первому под-кольцу (для простоты).
-            const holeIndices = [];
-            const coordsWithHoles = coordsLocal.slice();
-            if (r === 0 && holeRanges.length > 0) {
-                for (const hole of holeRanges) {
-                    holeIndices.push(coordsWithHoles.length / 2);
-                    for (let i = hole.start; i < hole.start + hole.count; i++) {
-                        const pt = points2D[i];
-                        coordsWithHoles.push(pt.x, pt.y);
-                    }
-                }
-            }
-
-            const raw = earcut(coordsWithHoles, holeIndices, 2);
-            if (raw.length === 0) continue;
-
-            const p0 = { x: coordsWithHoles[raw[0] * 2], y: coordsWithHoles[raw[0] * 2 + 1] };
-            const p1 = { x: coordsWithHoles[raw[1] * 2], y: coordsWithHoles[raw[1] * 2 + 1] };
-            const p2 = { x: coordsWithHoles[raw[2] * 2], y: coordsWithHoles[raw[2] * 2 + 1] };
-            const flipped = crossY(p0, p1, p2) < 0;
-
-            const base = range.start;
-            for (let i = 0; i < raw.length; i += 3) {
-                const a = raw[i] + base;
-                const b = raw[i + 1] + base;
-                const c = raw[i + 2] + base;
-                if (flipped) {
-                    allTopIndices.push(a, c, b);
-                    allBottomIndices.push(a, b, c);
-                } else {
-                    allTopIndices.push(a, b, c);
-                    allBottomIndices.push(a, c, b);
-                }
-            }
-        }
-
-        if (allTopIndices.length === 0) {
-            console.warn('Polygon: Earcut returned no triangles');
-            return;
-        }
+        this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
         // Верхняя крышка.
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
-            topPosArray[i * 3] = points2D[i].x;
+            const pt = points2D[i];
+            topPosArray[i * 3] = pt.x;
             topPosArray[i * 3 + 1] = 0;
-            topPosArray[i * 3 + 2] = points2D[i].y;
+            topPosArray[i * 3 + 2] = pt.y;
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-        topGeometry.setIndex(allTopIndices);
+        topGeometry.setIndex(topIndices);
 
         const topNormals = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) topNormals[i * 3 + 1] = 1;
@@ -676,12 +523,13 @@ export class Polygon {
             const bottomGeometry = new THREE.BufferGeometry();
             const bottomPosArray = new Float32Array(points2D.length * 3);
             for (let i = 0; i < points2D.length; i++) {
-                bottomPosArray[i * 3] = points2D[i].x;
+                const pt = points2D[i];
+                bottomPosArray[i * 3] = pt.x;
                 bottomPosArray[i * 3 + 1] = 0;
-                bottomPosArray[i * 3 + 2] = points2D[i].y;
+                bottomPosArray[i * 3 + 2] = pt.y;
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            bottomGeometry.setIndex(allBottomIndices);
+            bottomGeometry.setIndex(bottomIndices);
 
             const bottomNormals = new Float32Array(points2D.length * 3);
             for (let i = 0; i < points2D.length; i++) bottomNormals[i * 3 + 1] = -1;
@@ -699,7 +547,7 @@ export class Polygon {
             this._bottomMaterial = bottomMaterial;
             this._group.add(bottomMesh);
 
-            // Стенки — по всем под-кольцам.
+            // Стенки.
             const sidePositions = this._sidePositionsArray;
             const sideIndices = this._sideIndicesArray;
             sidePositions.length = 0;
@@ -707,22 +555,30 @@ export class Polygon {
 
             const initialHeight = this._height;
 
-            for (const range of outerRanges) {
-                const count = range.count;
+            for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+                if (ringStartIndices[ringIdx] === undefined) continue;
+
+                const start = ringStartIndices[ringIdx];
+                const nextRingStart = (ringIdx + 1 < ringStartIndices.length)
+                    ? ringStartIndices[ringIdx + 1]
+                    : points2D.length;
+                const count = nextRingStart - start;
+
                 if (count < 2) continue;
+
                 for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
-                    const topI = points2D[range.start + i];
-                    const topJ = points2D[range.start + j];
-                    const base = sidePositions.length / 3;
+                    const topI = points2D[start + i];
+                    const topJ = points2D[start + j];
+                    const baseIndex = sidePositions.length / 3;
 
                     sidePositions.push(topI.x, initialHeight, topI.y);
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topJ.x, initialHeight, topJ.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
 
-                    sideIndices.push(base, base + 1, base + 2);
-                    sideIndices.push(base + 1, base + 3, base + 2);
+                    sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+                    sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
                 }
             }
 
@@ -748,50 +604,37 @@ export class Polygon {
         this._raycastMeshesCache = null;
     }
 
-    /** Строит обводку (все под-кольца внешнего контура). @private */
+    /** Строит обводку по `_projectedOuterRing`. @private */
     _buildStrokeGeometry(map) {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
-        if (!this._projectedOuterSubRings || this._projectedOuterSubRings.length === 0) return;
 
         const canvas = map.renderer.domElement;
+        const projected = this._projectedOuterRing;
 
-        // Собираем мировые координаты всех под-колец в один массив.
-        // Каждое под-кольцо замыкаем явно.
-        this._strokeWorldCoords.length = 0;
-        const groupPos = this._group.position; // placeholder — используется в _updateStroke
-
-        for (const sub of this._projectedOuterSubRings) {
-            if (sub.length < 2) continue;
-            // Дедуплицируем и добавляем.
-            const firstPt = sub[0];
-            const localPts = [];
-            for (let i = 0; i < sub.length; i++) {
-                const p = sub[i];
-                if (i > 0 && p[0] === firstPt[0] && p[1] === firstPt[1]) continue;
-                localPts.push([p[0], p[1]]);
-            }
-            // Замыкаем.
-            if (localPts.length > 0) {
-                localPts.push([localPts[0][0], localPts[0][1]]);
-            }
-            // Если это не первое под-кольцо, добавляем "разрыв":
-            // вставляем NaN-маркер, чтобы _updateStroke знал о разрыве.
-            if (this._strokeWorldCoords.length > 0) {
-                this._strokeWorldCoords.push(null);
-            }
-            for (const p of localPts) {
-                this._strokeWorldCoords.push(p);
-            }
+        if (!projected || projected.length < 2) {
+            this._strokeWorldCoords.length = 0;
+            this._cachedStrokeHeights = [];
+            return;
         }
 
+        this._strokeWorldCoords.length = 0;
+        const first = projected[0];
+        for (let i = 0; i < projected.length; i++) {
+            const p = projected[i];
+            if (i > 0 && p[0] === first[0] && p[1] === first[1]) continue;
+            this._strokeWorldCoords.push([p[0], p[1]]);
+        }
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
 
         if (this._useSimpleStroke) {
             const positions = [];
             for (let i = 0; i < this._strokeWorldCoords.length; i++) {
                 const wc = this._strokeWorldCoords[i];
-                if (!wc) continue;
                 positions.push(wc[0], 0, wc[1]);
+            }
+            if (this._strokeWorldCoords.length > 0) {
+                const f = this._strokeWorldCoords[0];
+                positions.push(f[0], 0, f[1]);
             }
 
             const lineGeometry = new THREE.BufferGeometry();
@@ -815,11 +658,8 @@ export class Polygon {
             this._strokeMaterial = lineMaterial;
             this._group.add(line);
         } else {
-            // Для Line2 — собираем через разрывы отдельными geometry.
-            // Упрощение: рисуем первое под-кольцо (обычно достаточно).
-            // Для полноценной поддержки множественных под-колец можно
-            // создать по одной Line2 на каждое.
             this._strokeGeometry = new LineGeometry();
+
             this._strokeMaterial = new LineMaterial({
                 color: this._strokeColor,
                 linewidth: this._strokeWidth,
@@ -872,7 +712,7 @@ export class Polygon {
         }
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
-        this._projectedOuterSubRings = null;
+        this._projectedOuterRing = null;
         this._vertices2D.length = 0;
         this._boundingSphereRadius = 0;
         this._cachedHeights.length = 0;
@@ -1005,35 +845,17 @@ export class Polygon {
 
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
-            // Стенки уже построены по под-кольцам; перебираем каждый
-            // сегмент в порядке построения. Всего сегментов:
-            // sum(count для каждого под-кольца).
             let idx = 0;
-            if (this._projectedOuterSubRings) {
-                for (const sub of this._projectedOuterSubRings) {
-                    const count = sub.length; // приблизительно
-                    if (count < 2) continue;
-                    // Точное соответствие индексов — по порядку points2D,
-                    // но проще: обновим по _vertices2D с учётом того,
-                    // что все точки под-колец лежат в _vertices2D подряд.
-                    // Здесь упрощение: только для одного под-кольца.
-                    break;
-                }
-            }
-            // Fallback: обновляем только первые N-сегментов по _vertices2D.
             for (let i = 0; i < this._vertices2D.length; i++) {
                 const j = (i + 1) % this._vertices2D.length;
                 const upperI = this._cachedHeights[i];
                 const upperJ = this._cachedHeights[j];
                 const lowerI = upperI - this._height;
                 const lowerJ = upperJ - this._height;
-                if (idx * 3 + 1 >= sidePos.length) break;
+
                 sidePos[idx * 3 + 1] = upperI; idx++;
-                if (idx * 3 + 1 >= sidePos.length) break;
                 sidePos[idx * 3 + 1] = lowerI; idx++;
-                if (idx * 3 + 1 >= sidePos.length) break;
                 sidePos[idx * 3 + 1] = upperJ; idx++;
-                if (idx * 3 + 1 >= sidePos.length) break;
                 sidePos[idx * 3 + 1] = lowerJ; idx++;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
@@ -1060,6 +882,12 @@ export class Polygon {
             positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
         }
 
+        if (strokeLen > 0) {
+            const first = this._strokeWorldCoords[0];
+            const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
+            positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);
+        }
+
         if (this._useSimpleStroke) {
             const count = positions.length / 3;
             const existing = this._strokeGeometry.getAttribute('position');
@@ -1075,10 +903,8 @@ export class Polygon {
                 this._strokeGeometry.computeBoundingSphere();
             }
         } else {
-            if (positions.length > 0) {
-                this._strokeGeometry.setPositions(positions);
-                this._strokeLine.computeLineDistances();
-            }
+            this._strokeGeometry.setPositions(positions);
+            this._strokeLine.computeLineDistances();
         }
     }
 

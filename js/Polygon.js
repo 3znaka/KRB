@@ -32,23 +32,6 @@ export const POLYGON_RENDER_ORDER = {
 };
 
 /**
- * Доля от `WORLD_SIZE`, которая считается «нормальной» длиной ребра.
- *
- * Реальные грани объектов (стран, регионов, зданий) на порядки короче
- * полушария. Если хоть одно ребро кольца длиннее `WORLD_SIZE / 8`
- * (≈ 5000 км), это почти наверняка артефакт проекции: либо выход за
- * область определения Transverse Mercator (Colombia/Ecuador в N-37),
- * либо переход через антимеридиан в географической СК (Antarctica).
- *
- * Первый случай нужно браковать, второй — обрабатывать штатно.
- * Различает их `_hasAntimeridianWrap()`.
- *
- * @type {number}
- * @private
- */
-const INVALID_EDGE_FRACTION = 8;
-
-/**
  * Вычисляет Y-компоненту векторного произведения (p1 - p0) × (p2 - p0)
  * для треугольника, лежащего в плоскости XZ (Y=0).
  * Используется для определения ориентации обхода (winding) треугольников Earcut.
@@ -321,30 +304,6 @@ export class Polygon {
          */
         this._heightsFinalized = false;
 
-        /**
-         * Флаг «невалидной геометрии».
-         *
-         * Устанавливается в `_buildFillGeometry`, если после проекции у
-         * полигона обнаружилось ребро абсурдной длины (см.
-         * `INVALID_EDGE_FRACTION`) и при этом это НЕ артефакт перехода
-         * через антимеридиан (см. `_hasAntimeridianWrap`).
-         *
-         * Типичный случай, когда флаг ставится — страны, чьи координаты
-         * заданы в Transverse Mercator (UTM/GK) вдали от осевого
-         * меридиана зоны (например, Колумбия/Эквадор в N-37): точки
-         * «улетают» за область определения, и полигон вытягивается
-         * в полосу через весь мир. Такие полигоны не рисуются.
-         *
-         * Полигоны с антимеридианным переходом (например, Антарктида
-         * в WGS84 → Web Mercator) НЕ помечаются этим флагом: их «длинное»
-         * ребро — это шов по ±180°, визуально он проходит по низу карты
-         * и не ломает общую форму. Это позволяет показывать Антарктиду.
-         *
-         * @private
-         * @type {boolean}
-         */
-        this._invalidGeometry = false;
-
         // Центроид и вершины
         /** @private @type {Array.<THREE.Vector2>} */ this._vertices2D = [];
         /** @private @type {THREE.Vector3} */         this._centroidWorld = new THREE.Vector3();
@@ -467,9 +426,7 @@ export class Polygon {
      * Регистрирует полигон в общем InteractionManager карты.
      *
      * Если у полигона нет ни `onClick`, ни `onHover`, ни `tooltip` —
-     * регистрация не выполняется (объект не интерактивен). Полигоны с
-     * невалидной геометрией (`_invalidGeometry`) не регистрируются вовсе,
-     * чтобы не ловить клики по «полосе через весь мир».
+     * регистрация не выполняется (объект не интерактивен).
      *
      * @private
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
@@ -480,7 +437,6 @@ export class Polygon {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-        if (this._invalidGeometry) return;
         if (!this._onClick && !this._onHover && !this._tooltipText) return;
 
         const callbacks = {
@@ -635,101 +591,9 @@ export class Polygon {
     }
 
     /**
-     * Проверяет, есть ли в исходных кольцах переход через антимеридиан.
-     *
-     * Работает только для географических СК (`isGeographic`): именно там
-     * долгота обёрнута в [-180, 180], и точки по разные стороны
-     * антимеридиана имеют «прыжок» долготы на ~360°, хотя географически
-     * находятся рядом (например, `[180.0, -84.71]` и `[-179.94, -84.72]`
-     * в данных Антарктиды).
-     *
-     * Именно такие «прыжки» после проекции в Web Mercator превращаются
-     * в рёбра длиной во весь мир. Это НЕ повод браковать полигон —
-     * его нужно рисовать (пусть и с горизонтальным швом по низу карты).
-     *
-     * Для проекционных СК (UTM/GK и пр.) метод всегда возвращает `false`:
-     * там любой сверхдлинный отрезок — реальная проблема проекции, и
-     * полигон надо браковать.
-     *
-     * @returns {boolean} `true`, если найден переход через антимеридиан.
-     * @private
-     */
-    _hasAntimeridianWrap() {
-        if (!this._crs || !this._crs.isGeographic) return false;
-        const rings = this._rings;
-        if (!rings) return false;
-
-        for (let r = 0; r < rings.length; r++) {
-            const ring = rings[r];
-            if (!ring || ring.length < 2) continue;
-            const n = ring.length;
-            for (let i = 0; i < n; i++) {
-                const a = ring[i];
-                const b = ring[(i + 1) % n];
-                if (!a || !b || a.length < 2 || b.length < 2) continue;
-                const dLon = b[0] - a[0];
-                if (Math.abs(dLon) > 180) return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Проверяет, не «разъехалась» ли геометрия после проекции настолько,
-     * что её нельзя осмысленно отрисовать.
-     *
-     * Идея: если у полигона найдётся хоть одно ребро длиннее
-     * `WORLD_SIZE / INVALID_EDGE_FRACTION`, это, как правило, артефакт
-     * выхода за область определения проекции. Классический пример —
-     * Колумбия и Эквадор в N-37 Гаусса-Крюгера: страна вытягивается
-     * в полосу через весь мир, потому что часть её точек «улетает»
-     * за пределы координатной сетки Transverse Mercator.
-     *
-     * ВАЖНО: перед вызовом этого метода уже должна быть исключена
-     * ситуация антимеридианного перехода — см. `_hasAntimeridianWrap`.
-     * Иначе Антарктида будет ошибочно забракована.
-     *
-     * @param {Array.<number>} ringStartIndices - Индексы начала колец в `_worldCoords`.
-     * @param {number} worldSize - Полный размер мира карты (2πR), в метрах.
-     * @returns {boolean} `true`, если геометрия невалидна.
-     * @private
-     */
-    _isGeometryInvalid(ringStartIndices, worldSize) {
-        const maxEdge = worldSize / INVALID_EDGE_FRACTION;
-        const maxEdgeSq = maxEdge * maxEdge;
-        const wc = this._worldCoords;
-
-        for (let ringIdx = 0; ringIdx < ringStartIndices.length; ringIdx++) {
-            const start = ringStartIndices[ringIdx];
-            if (start === undefined) continue;
-            const nextStart = (ringIdx + 1 < ringStartIndices.length)
-                ? ringStartIndices[ringIdx + 1]
-                : wc.length;
-            const count = nextStart - start;
-            if (count < 2) continue;
-
-            for (let i = 0; i < count; i++) {
-                const a = wc[start + i];
-                const b = wc[start + ((i + 1) % count)];
-                if (!a || !b) continue;
-                const dx = b[0] - a[0];
-                const dz = b[1] - a[1];
-                if (dx * dx + dz * dz > maxEdgeSq) return true;
-            }
-        }
-        return false;
-    }
-
-    /**
      * Строит геометрию заливки полигона с использованием триангуляции Earcut.
      * Для экструдированных полигонов дополнительно создаёт нижнюю крышку
      * и боковые стенки.
-     *
-     * Если после проекции обнаруживается ребро абсурдной длины и это
-     * не переход через антимеридиан (см. `_hasAntimeridianWrap`), полигон
-     * помечается как невалидный и ни один меш не создаётся — группа
-     * остаётся невидимой. Для Антарктиды (антимеридианный шов) полигон
-     * строится штатно, просто с горизонтальным швом по низу карты.
      *
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
@@ -781,23 +645,6 @@ export class Polygon {
             console.warn('Polygon: after processing rings, less than 3 vertices');
             return;
         }
-
-        // === Детект «полос через весь мир» ===
-        //
-        // Различаем два случая:
-        //   1. Антимеридианный переход в географической СК (Антарктида).
-        //      Это не баг, а особенность данных; такой полигон нужно
-        //      рисовать, пусть и с горизонтальным швом по низу карты.
-        //   2. Реальный выход за область определения проекции
-        //      (Колумбия/Эквадор в N-37). Такой полигон бракуем.
-        if (!this._hasAntimeridianWrap()
-            && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {
-            this._invalidGeometry = true;
-            this._group.visible = false;
-            this._worldCoords.length = 0;
-            return;
-        }
-        this._invalidGeometry = false;
 
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
@@ -983,9 +830,6 @@ export class Polygon {
      * Строит геометрию обводки полигона. В зависимости от опций использует
      * Line2 или обычный THREE.Line.
      *
-     * Если полигон помечен невалидным (`_invalidGeometry`) — обводка
-     * не строится.
-     *
      * ВАЖНО: `_strokeWorldCoords` заполняется координатами внешнего кольца
      * без замыкающей точки (если последняя совпадает с первой — она
      * отбрасывается). Это значит, что длина `_strokeWorldCoords` может
@@ -998,7 +842,6 @@ export class Polygon {
      * @private
      */
     _buildStrokeGeometry(map) {
-        if (this._invalidGeometry) return;
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
 
         const canvas = map.renderer.domElement;
@@ -1119,7 +962,6 @@ export class Polygon {
         this._cachedStrokeHeights.length = 0;
         this._isHovered = false;
         this._raycastMeshesCache = null;
-        this._invalidGeometry = false;
 
         this._layer?._removeRef(this);
         this._layer = null;
@@ -1131,22 +973,12 @@ export class Polygon {
      * Обновляет состояние полигона на каждом кадре: видимость по зуму,
      * высоты и позицию центроида.
      *
-     * Полигоны с невалидной геометрией всегда невидимы и не обновляются.
-     *
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      * @returns {void}
      * @private
      */
     _update(map) {
         if (!this._map || !this._group) return;
-
-        // Полигон забракован на этапе построения геометрии —
-        // держим его скрытым и не тратим CPU на высоты/центроид.
-        if (this._invalidGeometry) {
-            this._group.visible = false;
-            return;
-        }
-
         const zoom = this._map.continuousZoom;
 
         if (this._layer && !this._layer.visible) {
@@ -1225,7 +1057,6 @@ export class Polygon {
      * @private
      */
     _updateHeights() {
-        if (this._invalidGeometry) return false;
         if (!this._fillGeometry || !this._vertices2D.length) return false;
         const map = this._map;
 
@@ -1332,7 +1163,6 @@ export class Polygon {
      * @private
      */
     _updateStroke() {
-        if (this._invalidGeometry) return;
         if (!this._strokeLine || !this._strokeGeometry) return;
         const positions = this._strokePositionsArray;
         positions.length = 0;
@@ -1383,10 +1213,6 @@ export class Polygon {
      * @private
      */
     _updateCentroidScreenPos() {
-        if (this._invalidGeometry) {
-            this._centroidScreenPos = null;
-            return;
-        }
         if (!this._map || !this._centroidWorld) {
             this._centroidScreenPos = null;
             return;

@@ -11,14 +11,13 @@ import { PopupManager } from './PopupManager.js';
 import { InteractionManager } from './Interaction.js';
 
 /**
- * Параметры камеры/зума, которые пользователь задаёт при создании карты.
+ * Параметры камеры/зума, задаваемые пользователем при создании карты.
  * Хранит центр (в градусах или world-метрах), zoom, minZoom/maxZoom,
  * чувствительность зума, pitch и bearing.
  *
  * @example
  * new View({ centerLonLat: [37.6178, 55.7558], zoom: 10 });
  * new View({ center: [4187596, -7509138], zoom: 3 });
- * new View({ centerLonLat: [37.6178, 55.7558], projection: 'EPSG:3395', zoom: 10 });
  */
 export class View {
     /**
@@ -48,7 +47,6 @@ export class View {
         if (options.centerLonLat) {
             /** @type {Array<number>} */
             this.centerLonLat = options.centerLonLat.slice();
-            // fromLonLat → [x, y], а в мире карты ось Z смотрит на юг.
             const [x, y] = projection.fromLonLat(this.centerLonLat);
             /** @type {Array<number>} */
             this.center = [x, -y];
@@ -89,8 +87,11 @@ export class KrbMap {
      * @param {string} options.target - ID DOM-элемента.
      * @param {Array<Object>} options.layers - Слои (texture / elevation / heightScale).
      * @param {View} options.view
-     * @param {string} [options.projection='EPSG:3857']
-     * @param {string} [options.inputCRS='EPSG:4326']
+     * @param {string} [options.projection='EPSG:3857'] - Проекция мира карты.
+     * @param {string} [options.inputCRS='EPSG:4326'] - СК по умолчанию для «географических» данных.
+     * @param {boolean} [options.deformedTiles] - Использовать ли билинейно-деформированные
+     *     тайлы (нужно для всех проекций, кроме Mercator). По умолчанию —
+     *     `!projection.isMercator`. Ручное `true`/`false` переопределяет авто-детект.
      * @param {number} [options.R]
      * @param {number} [options.segments]
      * @param {number} [options.animDuration]
@@ -124,6 +125,19 @@ export class KrbMap {
         this.inputCRS = options.inputCRS
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
+
+        /**
+         * Нужно ли деформировать тайлы под проекцию карты.
+         *
+         * Раньше (Mercator-онли) тайлы ложились прямоугольниками; для
+         * остальных проекций это неверно. При `deformedTiles === true`
+         * вершины тайла вычисляются через lon/lat углов XYZ-тайла,
+         * спроецированные в проекцию карты.
+         *
+         * По умолчанию — авто: включается, если проекция не Mercator.
+         * @type {boolean}
+         */
+        this.deformedTiles = options.deformedTiles ?? !this.projection.isMercator;
 
         if (this.view.projection && this.view.projection !== this.projection.code) {
             console.warn(
@@ -160,40 +174,10 @@ export class KrbMap {
         this.targetContinuousZoom = this.view.zoom;
         this.currentDiscreteZoom = this.view.zoom;
 
-        /**
-         * Флаг окончательного уничтожения карты. После `dispose()` любые
-         * обращения к карте должны прекратиться — внутренние структуры
-         * обнулены, ссылки на GPU-ресурсы освобождены.
-         * @private
-         * @type {boolean}
-         */
-        this._disposed = false;
-
-        /**
-         * Флаг «карта на паузе». В этом состоянии rAF-цикл не крутится,
-         * рендер и опрос тайлов не выполняются, но сама карта жива и
-         * может быть возвращена в работу через `resume()`. Используется
-         * для скрытых вкладок / панелей, чтобы не жгли CPU/GPU.
-         * @private
-         * @type {boolean}
-         */
-        this._paused = false;
-
-        /**
-         * ID активного requestAnimationFrame главного цикла. Хранится,
-         * чтобы `pause()`/`dispose()` могли его отменить.
-         * @private
-         * @type {number|null}
-         */
-        this._rafId = null;
-
-        /**
-         * AbortController для всех DOM-слушателей, навешанных картой.
-         * Один `abort()` в `dispose()` снимает все слушатели разом.
-         * @private
-         * @type {AbortController|null}
-         */
-        this._abortController = null;
+        /** @private @type {boolean} */ this._disposed = false;
+        /** @private @type {boolean} */ this._paused = false;
+        /** @private @type {number|null} */ this._rafId = null;
+        /** @private @type {AbortController|null} */ this._abortController = null;
 
         this.initThree();
         this.initControls();
@@ -212,8 +196,7 @@ export class KrbMap {
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
 
-        // Пул временных векторов. Слоты циклически переиспользуются:
-        // ссылку нельзя удерживать между вызовами getVec3()/getVec2().
+        // Пул временных векторов: ссылку нельзя удерживать между вызовами.
         this._tempPool = {
             v3: Array.from({ length: 16 }, () => new THREE.Vector3()),
             v2: Array.from({ length: 16 }, () => new THREE.Vector2()),
@@ -305,10 +288,7 @@ export class KrbMap {
        Освещение
        ================================================================ */
 
-    /**
-     * @param {number|string} color
-     * @param {number} [intensity=0.8]
-     */
+    /** @param {number|string} color @param {number} [intensity=0.8] */
     setAmbientLight(color, intensity = 0.8) {
         if (!this.ambientLight) { console.warn('Ambient light is not initialized.'); return; }
         this.ambientLight.color.set(color);
@@ -372,8 +352,7 @@ export class KrbMap {
        ================================================================ */
 
     /**
-     * Координаты из `fromCrs` в world-метры карты. Без валидации — за
-     * пределами области определения proj4 может вернуть NaN/Infinity.
+     * Координаты из `fromCrs` в world-метры карты. Без валидации.
      * Для безопасного варианта используйте {@link KrbMap#projectSafe}.
      *
      * @param {Array<number>} coord - [x, y] в СК `fromCrs`.
@@ -392,22 +371,8 @@ export class KrbMap {
 
     /**
      * Безопасная версия {@link KrbMap#project}: возвращает `null` вместо
-     * невалидных координат.
-     *
-     * Что делается:
-     *   1. `src → lon/lat` (через `toLonLatSafe`, если доступно).
-     *   2. `lon/lat → метры проекции карты` через `fromLonLatSafe`, который
-     *      внутри:
-     *      - для Mercator прижимает широту к ±85.05°;
-     *      - отсеивает мусор от proj4 (NaN, Infinity, а также координаты
-     *        с модулем больше `projection.maxAbsCoord` — обычно 1e8 м,
-     *        то есть результаты деления на ноль за сингулярностью
-     *        Transverse Mercator).
-     *
-     * Зоны UTM/GK никак не проверяются: точка в Перу при карте в UTM 37N
-     * даст «мусорные» координаты, они будут отсеяны как выброс, а
-     * потребитель (Polygon) подставит на её место соседнюю валидную
-     * точку кольца, чтобы не рисовать «ус» через всю сцену.
+     * невалидных координат (кламп широты для Mercator + отсев «мусора»
+     * от proj4).
      *
      * @param {Array<number>} coord
      * @param {Projection|string} [fromCrs=this.inputCRS]
@@ -418,17 +383,13 @@ export class KrbMap {
         if (!Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) return null;
 
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
-
-        // Координаты уже в СК карты — только флип Y.
         if (src === this.projection) return [coord[0], -coord[1]];
 
-        // src → lon/lat.
         const lonLat = typeof src.toLonLatSafe === 'function'
             ? src.toLonLatSafe(coord)
             : src.toLonLat(coord);
         if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
 
-        // lon/lat → метры проекции карты (кламп широты + отсев мусора).
         const proj = typeof this.projection.fromLonLatSafe === 'function'
             ? this.projection.fromLonLatSafe(lonLat)
             : this.projection.fromLonLat(lonLat);
@@ -451,21 +412,73 @@ export class KrbMap {
         return dst.fromLonLat(lonLat);
     }
 
-    /**
-     * Шорткат: (lon, lat) → [x, z].
-     * @param {number} lon @param {number} lat @returns {Array<number>}
-     */
+    /** Шорткат: (lon, lat) → [x, z]. @returns {Array<number>} */
     projectLonLat(lon, lat) {
         const [x, y] = this.projection.fromLonLat([lon, lat]);
         return [x, -y];
     }
 
-    /**
-     * Шорткат: (x, z) → [lon, lat].
-     * @param {number} x @param {number} z @returns {Array<number>}
-     */
+    /** Шорткат: (x, z) → [lon, lat]. @returns {Array<number>} */
     unprojectToLonLat(x, z) {
         return this.projection.toLonLat([x, -z]);
+    }
+
+    /**
+     * World-координаты → дробные индексы XYZ-тайла.
+     *
+     * Для Mercator — линейное преобразование (быстро, без proj4).
+     * Для остальных — через lon/lat и стандартную формулу Web Mercator.
+     *
+     * @param {number} worldX
+     * @param {number} worldZ
+     * @param {number} z
+     * @returns {[number, number]} [tx, ty] — дробные индексы (могут быть NaN,
+     *     если world-координаты вне области определения проекции).
+     */
+    worldToTileIndex(worldX, worldZ, z) {
+        const lx = worldX - this.worldGroup.position.x;
+        const lz = worldZ - this.worldGroup.position.z;
+        const n = 1 << z;
+
+        if (!this.deformedTiles) {
+            const tileSize = this.WORLD_SIZE / n;
+            return [
+                (lx + this.MAX_MERCATOR) / tileSize,
+                (lz + this.MAX_MERCATOR) / tileSize
+            ];
+        }
+
+        const lonLat = this.unprojectToLonLat(lx, lz);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return [NaN, NaN];
+        }
+        const latC = Math.max(-85.05112878, Math.min(85.05112878, lonLat[1]));
+        const sin = Math.sin(latC * Math.PI / 180);
+        const mercX = (lonLat[0] + 180) / 360;
+        const mercY = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
+        return [mercX * n, mercY * n];
+    }
+
+    /**
+     * Обратное к {@link KrbMap#worldToTileIndex}: дробный tile-index → world-метры.
+     * @param {number} tx
+     * @param {number} ty
+     * @param {number} z
+     * @returns {[number, number]} [worldX, worldZ]
+     */
+    tileIndexToWorld(tx, ty, z) {
+        const n = 1 << z;
+        if (!this.deformedTiles) {
+            const tileSize = this.WORLD_SIZE / n;
+            return [
+                tx * tileSize - this.MAX_MERCATOR + this.worldGroup.position.x,
+                ty * tileSize - this.MAX_MERCATOR + this.worldGroup.position.z
+            ];
+        }
+        const lon = tx / n * 360 - 180;
+        const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / n))) * 180 / Math.PI;
+        const [x, zWorld] = this.projectLonLat(lon, lat);
+        return [x + this.worldGroup.position.x, zWorld + this.worldGroup.position.z];
     }
 
     /** true, если проекция циклична по долготе (Mercator, longlat). @private */
@@ -659,20 +672,14 @@ export class KrbMap {
        URL-хелперы
        ================================================================ */
 
-    /**
-     * @param {number} z @param {number} x @param {number} y
-     * @returns {string|null}
-     */
+    /** @param {number} z @param {number} x @param {number} y @returns {string|null} */
     getTextureUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].texture) return null;
         return this.layers[0].texture
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /**
-     * @param {number} z @param {number} x @param {number} y
-     * @returns {string|null}
-     */
+    /** @param {number} z @param {number} x @param {number} y @returns {string|null} */
     getElevationUrl(z, x, y) {
         if (!this.layers[0] || !this.layers[0].elevation) return null;
         return this.layers[0].elevation
@@ -707,12 +714,13 @@ export class KrbMap {
     getSurfaceMaxHeight(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const z = this.currentDiscreteZoom;
-        const tileSize = this.WORLD_SIZE / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
-        const localX = worldX - this.worldGroup.position.x;
-        const localZ = worldZ - this.worldGroup.position.z;
-        const virtX = Math.floor((localX + this.MAX_MERCATOR) / tileSize);
-        const y = Math.floor((localZ + this.MAX_MERCATOR) / tileSize);
+
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return 0;
+
+        const virtX = Math.floor(tx);
+        const y = Math.floor(ty);
         if (y < 0 || y > maxTile) return 0;
         const vk = getVirtKey(z, virtX, y);
 
@@ -734,26 +742,30 @@ export class KrbMap {
 
     /**
      * Интерполированная высота рельефа в точке.
+     *
+     * Работает в tile-space: `u, v` — доли внутри тайла, независимо от
+     * того, прямоугольный он (Mercator) или деформированный. Это
+     * согласуется с раскладкой вершин PlaneGeometry (row-major от NW).
+     *
      * @param {number} worldX @param {number} worldZ @returns {number}
      */
     getSurfaceHeightAt(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const z = this.currentDiscreteZoom;
-        const tileSize = this.WORLD_SIZE / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
-        const localX = worldX - this.worldGroup.position.x;
-        const localZ = worldZ - this.worldGroup.position.z;
-        const virtX = Math.floor((localX + this.MAX_MERCATOR) / tileSize);
-        const y = Math.floor((localZ + this.MAX_MERCATOR) / tileSize);
+
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return 0;
+
+        const virtX = Math.floor(tx);
+        const y = Math.floor(ty);
         if (y < 0 || y > maxTile) return 0;
         const vk = getVirtKey(z, virtX, y);
         const inst = this.tileManager.tiles.get(vk);
         if (!inst || !inst.heightsApplied || !inst.mesh) return 0;
 
-        const originX = virtX * tileSize - this.MAX_MERCATOR;
-        const originZ = getOriginZ(y, tileSize, this.MAX_MERCATOR);
-        const u = (localX - originX) / tileSize;
-        const v = (localZ - originZ) / tileSize;
+        const u = tx - virtX;
+        const v = ty - y;
 
         const seg = this.SEGMENTS;
         const pos = inst.geometry.attributes.position.array;
@@ -781,18 +793,26 @@ export class KrbMap {
      */
     ensureTileForPoint(worldX, worldZ) {
         const z = this.currentDiscreteZoom;
-        const tileSize = this.WORLD_SIZE / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
-        const localX = worldX - this.worldGroup.position.x;
-        const localZ = worldZ - this.worldGroup.position.z;
-        const virtX = Math.floor((localX + this.MAX_MERCATOR) / tileSize);
-        const y = Math.floor((localZ + this.MAX_MERCATOR) / tileSize);
+
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
+
+        const virtX = Math.floor(tx);
+        const y = Math.floor(ty);
         if (y < 0 || y > maxTile) return;
         this.tileManager.ensureTile(z, virtX, y);
     }
 
-    /** Статический фоновый слой из текстур. */
+    /**
+     * Статический фоновый слой из текстур.
+     *
+     * В deformed-режиме фон не строится: плоско-прямоугольные
+     * заглушки не соответствуют проекции и будут заметно «врать».
+     * В этом режиме вся отрисовка — на TileManager.
+     */
     createStaticBackgroundLayer() {
+        if (this.deformedTiles) return;
         if (!this.layers.length || !this.layers.some(l => l.texture)) return;
         while (this.staticBgGroup.children.length > 0) {
             const child = this.staticBgGroup.children[0];
@@ -1039,7 +1059,7 @@ export class KrbMap {
     }
 
     /**
-     * Навешивает все DOM-слушатели через единый AbortController —
+     * Навешивает все DOM-слушатели через единый AbortController,
      * чтобы `dispose()` мог снять их одной командой.
      * @private
      */
@@ -1428,10 +1448,7 @@ export class KrbMap {
         this.fitToBounds([[minX, minY], [maxX, maxY]], { ...options, crs });
     }
 
-    /**
-     * Минимальная дистанция, при которой bounds влезает в кадр.
-     * @private
-     */
+    /** Минимальная дистанция, при которой bounds влезает в кадр. @private */
     _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
         const canvas = this.renderer.domElement;
         const W = canvas.clientWidth;
@@ -1487,16 +1504,9 @@ export class KrbMap {
        ================================================================ */
 
     /**
-     * Ставит карту на паузу.
-     *
-     * Останавливает главный rAF-цикл (рендер, throttled-опрос видимых
-     * тайлов, пост-апдейты слоёв) и цикл камерных анимаций. При этом все
-     * DOM-слушатели, менеджеры, GPU-ресурсы и геометрии остаются на месте —
-     * карту можно вернуть в работу через {@link KrbMap#resume}.
-     *
-     * Используется для скрытых панелей / вкладок, когда карт несколько и
-     * не нужно, чтобы все они рендерились каждый кадр.
-     *
+     * Ставит карту на паузу: останавливает главный rAF-цикл и цикл
+     * камерных анимаций. DOM-слушатели, менеджеры, GPU-ресурсы остаются
+     * на месте — карту можно вернуть через {@link KrbMap#resume}.
      * @returns {void}
      */
     pause() {
@@ -1511,8 +1521,6 @@ export class KrbMap {
             cancelAnimationFrame(this._cameraAnimFrame);
             this._cameraAnimFrame = null;
         }
-        // Прерываем активные камерные анимации, чтобы при resume()
-        // не оказаться в промежуточном состоянии.
         this._cameraAnimation = null;
         this._cameraAnimations.pitch = null;
         this._cameraAnimations.bearing = null;
@@ -1520,49 +1528,28 @@ export class KrbMap {
 
     /**
      * Возобновляет работу после {@link KrbMap#pause}.
-     *
-     * Пересчитывает размеры (на случай, если контейнер менял геометрию,
-     * пока карта была скрыта), запускает главный цикл заново.
-     *
      * @returns {void}
      */
     resume() {
         if (this._disposed || !this._paused) return;
         this._paused = false;
 
-        // Контейнер мог измениться в размерах, пока был скрыт.
         this.onResize();
-
-        // Сброс таймера, чтобы первый же кадр главного цикла обновил тайлы.
         this.lastVisibleUpdateTime = 0;
         this.clock.getDelta();
 
         this.animate();
     }
 
-    /**
-     * @returns {boolean} `true`, если карта сейчас на паузе.
-     */
+    /** @returns {boolean} `true`, если карта сейчас на паузе. */
     isPaused() { return this._paused; }
 
-    /**
-     * @returns {boolean} `true`, если карта уничтожена через `dispose()`.
-     */
+    /** @returns {boolean} `true`, если карта уничтожена через `dispose()`. */
     isDisposed() { return this._disposed; }
 
     /**
      * Полностью уничтожает карту: останавливает циклы, снимает все
      * DOM-слушатели, освобождает GPU-ресурсы и обнуляет ссылки.
-     *
-     * После `dispose()` карта непригодна к использованию — повторное
-     * обращение к её методам может привести к ошибкам (методы, которые
-     * дёргают rAF или сцену, проверяют `_disposed` и молча выходят).
-     *
-     * Все менеджеры (TileManager, TextManager, PopupManager,
-     * InteractionManager) вызываются через `dispose()`, если он у них есть.
-     * Это позволяет каждому из них освободить собственные ресурсы: тайлы,
-     * текстуры, воркеры, DOM-узлы подписей и т.д.
-     *
      * @returns {void}
      */
     dispose() {
@@ -1581,13 +1568,13 @@ export class KrbMap {
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
 
-        // 2. Снять все DOM-слушатели одной командой.
+        // 2. Снять DOM-слушатели.
         if (this._abortController) {
             try { this._abortController.abort(); } catch (e) { console.warn(e); }
             this._abortController = null;
         }
 
-        // 3. Менеджеры — каждый освобождает своё, если умеет.
+        // 3. Менеджеры.
         const managers = ['tileManager', 'textManager', 'popupManager', 'interaction'];
         for (const name of managers) {
             const m = this[name];
@@ -1597,10 +1584,7 @@ export class KrbMap {
             this[name] = null;
         }
 
-        // 4. Освобождение геометрий и материалов сцены.
-        //    (Текстуры, если они закэшированы менеджерами, менеджеры
-        //    должны были уже прибрать; renderer.dispose() добьёт остатки
-        //    на GPU.)
+        // 4. Геометрии и материалы сцены.
         this._disposeObject3D(this.scene);
 
         // 5. OrbitControls.
@@ -1609,7 +1593,7 @@ export class KrbMap {
         }
         this.controls = null;
 
-        // 6. Рендерер: снять canvas, потерять контекст, освободить ресурсы.
+        // 6. Рендерер.
         if (this.renderer) {
             const canvas = this.renderer.domElement;
             try { this.renderer.dispose(); } catch (e) { console.warn(e); }
@@ -1625,7 +1609,7 @@ export class KrbMap {
         this.ambientLight = null;
         this.sunLight = null;
 
-        // 7. Обнуление прочих ссылок — чтобы GC мог собрать карту.
+        // 7. Прочие ссылки.
         this._dynamicLayers = [];
         this.layers = [];
         this.globalElevCache?.clear?.();
@@ -1645,12 +1629,7 @@ export class KrbMap {
 
     /**
      * Рекурсивно обходит поддерево и освобождает геометрии/материалы.
-     *
-     * Текстуры материалов здесь НЕ трогаем: они вполне могут быть
-     * закэшированы менеджерами (TileManager) и разделены между мешами.
-     * Свою работу по текстурам делают `tileManager.dispose()` и
-     * `renderer.dispose()` / `forceContextLoss()`.
-     *
+     * Текстуры не трогаем: они могут быть закэшированы менеджерами.
      * @param {THREE.Object3D|null} root
      * @private
      */

@@ -160,6 +160,41 @@ export class KrbMap {
         this.targetContinuousZoom = this.view.zoom;
         this.currentDiscreteZoom = this.view.zoom;
 
+        /**
+         * Флаг окончательного уничтожения карты. После `dispose()` любые
+         * обращения к карте должны прекратиться — внутренние структуры
+         * обнулены, ссылки на GPU-ресурсы освобождены.
+         * @private
+         * @type {boolean}
+         */
+        this._disposed = false;
+
+        /**
+         * Флаг «карта на паузе». В этом состоянии rAF-цикл не крутится,
+         * рендер и опрос тайлов не выполняются, но сама карта жива и
+         * может быть возвращена в работу через `resume()`. Используется
+         * для скрытых вкладок / панелей, чтобы не жгли CPU/GPU.
+         * @private
+         * @type {boolean}
+         */
+        this._paused = false;
+
+        /**
+         * ID активного requestAnimationFrame главного цикла. Хранится,
+         * чтобы `pause()`/`dispose()` могли его отменить.
+         * @private
+         * @type {number|null}
+         */
+        this._rafId = null;
+
+        /**
+         * AbortController для всех DOM-слушателей, навешанных картой.
+         * Один `abort()` в `dispose()` снимает все слушатели разом.
+         * @private
+         * @type {AbortController|null}
+         */
+        this._abortController = null;
+
         this.initThree();
         this.initControls();
         this.initDragTools();
@@ -538,6 +573,7 @@ export class KrbMap {
 
     /** Общий rAF-цикл для анимаций pitch/bearing. @private */
     _startCameraAnimationLoopIfNeeded() {
+        if (this._disposed || this._paused) return;
         if (this._cameraAnimation || this._cameraAnimFrame) return;
 
         this._cameraAnimation = { custom: true };
@@ -545,6 +581,12 @@ export class KrbMap {
         this.controls.enableDamping = false;
 
         const animateStep = (now) => {
+            if (this._disposed) {
+                this._cameraAnimation = null;
+                this._cameraAnimFrame = null;
+                return;
+            }
+
             let anyActive = false;
             const target = this._tempVec3a.copy(this.controls.target);
             const currentPos = this._tempVec3b.copy(this.camera.position);
@@ -956,6 +998,7 @@ export class KrbMap {
     }
 
     onResize() {
+        if (this._disposed) return;
         const w = this.targetElement.clientWidth;
         const h = this.targetElement.clientHeight;
         this.camera.aspect = w / h;
@@ -995,17 +1038,26 @@ export class KrbMap {
         }
     }
 
+    /**
+     * Навешивает все DOM-слушатели через единый AbortController —
+     * чтобы `dispose()` мог снять их одной командой.
+     * @private
+     */
     bindEvents() {
-        this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        window.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        window.addEventListener('mouseup', () => this.onMouseUp());
-        this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
-        window.addEventListener('resize', () => this.onResize());
-        this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
-        this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
-        this.renderer.domElement.addEventListener('touchend', (e) => this.onTouchEnd(e));
-        this.renderer.domElement.addEventListener('touchcancel', (e) => this.onTouchEnd(e));
-        this.renderer.domElement.addEventListener('click', (e) => this.onClick(e));
+        this._abortController = new AbortController();
+        const signal = this._abortController.signal;
+        const el = this.renderer.domElement;
+
+        el.addEventListener('mousedown', (e) => this.onMouseDown(e), { signal });
+        window.addEventListener('mousemove', (e) => this.onMouseMove(e), { signal });
+        window.addEventListener('mouseup', () => this.onMouseUp(), { signal });
+        el.addEventListener('wheel', (e) => this.onWheel(e), { passive: false, signal });
+        window.addEventListener('resize', () => this.onResize(), { signal });
+        el.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false, signal });
+        el.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false, signal });
+        el.addEventListener('touchend', (e) => this.onTouchEnd(e), { signal });
+        el.addEventListener('touchcancel', (e) => this.onTouchEnd(e), { signal });
+        el.addEventListener('click', (e) => this.onClick(e), { signal });
     }
 
     /* ================================================================
@@ -1062,6 +1114,7 @@ export class KrbMap {
 
     /** @param {boolean} [force] */
     maybeUpdateVisibleTiles(force = false) {
+        if (this._disposed) return;
         const now = performance.now();
         if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
         this.lastVisibleUpdateTime = now;
@@ -1123,7 +1176,7 @@ export class KrbMap {
      * @param {number|null} [targetZoom=null]
      */
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
-        if (this._cameraAnimation) return;
+        if (this._disposed || this._cameraAnimation) return;
 
         const startTarget = this._tempVec3a.copy(this.controls.target);
         const startPos = this._tempVec3b.copy(this.camera.position);
@@ -1148,7 +1201,7 @@ export class KrbMap {
         this.controls.enableDamping = false;
 
         const animateStep = (now) => {
-            if (!this._cameraAnimation) return;
+            if (this._disposed || !this._cameraAnimation) return;
             const anim = this._cameraAnimation;
             let t = (now - anim.startTime) / (anim.duration * 1000);
             t = Math.min(t, 1.0);
@@ -1199,7 +1252,7 @@ export class KrbMap {
      * @param {number} [duration=0.3] @param {boolean} [resetPitch=true]
      */
     rotateToNorth(duration = 0.3, resetPitch = true) {
-        if (this._cameraAnimation) return;
+        if (this._disposed || this._cameraAnimation) return;
 
         const startTarget = this._tempVec3a.copy(this.controls.target);
         const startPos = this._tempVec3b.copy(this.camera.position);
@@ -1237,7 +1290,7 @@ export class KrbMap {
         };
 
         const animateStep = (now) => {
-            if (!this._cameraAnimation) return;
+            if (this._disposed || !this._cameraAnimation) return;
             const anim = this._cameraAnimation;
             let t = (now - anim.startTime) / (anim.duration * 1000);
             t = Math.min(t, 1.0);
@@ -1430,12 +1483,207 @@ export class KrbMap {
     }
 
     /* ================================================================
+       Пауза / уничтожение
+       ================================================================ */
+
+    /**
+     * Ставит карту на паузу.
+     *
+     * Останавливает главный rAF-цикл (рендер, throttled-опрос видимых
+     * тайлов, пост-апдейты слоёв) и цикл камерных анимаций. При этом все
+     * DOM-слушатели, менеджеры, GPU-ресурсы и геометрии остаются на месте —
+     * карту можно вернуть в работу через {@link KrbMap#resume}.
+     *
+     * Используется для скрытых панелей / вкладок, когда карт несколько и
+     * не нужно, чтобы все они рендерились каждый кадр.
+     *
+     * @returns {void}
+     */
+    pause() {
+        if (this._disposed || this._paused) return;
+        this._paused = true;
+
+        if (this._rafId !== null) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
+        }
+        if (this._cameraAnimFrame !== null) {
+            cancelAnimationFrame(this._cameraAnimFrame);
+            this._cameraAnimFrame = null;
+        }
+        // Прерываем активные камерные анимации, чтобы при resume()
+        // не оказаться в промежуточном состоянии.
+        this._cameraAnimation = null;
+        this._cameraAnimations.pitch = null;
+        this._cameraAnimations.bearing = null;
+    }
+
+    /**
+     * Возобновляет работу после {@link KrbMap#pause}.
+     *
+     * Пересчитывает размеры (на случай, если контейнер менял геометрию,
+     * пока карта была скрыта), запускает главный цикл заново.
+     *
+     * @returns {void}
+     */
+    resume() {
+        if (this._disposed || !this._paused) return;
+        this._paused = false;
+
+        // Контейнер мог измениться в размерах, пока был скрыт.
+        this.onResize();
+
+        // Сброс таймера, чтобы первый же кадр главного цикла обновил тайлы.
+        this.lastVisibleUpdateTime = 0;
+        this.clock.getDelta();
+
+        this.animate();
+    }
+
+    /**
+     * @returns {boolean} `true`, если карта сейчас на паузе.
+     */
+    isPaused() { return this._paused; }
+
+    /**
+     * @returns {boolean} `true`, если карта уничтожена через `dispose()`.
+     */
+    isDisposed() { return this._disposed; }
+
+    /**
+     * Полностью уничтожает карту: останавливает циклы, снимает все
+     * DOM-слушатели, освобождает GPU-ресурсы и обнуляет ссылки.
+     *
+     * После `dispose()` карта непригодна к использованию — повторное
+     * обращение к её методам может привести к ошибкам (методы, которые
+     * дёргают rAF или сцену, проверяют `_disposed` и молча выходят).
+     *
+     * Все менеджеры (TileManager, TextManager, PopupManager,
+     * InteractionManager) вызываются через `dispose()`, если он у них есть.
+     * Это позволяет каждому из них освободить собственные ресурсы: тайлы,
+     * текстуры, воркеры, DOM-узлы подписей и т.д.
+     *
+     * @returns {void}
+     */
+    dispose() {
+        if (this._disposed) return;
+        this._disposed = true;
+
+        // 1. Стоп всех rAF-циклов.
+        if (this._rafId !== null) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
+        }
+        if (this._cameraAnimFrame !== null) {
+            cancelAnimationFrame(this._cameraAnimFrame);
+            this._cameraAnimFrame = null;
+        }
+        this._cameraAnimation = null;
+        this._cameraAnimations = { pitch: null, bearing: null };
+
+        // 2. Снять все DOM-слушатели одной командой.
+        if (this._abortController) {
+            try { this._abortController.abort(); } catch (e) { console.warn(e); }
+            this._abortController = null;
+        }
+
+        // 3. Менеджеры — каждый освобождает своё, если умеет.
+        const managers = ['tileManager', 'textManager', 'popupManager', 'interaction'];
+        for (const name of managers) {
+            const m = this[name];
+            if (m && typeof m.dispose === 'function') {
+                try { m.dispose(); } catch (e) { console.warn(`KrbMap.dispose: ${name}.dispose() threw`, e); }
+            }
+            this[name] = null;
+        }
+
+        // 4. Освобождение геометрий и материалов сцены.
+        //    (Текстуры, если они закэшированы менеджерами, менеджеры
+        //    должны были уже прибрать; renderer.dispose() добьёт остатки
+        //    на GPU.)
+        this._disposeObject3D(this.scene);
+
+        // 5. OrbitControls.
+        if (this.controls && typeof this.controls.dispose === 'function') {
+            try { this.controls.dispose(); } catch (e) { console.warn(e); }
+        }
+        this.controls = null;
+
+        // 6. Рендерер: снять canvas, потерять контекст, освободить ресурсы.
+        if (this.renderer) {
+            const canvas = this.renderer.domElement;
+            try { this.renderer.dispose(); } catch (e) { console.warn(e); }
+            try { if (typeof this.renderer.forceContextLoss === 'function') this.renderer.forceContextLoss(); }
+            catch (e) { console.warn(e); }
+            if (canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
+        }
+        this.renderer = null;
+        this.camera = null;
+        this.scene = null;
+        this.worldGroup = null;
+        this.staticBgGroup = null;
+        this.ambientLight = null;
+        this.sunLight = null;
+
+        // 7. Обнуление прочих ссылок — чтобы GC мог собрать карту.
+        this._dynamicLayers = [];
+        this.layers = [];
+        this.globalElevCache?.clear?.();
+        this.globalElevCache = null;
+        this._surfaceMaxHeightCache?.clear?.();
+        this._surfaceMaxHeightCache = null;
+        this._tempPool = null;
+        this._tempVec3a = null;
+        this._tempVec3b = null;
+        this._tempVec3c = null;
+        this._tempDir = null;
+        this._tempTarget = null;
+        this._tempRaycaster = null;
+        this._tempMouse = null;
+        this.targetElement = null;
+    }
+
+    /**
+     * Рекурсивно обходит поддерево и освобождает геометрии/материалы.
+     *
+     * Текстуры материалов здесь НЕ трогаем: они вполне могут быть
+     * закэшированы менеджерами (TileManager) и разделены между мешами.
+     * Свою работу по текстурам делают `tileManager.dispose()` и
+     * `renderer.dispose()` / `forceContextLoss()`.
+     *
+     * @param {THREE.Object3D|null} root
+     * @private
+     */
+    _disposeObject3D(root) {
+        if (!root) return;
+        root.traverse((obj) => {
+            if (obj.geometry && typeof obj.geometry.dispose === 'function') {
+                try { obj.geometry.dispose(); } catch (e) { console.warn(e); }
+            }
+            obj.geometry = null;
+
+            const mats = obj.material;
+            if (mats) {
+                const list = Array.isArray(mats) ? mats : [mats];
+                for (const m of list) {
+                    if (!m) continue;
+                    try { if (typeof m.dispose === 'function') m.dispose(); }
+                    catch (e) { console.warn(e); }
+                }
+            }
+            obj.material = null;
+        });
+        if (typeof root.clear === 'function') root.clear();
+    }
+
+    /* ================================================================
        Главный цикл
        ================================================================ */
 
     /** @private */
     animate() {
-        requestAnimationFrame(() => this.animate());
+        if (this._disposed || this._paused) return;
+        this._rafId = requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
 
         if (!this._cameraAnimation) {

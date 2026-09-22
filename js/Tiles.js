@@ -176,6 +176,12 @@ export class TileManager {
      * сторон видимой области) через `engine.worldToTileIndex` — так
      * корректно учитывается нелинейность проекции.
      *
+     * ВАЖНО: в deformed-режиме bbox КЛАМПИТСЯ к [0, maxTile] по обеим
+     * осям. Без этого проекции с узким доменом (Equal Earth и т.п.)
+     * давали tile-индексы вида -7..15, и цикл генерировал сотни
+     * «фантомных» тайлов, каждый из которых прогонялся через proj4.
+     * Это и вызывало просадку до 1 FPS.
+     *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
      * @param {number} continuousZoom
@@ -218,8 +224,11 @@ export class TileManager {
                 if (ty > maxTy) maxTy = ty;
             }
             if (Number.isFinite(minTx)) {
-                xMin = Math.floor(minTx);
-                xMax = Math.ceil(maxTx);
+                // Клампим ОБЕ оси к валидному диапазону индексов.
+                // До этого фикса xMin/xMax не клампились, и для Equal Earth
+                // bbox разъезжался до -7..15, что давало 200+ тайлов на кадр.
+                xMin = Math.max(0, Math.floor(minTx));
+                xMax = Math.min(maxTile, Math.ceil(maxTx));
                 yMin = Math.max(0, Math.floor(minTy));
                 yMax = Math.min(maxTile, Math.ceil(maxTy));
             } else {
@@ -312,6 +321,13 @@ export class TileManager {
     /**
      * Ищет ближайшего готового предка для тайла.
      *
+     * ВАЖНО: если предок помечен `unrenderable` (например, целиком
+     * лежит вне области определения проекции), прекращаем поиск.
+     * Логика: если тайл на зуме Z не удалось построить из-за того, что
+     * он вне домена, то его родитель на Z-1, покрывающий ту же
+     * географическую область, тоже вне домена. Раньше это приводило к
+     * бесконечному созданию и выбросу цепочек предков на каждом кадре.
+     *
      * @param {number} z
      * @param {number} virtX
      * @param {number} y
@@ -324,6 +340,7 @@ export class TileManager {
             const ax = virtX >> dz;
             const ay = y >> dz;
             const inst = this.ensureTile(az, ax, ay);
+            if (inst.unrenderable) return null;
             if (inst.ready && inst.mesh) return inst;
         }
         return null;
@@ -350,6 +367,14 @@ export class TileManager {
             geometry: null,
             ready: false,
             failed: false,
+            /**
+             * Тайл невозможно отрисовать в принципе: `createTileMesh`
+             * вернул null (вырожден / вне области определения проекции).
+             * Не даём `findReadyAncestor` спамить предками по этому
+             * поддереву.
+             * @type {boolean}
+             */
+            unrenderable: false,
             loading: true,
             texUrl: null,
             lastUsed: this.frame,
@@ -367,7 +392,8 @@ export class TileManager {
      *
      * Если `createTileMesh` возвращает null (деформированный тайл
      * вырожден/перекручен/вне области определения проекции) —
-     * тайл помечается failed без геометрии, текстура освобождается.
+     * тайл помечается failed+unrenderable без геометрии, текстура
+     * освобождается.
      *
      * @param {Object} inst
      * @returns {Promise<void>}
@@ -397,6 +423,7 @@ export class TileManager {
                 this.releaseTexture(texUrl);
                 inst.loading = false;
                 inst.failed = true;
+                inst.unrenderable = true;
                 inst.ready = true;
                 return;
             }

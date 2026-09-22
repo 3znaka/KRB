@@ -11,13 +11,18 @@ const HARDCODED = {
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
  * Proj4 не сигнализирует об ошибке: за пределами области определения
- * он молча возвращает NaN/Infinity или огромные числа. Всё это,
- * попав в буфер вершин, даёт артефакты рендера.
+ * он молча возвращает NaN/Infinity, огромные числа или «уехавшие»
+ * градусы (например, lon ≈ 470° для Equal Earth). Всё это, попав в
+ * буфер вершин или в формулу tile-index, даёт артефакты рендера и
+ * дикие просадки FPS (см. KrbMap.worldToTileIndex).
  *
  * Projection умеет:
  *  1. Отсеивать мусор через `isValidCoord` (порог `maxAbsCoord`).
  *  2. Для Mercator — прижимать широту к ±85.05°, чтобы proj4 не
  *     возвращал Infinity на полюсах.
+ *  3. Отбраковывать lon/lat вне диапазона ±180°/±90° (в isValidLonLat
+ *     и на выходе toLonLatSafe) — это защищает от проекций с узким
+ *     доменом, для которых proj4 выдаёт «уехавшие» градусы.
  *
  * ВАЖНО: разрывы из-за пересечения антимеридиана (например, кольцо
  * Антарктиды, где lon прыгает с +180 на −180) Projections не чинит —
@@ -75,10 +80,28 @@ export class Projection {
         return 0;
     }
 
-    /** Конечны ли lon/lat. @param {Array<number>} lonLat @returns {boolean} */
+    /**
+     * Валидны ли географические координаты.
+     *
+     * Помимо конечности проверяем естественные пределы: долгота в
+     * [−180, 180], широта в [−90, 90]. Это отсекает мусор, который
+     * proj4 может выдать при работе с проекциями с узким доменом
+     * (Equal Earth и т.п.): например, lon ≈ 470° — формально число
+     * конечное, но в world-координаты и tile-index превращается в
+     * абсурд и раздувает bbox тайлов.
+     *
+     * Допуск 0.0001° — на случай, если данные пришли из округления.
+     *
+     * @param {Array<number>} lonLat
+     * @returns {boolean}
+     */
     isValidLonLat(lonLat) {
         if (!lonLat || lonLat.length < 2) return false;
-        return Number.isFinite(lonLat[0]) && Number.isFinite(lonLat[1]);
+        const lon = lonLat[0], lat = lonLat[1];
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
+        if (Math.abs(lon) > 180.0001) return false;
+        if (Math.abs(lat) > 90.0001) return false;
+        return true;
     }
 
     /**
@@ -125,12 +148,23 @@ export class Projection {
 
     /**
      * Безопасное обратное преобразование.
+     *
+     * Помимо конечности проверяем, что proj4 вернул осмысленные
+     * градусы. Для проекций с узким доменом (Equal Earth, некоторые
+     * азимутальные) координаты вне области определения дают lon
+     * далеко за пределами [−180, 180]. Такие значения нельзя
+     * пропускать: KrbMap.worldToTileIndex через формулу Web Mercator
+     * превратит lon=470° в tile-индекс 1.8, xMin/xMax раздуются,
+     * и TileManager сгенерирует сотни «фантомных» тайлов — это и
+     * вызывало просадку до 1 FPS.
+     *
      * @param {Array<number>} coord @returns {Array<number>|null}
      */
     toLonLatSafe(coord) {
         if (!this.isValidCoord(coord)) return null;
         const out = this.toLonLat(coord);
         if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1])) return null;
+        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001) return null;
         return out;
     }
 }

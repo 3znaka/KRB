@@ -119,6 +119,20 @@ export class KrbMap {
         this.view = options.view;
         this.hasElevation = options.layers.some(layer => !!layer.elevation);
 
+        /**
+         * Есть ли на карте хоть один слой, для которого нужен TileManager
+         * (текстура или рельеф). Если нет — TileManager полностью
+         * отключается в горячем пути (см. maybeUpdateVisibleTiles).
+         *
+         * Это принципиально: TileManager строит deformed-тайлы даже в
+         * проекциях с узким доменом (Equal Earth и т.п.), и на каждом
+         * кадре тратит CPU на proj4. Если тайловых слоёв нет, эта
+         * работа бессмысленна.
+         *
+         * @type {boolean}
+         */
+        this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
+
         // Мир карты в метрах этой проекции.
         this.projection = Projections.get(options.projection ?? 'EPSG:3857');
         // СК по умолчанию для «географических» входных данных.
@@ -429,6 +443,13 @@ export class KrbMap {
      * Для Mercator — линейное преобразование (быстро, без proj4).
      * Для остальных — через lon/lat и стандартную формулу Web Mercator.
      *
+     * ВАЖНО: результат проекции за пределами области определения
+     * отбраковывается. proj4 не валидирует домен и для координат вне
+     * Equal Earth (или другого узкого домена) легко возвращает
+     * lon ≈ 470°, что после формулы Web Mercator даёт абсурдные
+     * tile-индексы (например, -7..15 на zoom=3) и раздувает bbox
+     * в TileManager.update.
+     *
      * @param {number} worldX
      * @param {number} worldZ
      * @param {number} z
@@ -450,6 +471,9 @@ export class KrbMap {
 
         const lonLat = this.unprojectToLonLat(lx, lz);
         if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return [NaN, NaN];
+        }
+        if (Math.abs(lonLat[0]) > 180.0001 || Math.abs(lonLat[1]) > 90.0001) {
             return [NaN, NaN];
         }
         const latC = Math.max(-85.05112878, Math.min(85.05112878, lonLat[1]));
@@ -1132,7 +1156,18 @@ export class KrbMap {
         return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, idealZ));
     }
 
-    /** @param {boolean} [force] */
+    /**
+     * Обновляет видимые тайлы.
+     *
+     * ВАЖНО: если на карте нет ни одного тайлового слоя (только
+     * векторные полигоны), метод выходит сразу после пересчёта
+     * currentDiscreteZoom. Это отключает весь TileManager в горячем
+     * пути — включая построение deformed-тайлов через proj4, которое
+     * для узких проекций (Equal Earth и т.п.) давало просадку до 1 FPS
+     * даже при пустом списке layers.
+     *
+     * @param {boolean} [force]
+     */
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;
         const now = performance.now();
@@ -1141,6 +1176,8 @@ export class KrbMap {
 
         const newZ = this.peekIdealZoom(this.continuousZoom);
         if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
+
+        if (!this.hasTileLayers) return;
 
         this.tileManager.update(
             this.camera, this.controls.target,

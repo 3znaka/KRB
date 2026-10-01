@@ -15,3 +15,4 @@ export { Projections } from './Projections.js';
 export { exportToGLB } from './Exporter.js';
 export { InteractionManager } from './Interaction.js';
 export { GeoTiffLayer } from './GeoTiffLayer.js';
+export { VectorLineLayer } from './VectorLineLayer.js';

@@ -168,11 +168,17 @@ class Vector3D {
         if (res.x !== cv.width || res.y !== cv.height) {
             res.set(cv.width, cv.height);
         }
+        
+        // Оптимизированная проверка дистанции с учётом сдвига мира (worldGroup)
         if (map.view.objectDistanceFactor > 0 && this.pointsWorld.length >= 2) {
             const mid = this.pointsWorld[this.pointsWorld.length >> 1];
-            const d   = map.camera.position.distanceTo(
-                new THREE.Vector3(mid[0], mid[1], mid[2])
+            const wgPos = map.worldGroup.position;
+            
+            // Используем пул временных векторов (map.getVec3), чтобы не аллоцировать память каждый кадр
+            const d = map.camera.position.distanceTo(
+                map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z)
             );
+            
             this._group.visible = d <= map.maxObjectDistance;
         }
     }
@@ -248,13 +254,23 @@ class Vector3D {
             ? this.pointsWorld[this.pointsWorld.length - 1] 
             : this.pointsWorld[0];
             
-        const vec = new THREE.Vector3(pt[0], pt[1], pt[2]);
-        vec.project(this._map.camera);
+        const map = this._map;
+        const wgPos = map.worldGroup.position;
+        
+        // КРИТИЧЕСКИ ВАЖНО: прибавляем сдвиг worldGroup, чтобы подпись двигалась вместе с вектором.
+        // Используем map.getVec3() для предотвращения аллокаций в горячем пути (как в Polygon.js)
+        const vec = map.getVec3().set(
+            pt[0] + wgPos.x,
+            pt[1] + wgPos.y,
+            pt[2] + wgPos.z
+        );
+        
+        vec.project(map.camera);
         
         // Если точка за камерой
         if (vec.z > 1) return null;
         
-        const canvas = this._map.renderer.domElement;
+        const canvas = map.renderer.domElement;
         return {
             x: (vec.x * 0.5 + 0.5) * canvas.clientWidth,
             y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight

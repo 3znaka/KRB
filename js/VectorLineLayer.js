@@ -246,7 +246,10 @@ export class VectorLineLayer extends Layer {
         this.defaultExag  = opts.defaultExag ?? 1;
         this.heightScale  = opts.heightScale ?? 1;
         this.styleFn      = opts.style || null;
-        this.filter       = opts.filter || null; // <-- ДОБАВИТЬ ЭТУ СТРОКУ
+        this.filter       = opts.filter || null;
+
+        this.exagOption   = opts.exag !== undefined ? opts.exag : null; 
+        
         this._loaded      = false;
     }
 
@@ -333,7 +336,17 @@ export class VectorLineLayer extends Layer {
         const x0 = props.X0 ?? geom.coordinates[0];
         const y0 = props.Y0 ?? geom.coordinates[1];
         const z0 = props.Z0 ?? (geom.coordinates[2] || 0);
-        const exag = props.EXAG ?? this.defaultExag;
+
+        // <-- ЗАМЕНИТЬ РАСЧЕТ EXAG НА ЭТОТ БЛОК:
+        let exag = this.defaultExag;
+        if (typeof this.exagOption === 'function') {
+            exag = this.exagOption(props); // Динамический расчет
+        } else if (this.exagOption !== null) {
+            exag = this.exagOption;        // Жесткое переопределение числом
+        } else {
+            exag = props.EXAG ?? this.defaultExag; // Берем из файла, как раньше
+        }
+        // ---------------------------------------------
 
         if (this.ecef) {
             /* 1) базовая точка → geodetic */

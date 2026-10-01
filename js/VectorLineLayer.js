@@ -2,6 +2,7 @@
  * VectorLineLayer.js — 3D-векторы из GeoJSON.
  * Поддержка ECEF (EPSG:10176 IGS20 и др.), ENU-сдвигов,
  * LineString / MultiLineString с произвольным числом узлов.
+ * Поддержка раздельного вертикального преувеличения (verticalExag).
  *
  * @module VectorLineLayer
  */
@@ -23,14 +24,6 @@ const _F  = 1 / 298.257222101;
 const _B  = _A * (1 - _F);
 const _E2 = 1 - (_B * _B) / (_A * _A);
 
-/**
- * ECEF (X, Y, Z) → Geodetic (lon°, lat°, h_м).
- * Итеративный метод Bowring, сходится за 2–3 итерации.
- * @param {number} X
- * @param {number} Y
- * @param {number} Z
- * @returns {[number, number, number]} [lon, lat, h]
- */
 function ecefToGeodetic(X, Y, Z) {
     const p   = Math.sqrt(X * X + Y * Y);
     const lon = Math.atan2(Y, X);
@@ -47,15 +40,6 @@ function ecefToGeodetic(X, Y, Z) {
     return [lon * 180 / Math.PI, lat * 180 / Math.PI, h];
 }
 
-/**
- * ENU-сдвиг → ECEF-сдвиг (матрица поворота).
- * @param {number} e  East  (м)
- * @param {number} n  North (м)
- * @param {number} u  Up    (м)
- * @param {number} lonRad
- * @param {number} latRad
- * @returns {[number, number, number]} [dX, dY, dZ] в ECEF
- */
 function enuToEcefDelta(e, n, u, lonRad, latRad) {
     const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
     const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
@@ -66,7 +50,6 @@ function enuToEcefDelta(e, n, u, lonRad, latRad) {
     ];
 }
 
-/** Известные геоцентрические EPSG-коды. */
 const ECEF_CODES = new Set([
     'EPSG:4978',  'EPSG:10176',
     'EPSG:7901',  'EPSG:7902',  'EPSG:7903',  'EPSG:7904',
@@ -84,16 +67,6 @@ function isEcefCrs(code) {
    ================================================================ */
 
 class Vector3D {
-    /**
-     * @param {Object}  opts
-     * @param {Array<[number,number,number]>} opts.pointsWorld
-     *   Массив [worldX, worldY, worldZ], ≥ 2 точек.
-     * @param {string}  [opts.color='#ff0000']
-     * @param {number}  [opts.width=3]          Толщина ствола (px, Line2).
-     * @param {number}  [opts.arrowSize=10]     Длина конуса (мировые м).
-     * @param {number}  [opts.opacity=1]
-     * @param {boolean} [opts.depthTest=true]
-     */
     constructor(opts) {
         this.pointsWorld = opts.pointsWorld;
         this.color       = opts.color || '#ff0000';
@@ -111,8 +84,6 @@ class Vector3D {
         this._cone     = null;
     }
 
-    /* ---------- attach / update / remove ---------- */
-
     _attach(map, layer) {
         if (this._map === map) return;
         this.remove();
@@ -122,7 +93,6 @@ class Vector3D {
         const pts = this.pointsWorld;
         if (!pts || pts.length < 2) return;
 
-        // ---- Ствол (Line2 через все узлы) ----
         const pos = [];
         for (const [wx, wy, wz] of pts) pos.push(wx, wy, wz);
 
@@ -144,7 +114,6 @@ class Vector3D {
         this._line.computeLineDistances();
         this._group.add(this._line);
 
-        // ---- Стрелка (конус на последнем сегменте) ----
         const last  = pts.length - 1;
         const pFrom = new THREE.Vector3(...pts[last - 1]);
         const pTo   = new THREE.Vector3(...pts[last]);
@@ -226,17 +195,6 @@ class Vector3D {
    ================================================================ */
 
 export class VectorLineLayer extends Layer {
-    /**
-     * @param {Object}   opts
-     * @param {string}   [opts.url]
-     * @param {Object}   [opts.data]
-     * @param {string}   [opts.crs]            СК входных координат.
-     * @param {boolean}  [opts.ecef]           Принудительный ECEF-режим.
-     *   Авто-определяется по crs, если не задан.
-     * @param {number}   [opts.defaultExag=1]  Множитель EXAG по умолчанию.
-     * @param {number}   [opts.heightScale=1]  Масштаб высот (Y).
-     * @param {Function} [opts.style]          (feature, props) → {color, width, arrowSize, opacity}
-     */
     constructor(opts = {}) {
         super();
         this.url          = opts.url || null;
@@ -248,7 +206,8 @@ export class VectorLineLayer extends Layer {
         this.styleFn      = opts.style || null;
         this.filter       = opts.filter || null;
 
-        this.exagOption   = opts.exag !== undefined ? opts.exag : null; 
+        this.exagOption       = opts.exag !== undefined ? opts.exag : null;
+        this.verticalExagOption = opts.verticalExag !== undefined ? opts.verticalExag : null; 
         
         this._loaded      = false;
     }
@@ -265,8 +224,6 @@ export class VectorLineLayer extends Layer {
         this._loaded  = false;
         if (this._map) this._load();
     }
-
-    /* ---------- загрузка / парсинг ---------- */
 
     async _load() {
         let gj = this.data;
@@ -290,14 +247,11 @@ export class VectorLineLayer extends Layer {
         for (const f of feats) this._addFeature(f);
     }
 
-    /* ---------- диспетчер ---------- */
-
-     _addFeature(feature) {
+    _addFeature(feature) {
         const props = feature.properties || {};
         const geom  = feature.geometry;
         if (!geom) return;
 
-        // <-- ДОБАВИТЬ ЭТУ ПРОВЕРКУ (пропускаем feature, если filter вернул false)
         if (this.filter && !this.filter(feature, props)) return;
 
         let pts = null;
@@ -305,10 +259,10 @@ export class VectorLineLayer extends Layer {
         if (geom.type === 'Point') {
             pts = this._fromPoint(props, geom);
         } else if (geom.type === 'LineString') {
-            pts = this._fromCoords(geom.coordinates);
+            pts = this._fromCoords(geom.coordinates, props);
         } else if (geom.type === 'MultiLineString') {
             for (const c of geom.coordinates) {
-                const p = this._fromCoords(c);
+                const p = this._fromCoords(c, props);
                 if (p) this._spawn(p, feature, props);
             }
             return;
@@ -330,76 +284,87 @@ export class VectorLineLayer extends Layer {
         }));
     }
 
-    /* ---------- Point + ENU ---------- */
+    /* ---------- Утилита для расчёта масштаба ---------- */
+    _resolveExag(props, option, defaultExag) {
+        if (typeof option === 'function') return option(props);
+        if (option !== null && option !== undefined) return option;
+        return props.EXAG ?? defaultExag;
+    }
 
+    /* ---------- Point + ENU ---------- */
     _fromPoint(props, geom) {
         const x0 = props.X0 ?? geom.coordinates[0];
         const y0 = props.Y0 ?? geom.coordinates[1];
         const z0 = props.Z0 ?? (geom.coordinates[2] || 0);
 
-        // <-- ЗАМЕНИТЬ РАСЧЕТ EXAG НА ЭТОТ БЛОК:
-        let exag = this.defaultExag;
-        if (typeof this.exagOption === 'function') {
-            exag = this.exagOption(props); // Динамический расчет
-        } else if (this.exagOption !== null) {
-            exag = this.exagOption;        // Жесткое переопределение числом
-        } else {
-            exag = props.EXAG ?? this.defaultExag; // Берем из файла, как раньше
-        }
-        // ---------------------------------------------
+        // Горизонтальный масштаб
+        const exag = this._resolveExag(props, this.exagOption, this.defaultExag);
+        // Вертикальный масштаб (если не задан, берём горизонтальный для совместимости)
+        const vExag = this._resolveExag(props, this.verticalExagOption, exag);
 
         if (this.ecef) {
-            /* 1) базовая точка → geodetic */
             const [lon0, lat0, h0] = ecefToGeodetic(x0, y0, z0);
             const loR = lon0 * Math.PI / 180;
             const laR = lat0 * Math.PI / 180;
 
-            /* 2) ENU-сдвиг → ECEF-сдвиг */
+            // Применяем разные масштабы к горизонтальным и вертикальным компонентам
             const e = (props.E ?? props.dX ?? 0) * exag;
             const n = (props.N ?? props.dY ?? 0) * exag;
-            const u = (props.U ?? props.dZ ?? 0) * exag;
+            const u = (props.U ?? props.dZ ?? 0) * vExag; // <-- РАЗДЕЛЬНОЕ УТРИРОВАНИЕ
+            
             const [dX, dY, dZ] = enuToEcefDelta(e, n, u, loR, laR);
-
-            /* 3) конечная точка → geodetic */
             const [lon1, lat1, h1] = ecefToGeodetic(x0 + dX, y0 + dY, z0 + dZ);
 
             return this._llhToWorld(lon0, lat0, h0, lon1, lat1, h1);
         }
 
-        /* Не-ECEF: просто проекция + сдвиг */
+        // Не-ECEF
         const crs = this.crsCode || this._map.inputCRS;
         const e = (props.E ?? props.dX ?? 0) * exag;
         const n = (props.N ?? props.dY ?? 0) * exag;
-        const u = (props.U ?? props.dZ ?? 0) * exag;
+        const u = (props.U ?? props.dZ ?? 0) * vExag; // <-- РАЗДЕЛЬНОЕ УТРИРОВАНИЕ
+        
         const s = this._map.project([x0, y0], crs);
         const t = this._map.project([x0 + e, y0 + n], crs);
+        
         return [
-            [s[0], z0 * this.heightScale,       s[1]],
-            [t[0], (z0 + u) * this.heightScale,  t[1]],
+            [s[0], z0 * this.heightScale,      s[1]],
+            [t[0], (z0 + u) * this.heightScale, t[1]],
         ];
     }
 
     /* ---------- LineString ---------- */
-
-    _fromCoords(coords) {
+    _fromCoords(coords, props = {}) {
         if (!coords || coords.length < 2) return null;
 
+        const exag = this._resolveExag(props, this.exagOption, this.defaultExag);
+        const vExag = this._resolveExag(props, this.verticalExagOption, exag);
+
         if (this.ecef) {
-            return coords.map(c => {
+            return coords.map((c, idx) => {
                 const [lon, lat, h] = ecefToGeodetic(c[0], c[1], c[2] || 0);
                 const w = this._map.project([lon, lat], 'EPSG:4326');
-                return [w[0], h * this.heightScale, w[1]];
+                
+                // Для линий применяем verticalExag к разнице высот относительно первой точки
+                const baseH = coords[0][2] || 0;
+                const deltaH = (c[2] || 0) - baseH;
+                const exaggeratedH = baseH + (deltaH * vExag);
+                
+                return [w[0], exaggeratedH * this.heightScale, w[1]];
             });
         }
 
         const crs = this.crsCode || this._map.inputCRS;
-        return coords.map(c => {
+        return coords.map((c, idx) => {
             const w = this._map.project([c[0], c[1]], crs);
-            return [w[0], (c[2] || 0) * this.heightScale, w[1]];
+            
+            const baseZ = coords[0][2] || 0;
+            const deltaZ = (c[2] || 0) - baseZ;
+            const exaggeratedZ = baseZ + (deltaZ * vExag);
+            
+            return [w[0], exaggeratedZ * this.heightScale, w[1]];
         });
     }
-
-    /* ---------- lon/lat/h → world ---------- */
 
     _llhToWorld(lon0, lat0, h0, lon1, lat1, h1) {
         const s = this._map.project([lon0, lat0], 'EPSG:4326');
@@ -409,8 +374,6 @@ export class VectorLineLayer extends Layer {
             [e[0], h1 * this.heightScale, e[1]],
         ];
     }
-
-    /* ---------- утилита ---------- */
 
     _colorByMag(p) {
         const m = p.total_mag || p.horiz_mag || 0;

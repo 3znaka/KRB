@@ -246,6 +246,7 @@ export class VectorLineLayer extends Layer {
         this.defaultExag  = opts.defaultExag ?? 1;
         this.heightScale  = opts.heightScale ?? 1;
         this.styleFn      = opts.style || null;
+        this.filter       = opts.filter || null; // <-- ДОБАВИТЬ ЭТУ СТРОКУ
         this._loaded      = false;
     }
 
@@ -288,10 +289,13 @@ export class VectorLineLayer extends Layer {
 
     /* ---------- диспетчер ---------- */
 
-    _addFeature(feature) {
+     _addFeature(feature) {
         const props = feature.properties || {};
         const geom  = feature.geometry;
         if (!geom) return;
+
+        // <-- ДОБАВИТЬ ЭТУ ПРОВЕРКУ (пропускаем feature, если filter вернул false)
+        if (this.filter && !this.filter(feature, props)) return;
 
         let pts = null;
 

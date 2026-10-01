@@ -3,6 +3,7 @@
  * Поддержка ECEF (EPSG:10176 IGS20 и др.), ENU-сдвигов,
  * LineString / MultiLineString с произвольным числом узлов.
  * Поддержка раздельного вертикального преувеличения (verticalExag).
+ * Поддержка текстовых подписей через TextManager.
  *
  * @module VectorLineLayer
  */
@@ -63,7 +64,7 @@ function isEcefCrs(code) {
 }
 
 /* ================================================================
-   Vector3D — один 3D-вектор / ломаная со стрелкой
+   Vector3D — один 3D-вектор / ломаная со стрелкой и подписью
    ================================================================ */
 
 class Vector3D {
@@ -75,6 +76,15 @@ class Vector3D {
         this.opacity     = opts.opacity ?? 1;
         this.depthTest   = opts.depthTest ?? true;
 
+        // Настройки подписи
+        this.title         = opts.title || '';
+        this.titleStyle    = opts.titleStyle || {};
+        this.titleMinZoom  = opts.titleMinZoom ?? -Infinity;
+        this.titleMaxZoom  = opts.titleMaxZoom ?? Infinity;
+        this.titlePlacement= opts.titlePlacement || 'start'; // 'start' или 'end'
+        this.titleOffset   = opts.titleOffset || [0, -10];
+        this.titleAlign    = opts.titleAlign || 'center';
+
         this._map      = null;
         this._layer    = null;
         this._group    = new THREE.Group();
@@ -82,6 +92,7 @@ class Vector3D {
         this._material = null;
         this._geometry = null;
         this._cone     = null;
+        this._textLabel= null; // Ссылка на объект TextManager
     }
 
     _attach(map, layer) {
@@ -143,6 +154,11 @@ class Vector3D {
         }
 
         map.worldGroup.add(this._group);
+
+        // Регистрация подписи в TextManager
+        if (this.title && map.textManager) {
+            this._textLabel = map.textManager.addLabel(this);
+        }
     }
 
     _update(map) {
@@ -162,6 +178,12 @@ class Vector3D {
     }
 
     remove() {
+        // Удаление подписи из TextManager
+        if (this._textLabel && this._map?.textManager) {
+            this._map.textManager.removeLabel(this._textLabel);
+            this._textLabel = null;
+        }
+
         if (this._group.parent) this._group.parent.remove(this._group);
         this._geometry?.dispose();
         this._material?.dispose();
@@ -188,6 +210,62 @@ class Vector3D {
         }
         return [[mnx, mnz], [mxx, mxz]];
     }
+
+    /* ================================================================
+       Интерфейс для TextManager
+       ================================================================ */
+    
+    getText() { return this.title; }
+    
+    getTextStyle() {
+        // Дефолтный стиль: белый текст с чёрной обводкой/тенью для читаемости на любом фоне
+        return Object.assign({
+            fontFamily: 'sans-serif',
+            color: '#ffffff',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)'
+        }, this.titleStyle);
+    }
+    
+    getTextZoomBounds() { 
+        return { min: this.titleMinZoom, max: this.titleMaxZoom }; 
+    }
+    
+    getLabelType() { return 'point'; }
+    
+    isVisible() {
+        if (!this._layer || !this._layer.visible) return false;
+        const zoom = this._map.continuousZoom;
+        return zoom >= this.titleMinZoom && zoom <= this.titleMaxZoom;
+    }
+    
+    getScreenPosition() {
+        if (!this._map || !this.pointsWorld || this.pointsWorld.length < 2) return null;
+        
+        // Выбираем точку: 'start' (начало вектора, база) или 'end' (кончик стрелки)
+        const pt = this.titlePlacement === 'end' 
+            ? this.pointsWorld[this.pointsWorld.length - 1] 
+            : this.pointsWorld[0];
+            
+        const vec = new THREE.Vector3(pt[0], pt[1], pt[2]);
+        vec.project(this._map.camera);
+        
+        // Если точка за камерой
+        if (vec.z > 1) return null;
+        
+        const canvas = this._map.renderer.domElement;
+        return {
+            x: (vec.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight
+        };
+    }
+    
+    getTitleAlign() { return this.titleAlign; }
+    getTitleVerticalAlign() { return 'bottom'; } // По умолчанию подпись над точкой
+    getTitleOffset() { return this.titleOffset; }
+    getAllowOverflow() { return false; }
+    getPriority() { return 10; } // Приоритет выше обычного, чтобы названия станций не прятались
 }
 
 /* ================================================================
@@ -275,12 +353,24 @@ export class VectorLineLayer extends Layer {
 
     _spawn(pointsWorld, feature, props) {
         const s = this.styleFn ? this.styleFn(feature, props) : {};
+        
+        // Если title не задан явно в style, берём ID из свойств (или пустую строку)
+        const title = s.title !== undefined ? s.title : (props.ID || '');
+
         this.add(new Vector3D({
             pointsWorld,
             color:     s.color     || this._colorByMag(props),
             width:     s.width     ?? 3,
             arrowSize: s.arrowSize ?? 15,
             opacity:   s.opacity   ?? 1,
+            // Передаём параметры подписи
+            title: title,
+            titleStyle: s.titleStyle || {},
+            titleMinZoom: s.titleMinZoom ?? 8, // Показывать названия только при приближении (зум >= 8)
+            titleMaxZoom: s.titleMaxZoom ?? Infinity,
+            titlePlacement: s.titlePlacement || 'start',
+            titleOffset: s.titleOffset || [0, -12],
+            titleAlign: s.titleAlign || 'center'
         }));
     }
 
@@ -297,9 +387,7 @@ export class VectorLineLayer extends Layer {
         const y0 = props.Y0 ?? geom.coordinates[1];
         const z0 = props.Z0 ?? (geom.coordinates[2] || 0);
 
-        // Горизонтальный масштаб
         const exag = this._resolveExag(props, this.exagOption, this.defaultExag);
-        // Вертикальный масштаб (если не задан, берём горизонтальный для совместимости)
         const vExag = this._resolveExag(props, this.verticalExagOption, exag);
 
         if (this.ecef) {
@@ -307,10 +395,9 @@ export class VectorLineLayer extends Layer {
             const loR = lon0 * Math.PI / 180;
             const laR = lat0 * Math.PI / 180;
 
-            // Применяем разные масштабы к горизонтальным и вертикальным компонентам
             const e = (props.E ?? props.dX ?? 0) * exag;
             const n = (props.N ?? props.dY ?? 0) * exag;
-            const u = (props.U ?? props.dZ ?? 0) * vExag; // <-- РАЗДЕЛЬНОЕ УТРИРОВАНИЕ
+            const u = (props.U ?? props.dZ ?? 0) * vExag;
             
             const [dX, dY, dZ] = enuToEcefDelta(e, n, u, loR, laR);
             const [lon1, lat1, h1] = ecefToGeodetic(x0 + dX, y0 + dY, z0 + dZ);
@@ -318,11 +405,10 @@ export class VectorLineLayer extends Layer {
             return this._llhToWorld(lon0, lat0, h0, lon1, lat1, h1);
         }
 
-        // Не-ECEF
         const crs = this.crsCode || this._map.inputCRS;
         const e = (props.E ?? props.dX ?? 0) * exag;
         const n = (props.N ?? props.dY ?? 0) * exag;
-        const u = (props.U ?? props.dZ ?? 0) * vExag; // <-- РАЗДЕЛЬНОЕ УТРИРОВАНИЕ
+        const u = (props.U ?? props.dZ ?? 0) * vExag;
         
         const s = this._map.project([x0, y0], crs);
         const t = this._map.project([x0 + e, y0 + n], crs);
@@ -345,7 +431,6 @@ export class VectorLineLayer extends Layer {
                 const [lon, lat, h] = ecefToGeodetic(c[0], c[1], c[2] || 0);
                 const w = this._map.project([lon, lat], 'EPSG:4326');
                 
-                // Для линий применяем verticalExag к разнице высот относительно первой точки
                 const baseH = coords[0][2] || 0;
                 const deltaH = (c[2] || 0) - baseH;
                 const exaggeratedH = baseH + (deltaH * vExag);

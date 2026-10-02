@@ -327,7 +327,7 @@ export class Polyline {
         this._updateHeights();
 
         // Проверка дальности отрисовки
-        if (map.view.objectDistanceFactor > 0 && this._absPositions.length >= 2) {
+        if (map.objectRenderDistanceFactor > 0 && this._absPositions.length >= 2) {
             const wgPos = map.worldGroup.position;
             const points3D = this._absPositions.map(([ax, az], i) => {
                 const height = this._cachedHeights?.[i] ?? this._altitudeOffset;

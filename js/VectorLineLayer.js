@@ -1,14 +1,24 @@
 /**
- * VectorLineLayer.js — 3D-векторы из GeoJSON.
- * Поддержка ECEF (EPSG:10176 IGS20 и др.), ENU-сдвигов,
- * LineString / MultiLineString с произвольным числом узлов.
- * Поддержка раздельного вертикального преувеличения (verticalExag).
- * Поддержка текстовых подписей через TextManager.
+ * VectorLineLayer.js — 3D-векторы (направленные отрезки и ломаные) из GeoJSON.
+ *
+ * Каждая фича превращается в один {@link Vector3D}: ломаную по узловым точкам
+ * с конической стрелкой на конце и опциональной подписью через TextManager.
+ *
+ * Слой не знает ничего о предметной области — ECEF, ENU, магнитных полях
+ * и т.п. Всё, что касается интерпретации свойств фичи, выносится в
+ * пользовательские коллбэки:
+ *
+ *  - `pointsFn(feature, props) → Array<[x,y,z]>` — узлы вектора в СК `crs`;
+ *  - `style(feature, props) → Object` — цвет, толщина, стрелка, подпись;
+ *  - `filter(feature, props) → boolean` — предварительный отбор.
+ *
+ * Для удобства экспортируются утилиты ECEF ↔ Geodetic и ENU → ECEF,
+ * которые можно вызывать внутри `pointsFn`.
  *
  * @module VectorLineLayer
  */
+
 import { Layer } from './Layers.js';
-import { Projections } from './Projections.js';
 import {
     THREE,
     Line2,
@@ -16,8 +26,9 @@ import {
     LineGeometry,
 } from '../js_TP/tpb.js';
 
+
 /* ================================================================
-   ECEF ↔ Geodetic  (эллипсоид GRS-80 / IGS20)
+   ECEF ↔ Geodetic  (эллипсоид GRS-80 / IGS20) — экспортируемые утилиты
    ================================================================ */
 
 const _A  = 6378137.0;
@@ -25,7 +36,16 @@ const _F  = 1 / 298.257222101;
 const _B  = _A * (1 - _F);
 const _E2 = 1 - (_B * _B) / (_A * _A);
 
-function ecefToGeodetic(X, Y, Z) {
+/**
+ * Преобразование геоцентрических координат ECEF (X, Y, Z, метры)
+ * в геодезические (lon°, lat°, h м) на эллипсоиде GRS-80.
+ *
+ * @param {number} X - ECEF X, метры.
+ * @param {number} Y - ECEF Y, метры.
+ * @param {number} Z - ECEF Z, метры.
+ * @returns {[number, number, number]} [lon, lat, h].
+ */
+export function ecefToGeodetic(X, Y, Z) {
     const p   = Math.sqrt(X * X + Y * Y);
     const lon = Math.atan2(Y, X);
     let lat   = Math.atan2(Z, p * (1 - _E2));
@@ -41,7 +61,18 @@ function ecefToGeodetic(X, Y, Z) {
     return [lon * 180 / Math.PI, lat * 180 / Math.PI, h];
 }
 
-function enuToEcefDelta(e, n, u, lonRad, latRad) {
+/**
+ * Преобразование локального смещения ENU (East, North, Up) в приращение
+ * ECEF в окрестности точки (lonRad, latRad).
+ *
+ * @param {number} e - East, метры.
+ * @param {number} n - North, метры.
+ * @param {number} u - Up, метры.
+ * @param {number} lonRad - Долгота базовой точки, радианы.
+ * @param {number} latRad - Широта базовой точки, радианы.
+ * @returns {[number, number, number]} [dX, dY, dZ] в ECEF.
+ */
+export function enuToEcefDelta(e, n, u, lonRad, latRad) {
     const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
     const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
     return [
@@ -51,7 +82,8 @@ function enuToEcefDelta(e, n, u, lonRad, latRad) {
     ];
 }
 
-const ECEF_CODES = new Set([
+/** Известные коды ECEF-проекций. @type {Set<string>} */
+export const ECEF_CODES = new Set([
     'EPSG:4978',  'EPSG:10176',
     'EPSG:7901',  'EPSG:7902',  'EPSG:7903',  'EPSG:7904',
     'EPSG:7905',  'EPSG:7906',  'EPSG:7907',  'EPSG:7908',
@@ -59,91 +91,193 @@ const ECEF_CODES = new Set([
     'EPSG:8403',  'EPSG:8404',
 ]);
 
-function isEcefCrs(code) {
+/**
+ * Проверяет, является ли код СК геоцентрической (ECEF).
+ *
+ * @param {string|null|undefined} code
+ * @returns {boolean}
+ */
+export function isEcefCrs(code) {
     return code ? ECEF_CODES.has(code.toUpperCase()) : false;
 }
 
+
 /* ================================================================
-   Vector3D — один 3D-вектор / ломаная со стрелкой и подписью
+   Дефолтный стиль Vector3D — мержится с результатом пользовательского styleFn
    ================================================================ */
 
+/** @private */
+const DEFAULT_STYLE = {
+    color: '#3388ff',
+    width: 2,
+    arrowSize: 10,
+    opacity: 1,
+    depthTest: true,
+    minZoom: -Infinity,
+    maxZoom: Infinity,
+
+    title: '',
+    titleStyle: {},
+    titleMinZoom: -Infinity,
+    titleMaxZoom: Infinity,
+    titlePlacement: 'start',
+    titleOffset: [0, -10],
+    titleAlign: 'center',
+    titleVerticalAlign: 'bottom',
+    titleAllowOverflow: false,
+    titlePriority: 0,
+
+    tooltip: '',
+    onClick: null,
+    onHover: null,
+};
+
+
+/* ================================================================
+   Vector3D — один 3D-вектор со стрелкой и подписью
+   ================================================================ */
+
+/**
+ * Направленный отрезок (или ломаная) в world-метрах карты.
+ *
+ * Позиции узлов задаются уже в world-координатах: `[x, y, z]`, где `x`/`z` —
+ * горизонтальные метры проекции карты, `y` — абсолютная высота.
+ * Проецирование исходных данных — задача слоя.
+ *
+ * Регистрируется в `InteractionManager` (если есть `onClick` / `onHover` /
+ * `tooltip`) и в `TextManager` (если задан `title`).
+ */
 class Vector3D {
+    /**
+     * @param {Object} opts
+     * @param {Array<[number, number, number]>} opts.points
+     *     Узлы вектора в world-метрах: `[x, y, z]`. Минимум 2 точки.
+     * @param {string} [opts.color='#3388ff'] - Цвет (CSS / THREE.Color).
+     * @param {number} [opts.width=2] - Толщина линии в пикселях (Line2).
+     * @param {number} [opts.arrowSize=10] - Длина стрелки в world-метрах.
+     * @param {number} [opts.opacity=1] - Прозрачность (0..1).
+     * @param {boolean} [opts.depthTest=true] - Включить тест глубины.
+     * @param {number} [opts.minZoom=-Infinity] - Минимальный зум видимости.
+     * @param {number} [opts.maxZoom=Infinity] - Максимальный зум видимости.
+     *
+     * @param {string} [opts.title=''] - Текст постоянной подписи.
+     * @param {Object} [opts.titleStyle={}] - CSS-стили подписи.
+     * @param {number} [opts.titleMinZoom=-Infinity] - Мин. зум подписи.
+     * @param {number} [opts.titleMaxZoom=Infinity] - Макс. зум подписи.
+     * @param {'start'|'end'} [opts.titlePlacement='start'] - Куда привязать подпись.
+     * @param {[number, number]} [opts.titleOffset=[0,-10]] - Смещение подписи, px.
+     * @param {'left'|'center'|'right'} [opts.titleAlign='center'] - Гор. выравнивание.
+     * @param {'top'|'middle'|'bottom'} [opts.titleVerticalAlign='bottom'] - Верт. выравнивание.
+     * @param {boolean} [opts.titleAllowOverflow=false] - Разрешить выход за границы.
+     * @param {number} [opts.titlePriority=0] - Приоритет подписи.
+     *
+     * @param {string} [opts.tooltip=''] - HTML-тултип (через InteractionManager).
+     * @param {Function|null} [opts.onClick=null] - Обработчик клика.
+     * @param {Function|null} [opts.onHover=null] - Обработчик hover.
+     */
     constructor(opts) {
-        this.pointsWorld = opts.pointsWorld;
-        this.color       = opts.color || '#ff0000';
-        this.width       = opts.width || 3;
-        this.arrowSize   = opts.arrowSize || 10;
-        this.opacity     = opts.opacity ?? 1;
-        this.depthTest   = opts.depthTest ?? true;
+        this._points = opts.points;
 
-        // Настройки подписи
-        this.title         = opts.title || '';
-        this.titleStyle    = opts.titleStyle || {};
-        this.titleMinZoom  = opts.titleMinZoom ?? -Infinity;
-        this.titleMaxZoom  = opts.titleMaxZoom ?? Infinity;
-        this.titlePlacement= opts.titlePlacement || 'start'; // 'start' или 'end'
-        this.titleOffset   = opts.titleOffset || [0, -10];
-        this.titleAlign    = opts.titleAlign || 'center';
+        this._color     = opts.color ?? DEFAULT_STYLE.color;
+        this._width     = opts.width ?? DEFAULT_STYLE.width;
+        this._arrowSize = opts.arrowSize ?? DEFAULT_STYLE.arrowSize;
+        this._opacity   = opts.opacity ?? DEFAULT_STYLE.opacity;
+        this._depthTest = opts.depthTest ?? DEFAULT_STYLE.depthTest;
+        this._minZoom   = opts.minZoom ?? DEFAULT_STYLE.minZoom;
+        this._maxZoom   = opts.maxZoom ?? DEFAULT_STYLE.maxZoom;
 
-        this._map      = null;
-        this._layer    = null;
-        this._group    = new THREE.Group();
+        this._title                = opts.title ?? DEFAULT_STYLE.title;
+        this._titleStyle           = opts.titleStyle ?? DEFAULT_STYLE.titleStyle;
+        this._titleMinZoom         = opts.titleMinZoom ?? DEFAULT_STYLE.titleMinZoom;
+        this._titleMaxZoom         = opts.titleMaxZoom ?? DEFAULT_STYLE.titleMaxZoom;
+        this._titlePlacement       = opts.titlePlacement ?? DEFAULT_STYLE.titlePlacement;
+        this._titleOffset          = opts.titleOffset ?? DEFAULT_STYLE.titleOffset;
+        this._titleAlign           = opts.titleAlign ?? DEFAULT_STYLE.titleAlign;
+        this._titleVerticalAlign   = opts.titleVerticalAlign ?? DEFAULT_STYLE.titleVerticalAlign;
+        this._titleAllowOverflow   = opts.titleAllowOverflow ?? DEFAULT_STYLE.titleAllowOverflow;
+        this._titlePriority        = opts.titlePriority ?? DEFAULT_STYLE.titlePriority;
+
+        this._tooltip = opts.tooltip ?? DEFAULT_STYLE.tooltip;
+        this._onClick = opts.onClick ?? DEFAULT_STYLE.onClick;
+        this._onHover = opts.onHover ?? DEFAULT_STYLE.onHover;
+
+        this._map   = null;
+        this._layer = null;
+        this._group = new THREE.Group();
+
         this._line     = null;
         this._material = null;
         this._geometry = null;
         this._cone     = null;
-        this._textLabel= null; // Ссылка на объект TextManager
+
+        this._textLabel = null;
+        this._unregisterInteraction = null;
     }
 
+    /**
+     * Внутренний метод, вызываемый слоем при добавлении. Создаёт геометрию,
+     * материалы, стрелку, регистрирует объект в InteractionManager и
+     * TextManager.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @param {Layer} layer
+     * @private
+     */
     _attach(map, layer) {
-        if (this._map === map) return;
+        if (this._map === map && this._layer === layer) return;
         this.remove();
-        this._map   = map;
+        this._map = map;
         this._layer = layer;
 
-        const pts = this.pointsWorld;
+        const pts = this._points;
         if (!pts || pts.length < 2) return;
 
-        const pos = [];
-        for (const [wx, wy, wz] of pts) pos.push(wx, wy, wz);
+        // --- Line2 --------------------------------------------------------
+        const flat = [];
+        for (let i = 0; i < pts.length; i++) {
+            flat.push(pts[i][0], pts[i][1], pts[i][2]);
+        }
 
         this._geometry = new LineGeometry();
-        this._geometry.setPositions(pos);
+        this._geometry.setPositions(flat);
 
-        const cv = map.renderer.domElement;
+        const canvas = map.renderer.domElement;
         this._material = new LineMaterial({
-            color:       this.color,
-            linewidth:   this.width,
-            opacity:     this.opacity,
-            transparent: this.opacity < 1,
-            depthTest:   this.depthTest,
-            depthWrite:  this.depthTest,
-            resolution:  new THREE.Vector2(cv.width, cv.height),
+            color: this._color,
+            linewidth: this._width,
+            opacity: this._opacity,
+            transparent: this._opacity < 1,
+            depthTest: this._depthTest,
+            depthWrite: this._depthTest,
+            resolution: new THREE.Vector2(canvas.width, canvas.height),
         });
 
         this._line = new Line2(this._geometry, this._material);
         this._line.computeLineDistances();
+        this._line.renderOrder = 999;
         this._group.add(this._line);
 
+        // --- Стрелка на последнем сегменте --------------------------------
         const last  = pts.length - 1;
-        const pFrom = new THREE.Vector3(...pts[last - 1]);
-        const pTo   = new THREE.Vector3(...pts[last]);
+        const pFrom = new THREE.Vector3(pts[last - 1][0], pts[last - 1][1], pts[last - 1][2]);
+        const pTo   = new THREE.Vector3(pts[last][0],     pts[last][1],     pts[last][2]);
         const dir   = new THREE.Vector3().subVectors(pTo, pFrom);
         const len   = dir.length();
 
         if (len > 1e-6) {
-            const cH = Math.min(this.arrowSize, len * 0.4);
+            const cH = Math.min(this._arrowSize, len * 0.4);
             const cR = cH * 0.35;
             const cGeo = new THREE.ConeGeometry(cR, cH, 12);
             cGeo.translate(0, cH / 2, 0);
 
             this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
-                color:       this.color,
-                opacity:     this.opacity,
-                transparent: this.opacity < 1,
-                depthTest:   this.depthTest,
-                depthWrite:  this.depthTest,
+                color: this._color,
+                opacity: this._opacity,
+                transparent: this._opacity < 1,
+                depthTest: this._depthTest,
+                depthWrite: this._depthTest,
             }));
+            this._cone.renderOrder = 999;
             this._cone.position.copy(pTo);
             this._cone.setRotationFromQuaternion(
                 new THREE.Quaternion().setFromUnitVectors(
@@ -155,331 +289,412 @@ class Vector3D {
 
         map.worldGroup.add(this._group);
 
-        // Регистрация подписи в TextManager
-        if (this.title && map.textManager) {
+        // --- InteractionManager -------------------------------------------
+        if (map.interaction && (this._onClick || this._onHover || this._tooltip)) {
+            this._unregisterInteraction = map.interaction.register(this, {
+                getMeshes: () => {
+                    const meshes = [];
+                    if (this._line) meshes.push(this._line);
+                    if (this._cone) meshes.push(this._cone);
+                    return meshes;
+                },
+                onClick:    this._onClick || null,
+                onHover:    this._onHover || null,
+                getTooltip: this._tooltip ? () => this._tooltip : null,
+                isVisible:  () => this._group.visible,
+            });
+        }
+
+        // --- TextManager --------------------------------------------------
+        if (this._title && map.textManager) {
             this._textLabel = map.textManager.addLabel(this);
         }
     }
 
+    /**
+     * Ежекадровое обновление: видимость по зуму и дальности,
+     * актуализация resolution LineMaterial.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @private
+     */
     _update(map) {
-        if (!this._material || !this._line) return;
-        const cv  = map.renderer.domElement;
+        if (!this._map || !this._line) return;
+
+        const zoom = map.continuousZoom;
+        let visible = (this._layer ? this._layer.visible : true)
+            && zoom >= this._minZoom && zoom <= this._maxZoom;
+
+        if (visible && map.objectRenderDistanceFactor > 0 && this._points.length >= 2) {
+            const mid = this._points[this._points.length >> 1];
+            const wgPos = map.worldGroup.position;
+            const d = map.camera.position.distanceTo(
+                map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z)
+            );
+            if (d > map.maxObjectDistance) visible = false;
+        }
+
+        this._group.visible = visible;
+        if (!visible) return;
+
+        const cv = map.renderer.domElement;
         const res = this._material.resolution;
         if (res.x !== cv.width || res.y !== cv.height) {
             res.set(cv.width, cv.height);
         }
-        
-        // Оптимизированная проверка дистанции с учётом сдвига мира (worldGroup)
-        if (map.view.objectDistanceFactor > 0 && this.pointsWorld.length >= 2) {
-            const mid = this.pointsWorld[this.pointsWorld.length >> 1];
-            const wgPos = map.worldGroup.position;
-            
-            // Используем пул временных векторов (map.getVec3), чтобы не аллоцировать память каждый кадр
-            const d = map.camera.position.distanceTo(
-                map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z)
-            );
-            
-            this._group.visible = d <= map.maxObjectDistance;
-        }
     }
 
+    /**
+     * Удаляет вектор с карты, освобождает ресурсы и снимает регистрации.
+     */
     remove() {
-        // Удаление подписи из TextManager
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+
         if (this._textLabel && this._map?.textManager) {
             this._map.textManager.removeLabel(this._textLabel);
             this._textLabel = null;
         }
 
         if (this._group.parent) this._group.parent.remove(this._group);
+
         this._geometry?.dispose();
         this._material?.dispose();
         if (this._cone) {
             this._cone.geometry.dispose();
             this._cone.material.dispose();
         }
+
+        this._line = null;
+        this._material = null;
+        this._geometry = null;
+        this._cone = null;
+
         this._layer?._removeRef(this);
         this._layer = null;
-        this._map   = null;
+        this._map = null;
     }
 
+    /**
+     * Возвращает объединённый прямоугольник по узлам вектора.
+     *
+     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326']
+     * @returns {Array<Array<number>>|null}
+     */
     getBounds(crs = 'EPSG:4326') {
         let mnx = Infinity, mnz = Infinity, mxx = -Infinity, mxz = -Infinity;
-        for (const [wx, , wz] of this.pointsWorld) {
-            if (wx < mnx) mnx = wx;  if (wx > mxx) mxx = wx;
-            if (wz < mnz) mnz = wz;  if (wz > mxz) mxz = wz;
+        for (const p of this._points) {
+            if (p[0] < mnx) mnx = p[0];
+            if (p[0] > mxx) mxx = p[0];
+            if (p[2] < mnz) mnz = p[2];
+            if (p[2] > mxz) mxz = p[2];
         }
         if (!isFinite(mnx)) return null;
+
         if (this._map) {
             const a = this._map.unproject([mnx, mnz], crs);
             const b = this._map.unproject([mxx, mxz], crs);
             return [[a[0], a[1]], [b[0], b[1]]];
         }
+        // Без карты перевести world → CRS невозможно; вернём world-метры.
         return [[mnx, mnz], [mxx, mxz]];
     }
 
     /* ================================================================
        Интерфейс для TextManager
        ================================================================ */
-    
-    getText() { return this.title; }
-    
+
+    /** @returns {string} */
+    getText() { return this._title; }
+
+    /** @returns {Object} */
     getTextStyle() {
-        // Дефолтный стиль: белый текст с чёрной обводкой/тенью для читаемости на любом фоне
         return Object.assign({
             fontFamily: 'sans-serif',
             color: '#ffffff',
             fontSize: '12px',
             fontWeight: 'bold',
-            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)'
-        }, this.titleStyle);
+            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
+        }, this._titleStyle);
     }
-    
-    getTextZoomBounds() { 
-        return { min: this.titleMinZoom, max: this.titleMaxZoom }; 
+
+    /** @returns {{min: number, max: number}} */
+    getTextZoomBounds() {
+        return { min: this._titleMinZoom, max: this._titleMaxZoom };
     }
-    
+
+    /** @returns {'point'} */
     getLabelType() { return 'point'; }
-    
+
+    /** @returns {boolean} */
     isVisible() {
         if (!this._layer || !this._layer.visible) return false;
+        if (!this._map) return false;
         const zoom = this._map.continuousZoom;
-        return zoom >= this.titleMinZoom && zoom <= this.titleMaxZoom;
+        return zoom >= this._titleMinZoom && zoom <= this._titleMaxZoom;
     }
-    
+
+    /**
+     * Экранные координаты точки привязки подписи.
+     * `'end'` — кончик стрелки, иначе — начало вектора.
+     *
+     * @returns {{x: number, y: number}|null}
+     */
     getScreenPosition() {
-        if (!this._map || !this.pointsWorld || this.pointsWorld.length < 2) return null;
-        
-        // Выбираем точку: 'start' (начало вектора, база) или 'end' (кончик стрелки)
-        const pt = this.titlePlacement === 'end' 
-            ? this.pointsWorld[this.pointsWorld.length - 1] 
-            : this.pointsWorld[0];
-            
+        if (!this._map || !this._points || this._points.length < 2) return null;
+
+        const pt = this._titlePlacement === 'end'
+            ? this._points[this._points.length - 1]
+            : this._points[0];
+
         const map = this._map;
         const wgPos = map.worldGroup.position;
-        
-        // КРИТИЧЕСКИ ВАЖНО: прибавляем сдвиг worldGroup, чтобы подпись двигалась вместе с вектором.
-        // Используем map.getVec3() для предотвращения аллокаций в горячем пути (как в Polygon.js)
+
         const vec = map.getVec3().set(
             pt[0] + wgPos.x,
             pt[1] + wgPos.y,
             pt[2] + wgPos.z
         );
-        
         vec.project(map.camera);
-        
-        // Если точка за камерой
+
         if (vec.z > 1) return null;
-        
+
         const canvas = map.renderer.domElement;
         return {
             x: (vec.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight
+            y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
-    
-    getTitleAlign() { return this.titleAlign; }
-    getTitleVerticalAlign() { return 'bottom'; } // По умолчанию подпись над точкой
-    getTitleOffset() { return this.titleOffset; }
-    getAllowOverflow() { return false; }
-    getPriority() { return 10; } // Приоритет выше обычного, чтобы названия станций не прятались
+
+    /** @returns {'left'|'center'|'right'} */
+    getTitleAlign() { return this._titleAlign; }
+
+    /** @returns {'top'|'middle'|'bottom'} */
+    getTitleVerticalAlign() { return this._titleVerticalAlign; }
+
+    /** @returns {[number, number]} */
+    getTitleOffset() { return this._titleOffset; }
+
+    /** @returns {boolean} */
+    getAllowOverflow() { return this._titleAllowOverflow; }
+
+    /** @returns {number} */
+    getPriority() { return this._titlePriority; }
 }
+
 
 /* ================================================================
    VectorLineLayer
    ================================================================ */
 
+/**
+ * Слой 3D-векторов из GeoJSON.
+ *
+ * Каждая фича преобразуется в узлы `[x, y, z]` (коллбэк `pointsFn`), узлы
+ * проецируются в world-метры карты и попадают в {@link Vector3D} вместе со
+ * стилем из `styleFn`.
+ *
+ * ECEF-координаты (EPSG:4978, 10176, 7901..7912, 8403, 8404) распознаются
+ * автоматически: каждая точка проходит через `ecefToGeodetic` и далее
+ * проецируется из WGS84. Слой всё равно ожидает, что `pointsFn` возвращает
+ * точки **в СК `crs`**, то есть если у вас ECEF — возвращайте ECEF.
+ *
+ * @example
+ * const layer = new VectorLineLayer({
+ *     data: featureCollection,
+ *     crs: 'EPSG:4978',
+ *     pointsFn: (f, p) => {
+ *         const [lon0, lat0, h0] = ecefToGeodetic(p.X0, p.Y0, p.Z0);
+ *         const [dX, dY, dZ] = enuToEcefDelta(p.E, p.N, p.U,
+ *                                             lon0 * Math.PI / 180,
+ *                                             lat0 * Math.PI / 180);
+ *         const [lon1, lat1, h1] = ecefToGeodetic(p.X0 + dX, p.Y0 + dY, p.Z0 + dZ);
+ *         return [[lon0, lat0, h0], [lon1, lat1, h1]];
+ *     },
+ *     style: (f, p) => ({ color: p.color, width: 4, title: p.ID })
+ * });
+ * layer.addTo(map);
+ */
 export class VectorLineLayer extends Layer {
+    /**
+     * @param {Object} [opts]
+     * @param {string} [opts.url] - URL GeoJSON-файла.
+     * @param {Object} [opts.data] - Готовый GeoJSON (приоритетнее `url`).
+     * @param {string} [opts.crs] - Код СК координат `pointsFn`.
+     *     По умолчанию используется `map.inputCRS`.
+     * @param {Function} [opts.filter] - `(feature, props) → boolean`.
+     * @param {Function} [opts.pointsFn] - `(feature, props) → Array<[x,y,z]>`.
+     *     Возвращает узлы вектора в СК `crs`. Для MultiLineString можно
+     *     вернуть массив массивов (`Array<Array<[x,y,z]>>`) — тогда будет
+     *     создан отдельный {@link Vector3D} на каждую линию.
+     *     По умолчанию: координаты `LineString` / `MultiLineString` из геометрии.
+     * @param {Function} [opts.style] - `(feature, props) → Object` — стиль
+     *     {@link Vector3D}. Любое незаданное поле берётся из `DEFAULT_STYLE`.
+     * @param {number} [opts.heightScale=1] - Глобальный множитель вертикали,
+     *     применяется к `z` после `pointsFn`.
+     * @param {number} [opts.altitudeOffset=0] - Аддитивный сдвиг по Y, метры.
+     */
     constructor(opts = {}) {
         super();
-        this.url          = opts.url || null;
-        this.data         = opts.data || null;
-        this.crsCode      = opts.crs || null;
-        this.ecef         = opts.ecef ?? isEcefCrs(this.crsCode);
-        this.defaultExag  = opts.defaultExag ?? 1;
-        this.heightScale  = opts.heightScale ?? 1;
-        this.styleFn      = opts.style || null;
-        this.filter       = opts.filter || null;
 
-        this.exagOption       = opts.exag !== undefined ? opts.exag : null;
-        this.verticalExagOption = opts.verticalExag !== undefined ? opts.verticalExag : null; 
-        
-        this._loaded      = false;
+        this.url       = opts.url || null;
+        this.data      = opts.data || null;
+        this._crsCode  = opts.crs || null;
+        this._isEcef   = isEcefCrs(this._crsCode);
+
+        this.filter    = opts.filter || null;
+        this.pointsFn  = opts.pointsFn || null;
+        this.styleFn   = opts.style || null;
+
+        this.heightScale    = opts.heightScale ?? 1;
+        this.altitudeOffset = opts.altitudeOffset ?? 0;
+
+        this._loaded = false;
     }
 
+    /**
+     * Добавляет слой на карту и запускает загрузку данных.
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @returns {VectorLineLayer} this
+     */
     addTo(map) {
         super.addTo(map);
         if (!this._loaded) this._load();
         return this;
     }
 
+    /** Полная перезагрузка: удаляет объекты и повторно парсит данные. */
     reload() {
         for (const o of [...this._objects]) o.remove();
         this._objects = [];
-        this._loaded  = false;
+        this._loaded = false;
         if (this._map) this._load();
     }
 
+    /**
+     * Загрузка GeoJSON (из `data` или `url`) и запуск парсинга.
+     * @private
+     */
     async _load() {
-        let gj = this.data;
-        if (!gj && this.url) {
+        let geojson = this.data;
+        if (!geojson && this.url) {
             try {
                 const r = await fetch(this.url);
-                gj = await r.json();
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                geojson = await r.json();
             } catch (e) {
                 console.error('VectorLineLayer: fetch error', e);
                 return;
             }
         }
-        if (!gj) return;
-        this._parse(gj);
+        if (!geojson) return;
+        this._parse(geojson);
         this._loaded = true;
     }
 
-    _parse(gj) {
-        const feats = gj.type === 'FeatureCollection' ? gj.features
-                    : gj.type === 'Feature' ? [gj] : [];
-        for (const f of feats) this._addFeature(f);
+    /**
+     * Разбор GeoJSON: FeatureCollection / Feature / одиночная геометрия.
+     * @param {Object} geojson
+     * @private
+     */
+    _parse(geojson) {
+        const t = geojson.type;
+        if (t === 'FeatureCollection') {
+            for (const f of geojson.features) this._addFeature(f);
+        } else if (t === 'Feature') {
+            this._addFeature(geojson);
+        } else if (t === 'LineString' || t === 'MultiLineString' || t === 'Point') {
+            this._addFeature({ type: 'Feature', geometry: geojson, properties: {} });
+        }
     }
 
+    /**
+     * @param {Object} feature
+     * @private
+     */
     _addFeature(feature) {
         const props = feature.properties || {};
-        const geom  = feature.geometry;
-        if (!geom) return;
-
         if (this.filter && !this.filter(feature, props)) return;
 
-        let pts = null;
+        const raw = this.pointsFn
+            ? this.pointsFn(feature, props)
+            : this._defaultPoints(feature, props);
 
-        if (geom.type === 'Point') {
-            pts = this._fromPoint(props, geom);
-        } else if (geom.type === 'LineString') {
-            pts = this._fromCoords(geom.coordinates, props);
-        } else if (geom.type === 'MultiLineString') {
-            for (const c of geom.coordinates) {
-                const p = this._fromCoords(c, props);
-                if (p) this._spawn(p, feature, props);
-            }
-            return;
-        } else {
-            return;
+        if (!raw) return;
+
+        // Нормализация: [[x,y,z],...] — один вектор; [[...],[...]] — несколько.
+        const vectors = this._isSingleVector(raw) ? [raw] : raw;
+
+        for (const pts of vectors) {
+            if (!Array.isArray(pts) || pts.length < 2) continue;
+            this._spawn(pts, feature, props);
+        }
+    }
+
+    /**
+     * Дефолтный извлекатель точек — читает координаты геометрии.
+     * @private
+     */
+    _defaultPoints(feature, props) {
+        const geom = feature.geometry;
+        if (!geom) return null;
+        if (geom.type === 'LineString')       return geom.coordinates;
+        if (geom.type === 'MultiLineString')  return geom.coordinates;
+        return null;
+    }
+
+    /**
+     * Определяет, является ли аргумент одним вектором (`[[x,y,z],…]`) или
+     * массивом векторов (`[[[…]],[[…]]]`).
+     * @private
+     */
+    _isSingleVector(arr) {
+        if (!Array.isArray(arr) || arr.length === 0) return false;
+        return Array.isArray(arr[0]) && typeof arr[0][0] === 'number';
+    }
+
+    /**
+     * Проецирует одну точку из исходной СК в world-метры.
+     * Для ECEF-кодов сначала конвертирует в геодезические.
+     * @private
+     * @returns {[number, number]|null}
+     */
+    _projectPoint(p) {
+        const x = p[0], y = p[1], z = p[2] ?? 0;
+
+        if (this._isEcef) {
+            const [lon, lat] = ecefToGeodetic(x, y, z);
+            return this._map.projectSafe([lon, lat], 'EPSG:4326');
         }
 
-        if (pts) this._spawn(pts, feature, props);
+        const crs = this._crsCode || this._map.inputCRS;
+        return this._map.projectSafe([x, y], crs);
     }
 
-    _spawn(pointsWorld, feature, props) {
-        const s = this.styleFn ? this.styleFn(feature, props) : {};
-        
-        // Если title не задан явно в style, берём ID из свойств (или пустую строку)
-        const title = s.title !== undefined ? s.title : (props.ID || '');
+    /**
+     * Создаёт {@link Vector3D} из узловых точек.
+     * @private
+     */
+    _spawn(pointsSource, feature, props) {
+        const style = Object.assign(
+            {},
+            DEFAULT_STYLE,
+            this.styleFn ? this.styleFn(feature, props) : null
+        );
 
-        this.add(new Vector3D({
-            pointsWorld,
-            color:     s.color     || this._colorByMag(props),
-            width:     s.width     ?? 3,
-            arrowSize: s.arrowSize ?? 15,
-            opacity:   s.opacity   ?? 1,
-            // Передаём параметры подписи
-            title: title,
-            titleStyle: s.titleStyle || {},
-            titleMinZoom: s.titleMinZoom ?? 8, // Показывать названия только при приближении (зум >= 8)
-            titleMaxZoom: s.titleMaxZoom ?? Infinity,
-            titlePlacement: s.titlePlacement || 'start',
-            titleOffset: s.titleOffset || [0, -12],
-            titleAlign: s.titleAlign || 'center'
-        }));
-    }
-
-    /* ---------- Утилита для расчёта масштаба ---------- */
-    _resolveExag(props, option, defaultExag) {
-        if (typeof option === 'function') return option(props);
-        if (option !== null && option !== undefined) return option;
-        return props.EXAG ?? defaultExag;
-    }
-
-    /* ---------- Point + ENU ---------- */
-    _fromPoint(props, geom) {
-        const x0 = props.X0 ?? geom.coordinates[0];
-        const y0 = props.Y0 ?? geom.coordinates[1];
-        const z0 = props.Z0 ?? (geom.coordinates[2] || 0);
-
-        const exag = this._resolveExag(props, this.exagOption, this.defaultExag);
-        const vExag = this._resolveExag(props, this.verticalExagOption, exag);
-
-        if (this.ecef) {
-            const [lon0, lat0, h0] = ecefToGeodetic(x0, y0, z0);
-            const loR = lon0 * Math.PI / 180;
-            const laR = lat0 * Math.PI / 180;
-
-            const e = (props.E ?? props.dX ?? 0) * exag;
-            const n = (props.N ?? props.dY ?? 0) * exag;
-            const u = (props.U ?? props.dZ ?? 0) * vExag;
-            
-            const [dX, dY, dZ] = enuToEcefDelta(e, n, u, loR, laR);
-            const [lon1, lat1, h1] = ecefToGeodetic(x0 + dX, y0 + dY, z0 + dZ);
-
-            return this._llhToWorld(lon0, lat0, h0, lon1, lat1, h1);
+        const pointsWorld = [];
+        for (let i = 0; i < pointsSource.length; i++) {
+            const p = pointsSource[i];
+            if (!Array.isArray(p) || p.length < 2) continue;
+            const xy = this._projectPoint(p);
+            if (!xy) continue;
+            const y = (p[2] ?? 0) * this.heightScale + this.altitudeOffset;
+            pointsWorld.push([xy[0], y, xy[1]]);
         }
+        if (pointsWorld.length < 2) return;
 
-        const crs = this.crsCode || this._map.inputCRS;
-        const e = (props.E ?? props.dX ?? 0) * exag;
-        const n = (props.N ?? props.dY ?? 0) * exag;
-        const u = (props.U ?? props.dZ ?? 0) * vExag;
-        
-        const s = this._map.project([x0, y0], crs);
-        const t = this._map.project([x0 + e, y0 + n], crs);
-        
-        return [
-            [s[0], z0 * this.heightScale,      s[1]],
-            [t[0], (z0 + u) * this.heightScale, t[1]],
-        ];
-    }
-
-    /* ---------- LineString ---------- */
-    _fromCoords(coords, props = {}) {
-        if (!coords || coords.length < 2) return null;
-
-        const exag = this._resolveExag(props, this.exagOption, this.defaultExag);
-        const vExag = this._resolveExag(props, this.verticalExagOption, exag);
-
-        if (this.ecef) {
-            return coords.map((c, idx) => {
-                const [lon, lat, h] = ecefToGeodetic(c[0], c[1], c[2] || 0);
-                const w = this._map.project([lon, lat], 'EPSG:4326');
-                
-                const baseH = coords[0][2] || 0;
-                const deltaH = (c[2] || 0) - baseH;
-                const exaggeratedH = baseH + (deltaH * vExag);
-                
-                return [w[0], exaggeratedH * this.heightScale, w[1]];
-            });
-        }
-
-        const crs = this.crsCode || this._map.inputCRS;
-        return coords.map((c, idx) => {
-            const w = this._map.project([c[0], c[1]], crs);
-            
-            const baseZ = coords[0][2] || 0;
-            const deltaZ = (c[2] || 0) - baseZ;
-            const exaggeratedZ = baseZ + (deltaZ * vExag);
-            
-            return [w[0], exaggeratedZ * this.heightScale, w[1]];
-        });
-    }
-
-    _llhToWorld(lon0, lat0, h0, lon1, lat1, h1) {
-        const s = this._map.project([lon0, lat0], 'EPSG:4326');
-        const e = this._map.project([lon1, lat1], 'EPSG:4326');
-        return [
-            [s[0], h0 * this.heightScale, s[1]],
-            [e[0], h1 * this.heightScale, e[1]],
-        ];
-    }
-
-    _colorByMag(p) {
-        const m = p.total_mag || p.horiz_mag || 0;
-        if (m > 0.02) return '#ff0000';
-        if (m > 0.01) return '#ffaa00';
-        return '#00ff00';
+        this.add(new Vector3D(Object.assign({ points: pointsWorld }, style)));
     }
 }

@@ -8,6 +8,7 @@ import { Marker3D } from './Marker3D.js';
 import { Area3D } from './Area3D.js';
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
+import { Vector3D } from './Vector3D.js';
 
 /**
  * Слой, создающий маркеры, линии и полигоны из GeoJSON.
@@ -97,6 +98,8 @@ export class GeoJSONLayer extends Layer {
         this.lineToOptions = options.lineToOptions || null;
         this.polygonToOptions = options.polygonToOptions || null;
         this.polygon3DToOptions = options.polygon3DToOptions || null;
+
+this.vectorToOptions = options.vectorToOptions || null;
 
         // Обычные маркеры.
         this.defaultIconUrl = options.defaultIconUrl || 'marker.png';
@@ -217,15 +220,32 @@ export class GeoJSONLayer extends Layer {
         const geom = feature.geometry;
         if (!geom) return;
 
-        switch (geom.type) {
-            case 'Point': this._addPointFeature(feature); break;
-            case 'LineString':
-            case 'MultiLineString': this._addLineFeature(feature); break;
-            case 'Polygon':
-            case 'MultiPolygon': this._addPolygonFeature(feature); break;
-            default:
-                console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
+switch (geom.type) {
+    case 'Point':
+        if (this.vectorToOptions && props.vector === true) {
+            this._addVectorFeature(feature);
+        } else {
+            this._addPointFeature(feature);
         }
+        break;
+
+    case 'LineString':
+    case 'MultiLineString':
+        if (this.vectorToOptions || props.vector === true) {
+            this._addVectorFeature(feature);
+        } else {
+            this._addLineFeature(feature);
+        }
+        break;
+
+    case 'Polygon':
+    case 'MultiPolygon':
+        this._addPolygonFeature(feature);
+        break;
+
+    default:
+        console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
+}
     }
 
     /** @private */
@@ -302,6 +322,66 @@ export class GeoJSONLayer extends Layer {
             if (this.onEachFeature) this.onEachFeature(feature, marker);
         }
     }
+
+/**
+ * Создаёт Vector3D из фичи. Для LineString/MultiLineString дефолтные
+ * `positions` берутся из геометрии; для Point — только из `vectorToOptions`.
+ *
+ * @private
+ */
+_addVectorFeature(feature) {
+    const props = feature.properties || {};
+    const geom = feature.geometry;
+
+    // Наборы координат по умолчанию (используются, если vectorToOptions
+    // не задал positions). Для Point дефолта нет.
+    let coordSets;
+    if (geom.type === 'LineString')        coordSets = [geom.coordinates];
+    else if (geom.type === 'MultiLineString') coordSets = geom.coordinates;
+    else                                   coordSets = [null];
+
+    for (const coords of coordSets) {
+        const opts = this.vectorToOptions
+            ? (this.vectorToOptions(feature, props) || {})
+            : this._defaultVectorOptions(feature, props, coords);
+
+        const positions = opts.positions ?? coords;
+        if (!positions || positions.length < 2) continue;
+
+        const vectorOptions = {
+            ...opts,
+            positions,
+            crs: opts.crs ?? this.crs,
+            title:              opts.title              ?? props.title ?? props.name ?? '',
+            titleStyle:         opts.titleStyle         ?? props.titleStyle ?? {},
+            titleOffset:        opts.titleOffset        ?? this._parsePair(props.titleOffset) ?? undefined,
+            titleAlign:         opts.titleAlign         ?? props.titleAlign ?? 'center',
+            titleVerticalAlign: opts.titleVerticalAlign ?? props.titleVerticalAlign ?? 'bottom',
+            titleMinZoom:       opts.titleMinZoom       ?? props.titleMinZoom ?? -Infinity,
+            titleMaxZoom:       opts.titleMaxZoom       ?? props.titleMaxZoom ?? Infinity,
+            titlePlacement:     opts.titlePlacement     ?? props.titlePlacement ?? 'start',
+            tooltip:            opts.tooltip            ?? props.tooltip ?? props.description ?? '',
+            minZoom:            opts.minZoom            ?? props.minZoom ?? -Infinity,
+            maxZoom:            opts.maxZoom            ?? props.maxZoom ?? Infinity,
+        };
+
+        const vector = new Vector3D(vectorOptions);
+        this.add(vector);
+        if (this.onEachFeature) this.onEachFeature(feature, vector);
+    }
+}
+
+/** @private */
+_defaultVectorOptions(feature, props, coords) {
+    return {
+        positions: coords,
+        color:     props.stroke || props.color || '#3388ff',
+        width:     props.width     ?? 2,
+        arrowSize: props.arrowSize ?? 10,
+        opacity:   props['stroke-opacity'] ?? props.opacity ?? 1,
+    };
+}
+
 
     /** @private */
     _defaultPointOptions(feature, props) {

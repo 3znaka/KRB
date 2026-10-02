@@ -16,8 +16,10 @@ export { exportToGLB } from './Exporter.js';
 export { InteractionManager } from './Interaction.js';
 export { GeoTiffLayer } from './GeoTiffLayer.js';
 export {
-    VectorLineLayer,
+    Vector3D,
     ecefToGeodetic,
     enuToEcefDelta,
     isEcefCrs,
-} from './VectorLineLayer.js';
+    ECEF_CODES,
+} from './Vector3D.js';
+export { VectorLineLayer } from './VectorLineLayer.js';

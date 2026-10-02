@@ -213,40 +213,47 @@ this.vectorToOptions = options.vectorToOptions || null;
         }
     }
 
-    /** @private */
-    _addFeature(feature) {
-        if (this.filter && !this.filter(feature)) return;
+/** @private */
+_addFeature(feature) {
+    const props = feature.properties || {};      // ← вот эта строка была пропущена
 
-        const geom = feature.geometry;
-        if (!geom) return;
+    if (this.filter && !this.filter(feature)) return;
 
-switch (geom.type) {
-    case 'Point':
-        if (this.vectorToOptions && props.vector === true) {
-            this._addVectorFeature(feature);
-        } else {
-            this._addPointFeature(feature);
-        }
-        break;
+    const geom = feature.geometry;
+    if (!geom) return;
 
-    case 'LineString':
-    case 'MultiLineString':
-        if (this.vectorToOptions || props.vector === true) {
-            this._addVectorFeature(feature);
-        } else {
-            this._addLineFeature(feature);
-        }
-        break;
+    switch (geom.type) {
+        case 'Point':
+            // Для точки развилка тройная (Marker / Marker3D / Vector3D),
+            // поэтому требуется явный флаг props.vector === true.
+            if (this.vectorToOptions && props.vector === true) {
+                this._addVectorFeature(feature);
+            } else {
+                this._addPointFeature(feature);
+            }
+            break;
 
-    case 'Polygon':
-    case 'MultiPolygon':
-        this._addPolygonFeature(feature);
-        break;
+        case 'LineString':
+        case 'MultiLineString':
+            // Для линий развилка двойная: либо Polyline, либо Vector3D.
+            // Наличие vectorToOptions — уже достаточный сигнал, что автор
+            // слоя хочет видеть линии векторами.
+            if (this.vectorToOptions || props.vector === true) {
+                this._addVectorFeature(feature);
+            } else {
+                this._addLineFeature(feature);
+            }
+            break;
 
-    default:
-        console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
-}
+        case 'Polygon':
+        case 'MultiPolygon':
+            this._addPolygonFeature(feature);
+            break;
+
+        default:
+            console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
     }
+}
 
     /** @private */
     _addPointFeature(feature) {

@@ -202,6 +202,16 @@ export class GeoTiffLayer extends Layer {
         /** @private @type {Pool|null} */ this._pool = options.pool || null;
         /** @private */ this._ownsPool = false;
 
+
+        /**
+ * Blob URL, из которого создан воркер (для revokeObjectURL).
+ * Используется, когда `workerUrl` кросс-доменный: браузер
+ * запрещает `new Worker(crossOriginUrl)` даже с CORS, поэтому
+ * мы скачиваем исходник воркера через `fetch` и оборачиваем в Blob.
+ * @private @type {string|null}
+ */
+this._blobWorkerUrl = null;
+
         // --- Колбэки загрузки ---
         /** @private */ this._onProgress = options.onProgress || null;
         /** @private */ this._onLoad = options.onLoad || null;
@@ -350,6 +360,11 @@ export class GeoTiffLayer extends Layer {
             this._pool = null;
             this._ownsPool = false;
         }
+
+        if (this._blobWorkerUrl) {
+    try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
+    this._blobWorkerUrl = null;
+}
 
         this._image = null;
         this._tiff = null;
@@ -514,10 +529,10 @@ export class GeoTiffLayer extends Layer {
      * @returns {Promise<void>}
      */
     async _load() {
-        this._loading = true;
-        this._progress(0);
-        try {
-            this._ensurePool();
+    this._loading = true;
+    this._progress(0);
+    try {
+        await this._ensurePool();
 
             const tiff = await this._openTiff();
             this._tiff = tiff;
@@ -562,25 +577,59 @@ export class GeoTiffLayer extends Layer {
         }
     }
 
-    /**
-     * Создаёт Pool, если пользователь запросил `useWorker` и не передал
-     * готовый пул.
-     *
-     * @private
-     */
-    _ensurePool() {
-        if (this._pool) return;
-        if (!this._useWorker) return;
-        try {
-            const url = this._workerUrl;
-            this._pool = new Pool(this._poolSize, () => new Worker(url));
-            this._ownsPool = true;
-        } catch (e) {
-            console.warn('GeoTiffLayer: не удалось создать Pool, декодирование в основном потоке', e);
-            this._pool = null;
-            this._ownsPool = false;
+/**
+ * Создаёт Pool, если пользователь запросил `useWorker` и не передал
+ * готовый пул.
+ *
+ * Если `workerUrl` кросс-доменный, браузер блокирует
+ * `new Worker(url)` из-за same-origin политики воркеров (CORS для
+ * этого конструктора не применяется). Обходим: скачиваем исходник
+ * воркера через `fetch` (CORS на CDN уже настроен), заворачиваем в
+ * Blob и создаём воркер из Blob URL — он считается same-origin с
+ * документом.
+ *
+ * @private
+ * @returns {Promise<void>}
+ */
+async _ensurePool() {
+    if (this._pool) return;
+    if (!this._useWorker) return;
+
+    try {
+        const url = this._workerUrl;
+
+        const resp = await fetch(url, { mode: 'cors' });
+        if (!resp.ok) {
+            throw new Error(`worker fetch failed: ${resp.status} ${resp.statusText}`);
         }
+        const code = await resp.text();
+
+        // На случай, если сервер вернул HTML-страницу ошибки
+        // с кодом 200 (бывает с SPA-fallback'ами).
+        const trimmed = code.trimStart();
+        if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+            throw new Error('worker URL вернул HTML вместо JavaScript');
+        }
+
+        const blob = new Blob([code], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+
+        this._pool = new Pool(this._poolSize, () => new Worker(blobUrl));
+        this._ownsPool = true;
+        this._blobWorkerUrl = blobUrl;
+    } catch (e) {
+        console.warn(
+            'GeoTiffLayer: не удалось создать Pool, декодирование в основном потоке',
+            e
+        );
+        if (this._blobWorkerUrl) {
+            try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
+            this._blobWorkerUrl = null;
+        }
+        this._pool = null;
+        this._ownsPool = false;
     }
+}
 
     /**
      * Открывает GeoTIFF из любого поддерживаемого источника.

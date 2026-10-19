@@ -11,7 +11,8 @@
  *  - чтение одноканальных (DEM) растров (float / >8 бит) через
  *    `image.readRasters()` с нормализацией значений и раскраской палитрой
  *    (по умолчанию — чёрно-белая);
- *  - произвольные цветовые палитры и пресеты (`terrain`, `viridis`, …);
+ *  - произвольные цветовые палитры и пресеты (`terrain`, `viridis`, …)
+ *    через общий модуль {@link module:ColorRamps};
  *  - обработку NoData (авто из GDAL_NODATA или явно);
  *  - опциональный Web Worker Pool (см. `geotiff.worker.js`) — сильно
  *    ускоряет декодирование сжатых GeoTIFF (LZW, Deflate);
@@ -31,6 +32,11 @@ import { THREE } from '../js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
 import { fromUrl, fromArrayBuffer, Pool } from '../js_TP/geotiff.bundle.js';
+import {
+    resolveColorRamp,
+    sampleColorRamp,
+    parseColorToRGBA
+} from './ColorRamps.js';
 
 /**
  * Приоритет рендера. Чуть выше, чем у тайлов, но ниже, чем у Image —
@@ -45,52 +51,6 @@ const GEOTIFF_RENDER_ORDER = 995;
  * @private
  */
 const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url).href;
-
-/**
- * Встроенные цветовые палитры для одноканальных растров.
- *
- * Формат стопа: `{ value: 0..1, r, g, b, a: 0..255 }`.
- * Значения `r/g/b/a` — «сырые» sRGB байты; при `SRGBColorSpace` на текстуре
- * это даёт ожидаемые цвета.
- *
- * @private
- */
-const COLOR_RAMP_PRESETS = {
-    grayscale: [
-        { value: 0, r:   0, g:   0, b:   0, a: 255 },
-        { value: 1, r: 255, g: 255, b: 255, a: 255 }
-    ],
-    terrain: [
-        { value: 0.00, r:   0, g:  40, b: 100, a: 255 }, // глубокая вода
-        { value: 0.10, r:   0, g: 100, b: 180, a: 255 }, // мелководье
-        { value: 0.20, r: 100, g: 180, b: 220, a: 255 }, // берег
-        { value: 0.25, r: 190, g: 215, b: 160, a: 255 }, // низины
-        { value: 0.45, r: 100, g: 160, b:  80, a: 255 }, // равнины
-        { value: 0.65, r: 200, g: 180, b: 120, a: 255 }, // плато
-        { value: 0.80, r: 170, g: 130, b:  90, a: 255 }, // горы
-        { value: 0.90, r: 220, g: 220, b: 220, a: 255 }, // снег
-        { value: 1.00, r: 255, g: 255, b: 255, a: 255 }  // пики
-    ],
-    viridis: [
-        { value: 0.00, r:  68, g:   1, b:  84, a: 255 },
-        { value: 0.25, r:  59, g:  82, b: 139, a: 255 },
-        { value: 0.50, r:  33, g: 145, b: 140, a: 255 },
-        { value: 0.75, r:  94, g: 201, b:  98, a: 255 },
-        { value: 1.00, r: 253, g: 231, b:  37, a: 255 }
-    ],
-    magma: [
-        { value: 0.00, r:   0, g:   0, b:   4, a: 255 },
-        { value: 0.25, r:  81, g:  18, b: 124, a: 255 },
-        { value: 0.50, r: 183, g:  55, b: 121, a: 255 },
-        { value: 0.75, r: 252, g: 137, b:  97, a: 255 },
-        { value: 1.00, r: 252, g: 253, b: 191, a: 255 }
-    ],
-    coolwarm: [
-        { value: 0.0, r:  59, g:  76, b: 192, a: 255 },
-        { value: 0.5, r: 221, g: 221, b: 221, a: 255 },
-        { value: 1.0, r: 180, g:   4, b:  38, a: 255 }
-    ]
-};
 
 /**
  * Слой GeoTIFF-растра.
@@ -146,6 +106,7 @@ export class GeoTiffLayer extends Layer {
      *       - `[{ value: 0, r: 0, g: 0, b: 0, a: 255 }, ...]`
      *     Если не задан — для float / >8 бит одноканальных GeoTIFF
      *     автоматически включается `'grayscale'`.
+     *     Полный список пресетов — см. {@link module:ColorRamps}.
      * @param {number|null} [options.minValue=null] - Нижняя граница
      *     нормализации. `null` — авто по данным.
      * @param {number|null} [options.maxValue=null] - Верхняя граница
@@ -362,7 +323,7 @@ export class GeoTiffLayer extends Layer {
      * (возвращает `Promise.resolve()`).
      *
      * @param {string|Array} ramp - Строка-пресет или массив стопов
-     *     (формат см. в описании `options.colorRamp`).
+     *     (формат см. в описании `options.colorRamp` и {@link module:ColorRamps}).
      * @returns {Promise<void>}
      */
     async setColorRamp(ramp) {
@@ -621,7 +582,7 @@ export class GeoTiffLayer extends Layer {
             : (image.fileDirectory?.SampleFormat);
         const fmt = Array.isArray(fmtRaw) ? fmtRaw[0] : fmtRaw;
 
-        if (fmt === 3) return true;                        // IEEE float
+        if (fmt === 3) return true;                         // IEEE float
         if (Number.isFinite(bits) && bits > 8) return true; // >8 бит
         return false;
     }
@@ -705,7 +666,7 @@ export class GeoTiffLayer extends Layer {
             if (t < 0) t = 0;
             else if (t > 1) t = 1;
 
-            const c = this._sampleRamp(ramp, t);
+            const c = sampleColorRamp(ramp, t);
             rgba[j]     = c[0];
             rgba[j + 1] = c[1];
             rgba[j + 2] = c[2];
@@ -735,148 +696,16 @@ export class GeoTiffLayer extends Layer {
     /**
      * Возвращает нормализованную палитру (сортированную по `value`).
      * Результат кэшируется в `_colorRampNormalized`.
+     *
+     * Вся логика разбора пресетов/массивов — в {@link module:ColorRamps}.
+     *
      * @private
      * @returns {Array<{value:number,r:number,g:number,b:number,a:number}>}
      */
     _getColorRamp() {
         if (this._colorRampNormalized) return this._colorRampNormalized;
-
-        const input = this._colorRampInput;
-        let ramp;
-
-        if (typeof input === 'string') {
-            ramp = COLOR_RAMP_PRESETS[input];
-            if (!ramp) {
-                console.warn(`GeoTiffLayer: неизвестный пресет colorRamp "${input}", используем grayscale`);
-                ramp = COLOR_RAMP_PRESETS.grayscale;
-            }
-        } else if (Array.isArray(input)) {
-            ramp = this._parseRampArray(input);
-        } else {
-            ramp = COLOR_RAMP_PRESETS.grayscale;
-        }
-
-        const copy = ramp.map(s => ({ ...s })).sort((a, b) => a.value - b.value);
-        this._colorRampNormalized = copy;
-        return copy;
-    }
-
-    /**
-     * Парсит пользовательский массив стопов.
-     *
-     * Поддерживаются варианты:
-     *   `[[0, '#000'], [1, '#fff']]`
-     *   `[[0, [0,0,0]], [1, [255,255,255]]]`
-     *   `[{ value: 0, color: '#000' }, ...]`
-     *   `[{ value: 0, r, g, b, a }, ...]`
-     *
-     * @private
-     * @param {Array} arr
-     * @returns {Array<{value:number,r:number,g:number,b:number,a:number}>}
-     */
-    _parseRampArray(arr) {
-        const out = [];
-        for (const item of arr) {
-            if (Array.isArray(item) && item.length >= 2) {
-                out.push({ value: item[0], ...this._parseColorToRGBA(item[1]) });
-            } else if (item && typeof item === 'object') {
-                if (item.color !== undefined) {
-                    out.push({ value: item.value, ...this._parseColorToRGBA(item.color) });
-                } else if ('r' in item && 'g' in item && 'b' in item) {
-                    out.push({
-                        value: item.value,
-                        r: item.r | 0,
-                        g: item.g | 0,
-                        b: item.b | 0,
-                        a: item.a ?? 255
-                    });
-                }
-            }
-        }
-        if (out.length === 0) {
-            console.warn('GeoTiffLayer: пустой colorRamp, используем grayscale');
-            return COLOR_RAMP_PRESETS.grayscale.map(s => ({ ...s }));
-        }
-        if (out.length === 1) {
-            // растянем одиночный стоп на весь диапазон
-            out.push({ ...out[0], value: 1 });
-        }
-        return out;
-    }
-
-    /**
-     * Приводит цвет к `{r, g, b, a}` в 0..255.
-     *
-     * Поддерживает:
-     *  - массивы `[r,g,b]` / `[r,g,b,a]`;
-     *  - hex-строки `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`;
-     *  - `rgb(...)` / `rgba(...)`;
-     *  - именованные цвета (`'red'`, `'transparent'`, …) — через
-     *    `THREE.Color`, но с `getHex()`-нормализацией, чтобы избежать
-     *    сюрпризов с цветовым пространством.
-     *
-     * @private
-     * @param {*} c
-     * @returns {{r:number,g:number,b:number,a:number}}
-     */
-    _parseColorToRGBA(c) {
-        if (Array.isArray(c) && c.length >= 3) {
-            return {
-                r: c[0] | 0,
-                g: c[1] | 0,
-                b: c[2] | 0,
-                a: c.length >= 4 ? (c[3] | 0) : 255
-            };
-        }
-        if (typeof c === 'string') {
-            const s = c.trim();
-            if (s.toLowerCase() === 'transparent') {
-                return { r: 0, g: 0, b: 0, a: 0 };
-            }
-            if (s.startsWith('#')) {
-                const hex = s.slice(1);
-                if (hex.length === 3 || hex.length === 4) {
-                    return {
-                        r: parseInt(hex[0] + hex[0], 16),
-                        g: parseInt(hex[1] + hex[1], 16),
-                        b: parseInt(hex[2] + hex[2], 16),
-                        a: hex.length === 4 ? parseInt(hex[3] + hex[3], 16) : 255
-                    };
-                }
-                if (hex.length === 6 || hex.length === 8) {
-                    return {
-                        r: parseInt(hex.slice(0, 2), 16),
-                        g: parseInt(hex.slice(2, 4), 16),
-                        b: parseInt(hex.slice(4, 6), 16),
-                        a: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) : 255
-                    };
-                }
-            }
-            const rgba = s.match(
-                /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i
-            );
-            if (rgba) {
-                return {
-                    r: Math.round(+rgba[1]),
-                    g: Math.round(+rgba[2]),
-                    b: Math.round(+rgba[3]),
-                    a: rgba[4] !== undefined ? Math.round(+rgba[4] * 255) : 255
-                };
-            }
-            // named color через THREE.Color
-            try {
-                const col = new THREE.Color(s);
-                const hex = col.getHex(); // в SRGBColorSpace
-                return {
-                    r: (hex >> 16) & 0xff,
-                    g: (hex >> 8) & 0xff,
-                    b: hex & 0xff,
-                    a: 255
-                };
-            } catch (e) { /* fallthrough */ }
-        }
-        console.warn(`GeoTiffLayer: не удалось разобрать цвет "${c}", используем чёрный`);
-        return { r: 0, g: 0, b: 0, a: 255 };
+        this._colorRampNormalized = resolveColorRamp(this._colorRampInput);
+        return this._colorRampNormalized;
     }
 
     /**
@@ -888,41 +717,8 @@ export class GeoTiffLayer extends Layer {
     _parseNoDataColor(c) {
         if (c === null || c === undefined) return null;
         if (typeof c === 'string' && c.toLowerCase() === 'transparent') return null;
-        const rgba = this._parseColorToRGBA(c);
+        const rgba = parseColorToRGBA(c);
         return [rgba.r, rgba.g, rgba.b, rgba.a];
-    }
-
-    /**
-     * Линейная интерполяция палитры в точке `t ∈ [0, 1]`.
-     * @private
-     * @param {Array<{value:number,r:number,g:number,b:number,a:number}>} ramp
-     * @param {number} t
-     * @returns {[number, number, number, number]}
-     */
-    _sampleRamp(ramp, t) {
-        if (t <= ramp[0].value) {
-            const s = ramp[0];
-            return [s.r, s.g, s.b, s.a];
-        }
-        const last = ramp[ramp.length - 1];
-        if (t >= last.value) {
-            return [last.r, last.g, last.b, last.a];
-        }
-        for (let i = 1; i < ramp.length; i++) {
-            if (t <= ramp[i].value) {
-                const a = ramp[i - 1];
-                const b = ramp[i];
-                const denom = b.value - a.value;
-                const f = denom > 0 ? (t - a.value) / denom : 0;
-                return [
-                    Math.round(a.r + (b.r - a.r) * f),
-                    Math.round(a.g + (b.g - a.g) * f),
-                    Math.round(a.b + (b.b - a.b) * f),
-                    Math.round(a.a + (b.a - a.a) * f)
-                ];
-            }
-        }
-        return [last.r, last.g, last.b, last.a];
     }
 
     /* ================================================================

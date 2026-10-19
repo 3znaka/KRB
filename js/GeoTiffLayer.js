@@ -18,12 +18,25 @@
  *    ускоряет декодирование сжатых GeoTIFF (LZW, Deflate);
  *  - события hover/click/tooltip через общий `map.interaction`;
  *  - подписи через `TextManager` (тот же интерфейс, что у `Image`);
- *  - `getBounds(crs)` для `map.fitTo(layer)`.
+ *  - `getBounds(crs)` для `map.fitTo(layer)`;
+ *  - **режим источника высот** (`asElevation: true`) — см. ниже.
  *
  * Координаты внутри TIFF интерпретируются в его собственной СК (см. выше).
  * Для отображения все четыре угла растра проецируются в СК карты
  * (`map.projection`) и ложатся в плоскость через `THREE.PlaneGeometry` —
  * ровно так же, как это делает `Image` со своими `nodes`.
+ *
+ * ### Режим источника высот (`asElevation: true`)
+ *
+ * Если задан `asElevation: true`, одноканальные значения растра
+ * сохраняются в памяти и слой регистрируется в `TileManager` как
+ * провайдер высот. Тайлы карты в этом случае получают рельеф не из
+ * тайлового DEM-источника, а напрямую из GeoTIFF: `TileManager`
+ * вызывает {@link GeoTiffLayer#getTileHeights} для каждого тайла и
+ * раскладывает полученный массив в геометрию.
+ *
+ * Слой может быть одновременно и «провайдером высот», и обычной
+ * подложкой (например, с `opacity: 0` — тогда виден только рельеф).
  *
  * @module GeoTiffLayer
  */
@@ -53,6 +66,13 @@ const GEOTIFF_RENDER_ORDER = 995;
 const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url).href;
 
 /**
+ * Масштаб высот по умолчанию (совпадает с `DEFAULTS.HEIGHT_SCALE` в Utils,
+ * но мы не тянем зависимость ради одной константы).
+ * @private
+ */
+const DEFAULT_HEIGHT_SCALE = 1.0;
+
+/**
  * Слой GeoTIFF-растра.
  *
  * @example
@@ -66,6 +86,16 @@ const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url
  *     onProgress: (p) => console.log(`progress: ${(p * 100).toFixed(0)}%`)
  * });
  * tiff.addTo(map);
+ *
+ * @example
+ * // Только как источник высот (без отрисовки растра):
+ * const dem = new GeoTiffLayer({
+ *     source: 'https://example.com/dem.tif',
+ *     asElevation: true,
+ *     heightScale: 1.5,
+ *     opacity: 0
+ * });
+ * dem.addTo(map);
  */
 export class GeoTiffLayer extends Layer {
     /**
@@ -115,6 +145,22 @@ export class GeoTiffLayer extends Layer {
      *     `null` — авто (пытаемся прочитать GDAL_NODATA из TIFF).
      * @param {string|null} [options.noDataColor='transparent'] - Цвет для
      *     NoData (`'transparent'` / `null` = не рисовать, иначе CSS-цвет).
+     *
+     * @param {boolean} [options.asElevation=false] - Включить режим
+     *     источника высот: слой зарегистрируется в `TileManager` и
+     *     будет отдавать рельеф для тайлов карты через
+     *     {@link GeoTiffLayer#getTileHeights}. Требует одноканального
+     *     (DEM) растра — RGB/палитровые будут проигнорированы с
+     *     предупреждением. Слой при этом продолжает рисоваться как
+     *     обычный растр (можно скрыть через `opacity: 0`).
+     * @param {number} [options.heightScale=1.0] - Множитель высот при
+     *     работе в режиме источника высот. Значения растра умножаются
+     *     на этот коэффициент перед записью в Y-координату вершин
+     *     тайлов карты.
+     * @param {boolean} [options.keepRawData=false] - Хранить сырые
+     *     (не раскрашенные) значения растра в памяти. Автоматически
+     *     включается при `asElevation: true`. Для больших DEM это
+     *     ощутимый объём (например, 5000×5000 float = 100 МБ).
      *
      * @param {string} [options.title=''] - Текст подписи.
      * @param {Object} [options.titleStyle] - CSS-стили подписи.
@@ -195,6 +241,26 @@ export class GeoTiffLayer extends Layer {
         /** @private @type {number|null} */ this._effectiveMax = null;
         /** @private @type {number|null} */ this._effectiveNoData = null;
 
+        // --- Режим источника высот ---
+        /** @private @type {boolean} */
+        this._asElevation = options.asElevation === true;
+        /** @private @type {number} */
+        this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
+        /**
+         * Хранить ли сырые значения растра. Автоматически включается в
+         * elevation-режиме. В остальных случаях — по явному запросу.
+         * @private @type {boolean}
+         */
+        this._keepRawData = this._asElevation || options.keepRawData === true;
+
+        /** @private @type {Float32Array|Uint16Array|Uint8Array|Int16Array|null} */
+        this._rawData = null;
+        /** @private @type {number} */ this._rawWidth = 0;
+        /** @private @type {number} */ this._rawHeight = 0;
+        /** @private @type {[number, number]|null} */ this._geoOrigin = null;
+        /** @private @type {[number, number]|null} */ this._geoResolution = null;
+        /** @private @type {number|null} */ this._geoNoData = null;
+
         // --- Внутреннее состояние ---
         /** @private @type {THREE.Group} */ this._group = new THREE.Group();
         /** @private @type {THREE.Mesh|null} */ this._mesh = null;
@@ -218,6 +284,12 @@ export class GeoTiffLayer extends Layer {
          * @private @type {(() => void)|null}
          */
         this._unregisterInteraction = null;
+
+        if (this._asElevation && !this._colorRampInput) {
+            // Принудительно включаем ramp-путь, чтобы гарантированно
+            // читать сырые значения, а не RGB.
+            // Палитра по умолчанию — grayscale (см. resolveColorRamp).
+        }
     }
 
     /* ================================================================
@@ -246,12 +318,20 @@ export class GeoTiffLayer extends Layer {
      * Удаляет слой с карты, освобождает GPU-ресурсы и (если пул создавали
      * мы сами) уничтожает Web Worker Pool.
      *
+     * Если слой был зарегистрирован как источник высот в `TileManager`,
+     * регистрация снимается.
+     *
      * @returns {void}
      */
     removeFromMap() {
         if (this._unregisterInteraction) {
             try { this._unregisterInteraction(); } catch (e) { /* swallow */ }
             this._unregisterInteraction = null;
+        }
+
+        // Отвязываемся от TileManager, если мы — текущий провайдер высот.
+        if (this._map?.tileManager?.elevationProvider === this) {
+            this._map.tileManager.elevationProvider = null;
         }
 
         if (this._group && this._group.parent) {
@@ -276,6 +356,14 @@ export class GeoTiffLayer extends Layer {
         this._loaded = false;
         this._isVisible = false;
         this._worldPositions.length = 0;
+
+        // Освобождаем сырые DEM-данные.
+        this._rawData = null;
+        this._rawWidth = 0;
+        this._rawHeight = 0;
+        this._geoOrigin = null;
+        this._geoResolution = null;
+        this._geoNoData = null;
 
         this._colorRampNormalized = null;
         this._effectiveMin = null;
@@ -345,12 +433,82 @@ export class GeoTiffLayer extends Layer {
     }
 
     /* ================================================================
+       Публичный API провайдера высот
+       ================================================================ */
+
+    /**
+     * Готов ли слой отдавать высоты. Возвращает `true` только после
+     * того, как сырые DEM-данные прочитаны из TIFF.
+     *
+     * @returns {boolean}
+     */
+    isElevationProvider() {
+        return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0;
+    }
+
+    /**
+     * Возвращает высоты для сетки тайла `(z, virtX, y)` размером
+     * `(segments+1) × (segments+1)`, row-major от NW к SE — ровно
+     * в той раскладке, которую ожидает `TileManager.applyHeightsToGeometry`.
+     *
+     * `virtX` — «виртуальный» X-индекс тайла (может быть < 0 или >= 2^z
+     * для тайлов, развёрнутых через антимеридиан). Lon/lat вычисляются
+     * по стандартной XYZ-Web-Mercator формуле, значение сэмплится
+     * билинейно из сырого растра.
+     *
+     * Для точек за пределами экстента GeoTIFF возвращается `0`
+     * (плоская поверхность на уровне моря).
+     *
+     * @param {number} z - Дискретный зум (XYZ).
+     * @param {number} virtX - Виртуальный X-индекс тайла.
+     * @param {number} y - Y-индекс тайла.
+     * @param {number} segments - Число сегментов сетки (SEGMENTS движка).
+     * @returns {Float32Array} Массив высот длиной `(segments+1)²`,
+     *     уже умноженный на `options.heightScale`.
+     */
+    getTileHeights(z, virtX, y, segments) {
+        const grid = segments + 1;
+        const count = grid * grid;
+        const out = new Float32Array(count);
+
+        if (!this.isElevationProvider()) return out;
+
+        const n = 1 << z;
+        const nd = this._geoNoData;
+        const hs = this._elevationHeightScale;
+
+        for (let row = 0; row < grid; row++) {
+            const v = row / segments;
+            const tileY = y + v;
+            const lat = Math.atan(
+                Math.sinh(Math.PI * (1 - 2 * tileY / n))
+            ) * 180 / Math.PI;
+
+            for (let col = 0; col < grid; col++) {
+                const u = col / segments;
+                const tileX = virtX + u;
+                const lon = tileX / n * 360 - 180;
+
+                const value = this._sampleAtLonLat(lon, lat);
+                out[row * grid + col] =
+                    (value === null || value === nd || !Number.isFinite(value))
+                        ? 0
+                        : value * hs;
+            }
+        }
+        return out;
+    }
+
+    /* ================================================================
        Загрузка
        ================================================================ */
 
     /**
      * Асинхронная загрузка: открывает TIFF, читает растр, строит текстуру
      * и геометрию, добавляет меш в `map.worldGroup`.
+     *
+     * Если слой создан с `asElevation: true`, после чтения растра он
+     * автоматически регистрируется как источник высот в `TileManager`.
      *
      * @private
      * @returns {Promise<void>}
@@ -383,6 +541,11 @@ export class GeoTiffLayer extends Layer {
             }
 
             this._registerInteraction();
+
+            // Регистрация в TileManager как источника высот.
+            if (this._asElevation && typeof this._map.enableGeotiffElevation === 'function') {
+                this._map.enableGeotiffElevation(this);
+            }
 
             this._loaded = true;
             this._progress(1);
@@ -495,8 +658,8 @@ export class GeoTiffLayer extends Layer {
      *
      * Ветвление:
      *  - **рамповый режим** (одноканальный float / >8 бит, либо явный
-     *    `colorRamp`): чтение сырых значений через `readRasters()` с
-     *    нормализацией и палитрой;
+     *    `colorRamp`, либо `asElevation`): чтение сырых значений через
+     *    `readRasters()` с нормализацией и палитрой;
      *  - **RGB/palette режим**: старый путь через `readRGB()`.
      *
      * @private
@@ -535,8 +698,12 @@ export class GeoTiffLayer extends Layer {
      *  - RGB (PhotometricInterpretation=2) и palette (Photometric=3) —
      *    всегда через `readRGB` (палитра встроена в файл);
      *  - одноканальное (SamplesPerPixel=1) + (`SampleFormat=3` (float)
-     *    или `BitsPerSample>8` или явно задан `colorRamp`) — рампа;
+     *    или `BitsPerSample>8` или явно задан `colorRamp`, или включён
+     *    режим `asElevation`) — рампа;
      *  - всё остальное — `readRGB`.
+     *
+     * В режиме `asElevation` для RGB/палитровых файлов выводим
+     * предупреждение — они не годятся как DEM.
      *
      * @private
      * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
@@ -546,7 +713,12 @@ export class GeoTiffLayer extends Layer {
         const photometric = image.fileDirectory?.PhotometricInterpretation;
         // RGB (2) или Palette (3) — раскраска уже «внутри» файла.
         if (photometric === 2 || photometric === 3) {
-            if (this._colorRampInput !== undefined) {
+            if (this._asElevation) {
+                console.warn(
+                    'GeoTiffLayer: asElevation проигнорирован — ' +
+                    `изображение цветное/палитровое (PhotometricInterpretation=${photometric})`
+                );
+            } else if (this._colorRampInput !== undefined) {
                 console.warn(
                     'GeoTiffLayer: colorRamp проигнорирован — изображение цветное/палитровое ' +
                     `(PhotometricInterpretation=${photometric})`
@@ -560,7 +732,12 @@ export class GeoTiffLayer extends Layer {
             : (image.fileDirectory?.SamplesPerPixel ?? 1);
 
         if (samples !== 1) {
-            if (this._colorRampInput !== undefined) {
+            if (this._asElevation) {
+                console.warn(
+                    'GeoTiffLayer: asElevation проигнорирован — ' +
+                    `изображение многоканальное (samplesPerPixel=${samples})`
+                );
+            } else if (this._colorRampInput !== undefined) {
                 console.warn(
                     `GeoTiffLayer: colorRamp проигнорирован — изображение многоканальное (samplesPerPixel=${samples})`
                 );
@@ -570,6 +747,9 @@ export class GeoTiffLayer extends Layer {
 
         // Пользователь явно попросил палитру.
         if (this._colorRampInput !== undefined) return true;
+
+        // Режим источника высот: гарантированно читаем сырые значения.
+        if (this._asElevation) return true;
 
         // Авто: float или >8 бит одноканальные.
         const bitsRaw = typeof image.getBitsPerSample === 'function'
@@ -593,6 +773,11 @@ export class GeoTiffLayer extends Layer {
 
     /**
      * Читает сырые значения и раскрашивает их палитрой.
+     *
+     * Если включён `_keepRawData`, сырые значения и геопривязка
+     * сохраняются в поля экземпляра — они используются методом
+     * {@link GeoTiffLayer#getTileHeights} в режиме источника высот.
+     *
      * @private
      * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
      * @param {number} width
@@ -617,6 +802,25 @@ export class GeoTiffLayer extends Layer {
                     if (gdalNd !== null && gdalNd !== undefined) noData = gdalNd;
                 }
             } catch (e) { /* ignore */ }
+        }
+
+        // Сохраняем сырые данные и геопривязку, если нужно.
+        if (this._keepRawData) {
+            this._rawData = data;
+            this._rawWidth = width;
+            this._rawHeight = height;
+            this._geoNoData = noData;
+            try {
+                this._geoOrigin = image.getOrigin();
+                this._geoResolution = image.getResolution();
+            } catch (e) {
+                console.warn('GeoTiffLayer: не удалось прочитать origin/resolution', e);
+                this._geoOrigin = null;
+                this._geoResolution = null;
+                // Без геопривязки сэмплировать по lon/lat нельзя —
+                // сбрасываем rawData, чтобы провайдер не отдавал мусор.
+                this._rawData = null;
+            }
         }
 
         // Диапазон нормализации
@@ -719,6 +923,107 @@ export class GeoTiffLayer extends Layer {
         if (typeof c === 'string' && c.toLowerCase() === 'transparent') return null;
         const rgba = parseColorToRGBA(c);
         return [rgba.r, rgba.g, rgba.b, rgba.a];
+    }
+
+    /* ================================================================
+       Сэмплирование сырых DEM-данных
+       ================================================================ */
+
+    /**
+     * Возвращает значение растра в точке `(lon, lat)` (в градусах WGS84)
+     * с билинейной интерполяцией.
+     *
+     * Внутри:
+     *  1. `lon/lat` → координаты СК растра (`this._crs`) через proj4
+     *     (для `EPSG:4326`/`CRS:84` — без преобразования);
+     *  2. смещение по `_geoOrigin` / `_geoResolution` → пиксельные
+     *     координаты (с учётом того, что `_geoOrigin` — это центр
+     *     TL-пикселя, а не его угол);
+     *  3. билинейная интерполяция по 4 соседним пикселям.
+     *
+     * Возвращает `null`, если точка вне экстента растра, или
+     * `_geoNoData`, если все 4 соседа — NoData.
+     *
+     * @private
+     * @param {number} lon
+     * @param {number} lat
+     * @returns {number|null}
+     */
+    _sampleAtLonLat(lon, lat) {
+        if (!this._rawData || !this._geoOrigin || !this._geoResolution) return null;
+
+        let xy;
+        const code = this._crs?.code;
+        if (code === 'EPSG:4326' || code === 'CRS:84') {
+            xy = [lon, lat];
+        } else if (typeof this._crs?.fromLonLatSafe === 'function') {
+            xy = this._crs.fromLonLatSafe([lon, lat]);
+        } else if (typeof this._crs?.fromLonLat === 'function') {
+            try { xy = this._crs.fromLonLat([lon, lat]); }
+            catch (e) { xy = null; }
+        } else {
+            return null;
+        }
+
+        if (!xy || !Number.isFinite(xy[0]) || !Number.isFinite(xy[1])) return null;
+
+        const [ox, oy] = this._geoOrigin;
+        const [rx, ry] = this._geoResolution;
+        if (!rx || !ry) return null;
+
+        const px = (xy[0] - ox) / rx;
+        const py = (xy[1] - oy) / ry;
+
+        if (px < 0 || py < 0 || px > this._rawWidth - 1 || py > this._rawHeight - 1) {
+            return null;
+        }
+
+        return this._bilinearSample(px, py);
+    }
+
+    /**
+     * Билинейная интерполяция в пиксельных координатах.
+     *
+     * @private
+     * @param {number} px - Дробный X (0..width-1).
+     * @param {number} py - Дробный Y (0..height-1).
+     * @returns {number|null}
+     */
+    _bilinearSample(px, py) {
+        const w = this._rawWidth;
+        const h = this._rawHeight;
+        const d = this._rawData;
+        const nd = this._geoNoData;
+
+        const x0 = Math.floor(px);
+        const y0 = Math.floor(py);
+        const x1 = Math.min(x0 + 1, w - 1);
+        const y1 = Math.min(y0 + 1, h - 1);
+        const fx = px - x0;
+        const fy = py - y0;
+
+        const v00 = d[y0 * w + x0];
+        const v10 = d[y0 * w + x1];
+        const v01 = d[y1 * w + x0];
+        const v11 = d[y1 * w + x1];
+
+        const isValid = (v) => Number.isFinite(v) && (nd === null || v !== nd);
+
+        // Если все 4 валидны — обычная билинейная интерполяция.
+        if (isValid(v00) && isValid(v10) && isValid(v01) && isValid(v11)) {
+            const a = v00 * (1 - fx) + v10 * fx;
+            const b = v01 * (1 - fx) + v11 * fx;
+            return a * (1 - fy) + b * fy;
+        }
+
+        // Иначе — среднее по валидным (сглаживаем NoData на границе).
+        let sum = 0;
+        let cnt = 0;
+        if (isValid(v00)) { sum += v00; cnt++; }
+        if (isValid(v10)) { sum += v10; cnt++; }
+        if (isValid(v01)) { sum += v01; cnt++; }
+        if (isValid(v11)) { sum += v11; cnt++; }
+        return cnt > 0 ? sum / cnt : null;
     }
 
     /* ================================================================

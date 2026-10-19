@@ -129,6 +129,9 @@ export class KrbMap {
          * кадре тратит CPU на proj4. Если тайловых слоёв нет, эта
          * работа бессмысленна.
          *
+         * Может быть поднят в `true` позже — через
+         * {@link KrbMap#enableGeotiffElevation}.
+         *
          * @type {boolean}
          */
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
@@ -182,6 +185,14 @@ export class KrbMap {
 
         const elevLayer = this.layers.find(l => l.elevation);
         this.effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
+
+        /**
+         * Пользователь задал minCameraHeightOffset явно. Если нет — при
+         * подключении внешнего источника высот (GeoTIFF) значение
+         * пересчитывается от effectiveHeightScale.
+         * @private
+         */
+        this._minCameraHeightOffsetIsCustom = options.minCameraHeightOffset !== undefined;
         this.MIN_CAMERA_HEIGHT_OFFSET = options.minCameraHeightOffset ?? (200 * this.effectiveHeightScale);
 
         this.continuousZoom = this.view.zoom;
@@ -718,6 +729,74 @@ export class KrbMap {
     }
 
     /* ================================================================
+       Источник высот из GeoTIFF
+       ================================================================ */
+
+    /**
+     * Подключает GeoTIFF-слой как источник высот для тайлов карты.
+     *
+     * Вызывается автоматически из {@link module:GeoTiffLayer} при
+     * загрузке, если слой создан с `asElevation: true`. Может быть
+     * вызван и вручную — работает и «холодно» (до загрузки тайлов),
+     * и «горячо» (когда тайлы уже есть).
+     *
+     * Что делает:
+     *  1. Поднимает `hasElevation` и `hasTileLayers` карты;
+     *  2. Подхватывает `heightScale` из слоя (если не был задан
+     *     пользователем через `options.minCameraHeightOffset`);
+     *  3. Делегирует регистрацию в {@link TileManager#enableGeotiffElevation}
+     *     — тот при необходимости пересоздаст уже загруженные «плоские»
+     *     тайлы и запросит для них высоты;
+     *  4. Сбрасывает кэш максимальных высот поверхности;
+     *  5. Форсирует пересчёт видимых тайлов.
+     *
+     * @param {import('./GeoTiffLayer.js').GeoTiffLayer} layer
+     * @returns {void}
+     */
+    enableGeotiffElevation(layer) {
+        if (!layer || !this.tileManager) return;
+
+        // Подхватываем масштаб высот слоя (если он задан и валиден).
+        const hs = layer._elevationHeightScale;
+        if (Number.isFinite(hs) && hs > 0) {
+            this.effectiveHeightScale = hs;
+            if (!this._minCameraHeightOffsetIsCustom) {
+                this.MIN_CAMERA_HEIGHT_OFFSET = 200 * this.effectiveHeightScale;
+            }
+        }
+
+        this.hasElevation = true;
+        // GeoTIFF-elevation даёт рельеф тайлам, значит TileManager
+        // должен работать даже если текстового слоя нет.
+        if (!this.hasTileLayers) this.hasTileLayers = true;
+
+        this.tileManager.enableGeotiffElevation(layer);
+
+        // Старые данные о максимальной высоте больше не валидны.
+        this._surfaceMaxHeightCache.clear();
+
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /**
+     * Отключает текущий внешний источник высот (GeoTIFF).
+     *
+     * Полезно, если пользователь хочет вернуться к URL-источнику или
+     * убрать рельеф. Уже поднятые `hasElevation`/`hasTileLayers`
+     * карты не опускаются: возможно, у пользователя есть и другие
+     * источники рельефа. Тайлы с уже применёнными высотами «доживают»
+     * до вытеснения из LRU-кэша.
+     *
+     * @returns {void}
+     */
+    disableGeotiffElevation() {
+        if (!this.tileManager) return;
+        this.tileManager.elevationProvider = null;
+        this._surfaceMaxHeightCache.clear();
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /* ================================================================
        Высоты поверхности
        ================================================================ */
 
@@ -1165,6 +1244,9 @@ export class KrbMap {
      * пути — включая построение deformed-тайлов через proj4, которое
      * для узких проекций (Equal Earth и т.п.) давало просадку до 1 FPS
      * даже при пустом списке layers.
+     *
+     * Внешний источник высот (GeoTIFF) поднимает `hasTileLayers`, так
+     * что после его подключения тайлы будут обновляться.
      *
      * @param {boolean} [force]
      */

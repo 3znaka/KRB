@@ -81,6 +81,13 @@ export class Tile {
  *    карты. Режим включается флагом `engine.deformedTiles` (в Core —
  *    авто, если `!projection.isMercator`).
  *
+ * Поддерживает два источника высот:
+ *  - **URL-источник DEM-тайлов** (`engine.getElevationUrl` → worker);
+ *  - **внешний провайдер** (`elevationProvider`, например GeoTiffLayer
+ *    в режиме `asElevation`). Подключается методом
+ *    {@link TileManager#enableGeotiffElevation}; при наличии провайдера
+ *    запросы высот идут к нему синхронно, минуя worker и сеть.
+ *
  * @example
  * const engine = {
  *     currentDiscreteZoom: 3,
@@ -140,21 +147,50 @@ export class TileManager {
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
+        /**
+         * Активен ли рельеф. Может быть поднят в `true` позже методом
+         * {@link TileManager#enableGeotiffElevation}, даже если
+         * изначально в `engine.hasElevation` было `false`.
+         * @type {boolean}
+         */
         this.hasElevation = engine.hasElevation;
+
+        /**
+         * Внешний провайдер высот (например, GeoTiffLayer в режиме
+         * `asElevation`). Если задан — {@link TileManager#requestElevation}
+         * сначала пытается взять данные у него, и только потом — из
+         * URL/worker/fallback.
+         *
+         * Интерфейс провайдера:
+         *  - `isElevationProvider(): boolean` — готов ли отдавать высоты;
+         *  - `getTileHeights(z, virtX, y, segments): Float32Array` —
+         *    `(segments+1)²` высот в row-major от NW, уже с применённым
+         *    масштабом.
+         *
+         * @type {Object|null}
+         */
+        this.elevationProvider = null;
 
         this.pendingWorkerJobs = [];
         this.activeWorkerJobs = 0;
         this.nextJobId = 1;
         this.workerPromises = new Map();
 
+        // Кэши/очереди высот создаём ВСЕГДА: провайдер может быть
+        // подключён позже (enableGeotiffElevation), и код requestElevation
+        // / loadTile должен иметь к ним доступ без дополнительных проверок.
+        this.srcKeyToElevUrl = new Map();
+        this.parentElevCache = engine.globalElevCache || new Map();
+        this.parentElevPromises = new Map();
+        this.elevDirectPromises = new Map();
+        this.elevationQueue = [];
+        this.activeElevationFetches = 0;
+        this.MAX_ELEVATION_FETCHES = 4;
+
+        // Worker нужен только для URL-источника DEM-тайлов. Для провайдера
+        // он не требуется (там всё синхронно), поэтому создаём воркер
+        // только если hasElevation был true изначально.
         if (this.hasElevation) {
-            this.srcKeyToElevUrl = new Map();
-            this.parentElevCache = engine.globalElevCache || new Map();
-            this.parentElevPromises = new Map();
-            this.elevDirectPromises = new Map();
-            this.elevationQueue = [];
-            this.activeElevationFetches = 0;
-            this.MAX_ELEVATION_FETCHES = 4;
             this.initWorker();
         }
 
@@ -385,6 +421,96 @@ export class TileManager {
         this.tiles.set(k, inst);
         this.loadTile(inst);
         return inst;
+    }
+
+    /* ================================================================
+       Подключение внешнего источника высот (GeoTIFF)
+       ================================================================ */
+
+    /**
+     * Включает источник высот на основе внешнего провайдера (например,
+     * `GeoTiffLayer` в режиме `asElevation`).
+     *
+     * Работает и в «холодном» (до загрузки тайлов), и в «горячем»
+     * состоянии:
+     *  - если `hasElevation` был `false` — все уже загруженные «плоские»
+     *    тайлы (4 вершины) будут удалены; следующий `update()` создаст
+     *    их заново уже с сеткой `SEGMENTS`, и они запросят высоты у
+     *    провайдера;
+     *  - если `hasElevation` уже был `true` — тайлам, которые ожидали
+     *    высоты, но ещё не получили их, будет запущен повторный запрос
+     *    уже через провайдер. Тайлы, у которых высоты уже применены
+     *    (например, из tile-DEM), не трогаются: они «доживают» до
+     *    вытеснения из LRU-кэша.
+     *
+     * Интерфейс провайдера:
+     *  - `isElevationProvider(): boolean` — готов ли отдавать высоты;
+     *  - `getTileHeights(z, virtX, y, segments): Float32Array` —
+     *    `(segments+1)²` высот в row-major от NW; масштаб высот уже
+     *    применён внутри провайдера.
+     *
+     * @param {Object} provider - Объект-провайдер высот.
+     * @returns {void}
+     */
+    enableGeotiffElevation(provider) {
+        if (!provider) return;
+        if (this.elevationProvider === provider) return;
+
+        const wasElevated = this.hasElevation;
+        this.elevationProvider = provider;
+        this.hasElevation = true;
+
+        if (!wasElevated) {
+            // Пересоздаём «плоские» тайлы — они должны получить SEGMENTS-сетку.
+            this._disposeFlatTiles();
+        } else {
+            // Уже был рельеф (URL-источник). Тайлы, ожидавшие высоты,
+            // теперь должны спросить у провайдера.
+            this._refreshElevationsFromProvider();
+        }
+
+        // Форсируем обновление видимых тайлов — новые тайлы будут
+        // созданы с правильной геометрией.
+        this.frame = 0;
+    }
+
+    /**
+     * Удаляет из кэша тайлы, чья геометрия не соответствует текущему
+     * режиму (плоские, `seg=1`). Следующий `update()` создаст их заново.
+     *
+     * Тайлы в состоянии `loading` не трогаем: к моменту, когда
+     * `loadTile` дойдёт до `createTileMesh`, `this.hasElevation` уже
+     * будет `true`, и они создадутся правильно.
+     *
+     * @private
+     */
+    _disposeFlatTiles() {
+        const targetCount = (this.engine.SEGMENTS + 1) * (this.engine.SEGMENTS + 1);
+        const toDispose = [];
+        for (const inst of this.tiles.values()) {
+            if (!inst.mesh || !inst.geometry) continue;
+            if (inst.loading) continue;
+            const count = inst.geometry.attributes.position.count;
+            if (count !== targetCount) toDispose.push(inst);
+        }
+        for (const inst of toDispose) this.disposeTile(inst);
+    }
+
+    /**
+     * Повторно запрашивает высоты у провайдера для тайлов, которые
+     * ждали их, но ещё не получили.
+     *
+     * @private
+     */
+    _refreshElevationsFromProvider() {
+        for (const inst of this.tiles.values()) {
+            if (!inst.mesh) continue;
+            if (inst.loading) continue;
+            if (inst.heightsApplied) continue;
+            if (!this.shouldRequestElevation(inst)) continue;
+            inst.expectsElevation = true;
+            this.requestElevation(inst);
+        }
     }
 
     /**
@@ -717,6 +843,13 @@ export class TileManager {
 
     /**
      * Запрашивает данные высот для тайла и применяет их к геометрии.
+     *
+     * Порядок источников:
+     *  1. **Внешний провайдер** (`elevationProvider`, например GeoTIFF) —
+     *     синхронный, из памяти;
+     *  2. **URL-источник DEM-тайлов** (`srcKeyToElevUrl`) — worker + сеть;
+     *  3. **Fallback** — родительский DEM-тайл (только для URL-режима).
+     *
      * @param {Object} inst
      * @returns {Promise<void>}
      * @private
@@ -726,17 +859,36 @@ export class TileManager {
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
             const srcKey = getVirtKey(inst.z, srcX, inst.y);
-            const elevUrl = this.srcKeyToElevUrl.get(srcKey);
-            const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
-            const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
-            const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
 
-            let heights;
-            if (elevUrl) {
-                heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
-            } else {
+            let heights = null;
+
+            // --- 1. Внешний провайдер (GeoTIFF и т.п.) ---
+            const provider = this.elevationProvider;
+            if (provider &&
+                typeof provider.isElevationProvider === 'function' &&
+                provider.isElevationProvider() &&
+                typeof provider.getTileHeights === 'function') {
+                heights = provider.getTileHeights(
+                    inst.z, inst.virtX, inst.y, this.engine.SEGMENTS
+                );
+            }
+
+            // --- 2. URL-источник DEM-тайлов ---
+            if (!heights) {
+                const elevUrl = this.srcKeyToElevUrl.get(srcKey);
+                if (elevUrl) {
+                    const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
+                    const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
+                    const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
+                    heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
+                }
+            }
+
+            // --- 3. Fallback на родительский DEM-тайл ---
+            if (!heights) {
                 heights = await this.getFallbackElevation(inst);
             }
+
             if (this.tiles.get(k) !== inst || !inst.mesh) return;
             this.applyHeightsToGeometry(inst, heights);
             inst.ready = true;
@@ -846,10 +998,19 @@ export class TileManager {
 
     /**
      * Загружает данные высот родительского тайла.
+     *
+     * Если для (z, srcX, y) нет URL (например, DEM-слой не подключён,
+     * а высоты сейчас приходят из внешнего провайдера) — возвращает
+     * null, не создавая запросов.
+     *
      * @private
      */
     async getParentElevData(z, srcX, y) {
         if (z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return null;
+
+        const url = this.engine.getElevationUrl(z, srcX, y);
+        if (!url) return null;
+
         const key = `${z},${srcX},${y}`;
         if (this.parentElevCache.has(key)) return this.parentElevCache.get(key);
         if (this.parentElevPromises.has(key)) return this.parentElevPromises.get(key);
@@ -872,7 +1033,7 @@ export class TileManager {
                 this.parentElevPromises.delete(key);
                 resolve(null);
             };
-            img.src = this.engine.getElevationUrl(z, srcX, y);
+            img.src = url;
         });
         this.parentElevPromises.set(key, promise);
         return promise;
@@ -949,6 +1110,10 @@ export class TileManager {
 
     /**
      * Масштаб высот из слоёв движка.
+     *
+     * Используется только в URL-режиме (worker). Для внешнего провайдера
+     * масштаб применяется внутри `provider.getTileHeights`.
+     *
      * @returns {number}
      * @private
      */
@@ -964,12 +1129,16 @@ export class TileManager {
      * по 5 точкам вокруг центра — иначе на нелинейных проекциях легко
      * ошибиться с диапазоном.
      *
+     * Ничего не делает, если активен внешний провайдер высот
+     * (GeoTIFF и т.п.) — у него нет URL для предзагрузки.
+     *
      * @param {THREE.Vector3} center
      * @param {number} z
      * @param {THREE.Vector3} worldGroupPos
      */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation || z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return;
+        if (this.elevationProvider) return;
         const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
         const margin = 2;
         const radius = tileSize * margin;
@@ -1057,6 +1226,11 @@ export class TileManager {
      * по UV-сетке и возвращает (SEGMENTS+1)² высот в row-major, что
      * совпадает с раскладкой вершин PlaneGeometry и для deformed,
      * и для плоских тайлов.
+     *
+     * Создаётся только если `hasElevation` был `true` в конструкторе
+     * (URL-источник DEM). Внешний провайдер (GeoTIFF) обходится без
+     * воркера — там вычисления синхронные.
+     *
      * @private
      */
     initWorker() {

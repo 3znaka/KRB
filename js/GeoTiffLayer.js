@@ -7,7 +7,12 @@
  *    `GeographicTypeGeoKey`) с фолбэком на `map.inputCRS` / WGS84;
  *  - корректное размещение с учётом `ModelPixelScale` / `ModelTiepoint`
  *    (используются методы `image.getOrigin()` / `getResolution()`);
- *  - чтение растра как RGB-текстуры через `image.readRGB()`;
+ *  - чтение многоканальных/палитровых 8-битных снимков через `image.readRGB()`;
+ *  - чтение одноканальных (DEM) растров (float / >8 бит) через
+ *    `image.readRasters()` с нормализацией значений и раскраской палитрой
+ *    (по умолчанию — чёрно-белая);
+ *  - произвольные цветовые палитры и пресеты (`terrain`, `viridis`, …);
+ *  - обработку NoData (авто из GDAL_NODATA или явно);
  *  - опциональный Web Worker Pool (см. `geotiff.worker.js`) — сильно
  *    ускоряет декодирование сжатых GeoTIFF (LZW, Deflate);
  *  - события hover/click/tooltip через общий `map.interaction`;
@@ -42,6 +47,52 @@ const GEOTIFF_RENDER_ORDER = 995;
 const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url).href;
 
 /**
+ * Встроенные цветовые палитры для одноканальных растров.
+ *
+ * Формат стопа: `{ value: 0..1, r, g, b, a: 0..255 }`.
+ * Значения `r/g/b/a` — «сырые» sRGB байты; при `SRGBColorSpace` на текстуре
+ * это даёт ожидаемые цвета.
+ *
+ * @private
+ */
+const COLOR_RAMP_PRESETS = {
+    grayscale: [
+        { value: 0, r:   0, g:   0, b:   0, a: 255 },
+        { value: 1, r: 255, g: 255, b: 255, a: 255 }
+    ],
+    terrain: [
+        { value: 0.00, r:   0, g:  40, b: 100, a: 255 }, // глубокая вода
+        { value: 0.10, r:   0, g: 100, b: 180, a: 255 }, // мелководье
+        { value: 0.20, r: 100, g: 180, b: 220, a: 255 }, // берег
+        { value: 0.25, r: 190, g: 215, b: 160, a: 255 }, // низины
+        { value: 0.45, r: 100, g: 160, b:  80, a: 255 }, // равнины
+        { value: 0.65, r: 200, g: 180, b: 120, a: 255 }, // плато
+        { value: 0.80, r: 170, g: 130, b:  90, a: 255 }, // горы
+        { value: 0.90, r: 220, g: 220, b: 220, a: 255 }, // снег
+        { value: 1.00, r: 255, g: 255, b: 255, a: 255 }  // пики
+    ],
+    viridis: [
+        { value: 0.00, r:  68, g:   1, b:  84, a: 255 },
+        { value: 0.25, r:  59, g:  82, b: 139, a: 255 },
+        { value: 0.50, r:  33, g: 145, b: 140, a: 255 },
+        { value: 0.75, r:  94, g: 201, b:  98, a: 255 },
+        { value: 1.00, r: 253, g: 231, b:  37, a: 255 }
+    ],
+    magma: [
+        { value: 0.00, r:   0, g:   0, b:   4, a: 255 },
+        { value: 0.25, r:  81, g:  18, b: 124, a: 255 },
+        { value: 0.50, r: 183, g:  55, b: 121, a: 255 },
+        { value: 0.75, r: 252, g: 137, b:  97, a: 255 },
+        { value: 1.00, r: 252, g: 253, b: 191, a: 255 }
+    ],
+    coolwarm: [
+        { value: 0.0, r:  59, g:  76, b: 192, a: 255 },
+        { value: 0.5, r: 221, g: 221, b: 221, a: 255 },
+        { value: 1.0, r: 180, g:   4, b:  38, a: 255 }
+    ]
+};
+
+/**
  * Слой GeoTIFF-растра.
  *
  * @example
@@ -50,7 +101,8 @@ const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url
  *     useWorker: true,
  *     poolSize: 2,
  *     opacity: 1,
- *     onLoad: (layer) => console.log('loaded:', layer.getBounds()),
+ *     colorRamp: 'terrain',       // опционально, по умолчанию grayscale
+ *     onLoad: (layer) => console.log('loaded:', layer.getBounds(), layer.getDataRange()),
  *     onProgress: (p) => console.log(`progress: ${(p * 100).toFixed(0)}%`)
  * });
  * tiff.addTo(map);
@@ -84,6 +136,24 @@ export class GeoTiffLayer extends Layer {
      * @param {Function} [options.onLoad] - Колбэк успешной загрузки,
      *     получает экземпляр слоя.
      * @param {Function} [options.onError] - Колбэк ошибки, получает Error.
+     *
+     * @param {string|Array} [options.colorRamp=undefined] - Палитра для
+     *     одноканальных (DEM) данных. Строка — имя пресета
+     *     (`'grayscale'`, `'terrain'`, `'viridis'`, `'magma'`, `'coolwarm'`),
+     *     либо массив стопов:
+     *       - `[[0, '#000000'], [0.5, '#808080'], [1, '#ffffff']]`
+     *       - `[{ value: 0, color: '#000' }, { value: 1, color: '#fff' }]`
+     *       - `[{ value: 0, r: 0, g: 0, b: 0, a: 255 }, ...]`
+     *     Если не задан — для float / >8 бит одноканальных GeoTIFF
+     *     автоматически включается `'grayscale'`.
+     * @param {number|null} [options.minValue=null] - Нижняя граница
+     *     нормализации. `null` — авто по данным.
+     * @param {number|null} [options.maxValue=null] - Верхняя граница
+     *     нормализации. `null` — авто по данным.
+     * @param {number|null} [options.noDataValue=null] - Значение NoData.
+     *     `null` — авто (пытаемся прочитать GDAL_NODATA из TIFF).
+     * @param {string|null} [options.noDataColor='transparent'] - Цвет для
+     *     NoData (`'transparent'` / `null` = не рисовать, иначе CSS-цвет).
      *
      * @param {string} [options.title=''] - Текст подписи.
      * @param {Object} [options.titleStyle] - CSS-стили подписи.
@@ -145,6 +215,24 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
+
+        // --- Рендеринг одноканальных (DEM) данных ---
+        /** @private */ this._colorRampInput = options.colorRamp ?? undefined;
+        /**
+         * Кэш нормализованной палитры. Заполняется в `_getColorRamp()`.
+         * @private @type {Array<{value:number,r:number,g:number,b:number,a:number}>|null}
+         */
+        this._colorRampNormalized = null;
+        /** @private */ this._minValue = options.minValue ?? null;
+        /** @private */ this._maxValue = options.maxValue ?? null;
+        /** @private */ this._noDataValue = options.noDataValue ?? null;
+        /** @private */ this._noDataColor = options.noDataColor !== undefined
+            ? options.noDataColor
+            : 'transparent';
+
+        /** @private @type {number|null} */ this._effectiveMin = null;
+        /** @private @type {number|null} */ this._effectiveMax = null;
+        /** @private @type {number|null} */ this._effectiveNoData = null;
 
         // --- Внутреннее состояние ---
         /** @private @type {THREE.Group} */ this._group = new THREE.Group();
@@ -228,6 +316,11 @@ export class GeoTiffLayer extends Layer {
         this._isVisible = false;
         this._worldPositions.length = 0;
 
+        this._colorRampNormalized = null;
+        this._effectiveMin = null;
+        this._effectiveMax = null;
+        this._effectiveNoData = null;
+
         super.removeFromMap();
     }
 
@@ -248,6 +341,47 @@ export class GeoTiffLayer extends Layer {
      * @returns {import('../js_TP/geotiff.bundle.js').GeoTIFFImage|null}
      */
     getImage() { return this._image; }
+
+    /**
+     * Фактический диапазон значений, использованный для нормализации.
+     * Заполняется только для рампового режима (одноканальные DEM).
+     * Для RGB-растров вернёт `null`.
+     *
+     * @returns {{min:number, max:number}|null}
+     */
+    getDataRange() {
+        if (this._effectiveMin === null) return null;
+        return { min: this._effectiveMin, max: this._effectiveMax };
+    }
+
+    /**
+     * Меняет палитру и перестраивает текстуру «на лету».
+     *
+     * Имеет смысл только для одноканальных (DEM) растров.
+     * Для RGB/палитровых снимков метод ничего не делает
+     * (возвращает `Promise.resolve()`).
+     *
+     * @param {string|Array} ramp - Строка-пресет или массив стопов
+     *     (формат см. в описании `options.colorRamp`).
+     * @returns {Promise<void>}
+     */
+    async setColorRamp(ramp) {
+        this._colorRampInput = ramp;
+        this._colorRampNormalized = null;
+
+        if (!this._image) return;
+        if (!this._isRampImage(this._image)) return;
+
+        const { texture } = await this._readAsRampTexture(
+            this._image, this._image.getWidth(), this._image.getHeight()
+        );
+        if (this._texture) this._texture.dispose();
+        this._texture = texture;
+        if (this._material) {
+            this._material.map = texture;
+            this._material.needsUpdate = true;
+        }
+    }
 
     /* ================================================================
        Загрузка
@@ -340,7 +474,6 @@ export class GeoTiffLayer extends Layer {
             return await fromArrayBuffer(src);
         }
         if (ArrayBuffer.isView(src)) {
-            // Uint8Array и т.п. — приводим к «сырому» буферу нужного окна
             const view = src;
             const buf = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
             return await fromArrayBuffer(buf);
@@ -399,9 +532,11 @@ export class GeoTiffLayer extends Layer {
     /**
      * Читает пиксели и создаёт `THREE.DataTexture` в формате RGBA.
      *
-     * Использует `image.readRGB()`, который корректно обрабатывает
-     * PhotometricInterpretation (RGB, palette, grayscale) и
-     * BitsPerSample. Для одноканальных DEM получится серая текстура.
+     * Ветвление:
+     *  - **рамповый режим** (одноканальный float / >8 бит, либо явный
+     *    `colorRamp`): чтение сырых значений через `readRasters()` с
+     *    нормализацией и палитрой;
+     *  - **RGB/palette режим**: старый путь через `readRGB()`.
      *
      * @private
      * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
@@ -411,13 +546,16 @@ export class GeoTiffLayer extends Layer {
         const width = image.getWidth();
         const height = image.getHeight();
 
+        if (this._isRampImage(image)) {
+            return await this._readAsRampTexture(image, width, height);
+        }
+
+        // --- Старый путь: RGB / palette / 8-бит grayscale ---
         const readOpts = {};
         if (this._pool) readOpts.pool = this._pool;
 
-        // readRGB возвращает Uint8Array длиной width*height*3
         const rgb = await image.readRGB(readOpts);
 
-        // Разворачиваем в RGBA (three.js предпочитает RGBA)
         const rgba = new Uint8Array(width * height * 4);
         for (let i = 0, j = 0; j < rgba.length; i += 3, j += 4) {
             rgba[j]     = rgb[i];
@@ -426,17 +564,365 @@ export class GeoTiffLayer extends Layer {
             rgba[j + 3] = 255;
         }
 
+        return { texture: this._makeDataTexture(rgba, width, height), width, height };
+    }
+
+    /**
+     * Решает, нужно ли применять палитру для данного изображения.
+     *
+     * Логика:
+     *  - RGB (PhotometricInterpretation=2) и palette (Photometric=3) —
+     *    всегда через `readRGB` (палитра встроена в файл);
+     *  - одноканальное (SamplesPerPixel=1) + (`SampleFormat=3` (float)
+     *    или `BitsPerSample>8` или явно задан `colorRamp`) — рампа;
+     *  - всё остальное — `readRGB`.
+     *
+     * @private
+     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
+     * @returns {boolean}
+     */
+    _isRampImage(image) {
+        const photometric = image.fileDirectory?.PhotometricInterpretation;
+        // RGB (2) или Palette (3) — раскраска уже «внутри» файла.
+        if (photometric === 2 || photometric === 3) {
+            if (this._colorRampInput !== undefined) {
+                console.warn(
+                    'GeoTiffLayer: colorRamp проигнорирован — изображение цветное/палитровое ' +
+                    `(PhotometricInterpretation=${photometric})`
+                );
+            }
+            return false;
+        }
+
+        const samples = typeof image.getSamplesPerPixel === 'function'
+            ? image.getSamplesPerPixel()
+            : (image.fileDirectory?.SamplesPerPixel ?? 1);
+
+        if (samples !== 1) {
+            if (this._colorRampInput !== undefined) {
+                console.warn(
+                    `GeoTiffLayer: colorRamp проигнорирован — изображение многоканальное (samplesPerPixel=${samples})`
+                );
+            }
+            return false;
+        }
+
+        // Пользователь явно попросил палитру.
+        if (this._colorRampInput !== undefined) return true;
+
+        // Авто: float или >8 бит одноканальные.
+        const bitsRaw = typeof image.getBitsPerSample === 'function'
+            ? image.getBitsPerSample()
+            : (image.fileDirectory?.BitsPerSample);
+        const bits = Array.isArray(bitsRaw) ? bitsRaw[0] : bitsRaw;
+
+        const fmtRaw = typeof image.getSampleFormat === 'function'
+            ? image.getSampleFormat()
+            : (image.fileDirectory?.SampleFormat);
+        const fmt = Array.isArray(fmtRaw) ? fmtRaw[0] : fmtRaw;
+
+        if (fmt === 3) return true;                        // IEEE float
+        if (Number.isFinite(bits) && bits > 8) return true; // >8 бит
+        return false;
+    }
+
+    /* ================================================================
+       Рамповый режим (одноканальные DEM)
+       ================================================================ */
+
+    /**
+     * Читает сырые значения и раскрашивает их палитрой.
+     * @private
+     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
+     * @param {number} width
+     * @param {number} height
+     * @returns {Promise<{texture: THREE.DataTexture, width: number, height: number}>}
+     */
+    async _readAsRampTexture(image, width, height) {
+        const readOpts = { samples: [0] };
+        if (this._pool) readOpts.pool = this._pool;
+
+        const rasters = await image.readRasters(readOpts);
+        /** @type {ArrayLike<number>} */
+        const data = rasters[0];
+        if (!data) throw new Error('GeoTiffLayer: readRasters вернул пустой результат');
+
+        // NoData: явный или GDAL_NODATA
+        let noData = this._noDataValue;
+        if (noData === null) {
+            try {
+                if (typeof image.getGDALNoData === 'function') {
+                    const gdalNd = image.getGDALNoData();
+                    if (gdalNd !== null && gdalNd !== undefined) noData = gdalNd;
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        // Диапазон нормализации
+        let minV = this._minValue;
+        let maxV = this._maxValue;
+        if (minV === null || maxV === null) {
+            let autoMin = Infinity, autoMax = -Infinity;
+            for (let i = 0; i < data.length; i++) {
+                const v = data[i];
+                if (!Number.isFinite(v)) continue;
+                if (noData !== null && v === noData) continue;
+                if (v < autoMin) autoMin = v;
+                if (v > autoMax) autoMax = v;
+            }
+            if (minV === null) minV = autoMin === Infinity ? 0 : autoMin;
+            if (maxV === null) maxV = autoMax === -Infinity ? 1 : autoMax;
+        }
+        if (!Number.isFinite(minV) || !Number.isFinite(maxV)) { minV = 0; maxV = 1; }
+        if (minV === maxV) maxV = minV + 1;
+
+        this._effectiveMin = minV;
+        this._effectiveMax = maxV;
+        this._effectiveNoData = noData;
+
+        const ramp = this._getColorRamp();
+        const ndColor = this._parseNoDataColor(this._noDataColor);
+        const range = maxV - minV;
+
+        const rgba = new Uint8Array(width * height * 4);
+        const n = data.length;
+        for (let i = 0; i < n; i++) {
+            const v = data[i];
+            const j = i * 4;
+
+            if (!Number.isFinite(v) || (noData !== null && v === noData)) {
+                if (ndColor) {
+                    rgba[j]     = ndColor[0];
+                    rgba[j + 1] = ndColor[1];
+                    rgba[j + 2] = ndColor[2];
+                    rgba[j + 3] = ndColor[3];
+                }
+                // иначе — (0,0,0,0), прозрачно
+                continue;
+            }
+
+            let t = (v - minV) / range;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+
+            const c = this._sampleRamp(ramp, t);
+            rgba[j]     = c[0];
+            rgba[j + 1] = c[1];
+            rgba[j + 2] = c[2];
+            rgba[j + 3] = c[3];
+        }
+
+        return { texture: this._makeDataTexture(rgba, width, height), width, height };
+    }
+
+    /**
+     * Создаёт `THREE.DataTexture` из RGBA-байтов.
+     * @private
+     */
+    _makeDataTexture(rgba, width, height) {
         const texture = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat);
-        // По умолчанию Texture.flipY = true; для DataTexture оставляем true,
-        // тогда UV-раскладка PlaneGeometry (0,1)=TL совпадает с рядом 0 массива.
+        // flipY=true: строка 0 массива (север растра) → верх плоскости,
+        // что совпадает с UV-раскладкой PlaneGeometry (v0=TL → (0,1)).
         texture.flipY = true;
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
         texture.needsUpdate = true;
+        return texture;
+    }
 
-        return { texture, width, height };
+    /**
+     * Возвращает нормализованную палитру (сортированную по `value`).
+     * Результат кэшируется в `_colorRampNormalized`.
+     * @private
+     * @returns {Array<{value:number,r:number,g:number,b:number,a:number}>}
+     */
+    _getColorRamp() {
+        if (this._colorRampNormalized) return this._colorRampNormalized;
+
+        const input = this._colorRampInput;
+        let ramp;
+
+        if (typeof input === 'string') {
+            ramp = COLOR_RAMP_PRESETS[input];
+            if (!ramp) {
+                console.warn(`GeoTiffLayer: неизвестный пресет colorRamp "${input}", используем grayscale`);
+                ramp = COLOR_RAMP_PRESETS.grayscale;
+            }
+        } else if (Array.isArray(input)) {
+            ramp = this._parseRampArray(input);
+        } else {
+            ramp = COLOR_RAMP_PRESETS.grayscale;
+        }
+
+        const copy = ramp.map(s => ({ ...s })).sort((a, b) => a.value - b.value);
+        this._colorRampNormalized = copy;
+        return copy;
+    }
+
+    /**
+     * Парсит пользовательский массив стопов.
+     *
+     * Поддерживаются варианты:
+     *   `[[0, '#000'], [1, '#fff']]`
+     *   `[[0, [0,0,0]], [1, [255,255,255]]]`
+     *   `[{ value: 0, color: '#000' }, ...]`
+     *   `[{ value: 0, r, g, b, a }, ...]`
+     *
+     * @private
+     * @param {Array} arr
+     * @returns {Array<{value:number,r:number,g:number,b:number,a:number}>}
+     */
+    _parseRampArray(arr) {
+        const out = [];
+        for (const item of arr) {
+            if (Array.isArray(item) && item.length >= 2) {
+                out.push({ value: item[0], ...this._parseColorToRGBA(item[1]) });
+            } else if (item && typeof item === 'object') {
+                if (item.color !== undefined) {
+                    out.push({ value: item.value, ...this._parseColorToRGBA(item.color) });
+                } else if ('r' in item && 'g' in item && 'b' in item) {
+                    out.push({
+                        value: item.value,
+                        r: item.r | 0,
+                        g: item.g | 0,
+                        b: item.b | 0,
+                        a: item.a ?? 255
+                    });
+                }
+            }
+        }
+        if (out.length === 0) {
+            console.warn('GeoTiffLayer: пустой colorRamp, используем grayscale');
+            return COLOR_RAMP_PRESETS.grayscale.map(s => ({ ...s }));
+        }
+        if (out.length === 1) {
+            // растянем одиночный стоп на весь диапазон
+            out.push({ ...out[0], value: 1 });
+        }
+        return out;
+    }
+
+    /**
+     * Приводит цвет к `{r, g, b, a}` в 0..255.
+     *
+     * Поддерживает:
+     *  - массивы `[r,g,b]` / `[r,g,b,a]`;
+     *  - hex-строки `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`;
+     *  - `rgb(...)` / `rgba(...)`;
+     *  - именованные цвета (`'red'`, `'transparent'`, …) — через
+     *    `THREE.Color`, но с `getHex()`-нормализацией, чтобы избежать
+     *    сюрпризов с цветовым пространством.
+     *
+     * @private
+     * @param {*} c
+     * @returns {{r:number,g:number,b:number,a:number}}
+     */
+    _parseColorToRGBA(c) {
+        if (Array.isArray(c) && c.length >= 3) {
+            return {
+                r: c[0] | 0,
+                g: c[1] | 0,
+                b: c[2] | 0,
+                a: c.length >= 4 ? (c[3] | 0) : 255
+            };
+        }
+        if (typeof c === 'string') {
+            const s = c.trim();
+            if (s.toLowerCase() === 'transparent') {
+                return { r: 0, g: 0, b: 0, a: 0 };
+            }
+            if (s.startsWith('#')) {
+                const hex = s.slice(1);
+                if (hex.length === 3 || hex.length === 4) {
+                    return {
+                        r: parseInt(hex[0] + hex[0], 16),
+                        g: parseInt(hex[1] + hex[1], 16),
+                        b: parseInt(hex[2] + hex[2], 16),
+                        a: hex.length === 4 ? parseInt(hex[3] + hex[3], 16) : 255
+                    };
+                }
+                if (hex.length === 6 || hex.length === 8) {
+                    return {
+                        r: parseInt(hex.slice(0, 2), 16),
+                        g: parseInt(hex.slice(2, 4), 16),
+                        b: parseInt(hex.slice(4, 6), 16),
+                        a: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) : 255
+                    };
+                }
+            }
+            const rgba = s.match(
+                /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i
+            );
+            if (rgba) {
+                return {
+                    r: Math.round(+rgba[1]),
+                    g: Math.round(+rgba[2]),
+                    b: Math.round(+rgba[3]),
+                    a: rgba[4] !== undefined ? Math.round(+rgba[4] * 255) : 255
+                };
+            }
+            // named color через THREE.Color
+            try {
+                const col = new THREE.Color(s);
+                const hex = col.getHex(); // в SRGBColorSpace
+                return {
+                    r: (hex >> 16) & 0xff,
+                    g: (hex >> 8) & 0xff,
+                    b: hex & 0xff,
+                    a: 255
+                };
+            } catch (e) { /* fallthrough */ }
+        }
+        console.warn(`GeoTiffLayer: не удалось разобрать цвет "${c}", используем чёрный`);
+        return { r: 0, g: 0, b: 0, a: 255 };
+    }
+
+    /**
+     * Приводит `noDataColor` к `[r,g,b,a]` или `null` (не рисовать).
+     * @private
+     * @param {*} c
+     * @returns {[number,number,number,number]|null}
+     */
+    _parseNoDataColor(c) {
+        if (c === null || c === undefined) return null;
+        if (typeof c === 'string' && c.toLowerCase() === 'transparent') return null;
+        const rgba = this._parseColorToRGBA(c);
+        return [rgba.r, rgba.g, rgba.b, rgba.a];
+    }
+
+    /**
+     * Линейная интерполяция палитры в точке `t ∈ [0, 1]`.
+     * @private
+     * @param {Array<{value:number,r:number,g:number,b:number,a:number}>} ramp
+     * @param {number} t
+     * @returns {[number, number, number, number]}
+     */
+    _sampleRamp(ramp, t) {
+        if (t <= ramp[0].value) {
+            const s = ramp[0];
+            return [s.r, s.g, s.b, s.a];
+        }
+        const last = ramp[ramp.length - 1];
+        if (t >= last.value) {
+            return [last.r, last.g, last.b, last.a];
+        }
+        for (let i = 1; i < ramp.length; i++) {
+            if (t <= ramp[i].value) {
+                const a = ramp[i - 1];
+                const b = ramp[i];
+                const denom = b.value - a.value;
+                const f = denom > 0 ? (t - a.value) / denom : 0;
+                return [
+                    Math.round(a.r + (b.r - a.r) * f),
+                    Math.round(a.g + (b.g - a.g) * f),
+                    Math.round(a.b + (b.b - a.b) * f),
+                    Math.round(a.a + (b.a - a.a) * f)
+                ];
+            }
+        }
+        return [last.r, last.g, last.b, last.a];
     }
 
     /* ================================================================
@@ -463,10 +949,10 @@ export class GeoTiffLayer extends Layer {
 
         // 4 угла в исходной СК растра
         const cornersCrs = [
-            [ox,             oy],               // TL
-            [ox + width * rx, oy],              // TR
-            [ox,             oy + height * ry], // BL
-            [ox + width * rx, oy + height * ry] // BR
+            [ox,               oy],               // TL
+            [ox + width * rx,  oy],               // TR
+            [ox,               oy + height * ry], // BL
+            [ox + width * rx,  oy + height * ry]  // BR
         ];
 
         const map = this._map;
@@ -512,10 +998,12 @@ export class GeoTiffLayer extends Layer {
         // Порядок вершин у нас совпадает, а flipY=true даёт корректную
         // привязку: строка 0 массива (север растра) попадает на север карты.
 
+        const transparent = this._opacity < 1;
+
         const material = new THREE.MeshBasicMaterial({
             map: this._texture,
             side: THREE.DoubleSide,
-            transparent: this._opacity < 1,
+            transparent,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
             depthTest: true,
@@ -659,7 +1147,7 @@ export class GeoTiffLayer extends Layer {
             case 'multiply': return THREE.MultiplyBlending;
             case 'subtract': return THREE.SubtractiveBlending;
             case 'normal':
-            default: return THREE.NormalBlending;
+            default:         return THREE.NormalBlending;
         }
     }
 
@@ -754,10 +1242,10 @@ export class GeoTiffLayer extends Layer {
         const rx = resolution[0], ry = resolution[1];
 
         const cornersCrs = [
-            [ox,             oy],
-            [ox + width * rx, oy],
-            [ox,             oy + height * ry],
-            [ox + width * rx, oy + height * ry]
+            [ox,               oy],
+            [ox + width * rx,  oy],
+            [ox,               oy + height * ry],
+            [ox + width * rx,  oy + height * ry]
         ];
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;

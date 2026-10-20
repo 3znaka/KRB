@@ -53,12 +53,12 @@ class Perlin2D {
 export class NoiseElevationProvider {
      constructor({
         seed = 42,
-        amplitude = 10000,       // ← было 5000
-        octaves = 6,             // ← было 5
-        baseFrequency = 6,       // ← было 1/30
+        amplitude = 5000,     
+        octaves = 6,          
+        baseFrequency = 6,      
         lacunarity = 2.0,
         persistence = 0.5,
-        heightScale = 1,         // ← НОВОЕ: множитель амплитуды
+        heightScale = 1,        
     } = {}) {
         this.seed = seed >>> 0;
         this.heightScale = heightScale;

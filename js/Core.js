@@ -736,12 +736,19 @@ export class KrbMap {
        URL-хелперы
        ================================================================ */
 
-    /** @param {number} z @param {number} x @param {number} y @returns {string|null} */
-    getTextureUrl(z, x, y) {
-        if (!this.layers[0] || !this.layers[0].texture) return null;
-        return this.layers[0].texture
-            .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+/** @param {number} z @param {number} x @param {number} y @returns {string|null} */
+getTextureUrl(z, x, y) {
+    const layer = this.layers[0];
+    if (!layer || !layer.texture) return null;
+
+    if (layer.texture === 'demo') {
+        const n = 1 + Math.floor(Math.random() * 10);
+        return new URL(`./demotiles/${n}.png`, import.meta.url).href;
     }
+
+    return layer.texture
+        .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+}
 
     /** @param {number} z @param {number} x @param {number} y @returns {string|null} */
     getElevationUrl(z, x, y) {

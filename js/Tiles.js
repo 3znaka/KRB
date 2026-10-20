@@ -82,6 +82,7 @@ export class Tile {
     constructor(options) {
         this.texture = options.texture;
         this.elevation = options.elevation;
+        this.noise = options.noise;
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale ?? DEFAULTS.HEIGHT_SCALE;

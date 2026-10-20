@@ -42,14 +42,21 @@ const MAX_COVER_DEPTH = 2;
 const DEFORM_SEGMENTS_FLAT = 8;
 
 /**
- * Значения roughness/metalness по умолчанию для освещаемых тайлов.
- * `roughness = 0.9` — матовая «земляная» поверхность, без пластикового
- * блеска; `metalness = 0` — диэлектрик (у земли нет металлического
- * отражения).
+ * Значения по умолчанию для освещаемых тайлов.
+ *
+ * `roughness = 0.7` — матово, но с лёгким блеском, чтобы плоские
+ * участки не выглядели «пластилиновыми».
+ *
+ * `emissive = 0.5` — половина яркости текстуры идёт «как есть»
+ * (эмуляция запечённой освещённости), половина — модулируется
+ * динамическим светом. Без этого тайл под `MeshStandardMaterial`
+ * темнее, чем под `MeshBasicMaterial`, примерно вдвое.
+ *
  * @private
  */
-const TILE_DEFAULT_ROUGHNESS = 0.9;
+const TILE_DEFAULT_ROUGHNESS = 0.7;
 const TILE_DEFAULT_METALNESS = 0.0;
+const TILE_DEFAULT_EMISSIVE  = 0.5;
 
 /**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
@@ -95,16 +102,17 @@ export class Tile {
  *  - **URL-источник DEM-тайлов** (`engine.getElevationUrl` → worker);
  *  - **внешний провайдер** (`elevationProvider`, например GeoTiffLayer
  *    в режиме `asElevation`). Подключается методом
- *    {@link TileManager#enableGeotiffElevation}; при наличии провайдера
- *    запросы высот идут к нему синхронно, минуя worker и сеть.
+ *    {@link TileManager#enableGeotiffElevation}.
  *
- * **Освещение.** Если `engine.tileLighting === true`, тайлы получают
- * `MeshStandardMaterial` и начинают реагировать на `AmbientLight` /
- * `DirectionalLight` сцены так же, как `Marker3D`-примитивы. Нормали
- * берутся из `PlaneGeometry` (после `rotateX(-π/2)` они направлены
- * вверх) и обновляются через `computeVertexNormals()` при применении
- * рельефа. При `false` (по умолчанию) используется быстрый
- * `MeshBasicMaterial` — без освещения и с меньшей нагрузкой на GPU.
+ * **Освещение.** При `engine.tileLighting === true` тайлы используют
+ * `MeshStandardMaterial`, при `false` — быстрый `MeshBasicMaterial`.
+ * Запечённая тайловая текстура обычно «уже освещена» сервером, поэтому
+ * чисто физический PBR даёт заметно более тёмную картинку. Чтобы
+ * компенсировать это, при `tileLighting === true` текстура дублируется
+ * в `emissiveMap` с интенсивностью `engine.tileLightingEmissive`
+ * (по умолчанию `0.5`): половина яркости идёт «как есть», половина
+ * модулируется сценным светом. Это касается и фоновых (static BG)
+ * тайлов — они используют тот же материал.
  *
  * @example
  * const engine = {
@@ -119,6 +127,9 @@ export class Tile {
  *     hasElevation: true,
  *     deformedTiles: false,
  *     tileLighting: true,
+ *     tileLightingRoughness: 0.7,
+ *     tileLightingMetalness: 0.0,
+ *     tileLightingEmissive: 0.5,
  *     globalElevCache: new Map(),
  *     worldGroup: new THREE.Group(),
  *     projection: Projections.get('EPSG:3857'),
@@ -128,24 +139,19 @@ export class Tile {
  *     layers: [{ elevation: true, heightScale: 1.2 }]
  * };
  * const tileManager = new TileManager(engine);
- * tileManager.update(engine.camera, engine.controlsTarget, 3, engine.worldGroup.position);
- * tileManager.ensureTile(3, 0, 0);
- * const texture = await tileManager.loadTextureAsync('https://example.com/tile.png');
- * tileManager.createStaticTileMesh(1000, -500, -500, texture);
- * tileManager.prefetchParentElevations(new THREE.Vector3(0, 0, 0), 3, engine.worldGroup.position);
  */
 export class TileManager {
     /**
      * @param {Object} engine - Объект движка карты.
      * @param {boolean} engine.hasElevation
-     * @param {boolean} engine.deformedTiles - Использовать ли деформированные тайлы.
+     * @param {boolean} engine.deformedTiles
      * @param {boolean} [engine.tileLighting=false] - Использовать ли
-     *     освещаемый материал (`MeshStandardMaterial`) для тайлов.
-     *     При `false` — быстрый `MeshBasicMaterial`.
-     * @param {number} [engine.tileLightingRoughness=0.9] - Roughness
-     *     освещаемого материала (только при `tileLighting === true`).
-     * @param {number} [engine.tileLightingMetalness=0] - Metalness
-     *     освещаемого материала (только при `tileLighting === true`).
+     *     освещаемый материал (`MeshStandardMaterial`) для тайлов,
+     *     включая фоновые BG-тайлы.
+     * @param {number} [engine.tileLightingRoughness=0.7]
+     * @param {number} [engine.tileLightingMetalness=0.0]
+     * @param {number} [engine.tileLightingEmissive=0.5] - Доля «запечённой»
+     *     яркости текстуры (0..1). Компенсирует потемнение под PBR.
      * @param {Map} [engine.globalElevCache]
      * @param {THREE.Group} engine.worldGroup
      * @param {number} engine.MAX_MERCATOR
@@ -161,8 +167,8 @@ export class TileManager {
      * @param {number} engine.TILE_MARGIN
      * @param {number} engine.MAX_WORKER_REQUESTS
      * @param {Array.<Object>} engine.layers
-     * @param {import('./Projections.js').Projection} engine.projection - Проекция карты.
-     * @param {Function} engine.worldToTileIndex - Хелпер Core (world → дробный tile index).
+     * @param {import('./Projections.js').Projection} engine.projection
+     * @param {Function} engine.worldToTileIndex
      */
     constructor(engine) {
         this.engine = engine;
@@ -175,41 +181,29 @@ export class TileManager {
 
         /**
          * Активен ли рельеф. Может быть поднят в `true` позже методом
-         * {@link TileManager#enableGeotiffElevation}, даже если
-         * изначально в `engine.hasElevation` было `false`.
+         * {@link TileManager#enableGeotiffElevation}.
          * @type {boolean}
          */
         this.hasElevation = engine.hasElevation;
 
         /**
-         * Освещение тайлов. Значения `roughness`/`metalness` фиксируем
-         * в конструкторе (а не читаем каждый кадр), чтобы хот-пас
-         * создания материала не трогал `engine` лишний раз.
+         * Настройки освещения тайлов. Значения фиксируем в конструкторе,
+         * чтобы хот-пас создания материала не трогал `engine` лишний раз.
          * @private
-         * @type {boolean}
          */
         this.tileLighting = engine.tileLighting === true;
-        /** @private @type {number} */
         this.tileRoughness = Number.isFinite(engine.tileLightingRoughness)
             ? engine.tileLightingRoughness
             : TILE_DEFAULT_ROUGHNESS;
-        /** @private @type {number} */
         this.tileMetalness = Number.isFinite(engine.tileLightingMetalness)
             ? engine.tileLightingMetalness
             : TILE_DEFAULT_METALNESS;
+        this.tileEmissive = Number.isFinite(engine.tileLightingEmissive)
+            ? engine.tileLightingEmissive
+            : TILE_DEFAULT_EMISSIVE;
 
         /**
-         * Внешний провайдер высот (например, GeoTiffLayer в режиме
-         * `asElevation`). Если задан — {@link TileManager#requestElevation}
-         * сначала пытается взять данные у него, и только потом — из
-         * URL/worker/fallback.
-         *
-         * Интерфейс провайдера:
-         *  - `isElevationProvider(): boolean` — готов ли отдавать высоты;
-         *  - `getTileHeights(z, virtX, y, segments): Float32Array` —
-         *    `(segments+1)²` высот в row-major от NW, уже с применённым
-         *    масштабом.
-         *
+         * Внешний провайдер высот.
          * @type {Object|null}
          */
         this.elevationProvider = null;
@@ -219,9 +213,6 @@ export class TileManager {
         this.nextJobId = 1;
         this.workerPromises = new Map();
 
-        // Кэши/очереди высот создаём ВСЕГДА: провайдер может быть
-        // подключён позже (enableGeotiffElevation), и код requestElevation
-        // / loadTile должен иметь к ним доступ без дополнительных проверок.
         this.srcKeyToElevUrl = new Map();
         this.parentElevCache = engine.globalElevCache || new Map();
         this.parentElevPromises = new Map();
@@ -230,9 +221,6 @@ export class TileManager {
         this.activeElevationFetches = 0;
         this.MAX_ELEVATION_FETCHES = 4;
 
-        // Worker нужен только для URL-источника DEM-тайлов. Для провайдера
-        // он не требуется (там всё синхронно), поэтому создаём воркер
-        // только если hasElevation был true изначально.
         if (this.hasElevation) {
             this.initWorker();
         }
@@ -252,50 +240,78 @@ export class TileManager {
     /**
      * Создаёт материал для тайла.
      *
-     * При `tileLighting === false` — быстрый `MeshBasicMaterial`:
-     * текстура рисуется «как есть», без учёта света сцены. При
-     * `tileLighting === true` — `MeshStandardMaterial`: реагирует на
-     * `AmbientLight` и `DirectionalLight` сцены (как `Marker3D`),
-     * использует нормали геометрии. Флаги `depthWrite`/`depthTest`
-     * одинаковы в обоих режимах — на текущую логику наложения тайлов
-     * (с `renderOrder = z` и хаком `depthWrite = hasElevation`) смена
-     * материала не влияет.
+     * При `tileLighting === false` — быстрый `MeshBasicMaterial`, как
+     * раньше. При `true` — `MeshStandardMaterial` с эмуляцией
+     * «запечённой» яркости через `emissiveMap`: та же текстура, что и
+     * `map`, но с `emissiveIntensity = tileEmissive`. Это компенсирует
+     * потемнение под PBR (текстура-то уже «освещена» сервером).
      *
-     * @param {THREE.Texture|null} texture - Текстура тайла.
+     * @param {THREE.Texture|null} texture
+     * @param {Object} [opts]
+     * @param {boolean} [opts.depthWrite] - Переопределить `depthWrite`.
+     *     По умолчанию `this.hasElevation`.
+     * @param {boolean} [opts.depthTest] - Переопределить `depthTest`.
+     *     По умолчанию `this.hasElevation`.
      * @returns {THREE.Material}
      * @private
      */
-    _createTileMaterial(texture) {
-        const common = {
-            map: texture,
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
-        };
-        if (this.tileLighting) {
-            return new THREE.MeshStandardMaterial({
-                ...common,
-                roughness: this.tileRoughness,
-                metalness: this.tileMetalness
-            });
+    _createTileMaterial(texture, opts = {}) {
+        const depthWrite = opts.depthWrite !== undefined
+            ? opts.depthWrite
+            : this.hasElevation;
+        const depthTest = opts.depthTest !== undefined
+            ? opts.depthTest
+            : this.hasElevation;
+
+        const common = { map: texture, depthWrite, depthTest };
+
+        if (!this.tileLighting) {
+            return new THREE.MeshBasicMaterial(common);
         }
-        return new THREE.MeshBasicMaterial(common);
+
+        const mat = new THREE.MeshStandardMaterial({
+            ...common,
+            roughness: this.tileRoughness,
+            metalness: this.tileMetalness
+        });
+
+        if (this.tileEmissive > 0) {
+            mat.emissive = new THREE.Color(0xffffff);
+            mat.emissiveIntensity = this.tileEmissive;
+            if (texture) {
+                // Та же текстура, что и в `map`. Её `colorSpace` уже
+                // выставлен в SRGB при загрузке через loadTextureAsync.
+                mat.emissiveMap = texture;
+            }
+        }
+
+        return mat;
+    }
+
+    /**
+     * Заменяет текстуру у меша-тайла: и `map`, и `emissiveMap` (если
+     * материал освещаемый и `tileEmissive > 0`).
+     *
+     * Нужен для фоновых BG-тайлов: они создаются до загрузки текстуры,
+     * а `emissiveMap` без явной установки останется `null` — и BG
+     * будет заметно темнее подробных тайлов.
+     *
+     * @param {THREE.Mesh} mesh
+     * @param {THREE.Texture|null} texture
+     */
+    setMeshTexture(mesh, texture) {
+        if (!mesh || !mesh.material) return;
+        mesh.material.map = texture;
+        if (mesh.material.isMeshStandardMaterial && this.tileEmissive > 0) {
+            mesh.material.emissiveMap = texture;
+        }
+        mesh.material.needsUpdate = true;
     }
 
     /* ---- основной метод, вызывается из Core.maybeUpdateVisibleTiles ---- */
 
     /**
      * Обновляет видимые тайлы на основе положения камеры и зума.
-     *
-     * В Mercator-режиме bbox видимости — прямоугольник в tile-space.
-     * В deformed-режиме bbox считается по 8 точкам (углы + середины
-     * сторон видимой области) через `engine.worldToTileIndex` — так
-     * корректно учитывается нелинейность проекции.
-     *
-     * ВАЖНО: в deformed-режиме bbox КЛАМПИТСЯ к [0, maxTile] по обеим
-     * осям. Без этого проекции с узким доменом (Equal Earth и т.п.)
-     * давали tile-индексы вида -7..15, и цикл генерировал сотни
-     * «фантомных» тайлов, каждый из которых прогонялся через proj4.
-     * Это и вызывало просадку до 1 FPS.
      *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
@@ -321,9 +337,6 @@ export class TileManager {
         let xMin, xMax, yMin, yMax;
 
         if (this.engine.deformedTiles) {
-            // Углы + середины сторон дают устойчивый bbox даже для
-            // сильно нелинейных проекций (UTM/GK далеко от центрального
-            // меридиана).
             const samples = [
                 [minX, minZ], [maxX, minZ], [minX, maxZ], [maxX, maxZ],
                 [(minX + maxX) * 0.5, minZ], [(minX + maxX) * 0.5, maxZ],
@@ -339,15 +352,11 @@ export class TileManager {
                 if (ty > maxTy) maxTy = ty;
             }
             if (Number.isFinite(minTx)) {
-                // Клампим ОБЕ оси к валидному диапазону индексов.
-                // До этого фикса xMin/xMax не клампились, и для Equal Earth
-                // bbox разъезжался до -7..15, что давало 200+ тайлов на кадр.
                 xMin = Math.max(0, Math.floor(minTx));
                 xMax = Math.min(maxTile, Math.ceil(maxTx));
                 yMin = Math.max(0, Math.floor(minTy));
                 yMax = Math.min(maxTile, Math.ceil(maxTy));
             } else {
-                // Вся видимая область за пределами проекции.
                 xMin = 1; xMax = 0; yMin = 1; yMax = 0;
             }
         } else {
@@ -368,29 +377,19 @@ export class TileManager {
         const renderSet = new Set();
         for (const k of visibleKeys) {
             const [, vx, y] = k.split(',').map(Number);
-
-            // Всегда пытаемся загрузить идеальный тайл (ensureTile
-            // стартует загрузку при необходимости). Для deformed-режима
-            // тайлы вне области определения проекции просто «фейлятся»
-            // внутри loadTile и не мешают.
             const inst = this.ensureTile(idealZ, vx, y);
 
             if (inst.ready && inst.mesh) {
                 renderSet.add(k);
                 continue;
             }
-
-            // 1. Покрытие потомками — только чтение кэша, без загрузок.
             const fullyCovered = this.collectCover(idealZ, vx, y, renderSet);
-
-            // 2. Если потомки не закрыли всю область — пробуем предка.
             if (!fullyCovered) {
                 const anc = this.findReadyAncestor(idealZ, vx, y);
                 if (anc) renderSet.add(this.key(anc.z, anc.virtX, anc.y));
             }
         }
 
-        // Переключение видимости
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
@@ -402,17 +401,7 @@ export class TileManager {
         return idealZ;
     }
 
-    /**
-     * Рекурсивно собирает готовых потомков тайла в renderSet.
-     *
-     * @param {number} z
-     * @param {number} virtX
-     * @param {number} y
-     * @param {Set} renderSet
-     * @param {number} [depth]
-     * @returns {boolean} True, если всё покрытие собрано.
-     * @private
-     */
+    /** @private */
     collectCover(z, virtX, y, renderSet, depth = 0) {
         const k = this.key(z, virtX, y);
         const inst = this.tiles.get(k);
@@ -433,22 +422,7 @@ export class TileManager {
         return full;
     }
 
-    /**
-     * Ищет ближайшего готового предка для тайла.
-     *
-     * ВАЖНО: если предок помечен `unrenderable` (например, целиком
-     * лежит вне области определения проекции), прекращаем поиск.
-     * Логика: если тайл на зуме Z не удалось построить из-за того, что
-     * он вне домена, то его родитель на Z-1, покрывающий ту же
-     * географическую область, тоже вне домена. Раньше это приводило к
-     * бесконечному созданию и выбросу цепочек предков на каждом кадре.
-     *
-     * @param {number} z
-     * @param {number} virtX
-     * @param {number} y
-     * @returns {Object|null}
-     * @private
-     */
+    /** @private */
     findReadyAncestor(z, virtX, y) {
         for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= this.engine.MIN_ZOOM; dz++) {
             const az = z - dz;
@@ -463,11 +437,8 @@ export class TileManager {
 
     /**
      * Возвращает существующий тайл или создаёт и запускает загрузку нового.
-     *
-     * @param {number} z
-     * @param {number} virtX
-     * @param {number} y
-     * @returns {Object} Объект тайла.
+     * @param {number} z @param {number} virtX @param {number} y
+     * @returns {Object}
      */
     ensureTile(z, virtX, y) {
         const k = this.key(z, virtX, y);
@@ -478,24 +449,10 @@ export class TileManager {
         }
         inst = {
             z, virtX, y,
-            mesh: null,
-            geometry: null,
-            ready: false,
-            failed: false,
-            /**
-             * Тайл невозможно отрисовать в принципе: `createTileMesh`
-             * вернул null (вырожден / вне области определения проекции).
-             * Не даём `findReadyAncestor` спамить предками по этому
-             * поддереву.
-             * @type {boolean}
-             */
-            unrenderable: false,
-            loading: true,
-            texUrl: null,
-            lastUsed: this.frame,
-            heightsApplied: false,
-            elevationAppliedLevel: 0,
-            expectsElevation: false
+            mesh: null, geometry: null,
+            ready: false, failed: false, unrenderable: false,
+            loading: true, texUrl: null, lastUsed: this.frame,
+            heightsApplied: false, elevationAppliedLevel: 0, expectsElevation: false
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -507,28 +464,7 @@ export class TileManager {
        ================================================================ */
 
     /**
-     * Включает источник высот на основе внешнего провайдера (например,
-     * `GeoTiffLayer` в режиме `asElevation`).
-     *
-     * Работает и в «холодном» (до загрузки тайлов), и в «горячем»
-     * состоянии:
-     *  - если `hasElevation` был `false` — все уже загруженные «плоские»
-     *    тайлы (4 вершины) будут удалены; следующий `update()` создаст
-     *    их заново уже с сеткой `SEGMENTS`, и они запросят высоты у
-     *    провайдера;
-     *  - если `hasElevation` уже был `true` — тайлам, которые ожидали
-     *    высоты, но ещё не получили их, будет запущен повторный запрос
-     *    уже через провайдер. Тайлы, у которых высоты уже применены
-     *    (например, из tile-DEM), не трогаются: они «доживают» до
-     *    вытеснения из LRU-кэша.
-     *
-     * Интерфейс провайдера:
-     *  - `isElevationProvider(): boolean` — готов ли отдавать высоты;
-     *  - `getTileHeights(z, virtX, y, segments): Float32Array` —
-     *    `(segments+1)²` высот в row-major от NW; масштаб высот уже
-     *    применён внутри провайдера.
-     *
-     * @param {Object} provider - Объект-провайдер высот.
+     * @param {Object} provider
      * @returns {void}
      */
     enableGeotiffElevation(provider) {
@@ -540,29 +476,14 @@ export class TileManager {
         this.hasElevation = true;
 
         if (!wasElevated) {
-            // Пересоздаём «плоские» тайлы — они должны получить SEGMENTS-сетку.
             this._disposeFlatTiles();
         } else {
-            // Уже был рельеф (URL-источник). Тайлы, ожидавшие высоты,
-            // теперь должны спросить у провайдера.
             this._refreshElevationsFromProvider();
         }
-
-        // Форсируем обновление видимых тайлов — новые тайлы будут
-        // созданы с правильной геометрией.
         this.frame = 0;
     }
 
-    /**
-     * Удаляет из кэша тайлы, чья геометрия не соответствует текущему
-     * режиму (плоские, `seg=1`). Следующий `update()` создаст их заново.
-     *
-     * Тайлы в состоянии `loading` не трогаем: к моменту, когда
-     * `loadTile` дойдёт до `createTileMesh`, `this.hasElevation` уже
-     * будет `true`, и они создадутся правильно.
-     *
-     * @private
-     */
+    /** @private */
     _disposeFlatTiles() {
         const targetCount = (this.engine.SEGMENTS + 1) * (this.engine.SEGMENTS + 1);
         const toDispose = [];
@@ -575,17 +496,10 @@ export class TileManager {
         for (const inst of toDispose) this.disposeTile(inst);
     }
 
-    /**
-     * Повторно запрашивает высоты у провайдера для тайлов, которые
-     * ждали их, но ещё не получили.
-     *
-     * @private
-     */
+    /** @private */
     _refreshElevationsFromProvider() {
         for (const inst of this.tiles.values()) {
-            if (!inst.mesh) continue;
-            if (inst.loading) continue;
-            if (inst.heightsApplied) continue;
+            if (!inst.mesh || inst.loading || inst.heightsApplied) continue;
             if (!this.shouldRequestElevation(inst)) continue;
             inst.expectsElevation = true;
             this.requestElevation(inst);
@@ -593,13 +507,6 @@ export class TileManager {
     }
 
     /**
-     * Асинхронно загружает текстуру тайла и создаёт меш.
-     *
-     * Если `createTileMesh` возвращает null (деформированный тайл
-     * вырожден/перекручен/вне области определения проекции) —
-     * тайл помечается failed+unrenderable без геометрии, текстура
-     * освобождается.
-     *
      * @param {Object} inst
      * @returns {Promise<void>}
      * @private
@@ -624,7 +531,6 @@ export class TileManager {
 
             const mesh = this.createTileMesh(inst, texture);
             if (!mesh) {
-                // Деформированный тайл «схлопнулся» / вне области определения.
                 this.releaseTexture(texUrl);
                 inst.loading = false;
                 inst.failed = true;
@@ -655,23 +561,13 @@ export class TileManager {
         }
     }
 
-    /**
-     * Нужно ли запрашивать высоты для тайла.
-     * @param {Object} inst
-     * @returns {boolean}
-     * @private
-     */
+    /** @private */
     shouldRequestElevation(inst) {
         return inst.z >= this.engine.MIN_RELIEF_Z;
     }
 
     /**
-     * Создаёт меш тайла с текстурой. В deformed-режиме делегирует
-     * `_createDeformedTileMesh`.
-     *
-     * @param {Object} inst
-     * @param {THREE.Texture} texture
-     * @returns {THREE.Mesh|null} Меш или null, если тайл вырожден.
+     * Создаёт меш тайла (прямоугольный режим).
      * @private
      */
     createTileMesh(inst, texture) {
@@ -694,8 +590,6 @@ export class TileManager {
             geometry.rotateX(-Math.PI / 2);
         }
 
-        // Материал — через общую фабрику: MeshBasicMaterial или
-        // MeshStandardMaterial в зависимости от engine.tileLighting.
         const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geometry, mat);
@@ -710,23 +604,7 @@ export class TileManager {
     }
 
     /**
-     * Создаёт деформированный меш тайла: каждая вершина сетки
-     * `(SEG+1)×(SEG+1)` вычисляется через lon/lat соответствующей
-     * точки XYZ-тайла, спроецированные в проекцию карты.
-     *
-     * Раскладка вершин совпадает с PlaneGeometry:
-     *   row 0 = север (north), col 0 = запад (west),
-     *   UV плавно идут (0,1) NW → (1,0) SE.
-     * Это значит `applyHeightsToGeometry` и `syncEdgesBetween`
-     * работают без изменений.
-     *
-     * Возвращает `null`, если тайл:
-     *  - выходит за область определения проекции (proj4-safe → null), или
-     *  - вырожден / перекручен (знаковая площадь углов ≤ 0).
-     *
-     * @param {Object} inst
-     * @param {THREE.Texture} texture
-     * @returns {THREE.Mesh|null}
+     * Создаёт деформированный меш тайла.
      * @private
      */
     _createDeformedTileMesh(inst, texture) {
@@ -734,9 +612,6 @@ export class TileManager {
         const n = 1 << z;
         const proj = this.engine.projection;
 
-        // С рельефом seg = SEGMENTS — иначе воркер вернёт (SEGMENTS+1)²
-        // значений, которые applyHeightsToGeometry разложит по вершинам
-        // в порядке row-major (совпадает с PlaneGeometry).
         const seg = this.hasElevation ? this.engine.SEGMENTS : DEFORM_SEGMENTS_FLAT;
         const grid = seg + 1;
         const count = grid * grid;
@@ -750,14 +625,11 @@ export class TileManager {
         let hasInvalid = false;
 
         for (let j = 0; j < grid; j++) {
-            const v = j / seg;             // 0 = север, 1 = юг
+            const v = j / seg;
             const tileY = y + v;
             const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / n))) * 180 / Math.PI;
             for (let i = 0; i < grid; i++) {
                 const u = i / seg;
-                // Используем virtX (не srcX): в deformed-режиме мир
-                // НЕ замкнут по долготе, и тайл с virtX=-1 должен
-                // попасть ровно в свой (невалидный для проекции) сектор.
                 const tileX = virtX + u;
                 const lon = tileX / n * 360 - 180;
 
@@ -769,7 +641,7 @@ export class TileManager {
                     continue;
                 }
                 const wx = proj2[0];
-                const wz = -proj2[1]; // Y-флип: Z на юг
+                const wz = -proj2[1];
                 arr[k] = wx;
                 arr[k + 1] = 0;
                 arr[k + 2] = wz;
@@ -780,9 +652,6 @@ export class TileManager {
 
         if (hasInvalid) return null;
 
-        // Проверка «песочных часов»: знаковая площадь четырёхугольника
-        // углов (в порядке NW → NE → SE → SW). Для нормального тайла
-        // она > 0 (положительная ориентация в системе X×Z, где Z на юг).
         const iNW = 0;
         const iNE = seg;
         const iSE = grid * seg + seg;
@@ -799,7 +668,6 @@ export class TileManager {
         );
         if (!(area > 0)) return null;
 
-        // Центрируем по центроиду — mesh.position будет в его координатах.
         const cx = sumX / count;
         const cz = sumZ / count;
         for (let k = 0; k < count; k++) {
@@ -811,9 +679,6 @@ export class TileManager {
         geom.computeVertexNormals();
         geom.computeBoundingSphere();
 
-        // Материал — через общую фабрику. Нормали уже посчитаны
-        // (computeVertexNormals выше), так что MeshStandardMaterial
-        // в deformed-режиме тоже будет освещаться корректно.
         const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geom, mat);
@@ -831,11 +696,14 @@ export class TileManager {
     /**
      * Создаёт статический фоновый меш тайла.
      *
-     * Используется только для статической подложки (`staticBgGroup`)
-     * в Mercator-режиме. Намеренно остаётся на `MeshBasicMaterial`:
-     * меш рисуется с `depthTest: false` и `renderOrder: -2` под всеми
-     * тайлами, освещение на нём не читается, а `MeshStandardMaterial`
-     * добавил бы только стоимость.
+     * Используется для `staticBgGroup` — подложки в Mercator-режиме.
+     * **Теперь использует тот же материал, что и подробные тайлы**:
+     * при `tileLighting: true` это `MeshStandardMaterial` с
+     * `emissiveMap`, и BG-тайлы освещаются так же, как подробные.
+     * Переопределяем только `depthWrite`/`depthTest` — BG должен
+     * рисоваться поверх depth-буфера (`renderOrder = -2`).
+     *
+     * Текстура приходит позже (асинхронно) — см. {@link TileManager#setMeshTexture}.
      *
      * @param {number} tileSize
      * @param {number} originX
@@ -846,9 +714,7 @@ export class TileManager {
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            map: texture,
+        const mat = this._createTileMaterial(texture, {
             depthWrite: false,
             depthTest: false
         });
@@ -864,13 +730,7 @@ export class TileManager {
 
     /* ---- текстуры ---- */
 
-    /**
-     * Асинхронно загружает текстуру по URL с кэшированием.
-     * Параллельные запросы на один URL разделяют in-flight промис.
-     *
-     * @param {string} url
-     * @returns {Promise<THREE.Texture|null>}
-     */
+    /** @param {string} url @returns {Promise<THREE.Texture|null>} */
     async loadTextureAsync(url) {
         if (!url) return null;
 
@@ -906,11 +766,7 @@ export class TileManager {
         return texture;
     }
 
-    /**
-     * Уменьшает счётчик ссылок текстуры и освобождает при необходимости.
-     * @param {string} url
-     * @private
-     */
+    /** @param {string} url @private */
     releaseTexture(url) {
         if (!url) return;
         const e = this.textureCache.get(url);
@@ -924,19 +780,7 @@ export class TileManager {
 
     /* ---- высоты ---- */
 
-    /**
-     * Запрашивает данные высот для тайла и применяет их к геометрии.
-     *
-     * Порядок источников:
-     *  1. **Внешний провайдер** (`elevationProvider`, например GeoTIFF) —
-     *     синхронный, из памяти;
-     *  2. **URL-источник DEM-тайлов** (`srcKeyToElevUrl`) — worker + сеть;
-     *  3. **Fallback** — родительский DEM-тайл (только для URL-режима).
-     *
-     * @param {Object} inst
-     * @returns {Promise<void>}
-     * @private
-     */
+    /** @private */
     async requestElevation(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -945,7 +789,6 @@ export class TileManager {
 
             let heights = null;
 
-            // --- 1. Внешний провайдер (GeoTIFF и т.п.) ---
             const provider = this.elevationProvider;
             if (provider &&
                 typeof provider.isElevationProvider === 'function' &&
@@ -956,7 +799,6 @@ export class TileManager {
                 );
             }
 
-            // --- 2. URL-источник DEM-тайлов ---
             if (!heights) {
                 const elevUrl = this.srcKeyToElevUrl.get(srcKey);
                 if (elevUrl) {
@@ -967,7 +809,6 @@ export class TileManager {
                 }
             }
 
-            // --- 3. Fallback на родительский DEM-тайл ---
             if (!heights) {
                 heights = await this.getFallbackElevation(inst);
             }
@@ -982,10 +823,7 @@ export class TileManager {
         }
     }
 
-    /**
-     * Получает данные высот напрямую по URL или из кэша.
-     * @private
-     */
+    /** @private */
     async getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ) {
         const heightScale = this.getElevationHeightScale();
         if (this.parentElevCache.has(srcKey)) {
@@ -1032,7 +870,7 @@ export class TileManager {
         return promise;
     }
 
-    /** Обрабатывает очередь запросов высот. @private */
+    /** @private */
     _processElevationQueue() {
         while (this.activeElevationFetches < this.MAX_ELEVATION_FETCHES && this.elevationQueue.length > 0) {
             const { execute, resolve, reject } = this.elevationQueue.shift();
@@ -1040,12 +878,7 @@ export class TileManager {
         }
     }
 
-    /**
-     * Получает высоты из родительского тайла при отсутствии прямых данных.
-     * @param {Object} inst
-     * @returns {Promise<Float32Array>}
-     * @private
-     */
+    /** @private */
     async getFallbackElevation(inst) {
         let fz = inst.z - 1;
         while (fz > this.engine.MAX_RELIEF_Z) fz--;
@@ -1079,15 +912,7 @@ export class TileManager {
         return result.heights;
     }
 
-    /**
-     * Загружает данные высот родительского тайла.
-     *
-     * Если для (z, srcX, y) нет URL (например, DEM-слой не подключён,
-     * а высоты сейчас приходят из внешнего провайдера) — возвращает
-     * null, не создавая запросов.
-     *
-     * @private
-     */
+    /** @private */
     async getParentElevData(z, srcX, y) {
         if (z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return null;
 
@@ -1122,10 +947,7 @@ export class TileManager {
         return promise;
     }
 
-    /**
-     * Применяет массив высот к геометрии тайла.
-     * @private
-     */
+    /** @private */
     applyHeightsToGeometry(inst, heights) {
         const pos = inst.geometry.attributes.position.array;
         for (let i = 0; i < heights.length; i++) pos[i * 3 + 1] = heights[i];
@@ -1142,14 +964,7 @@ export class TileManager {
         }
     }
 
-    /**
-     * Синхронизирует высоты с соседними тайлами.
-     *
-     * Работает в deformed-режиме так же, как в Mercator: раскладка
-     * вершин PlaneGeometry одна и та же. Соседи определяются по
-     * tile-space (virtX, y), а не по world-координатам.
-     * @private
-     */
+    /** @private */
     syncTileWithNeighbors(inst) {
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]];
         for (const [dx, dy] of neighbors) {
@@ -1162,10 +977,7 @@ export class TileManager {
         }
     }
 
-    /**
-     * Синхронизирует высоты по общему ребру двух тайлов.
-     * @private
-     */
+    /** @private */
     syncEdgesBetween(instA, instB, dx, dy) {
         const posA = instA.geometry.attributes.position.array;
         const posB = instB.geometry.attributes.position.array;
@@ -1191,34 +1003,13 @@ export class TileManager {
         instB.geometry.computeVertexNormals();
     }
 
-    /**
-     * Масштаб высот из слоёв движка.
-     *
-     * Используется только в URL-режиме (worker). Для внешнего провайдера
-     * масштаб применяется внутри `provider.getTileHeights`.
-     *
-     * @returns {number}
-     * @private
-     */
+    /** @private */
     getElevationHeightScale() {
         const layerWithElev = this.engine.layers.find(l => l.elevation);
         return layerWithElev ? layerWithElev.heightScale : DEFAULTS.HEIGHT_SCALE;
     }
 
-    /**
-     * Предзагружает данные высот родительских тайлов в окрестности точки.
-     *
-     * В deformed-режиме bbox считается через `engine.worldToTileIndex`
-     * по 5 точкам вокруг центра — иначе на нелинейных проекциях легко
-     * ошибиться с диапазоном.
-     *
-     * Ничего не делает, если активен внешний провайдер высот
-     * (GeoTIFF и т.п.) — у него нет URL для предзагрузки.
-     *
-     * @param {THREE.Vector3} center
-     * @param {number} z
-     * @param {THREE.Vector3} worldGroupPos
-     */
+    /** @param {THREE.Vector3} center @param {number} z @param {THREE.Vector3} worldGroupPos */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation || z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return;
         if (this.elevationProvider) return;
@@ -1275,7 +1066,7 @@ export class TileManager {
 
     /* ---- LRU сборщик мусора ---- */
 
-    /** LRU-сборщик мусора для тайлов. @private */
+    /** @private */
     gc(renderSet) {
         if (this.tiles.size <= MAX_CACHED_TILES) return;
         const candidates = [];
@@ -1291,33 +1082,19 @@ export class TileManager {
         }
     }
 
-    /** Освобождает ресурсы тайла. @private */
+    /** @private */
     disposeTile(inst) {
         this.tiles.delete(this.key(inst.z, inst.virtX, inst.y));
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
             inst.mesh.geometry.dispose();
-            // Material.dispose() не трогает текстуру — она в ref-кэше
-            // и освобождается через releaseTexture ниже.
+            // Material.dispose() не трогает текстуру — она в ref-кэше.
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
     }
 
-    /**
-     * Инициализирует воркер для вычисления высот.
-     *
-     * Воркер не зависит от проекции: он сэмплит elevation-картинку
-     * по UV-сетке и возвращает (SEGMENTS+1)² высот в row-major, что
-     * совпадает с раскладкой вершин PlaneGeometry и для deformed,
-     * и для плоских тайлов.
-     *
-     * Создаётся только если `hasElevation` был `true` в конструкторе
-     * (URL-источник DEM). Внешний провайдер (GeoTIFF) обходится без
-     * воркера — там вычисления синхронные.
-     *
-     * @private
-     */
+    /** @private */
     initWorker() {
         const TILE_PIXELS = this.engine.TILE_PIXELS;
         const workerCode = `
@@ -1414,7 +1191,7 @@ export class TileManager {
         };
     }
 
-    /** Обрабатывает очередь задач воркера. @private */
+    /** @private */
     processWorkerQueue() {
         while (this.activeWorkerJobs < this.engine.MAX_WORKER_REQUESTS && this.pendingWorkerJobs.length > 0) {
             const job = this.pendingWorkerJobs.shift();
@@ -1423,13 +1200,7 @@ export class TileManager {
         }
     }
 
-    /**
-     * Планирует задачу для воркера.
-     * @param {string} type
-     * @param {Object} payload
-     * @returns {Promise<Object>}
-     * @private
-     */
+    /** @private */
     scheduleWorkerJob(type, payload) {
         const id = this.nextJobId++;
         const promise = new Promise((resolve, reject) => {

@@ -78,7 +78,8 @@ export class View {
  *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 3 }),
  *     projection: 'EPSG:3857',
  *     inputCRS: 'EPSG:4326',
- *     R: 6378137
+ *     R: 6378137,
+ *     tileLighting: true
  * });
  */
 export class KrbMap {
@@ -107,6 +108,18 @@ export class KrbMap {
      * @param {number} [options.staticBgZoom]
      * @param {number} [options.minCameraHeightOffset]
      * @param {boolean} [options.antialias=true]
+     * @param {boolean} [options.tileLighting=false] - Использовать ли
+     *     освещаемый материал (`MeshStandardMaterial`) для тайлов.
+     *     При `false` — быстрый `MeshBasicMaterial` без учёта света.
+     * @param {number} [options.tileLightingRoughness=0.7] - Roughness
+     *     освещаемого материала тайлов (только при `tileLighting === true`).
+     * @param {number} [options.tileLightingMetalness=0.0] - Metalness
+     *     освещаемого материала тайлов (только при `tileLighting === true`).
+     * @param {number} [options.tileLightingEmissive=0.5] - Доля «запечённой»
+     *     яркости текстуры (0..1). Компенсирует потемнение тайлов под PBR:
+     *     тайловая текстура обычно уже «освещена» сервером, и без эмиссии
+     *     `MeshStandardMaterial` выглядит заметно темнее, чем
+     *     `MeshBasicMaterial`. Только при `tileLighting === true`.
      */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
@@ -182,7 +195,22 @@ export class KrbMap {
         this.objectRenderDistanceFactor = options.objectRenderDistanceFactor ?? DEFAULTS.OBJECT_RENDER_DISTANCE_FACTOR;
         this.staticBgZoom = options.staticBgZoom ?? DEFAULTS.STATIC_BG_ZOOM;
         this.antialias = options.antialias ?? true;
-        this.tileLighting = options.tileLighting ?? false;
+
+        /**
+         * Настройки освещения тайлов. Читаются в конструкторе
+         * {@link TileManager}, поэтому должны быть установлены до его
+         * создания (см. ниже `new TileManager(this)`).
+         *
+         * Дефолты согласованы с `Tiles.js`:
+         *  - roughness 0.7 — матово, но с лёгким блеском;
+         *  - metalness 0.0 — диэлектрик;
+         *  - emissive  0.5 — половина яркости текстуры идёт «как есть»,
+         *    чтобы тайлы под PBR не темнели относительно `MeshBasicMaterial`.
+         */
+        this.tileLighting          = options.tileLighting          ?? false;
+        this.tileLightingRoughness = options.tileLightingRoughness ?? 0.7;
+        this.tileLightingMetalness = options.tileLightingMetalness ?? 0.0;
+        this.tileLightingEmissive  = options.tileLightingEmissive  ?? 0.5;
 
         const elevLayer = this.layers.find(l => l.elevation);
         this.effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
@@ -914,6 +942,11 @@ export class KrbMap {
      * В deformed-режиме фон не строится: плоско-прямоугольные
      * заглушки не соответствуют проекции и будут заметно «врать».
      * В этом режиме вся отрисовка — на TileManager.
+     *
+     * При `tileLighting: true` BG-тайлы получают тот же освещаемый
+     * материал, что и подробные тайлы (`MeshStandardMaterial` с
+     * `emissiveMap`), — иначе подложка выделялась бы более ярким
+     * цветом на фоне затемнённых подробных тайлов.
      */
     createStaticBackgroundLayer() {
         if (this.deformedTiles) return;
@@ -942,9 +975,15 @@ export class KrbMap {
                 this.staticBgGroup.add(mesh);
 
                 this.tileManager.loadTextureAsync(texUrl).then(tex => {
+                    // Защита от гонки с dispose(): если карта успела
+                    // уничтожиться, tileManager/staticBgGroup уже null.
+                    if (this._disposed || !this.tileManager || !this.staticBgGroup) return;
                     if (tex && mesh.parent === this.staticBgGroup) {
-                        mesh.material.map = tex;
-                        mesh.material.needsUpdate = true;
+                        // setMeshTexture ставит и `map`, и `emissiveMap` —
+                        // без этого BG-тайлы под MeshStandardMaterial
+                        // остались бы без emissive-компенсации и выглядели
+                        // бы темнее подробных тайлов.
+                        this.tileManager.setMeshTexture(mesh, tex);
                     }
                 }).catch(() => {});
             }

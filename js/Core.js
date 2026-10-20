@@ -9,6 +9,7 @@ import { TextManager } from './TextManager.js';
 import { initUI } from './Ui.js';
 import { PopupManager } from './PopupManager.js';
 import { InteractionManager } from './Interaction.js';
+import { NoiseElevationProvider } from './NoiseElevation.js';
 
 /**
  * Параметры камеры/зума, задаваемые пользователем при создании карты.
@@ -71,7 +72,36 @@ export class View {
 /**
  * Основной класс карты: Three.js-сцена, тайлы, камера, ввод.
  *
+ * **Публичные «спецзначения» полей слоя:**
+ *
+ *  - `texture: 'demo'` — вместо URL берутся картинки из папки
+ *    `demotiles/` рядом с модулем (`1.png` … `10.png`). Позиция тайла
+ *    игнорируется, картинка выбирается случайно при первой загрузке.
+ *
+ *  - `elevation: 'demo'` — вместо DEM-тайлов рельеф генерируется
+ *    процедурно fBm-Перлином. Параметры мира задаются в
+ *    `layer.noise` (`{ seed, amplitude, octaves, baseFrequency }`).
+ *    Детерминирован по `seed`: один и тот же сид → один и тот же мир
+ *    при любом зуме/панорамировании. `heightScale` в слое при этом
+ *    игнорируется — масштаб «запечён» в самом шуме.
+ *
+ *  - `heightScale` (число) — применяется только к URL-источнику DEM.
+ *
  * @example
+ * // карта-«обои» + процедурный рельеф:
+ * const map = new KrbMap({
+ *     target: 'map',
+ *     layers: [{
+ *         texture: 'demo',
+ *         elevation: 'demo',
+ *         noise: { seed: 777, amplitude: 6000, octaves: 5, baseFrequency: 1 / 25 }
+ *     }],
+ *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 5 }),
+ *     tileLighting: true,
+ *     minCameraHeightOffset: 2000
+ * });
+ *
+ * // обычный URL — работает как раньше:
  * const map = new KrbMap({
  *     target: 'map',
  *     layers: [{ texture: '.../{z}/{x}/{y}.png', elevation: '...', heightScale: 1 }],
@@ -86,7 +116,9 @@ export class KrbMap {
     /**
      * @param {Object} options
      * @param {string} options.target - ID DOM-элемента.
-     * @param {Array<Object>} options.layers - Слои (texture / elevation / heightScale).
+     * @param {Array<Object>} options.layers - Слои. Поля:
+     *     `texture?: string | 'demo'`, `elevation?: string | 'demo'`,
+     *     `heightScale?: number`, `noise?: Object` (только для `elevation: 'demo'`).
      * @param {View} options.view
      * @param {string} [options.projection='EPSG:3857'] - Проекция мира карты.
      * @param {string} [options.inputCRS='EPSG:4326'] - СК по умолчанию для «географических» данных.
@@ -213,12 +245,16 @@ export class KrbMap {
         this.tileLightingEmissive  = options.tileLightingEmissive  ?? 0.5;
 
         const elevLayer = this.layers.find(l => l.elevation);
-        this.effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;
+        // ВАЖНО: ?? вместо тернарника. При `elevation: 'demo'` или при
+        // URL-слое без явного heightScale поле `heightScale` = undefined,
+        // и без фолбэка мы бы получили `200 * undefined = NaN` в
+        // MIN_CAMERA_HEIGHT_OFFSET, что ломает камеру в applyZoomDistance.
+        this.effectiveHeightScale = elevLayer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
 
         /**
          * Пользователь задал minCameraHeightOffset явно. Если нет — при
-         * подключении внешнего источника высот (GeoTIFF) значение
-         * пересчитывается от effectiveHeightScale.
+         * подключении внешнего источника высот (GeoTIFF/шум) значение
+         * пересчитывается.
          * @private
          */
         this._minCameraHeightOffsetIsCustom = options.minCameraHeightOffset !== undefined;
@@ -284,6 +320,29 @@ export class KrbMap {
         this.popupManager = new PopupManager(this);
         this.interaction = new InteractionManager(this);
         this.tileManager = new TileManager(this);
+
+        // === Регистрация процедурного источника высот (`elevation: 'demo'`) ===
+        // Делаем это ДО createStaticBackgroundLayer и ДО первого
+        // maybeUpdateVisibleTiles(true), чтобы тайлы первого кадра
+        // строились уже с рельефом — без промежуточного «плоского» прохода.
+        const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
+        if (demoElevLayer) {
+            const provider = new NoiseElevationProvider(demoElevLayer.noise || {});
+            this.tileManager.enableGeotiffElevation(provider);
+
+            // Если пользователь не задал minCameraHeightOffset явно —
+            // прикидываем от амплитуды шума, иначе камера будет
+            // «втыкаться» в горы при zoom-in.
+            if (!this._minCameraHeightOffsetIsCustom) {
+                const amp = provider.amplitude;
+                if (Number.isFinite(amp) && amp > 0) {
+                    this.MIN_CAMERA_HEIGHT_OFFSET = Math.max(
+                        this.MIN_CAMERA_HEIGHT_OFFSET,
+                        amp * 0.25
+                    );
+                }
+            }
+        }
 
         // LRU-кэш максимальной высоты поверхности; сбрасывается при новых тайлах.
         this._surfaceMaxHeightCache = new Map();
@@ -736,24 +795,49 @@ export class KrbMap {
        URL-хелперы
        ================================================================ */
 
-/** @param {number} z @param {number} x @param {number} y @returns {string|null} */
-getTextureUrl(z, x, y) {
-    const layer = this.layers[0];
-    if (!layer || !layer.texture) return null;
+    /**
+     * Возвращает URL текстуры тайла.
+     *
+     * Спецзначение `layer.texture === 'demo'` → случайная картинка из
+     * `demotiles/1.png … demotiles/10.png` рядом с этим модулем.
+     * URL разрешается относительно `import.meta.url`, работает в
+     * нативном ESM и Vite/webpack без настройки.
+     *
+     * @param {number} z @param {number} x @param {number} y
+     * @returns {string|null}
+     */
+    getTextureUrl(z, x, y) {
+        const layer = this.layers[0];
+        if (!layer || !layer.texture) return null;
 
-    if (layer.texture === 'demo') {
-        const n = 1 + Math.floor(Math.random() * 10);
-        return new URL(`./demotiles/${n}.png`, import.meta.url).href;
+        if (layer.texture === 'demo') {
+            const n = 1 + Math.floor(Math.random() * 10);
+            return new URL(`./demotiles/${n}.png`, import.meta.url).href;
+        }
+
+        return layer.texture
+            .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    return layer.texture
-        .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
-}
-
-    /** @param {number} z @param {number} x @param {number} y @returns {string|null} */
+    /**
+     * Возвращает URL DEM-тайла.
+     *
+     * Спецзначение `layer.elevation === 'demo'` → `null`: рельеф
+     * генерируется процедурно через {@link NoiseElevationProvider},
+     * зарегистрированный в конструкторе. Возврат `null` важен — иначе
+     * `TileManager.loadTile` запишет `'demo'` в `srcKeyToElevUrl` и
+     * попытается `fetch('demo')`.
+     *
+     * @param {number} z @param {number} x @param {number} y
+     * @returns {string|null}
+     */
     getElevationUrl(z, x, y) {
-        if (!this.layers[0] || !this.layers[0].elevation) return null;
-        return this.layers[0].elevation
+        const layer = this.layers[0];
+        if (!layer || !layer.elevation) return null;
+
+        if (layer.elevation === 'demo') return null;
+
+        return layer.elevation
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
@@ -765,28 +849,23 @@ getTextureUrl(z, x, y) {
     }
 
     /* ================================================================
-       Источник высот из GeoTIFF
+       Источник высот из GeoTIFF / процедурного шума
        ================================================================ */
 
     /**
-     * Подключает GeoTIFF-слой как источник высот для тайлов карты.
+     * Подключает внешний источник высот (GeoTIFF-слой или
+     * {@link NoiseElevationProvider}) к тайлам карты.
      *
-     * Вызывается автоматически из {@link module:GeoTiffLayer} при
-     * загрузке, если слой создан с `asElevation: true`. Может быть
-     * вызван и вручную — работает и «холодно» (до загрузки тайлов),
-     * и «горячо» (когда тайлы уже есть).
+     * Вызывается автоматически:
+     *  - из {@link module:GeoTiffLayer} при загрузке, если слой создан
+     *    с `asElevation: true`;
+     *  - из конструктора `KrbMap`, если в слое указано
+     *    `elevation: 'demo'` (тогда провайдер — процедурный шум).
      *
-     * Что делает:
-     *  1. Поднимает `hasElevation` и `hasTileLayers` карты;
-     *  2. Подхватывает `heightScale` из слоя (если не был задан
-     *     пользователем через `options.minCameraHeightOffset`);
-     *  3. Делегирует регистрацию в {@link TileManager#enableGeotiffElevation}
-     *     — тот при необходимости пересоздаст уже загруженные «плоские»
-     *     тайлы и запросит для них высоты;
-     *  4. Сбрасывает кэш максимальных высот поверхности;
-     *  5. Форсирует пересчёт видимых тайлов.
+     * Может быть вызван и вручную — работает и «холодно» (до загрузки
+     * тайлов), и «горячо» (когда тайлы уже есть).
      *
-     * @param {import('./GeoTiffLayer.js').GeoTiffLayer} layer
+     * @param {Object} layer
      * @returns {void}
      */
     enableGeotiffElevation(layer) {
@@ -802,8 +881,8 @@ getTextureUrl(z, x, y) {
         }
 
         this.hasElevation = true;
-        // GeoTIFF-elevation даёт рельеф тайлам, значит TileManager
-        // должен работать даже если текстового слоя нет.
+        // GeoTIFF/шум дают рельеф тайлам, значит TileManager должен
+        // работать даже если текстового слоя нет.
         if (!this.hasTileLayers) this.hasTileLayers = true;
 
         this.tileManager.enableGeotiffElevation(layer);
@@ -815,13 +894,13 @@ getTextureUrl(z, x, y) {
     }
 
     /**
-     * Отключает текущий внешний источник высот (GeoTIFF).
+     * Отключает текущий внешний источник высот.
      *
      * Полезно, если пользователь хочет вернуться к URL-источнику или
-     * убрать рельеф. Уже поднятые `hasElevation`/`hasTileLayers`
-     * карты не опускаются: возможно, у пользователя есть и другие
-     * источники рельефа. Тайлы с уже применёнными высотами «доживают»
-     * до вытеснения из LRU-кэша.
+     * убрать рельеф. Уже поднятые `hasElevation`/`hasTileLayers` карты
+     * не опускаются: возможно, у пользователя есть и другие источники
+     * рельефа. Тайлы с уже применёнными высотами «доживают» до
+     * вытеснения из LRU-кэша.
      *
      * @returns {void}
      */
@@ -1292,8 +1371,9 @@ getTextureUrl(z, x, y) {
      * для узких проекций (Equal Earth и т.п.) давало просадку до 1 FPS
      * даже при пустом списке layers.
      *
-     * Внешний источник высот (GeoTIFF) поднимает `hasTileLayers`, так
-     * что после его подключения тайлы будут обновляться.
+     * Внешний источник высот (GeoTIFF / `elevation: 'demo'`) поднимает
+     * `hasTileLayers`, так что после его подключения тайлы будут
+     * обновляться.
      *
      * @param {boolean} [force]
      */

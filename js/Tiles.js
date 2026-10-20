@@ -42,6 +42,16 @@ const MAX_COVER_DEPTH = 2;
 const DEFORM_SEGMENTS_FLAT = 8;
 
 /**
+ * Значения roughness/metalness по умолчанию для освещаемых тайлов.
+ * `roughness = 0.9` — матовая «земляная» поверхность, без пластикового
+ * блеска; `metalness = 0` — диэлектрик (у земли нет металлического
+ * отражения).
+ * @private
+ */
+const TILE_DEFAULT_ROUGHNESS = 0.9;
+const TILE_DEFAULT_METALNESS = 0.0;
+
+/**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
  *
  * @example
@@ -88,6 +98,14 @@ export class Tile {
  *    {@link TileManager#enableGeotiffElevation}; при наличии провайдера
  *    запросы высот идут к нему синхронно, минуя worker и сеть.
  *
+ * **Освещение.** Если `engine.tileLighting === true`, тайлы получают
+ * `MeshStandardMaterial` и начинают реагировать на `AmbientLight` /
+ * `DirectionalLight` сцены так же, как `Marker3D`-примитивы. Нормали
+ * берутся из `PlaneGeometry` (после `rotateX(-π/2)` они направлены
+ * вверх) и обновляются через `computeVertexNormals()` при применении
+ * рельефа. При `false` (по умолчанию) используется быстрый
+ * `MeshBasicMaterial` — без освещения и с меньшей нагрузкой на GPU.
+ *
  * @example
  * const engine = {
  *     currentDiscreteZoom: 3,
@@ -100,6 +118,7 @@ export class Tile {
  *     TILE_PIXELS: 256,
  *     hasElevation: true,
  *     deformedTiles: false,
+ *     tileLighting: true,
  *     globalElevCache: new Map(),
  *     worldGroup: new THREE.Group(),
  *     projection: Projections.get('EPSG:3857'),
@@ -120,6 +139,13 @@ export class TileManager {
      * @param {Object} engine - Объект движка карты.
      * @param {boolean} engine.hasElevation
      * @param {boolean} engine.deformedTiles - Использовать ли деформированные тайлы.
+     * @param {boolean} [engine.tileLighting=false] - Использовать ли
+     *     освещаемый материал (`MeshStandardMaterial`) для тайлов.
+     *     При `false` — быстрый `MeshBasicMaterial`.
+     * @param {number} [engine.tileLightingRoughness=0.9] - Roughness
+     *     освещаемого материала (только при `tileLighting === true`).
+     * @param {number} [engine.tileLightingMetalness=0] - Metalness
+     *     освещаемого материала (только при `tileLighting === true`).
      * @param {Map} [engine.globalElevCache]
      * @param {THREE.Group} engine.worldGroup
      * @param {number} engine.MAX_MERCATOR
@@ -154,6 +180,23 @@ export class TileManager {
          * @type {boolean}
          */
         this.hasElevation = engine.hasElevation;
+
+        /**
+         * Освещение тайлов. Значения `roughness`/`metalness` фиксируем
+         * в конструкторе (а не читаем каждый кадр), чтобы хот-пас
+         * создания материала не трогал `engine` лишний раз.
+         * @private
+         * @type {boolean}
+         */
+        this.tileLighting = engine.tileLighting === true;
+        /** @private @type {number} */
+        this.tileRoughness = Number.isFinite(engine.tileLightingRoughness)
+            ? engine.tileLightingRoughness
+            : TILE_DEFAULT_ROUGHNESS;
+        /** @private @type {number} */
+        this.tileMetalness = Number.isFinite(engine.tileLightingMetalness)
+            ? engine.tileLightingMetalness
+            : TILE_DEFAULT_METALNESS;
 
         /**
          * Внешний провайдер высот (например, GeoTiffLayer в режиме
@@ -200,6 +243,42 @@ export class TileManager {
     /** Строковый ключ тайла. @private */
     key(z, virtX, y) {
         return getVirtKey(z, virtX, y);
+    }
+
+    /* ================================================================
+       Материал тайла
+       ================================================================ */
+
+    /**
+     * Создаёт материал для тайла.
+     *
+     * При `tileLighting === false` — быстрый `MeshBasicMaterial`:
+     * текстура рисуется «как есть», без учёта света сцены. При
+     * `tileLighting === true` — `MeshStandardMaterial`: реагирует на
+     * `AmbientLight` и `DirectionalLight` сцены (как `Marker3D`),
+     * использует нормали геометрии. Флаги `depthWrite`/`depthTest`
+     * одинаковы в обоих режимах — на текущую логику наложения тайлов
+     * (с `renderOrder = z` и хаком `depthWrite = hasElevation`) смена
+     * материала не влияет.
+     *
+     * @param {THREE.Texture|null} texture - Текстура тайла.
+     * @returns {THREE.Material}
+     * @private
+     */
+    _createTileMaterial(texture) {
+        const common = {
+            map: texture,
+            depthWrite: this.hasElevation,
+            depthTest: this.hasElevation
+        };
+        if (this.tileLighting) {
+            return new THREE.MeshStandardMaterial({
+                ...common,
+                roughness: this.tileRoughness,
+                metalness: this.tileMetalness
+            });
+        }
+        return new THREE.MeshBasicMaterial(common);
     }
 
     /* ---- основной метод, вызывается из Core.maybeUpdateVisibleTiles ---- */
@@ -615,11 +694,9 @@ export class TileManager {
             geometry.rotateX(-Math.PI / 2);
         }
 
-        const mat = new THREE.MeshBasicMaterial({
-            map: texture,
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
-        });
+        // Материал — через общую фабрику: MeshBasicMaterial или
+        // MeshStandardMaterial в зависимости от engine.tileLighting.
+        const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geometry, mat);
         mesh.position.set(
@@ -734,11 +811,10 @@ export class TileManager {
         geom.computeVertexNormals();
         geom.computeBoundingSphere();
 
-        const mat = new THREE.MeshBasicMaterial({
-            map: texture,
-            depthWrite: this.hasElevation,
-            depthTest: this.hasElevation
-        });
+        // Материал — через общую фабрику. Нормали уже посчитаны
+        // (computeVertexNormals выше), так что MeshStandardMaterial
+        // в deformed-режиме тоже будет освещаться корректно.
+        const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geom, mat);
         mesh.position.set(
@@ -754,6 +830,13 @@ export class TileManager {
 
     /**
      * Создаёт статический фоновый меш тайла.
+     *
+     * Используется только для статической подложки (`staticBgGroup`)
+     * в Mercator-режиме. Намеренно остаётся на `MeshBasicMaterial`:
+     * меш рисуется с `depthTest: false` и `renderOrder: -2` под всеми
+     * тайлами, освещение на нём не читается, а `MeshStandardMaterial`
+     * добавил бы только стоимость.
+     *
      * @param {number} tileSize
      * @param {number} originX
      * @param {number} originZ
@@ -1214,6 +1297,8 @@ export class TileManager {
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
             inst.mesh.geometry.dispose();
+            // Material.dispose() не трогает текстуру — она в ref-кэше
+            // и освобождается через releaseTexture ниже.
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);

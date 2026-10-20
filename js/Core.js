@@ -182,6 +182,7 @@ export class KrbMap {
         this.objectRenderDistanceFactor = options.objectRenderDistanceFactor ?? DEFAULTS.OBJECT_RENDER_DISTANCE_FACTOR;
         this.staticBgZoom = options.staticBgZoom ?? DEFAULTS.STATIC_BG_ZOOM;
         this.antialias = options.antialias ?? true;
+        this.tileLighting = options.tileLighting ?? false;
 
         const elevLayer = this.layers.find(l => l.elevation);
         this.effectiveHeightScale = elevLayer ? elevLayer.heightScale : DEFAULTS.HEIGHT_SCALE;

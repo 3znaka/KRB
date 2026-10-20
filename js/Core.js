@@ -321,18 +321,14 @@ export class KrbMap {
         this.interaction = new InteractionManager(this);
         this.tileManager = new TileManager(this);
 
-        // === Регистрация процедурного источника высот (`elevation: 'demo'`) ===
-        // Делаем это ДО createStaticBackgroundLayer и ДО первого
-        // maybeUpdateVisibleTiles(true), чтобы тайлы первого кадра
-        // строились уже с рельефом — без промежуточного «плоского» прохода.
-        const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
-        if (demoElevLayer) {
-            const provider = new NoiseElevationProvider(demoElevLayer.noise || {});
-            this.tileManager.enableGeotiffElevation(provider);
+const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
+if (demoElevLayer) {
+    const provider = new NoiseElevationProvider({
+        ...(demoElevLayer.noise || {}),
+        heightScale: demoElevLayer.heightScale ?? 1,   // ← НОВОЕ
+    });
+    this.tileManager.enableGeotiffElevation(provider);
 
-            // Если пользователь не задал minCameraHeightOffset явно —
-            // прикидываем от амплитуды шума, иначе камера будет
-            // «втыкаться» в горы при zoom-in.
             if (!this._minCameraHeightOffsetIsCustom) {
                 const amp = provider.amplitude;
                 if (Number.isFinite(amp) && amp > 0) {

@@ -51,16 +51,20 @@ class Perlin2D {
  * Возвращает метры, сразу в world-масштабе Y.
  */
 export class NoiseElevationProvider {
-    constructor({
+     constructor({
         seed = 42,
-        amplitude = 5000,          // пик, м
-        octaves = 5,
-        baseFrequency = 1 / 30,    // 1° масштаба; 1/30 → континент ≈ 30°
+        amplitude = 10000,       // ← было 5000
+        octaves = 6,             // ← было 5
+        baseFrequency = 6,       // ← было 1/30
         lacunarity = 2.0,
         persistence = 0.5,
+        heightScale = 1,         // ← НОВОЕ: множитель амплитуды
     } = {}) {
         this.seed = seed >>> 0;
-        this.amplitude = amplitude;
+        this.heightScale = heightScale;
+        // ВАЖНО: this.amplitude теперь хранит УЖЕ отмасштабированный пик.
+        // Core.js читает его для MIN_CAMERA_HEIGHT_OFFSET — это правильно.
+        this.amplitude = amplitude * heightScale;
         this.octaves = octaves;
         this.baseFrequency = baseFrequency;
         this.lacunarity = lacunarity;

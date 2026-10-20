@@ -80,13 +80,13 @@ export class Tile {
      * @param {number} [options.heightScale] - По умолчанию DEFAULTS.HEIGHT_SCALE.
      */
     constructor(options) {
-        this.texture = options.texture;
-        this.elevation = options.elevation;
-        this.noise = options.noise;
-        this.attributionTitle = options.attributionTitle || '';
-        this.attributionUrl = options.attributionUrl || '';
-        this.heightScale = options.heightScale ?? DEFAULTS.HEIGHT_SCALE;
-    }
+    this.texture = options.texture;
+    this.elevation = options.elevation;
+    this.noise = options.noise;
+    this.attributionTitle = options.attributionTitle || '';
+    this.attributionUrl = options.attributionUrl || '';
+    this.heightScale = options.heightScale;   // ← undefined, если не задан
+}
 }
 
 /**
@@ -1006,9 +1006,9 @@ export class TileManager {
 
     /** @private */
     getElevationHeightScale() {
-        const layerWithElev = this.engine.layers.find(l => l.elevation);
-        return layerWithElev ? layerWithElev.heightScale : DEFAULTS.HEIGHT_SCALE;
-    }
+    const layerWithElev = this.engine.layers.find(l => l.elevation);
+    return layerWithElev?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
+}
 
     /** @param {THREE.Vector3} center @param {number} z @param {THREE.Vector3} worldGroupPos */
     prefetchParentElevations(center, z, worldGroupPos) {

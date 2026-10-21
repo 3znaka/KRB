@@ -138,9 +138,7 @@ export class Vector3D {
      * @param {number} [options.titleMaxZoom=Infinity]
      * @param {'left'|'center'|'right'} [options.titleAlign='center']
      * @param {'top'|'middle'|'bottom'} [options.titleVerticalAlign]
-     *     По умолчанию: `'bottom'` для start, `'top'` для end.
      * @param {[number, number]} [options.titleOffset]
-     *     По умолчанию: `[0,-10]` для start, `[0,+10]` для end.
      * @param {boolean} [options.titleAllowOverflow=false]
      * @param {number} [options.titlePriority=0]
      *
@@ -164,29 +162,6 @@ export class Vector3D {
      *     Общие поля: `type`, `period`, `speed`, `paused`, `reverse`,
      *     `fadeRatio`, `color`, `size`, `sizeMode`, `opacity`,
      *     `hideStaticArrow`.
-     *
-     *     `type: 'movingArrow'` — один конус скользит по ломаной.
-     *     `type: 'flowArrows'`  — N конусов (поле `count` / `spacing`).
-     *     `type: 'pulse'`       — концевой конус пульсирует (`_cone`).
-     *         Доп. поля: `minScale`, `maxScale`, `easing`.
-     *     `type: 'part'` — частичная отрисовка линии. Поля:
-     *       @param {'extend'|'center'|'boomerang'|'dash'} [options.animation.mode='extend']
-     *       @param {number} [options.animation.dashLength=20] - В world-метрах
-     *           (или в долях от длины линии при `dashLengthMode: 'fraction'`).
-     *       @param {'world'|'fraction'} [options.animation.dashLengthMode='world']
-     *       @param {number} [options.animation.gapRatio=1] - Отношение gap/dashLength.
-     *       @param {number} [options.animation.offsetStep=1] - Сколько «шагов»
-     *           (dash+gap) смещать за период. Для бесшовного цикла — целое.
-     *       @param {boolean} [options.animation.headCone=false] - Конус на краю
-     *           каждого dash (marching ants).
-     *       @param {number|null} [options.animation.headConeSize=null]
-     *       @param {string|null} [options.animation.headConeColor=null]
-     *       @param {number|null} [options.animation.width=null] - Толщина линии.
-     *       @param {boolean} [options.animation.hideBaseLine=true] - Скрыть
-     *           базовую `Line2` (обязательно true, если вы не хотите смешивать
-     *           её с overlay).
-     *       @param {'linear'|'sine'|'easeIn'|'easeOut'} [options.animation.easing]
-     *           По умолчанию `'linear'` для `dash`, `'sine'` для остальных.
      */
     constructor(options = {}) {
         if (!options.positions || options.positions.length < 2) {
@@ -212,7 +187,6 @@ export class Vector3D {
 
         // ---------- Подписи ----------
         /**
-         * Разрешённые опции подписей (общие + per-role).
          * @type {{start: Object, end: Object}}
          * @private
          */
@@ -274,7 +248,7 @@ export class Vector3D {
     _parseTitleOptions(options, role) {
         const isStart = role === 'start';
         const sfx = isStart ? 'Start' : 'End';
-        const placement = options.titlePlacement; // legacy API: 'start' | 'end'
+        const placement = options.titlePlacement;
 
         let text;
         if (isStart) {
@@ -304,8 +278,6 @@ export class Vector3D {
     }
 
     /**
-     * Фасад, который регистрируется в `TextManager`. Все методы
-     * делегируют к правильной роли.
      * @param {'start'|'end'} role
      * @returns {Object}
      * @private
@@ -374,6 +346,8 @@ export class Vector3D {
      * @private
      */
     _parseAnimationsInto(anim) {
+        // Полная замена списка. Старые ресурсы к этому моменту уже должны
+        // быть освобождены через _teardownAnimations() (в setAnimation).
         this._animList = [];
         if (!anim) return;
         const arr = Array.isArray(anim) ? anim : [anim];
@@ -423,7 +397,6 @@ export class Vector3D {
             base.minScale = anim.minScale ?? 0.4;
             base.maxScale = anim.maxScale ?? 1.2;
             base.easing   = anim.easing   ?? 'sine';
-            // Pulse анимирует `_cone` — по умолчанию не скрываем его.
             base.hideStaticArrow = anim.hideStaticArrow ?? false;
         }
 
@@ -456,7 +429,6 @@ export class Vector3D {
         if (easing === 'linear')  return phase;
         if (easing === 'easeIn')  return phase * phase;
         if (easing === 'easeOut') return 1 - (1 - phase) * (1 - phase);
-        // 'sine' (in-out)
         return 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
     }
 
@@ -520,8 +492,6 @@ export class Vector3D {
     }
 
     /**
-     * Выписывает в `out` пары (start, end) для всех сегментов ломаной,
-     * пересекающихся с дуговым диапазоном `[t0, t1]` (в долях от L).
      * @param {number} t0
      * @param {number} t1
      * @param {number[]} out
@@ -569,6 +539,12 @@ export class Vector3D {
        ================================================================ */
 
     /**
+     * Создаёт GPU-ресурсы для всех анимаций и применяет их «статичные»
+     * эффекты (скрытие базовой линии / концевого конуса).
+     *
+     * FIX: сбрасывает `anim.time = 0`, чтобы после повторного
+     * `remove() → addTo()` анимация начиналась заново.
+     *
      * @param {import('./KrbMap.js').KrbMap} map
      * @private
      */
@@ -577,11 +553,10 @@ export class Vector3D {
         if (!this._animPolyline) return;
 
         for (const anim of this._animList) {
+            anim.time = 0;                              // FIX: свежий старт
             this._setupOneAnimation(anim, map);
         }
 
-        // Скрываем статичный концевой конус, если хоть одна анимация
-        // этого просит (по умолчанию — все, кроме `pulse`).
         if (this._cone) {
             const hide = this._animList.some(a => a.config.hideStaticArrow);
             if (hide) this._cone.visible = false;
@@ -680,7 +655,16 @@ export class Vector3D {
         }
     }
 
-    /** @private */
+    /**
+     * Освобождает GPU-ресурсы всех анимаций, но **сохраняет** сами
+     * конфиги в `_animList` — чтобы после повторного `_attach()`
+     * анимации могли быть созданы заново.
+     *
+     * FIX: строка `this._animList = []` убрана.
+     * FIX: обнуляются `overlayGeo` / `overlayMat`.
+     *
+     * @private
+     */
     _teardownAnimations() {
         for (const anim of this._animList) {
             const o = anim.config;
@@ -707,7 +691,9 @@ export class Vector3D {
                     anim.overlay.geometry.dispose();
                     anim.overlay.material.dispose();
                     if (anim.overlay.parent) anim.overlay.parent.remove(anim.overlay);
-                    anim.overlay = null;
+                    anim.overlay    = null;
+                    anim.overlayGeo = null;
+                    anim.overlayMat = null;
                 }
                 if (anim.headConeGroup) {
                     for (const c of anim.headConePool) {
@@ -724,10 +710,10 @@ export class Vector3D {
             }
         }
 
-        this._animList = [];
+        // FIX: НЕ очищаем _animList — конфиги должны переживать remove().
+        // Очистка списка остаётся за _parseAnimationsInto().
         this._animPolyline = null;
 
-        // Статичный концевой конус — вернуть к жизни.
         if (this._cone) {
             this._cone.visible = true;
             this._cone.material.opacity = this._opacity;
@@ -869,6 +855,10 @@ export class Vector3D {
     }
 
     /**
+     * FIX: стартуем с `i = -1`, чтобы при integer `offsetStep` цикл
+     * dash-паттерна был бесшовным (первый «dash» на phase=1 совпадает
+     * с первым «dash» на phase=0).
+     *
      * @param {Object} o
      * @param {number} phase
      * @returns {Array<[number, number]>}
@@ -889,7 +879,7 @@ export class Vector3D {
         if (o.reverse) shift = -shift;
 
         const ranges = [];
-        for (let i = 0; i < count; i++) {
+        for (let i = -1; i < count; i++) {
             const startLen = i * step + shift;
             const endLen   = startLen + dashLen;
             const cs = Math.max(0, startLen);
@@ -939,7 +929,6 @@ export class Vector3D {
         const headSize    = o.headConeSize ?? o.size ?? this._arrowSize;
         const headSizeMode = o.sizeMode ?? this._arrowSizeMode;
 
-        // До-выделяем пул при необходимости.
         while (pool.length < n) {
             const g = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
             g.translate(0, 0.5, 0);
@@ -1041,13 +1030,16 @@ export class Vector3D {
        ================================================================ */
 
     /**
+     * FIX: `remove()` вызывается только если объект уже куда-то привязан.
+     * Иначе первый `_attach` уничтожал `_animList`.
+     *
      * @param {import('./KrbMap.js').KrbMap} map
      * @param {Layer} layer
      * @private
      */
     _attach(map, layer) {
         if (this._map === map && this._layer === layer) return;
-        this.remove();
+        if (this._map || this._layer) this.remove();   // FIX
         this._map = map;
         this._layer = layer;
 
@@ -1172,9 +1164,6 @@ export class Vector3D {
     }
 
     /**
-     * Масштаб конуса. `size`/`sizeMode` по умолчанию берутся из
-     * `this._arrowSize` / `this._arrowSizeMode`.
-     *
      * @param {import('./KrbMap.js').KrbMap} map
      * @param {THREE.Mesh} [cone=this._cone]
      * @param {number|null} [size=null]
@@ -1249,7 +1238,6 @@ export class Vector3D {
             this._stepAllAnimations(map, deltaTime);
         }
 
-        // Статичный `_cone`: держим в фокусе, если его не анимирует `pulse`.
         const hasPulse = this._animList.some(a => a.config.type === 'pulse');
         if (!hasPulse && this._arrowSizeMode === 'px' && this._cone && this._cone.visible) {
             this._applyConeScale(map);
@@ -1268,16 +1256,26 @@ export class Vector3D {
         }
     }
 
-addTo(map) {
-    if (this._map) this.remove();
-    const personalLayer = new Layer();
-    personalLayer.addTo(map);
-    personalLayer.add(this);
-    return this;
-}
+    /**
+     * FIX: если уже на этой карте — ранний выход; иначе `remove()`
+     * с последующим созданием персонального слоя.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @returns {Vector3D}
+     */
+    addTo(map) {
+        if (this._map === map && this._layer) return this;   // FIX
+        if (this._map) this.remove();
+        const personalLayer = new Layer();
+        personalLayer.addTo(map);
+        personalLayer.add(this);
+        return this;
+    }
 
-
-    /** Удаляет вектор с карты, освобождает ресурсы и снимает регистрации. */
+    /**
+     * Удаляет вектор с карты, освобождает ресурсы и снимает регистрации.
+     * Сохраняет `_animList` (см. `_teardownAnimations`).
+     */
     remove() {
         if (this._unregisterInteraction) {
             this._unregisterInteraction();

@@ -122,12 +122,6 @@ export class Vector3D {
      *     `arrowSize`. В режиме `'px'` размер конуса пересчитывается при
      *     каждом зуме так, чтобы визуально на экране он всегда занимал
      *     `arrowSize` пикселей.
-     * @param {number} [options.arrowSizeMaxRatio] - Ограничение размера
-     *     конуса в долях длины последнего сегмента. По умолчанию:
-     *     `0.4` для режима `'world'` (обратная совместимость) и
-     *     `Infinity` для режима `'px'` (чтобы стрелка гарантированно
-     *     сохраняла пиксельный размер при любом зуме). Передайте
-     *     конечное число, если нужен мягкий предел и в `'px'`-режиме.
      * @param {number} [options.opacity=1]
      * @param {boolean} [options.depthTest=false]
      * @param {number} [options.heightScale=1] - Множитель высоты.
@@ -165,12 +159,6 @@ export class Vector3D {
         /** @private */ this._arrowSize = options.arrowSize ?? 10;
         /** @private @type {'px'|'world'} */
         this._arrowSizeMode = options.arrowSizeMode === 'world' ? 'world' : 'px';
-        /**
-         * Предел размера конуса в долях последнего сегмента.
-         * `null` — использовать значение по умолчанию для выбранного режима.
-         * @private @type {number|null}
-         */
-        this._arrowSizeMaxRatio = options.arrowSizeMaxRatio ?? null;
         /** @private */ this._opacity   = options.opacity ?? 1;
         /** @private */ this._depthTest = options.depthTest ?? false;
         /** @private */ this._minZoom   = options.minZoom ?? -Infinity;
@@ -203,8 +191,8 @@ export class Vector3D {
         /** @private */ this._cone = null;
 
         /**
-         * Длина последнего сегмента в world-метрах — для опционального
-         * ограничения размера конуса (см. `arrowSizeMaxRatio`).
+         * Длина последнего сегмента в world-метрах — для ограничения
+         * размера конуса в `'world'`-режиме (не больше 40 % сегмента).
          * @private @type {number}
          */
         this._lastSegLen = 0;
@@ -357,10 +345,10 @@ export class Vector3D {
      *
      * где `dist` — расстояние от камеры до основания конуса.
      *
-     * Предел `arrowSizeMaxRatio` (доля длины последнего сегмента) в
-     * `'px'`-режиме по умолчанию не применяется (`Infinity`), чтобы
-     * стрелка гарантированно сохраняла пиксельный размер при отдалении.
-     * В `'world'`-режиме по умолчанию сохранён прежний предел 0.4.
+     * В режиме `'px'` размер не ограничивается — цель режима в том,
+     * чтобы стрелка всегда занимала ровно `arrowSize` пикселей на
+     * экране независимо от зума. В режиме `'world'` сохранён прежний
+     * предел 40 % длины последнего сегмента.
      *
      * @param {import('./KrbMap.js').KrbMap} map
      * @private
@@ -371,6 +359,9 @@ export class Vector3D {
         let h;
         if (this._arrowSizeMode === 'world') {
             h = this._arrowSize;
+            if (this._lastSegLen > 0) {
+                h = Math.min(h, this._lastSegLen * 0.4);
+            }
         } else {
             const wgPos = map.worldGroup.position;
             const pos   = this._cone.position;
@@ -390,12 +381,6 @@ export class Vector3D {
             h = this._arrowSize * worldPerPixel;
         }
 
-        const maxRatio = this._arrowSizeMaxRatio
-            ?? (this._arrowSizeMode === 'world' ? 0.4 : Infinity);
-
-        if (this._lastSegLen > 0 && isFinite(maxRatio)) {
-            h = Math.min(h, this._lastSegLen * maxRatio);
-        }
         if (!isFinite(h) || h <= 0) h = 1e-6;
 
         this._cone.scale.setScalar(h);

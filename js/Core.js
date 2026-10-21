@@ -75,7 +75,7 @@ export class View {
  * **Публичные «спецзначения» полей слоя:**
  *
  *  - `texture: 'demo'` — вместо URL берутся картинки из папки
- *    `demotiles/` рядом с модулем (`1.png` … `10.png`). Позиция тайла
+ *    `demotiles/` рядом с модулем (`1.webp` … `24.webp`). Позиция тайла
  *    игнорируется, картинка выбирается случайно при первой загрузке.
  *
  *  - `elevation: 'demo'` — вместо DEM-тайлов рельеф генерируется
@@ -795,7 +795,7 @@ if (demoElevLayer) {
      * Возвращает URL текстуры тайла.
      *
      * Спецзначение `layer.texture === 'demo'` → случайная картинка из
-     * `demotiles/1.png … demotiles/10.png` рядом с этим модулем.
+     * `demotiles/1.webp … demotiles/24.webp` рядом с этим модулем.
      * URL разрешается относительно `import.meta.url`, работает в
      * нативном ESM и Vite/webpack без настройки.
      *
@@ -807,8 +807,8 @@ if (demoElevLayer) {
         if (!layer || !layer.texture) return null;
 
         if (layer.texture === 'demo') {
-            const n = 1 + Math.floor(Math.random() * 10);
-            return new URL(`./demotiles/${n}.png`, import.meta.url).href;
+            const n = 1 + Math.floor(Math.random() * 24);
+            return new URL(`./demotiles/${n}.webp`, import.meta.url).href;
         }
 
         return layer.texture

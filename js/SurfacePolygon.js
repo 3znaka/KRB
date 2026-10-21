@@ -240,85 +240,92 @@ export class SurfacePolygon {
      * @param {{left: number, right: number, bottom: number, top: number}} bbox - Границы тайла.
      * @private
      */
-    _createOverlayForTile(inst, bbox) {
-        const map = this._map;
-        const ts = map.WORLD_SIZE / Math.pow(2, inst.z);
-        const key = getVirtKey(inst.z, inst.virtX, inst.y);
+  _createOverlayForTile(inst, bbox) {
+    const map = this._map;
+    const ts = map.WORLD_SIZE / Math.pow(2, inst.z);
+    const key = getVirtKey(inst.z, inst.virtX, inst.y);
 
-        // Дедупликация: убираем предыдущий оверлей для этого же тайла.
-        const old = this._overlays.get(key);
-        if (old) {
-            this._disposeOverlayMesh(old);
-            this._overlays.delete(key);
-        }
-
-        // Копия геометрии тайла (с уже применёнными высотами).
-        const geomCopy = inst.geometry.clone();
-
-        // Поднимаем все вершины на offsetY.
-        const pos = geomCopy.attributes.position.array;
-        for (let i = 0; i < pos.length; i += 3) {
-            pos[i + 1] += this._offsetY;
-        }
-        geomCopy.attributes.position.needsUpdate = true;
-        geomCopy.computeVertexNormals();
-
-        // Готовим текстуру (Canvas).
-        const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = map.TILE_PIXELS;
-        const ctx2d = canvas.getContext('2d');
-
-        // Преобразуем координаты кольца полигона в UV тайла (могут выходить за 0..1).
-        const ring = this._rings[0];
-        const uvPoints = ring.map((pt) => {
-            const [wx, wz] = map.project(pt, this._crs);
-            const u = (wx - bbox.left) / ts;
-            const v = (wz - bbox.bottom) / ts;   // 0 = север, 1 = юг
-            return { u, v };
-        });
-
-        // Рисуем на Canvas.
-        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
-        if (uvPoints.length > 0) {
-            ctx2d.beginPath();
-            // v=0 (север) → y=0 (верх canvas), инверсии не требуется.
-            ctx2d.moveTo(uvPoints[0].u * canvas.width, uvPoints[0].v * canvas.height);
-            for (let i = 1; i < uvPoints.length; i++) {
-                ctx2d.lineTo(uvPoints[i].u * canvas.width, uvPoints[i].v * canvas.height);
-            }
-            ctx2d.closePath();
-            ctx2d.fillStyle = this._fillColor;
-            ctx2d.globalAlpha = this._fillOpacity;
-            ctx2d.fill();
-
-            if (this._strokeWidth > 0) {
-                ctx2d.globalAlpha = 1.0;
-                ctx2d.strokeStyle = this._strokeColor;
-                ctx2d.lineWidth = this._strokeWidth;
-                ctx2d.stroke();
-            }
-        }
-
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
-
-        const material = new THREE.MeshBasicMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: true,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-            polygonOffset: true,
-            polygonOffsetFactor: -1,
-            polygonOffsetUnits: -1
-        });
-
-        const overlayMesh = new THREE.Mesh(geomCopy, material);
-        overlayMesh.position.copy(inst.mesh.position); 
-        overlayMesh.renderOrder = 1;
-        map.worldGroup.add(overlayMesh);
-        this._overlays.set(key, overlayMesh);
+    const old = this._overlays.get(key);
+    if (old) {
+        this._disposeOverlayMesh(old);
+        this._overlays.delete(key);
     }
+
+    const geomCopy = inst.geometry.clone();
+    const pos = geomCopy.attributes.position.array;
+    for (let i = 0; i < pos.length; i += 3) {
+        pos[i + 1] += this._offsetY;
+    }
+    geomCopy.attributes.position.needsUpdate = true;
+    geomCopy.computeVertexNormals();
+    geomCopy.computeBoundingSphere(); // Важно для корректного отсечения (culling)
+
+    // 1. УВЕЛИЧИВАЕМ РАЗРЕШЕНИЕ ХОЛСТА (чтобы обводка была четкой)
+    const texSize = 512; // Или 1024, если позволяет память
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = texSize;
+    const ctx2d = canvas.getContext('2d');
+
+    const ring = this._rings[0];
+    const uvPoints = ring.map((pt) => {
+        const [wx, wz] = map.project(pt, this._crs);
+        const u = (wx - bbox.left) / ts;
+        const v = (wz - bbox.bottom) / ts;
+        return { u, v };
+    });
+
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    if (uvPoints.length > 0) {
+        // 2. ОГРАНИЧИВАЕМ КООРДИНАТЫ (Clamping)
+        // Это спасает от багов отрисовки огромных полигонов на Canvas 2D
+        const clamp = (val) => Math.max(-2, Math.min(3, val));
+
+        ctx2d.beginPath();
+        ctx2d.moveTo(clamp(uvPoints[0].u) * canvas.width, clamp(uvPoints[0].v) * canvas.height);
+        for (let i = 1; i < uvPoints.length; i++) {
+            ctx2d.lineTo(clamp(uvPoints[i].u) * canvas.width, clamp(uvPoints[i].v) * canvas.height);
+        }
+        ctx2d.closePath();
+        
+        ctx2d.fillStyle = this._fillColor;
+        ctx2d.globalAlpha = this._fillOpacity;
+        ctx2d.fill();
+
+        if (this._strokeWidth > 0) {
+            ctx2d.globalAlpha = 1.0;
+            ctx2d.strokeStyle = this._strokeColor;
+            // Масштабируем толщину обводки под новый размер холста
+            const scale = texSize / map.TILE_PIXELS;
+            ctx2d.lineWidth = this._strokeWidth * scale; 
+            ctx2d.stroke();
+        }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    
+    // 3. ОТКЛЮЧАЕМ MIPMAPS (Убирает размытие и растекание цвета)
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.needsUpdate = true;
+
+    const material = new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+    });
+
+    const overlayMesh = new THREE.Mesh(geomCopy, material);
+    overlayMesh.position.copy(inst.mesh.position);
+    overlayMesh.renderOrder = 1;
+    map.worldGroup.add(overlayMesh);
+    this._overlays.set(key, overlayMesh);
+}
 
     /**
      * Полностью освобождает ресурсы одного оверлея.

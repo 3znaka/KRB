@@ -102,6 +102,9 @@ export function isEcefCrs(code) {
    Vector3D
    ================================================================ */
 
+/** Отношение радиуса конуса к его высоте. @private @type {number} */
+const CONE_RADIUS_RATIO = 0.35;
+
 export class Vector3D {
     /**
      * @param {Object} options
@@ -111,7 +114,14 @@ export class Vector3D {
      *     Если задан ECEF-код — точки трактуются как ECEF.
      * @param {string} [options.color='#3388ff']
      * @param {number} [options.width=2] - Толщина линии, px.
-     * @param {number} [options.arrowSize=10] - Длина стрелки, world-м.
+     * @param {number} [options.arrowSize=10] - Размер "наконечника".
+     *     Единицы измерения определяются `arrowSizeMode`:
+     *      - `'px'`    — экранные пиксели (CSS);
+     *      - `'world'` — world-метры (абсолютная величина, не зависит от зума).
+     * @param {'px'|'world'} [options.arrowSizeMode='px'] - Режим трактовки
+     *     `arrowSize`. В режиме `'px'` размер конуса пересчитывается при
+     *     каждом зуме так, чтобы визуально на экране он всегда занимал
+     *     `arrowSize` пикселей.
      * @param {number} [options.opacity=1]
      * @param {boolean} [options.depthTest=false]
      * @param {number} [options.heightScale=1] - Множитель высоты.
@@ -147,6 +157,8 @@ export class Vector3D {
         /** @private */ this._color     = options.color ?? '#3388ff';
         /** @private */ this._width     = options.width ?? 2;
         /** @private */ this._arrowSize = options.arrowSize ?? 10;
+        /** @private @type {'px'|'world'} */
+        this._arrowSizeMode = options.arrowSizeMode === 'world' ? 'world' : 'px';
         /** @private */ this._opacity   = options.opacity ?? 1;
         /** @private */ this._depthTest = options.depthTest ?? false;
         /** @private */ this._minZoom   = options.minZoom ?? -Infinity;
@@ -177,6 +189,13 @@ export class Vector3D {
         /** @private */ this._material = null;
         /** @private */ this._geometry = null;
         /** @private */ this._cone = null;
+
+        /**
+         * Длина последнего сегмента в world-метрах — для ограничения
+         * размера конуса (не больше 40 % сегмента).
+         * @private @type {number}
+         */
+        this._lastSegLen = 0;
 
         /** @private */ this._textLabel = null;
         /** @private */ this._unregisterInteraction = null;
@@ -265,10 +284,12 @@ export class Vector3D {
         const len   = dir.length();
 
         if (len > 1e-6) {
-            const cH = Math.min(this._arrowSize, len * 0.4);
-            const cR = cH * 0.35;
-            const cGeo = new THREE.ConeGeometry(cR, cH, 12);
-            cGeo.translate(0, cH / 2, 0);
+            // Единичный конус: высота 1, радиус CONE_RADIUS_RATIO, база
+            // в Y=0, вершина в Y=1. Реальный размер задаётся через
+            // `mesh.scale` в _applyConeScale() — это позволяет
+            // пересчитывать размер при зуме (режим 'px').
+            const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
+            cGeo.translate(0, 0.5, 0);
 
             this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
                 color: this._color,
@@ -284,6 +305,10 @@ export class Vector3D {
                     new THREE.Vector3(0, 1, 0), dir.normalize()
                 )
             );
+
+            this._lastSegLen = len;
+            this._applyConeScale(map);
+
             this._group.add(this._cone);
         }
 
@@ -312,11 +337,64 @@ export class Vector3D {
     }
 
     /**
+     * Пересчитывает масштаб конуса-стрелки под `arrowSize` с учётом
+     * `arrowSizeMode`. В режиме `'px'` переводит пиксели в world-метры
+     * по текущему состоянию камеры:
+     *
+     *     worldPerPixel = 2 * dist * tan(fov/2) / canvas.clientHeight
+     *
+     * где `dist` — расстояние от камеры до основания конуса. Результат
+     * ограничивается 40 % длины последнего сегмента, чтобы стрелка не
+     * «съедала» весь отрезок.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @private
+     */
+    _applyConeScale(map) {
+        if (!this._cone) return;
+
+        let h;
+        if (this._arrowSizeMode === 'world') {
+            h = this._arrowSize;
+        } else {
+            const wgPos = map.worldGroup.position;
+            const pos   = this._cone.position;
+            const dist  = map.camera.position.distanceTo(
+                map.getVec3().set(
+                    pos.x + wgPos.x,
+                    pos.y + wgPos.y,
+                    pos.z + wgPos.z
+                )
+            );
+
+            const canvas  = map.renderer.domElement;
+            const fovRad  = map.camera.fov * Math.PI / 180;
+            const hPixels = Math.max(1, canvas.clientHeight);
+            const worldPerPixel = (2 * dist * Math.tan(fovRad / 2)) / hPixels;
+
+            h = this._arrowSize * worldPerPixel;
+        }
+
+        if (this._lastSegLen > 0) {
+            h = Math.min(h, this._lastSegLen * 0.4);
+        }
+        if (!isFinite(h) || h <= 0) h = 1e-6;
+
+        this._cone.scale.setScalar(h);
+    }
+
+    /**
      * @param {import('./KrbMap.js').KrbMap} map
      * @private
      */
     _update(map) {
         if (!this._map || !this._line) return;
+
+        // Режим 'px': размер стрелки зависит от зума — пересчитываем
+        // каждый кадр. В режиме 'world' масштаб уже задан в _attach().
+        if (this._arrowSizeMode === 'px' && this._cone) {
+            this._applyConeScale(map);
+        }
 
         const zoom = map.continuousZoom;
         let visible = (this._layer ? this._layer.visible : true)
@@ -366,6 +444,7 @@ export class Vector3D {
         this._material = null;
         this._geometry = null;
         this._cone = null;
+        this._lastSegLen = 0;
 
         this._layer?._removeRef(this);
         this._layer = null;

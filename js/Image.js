@@ -6,6 +6,14 @@
  * Источником может быть URL, HTMLImageElement или HTMLCanvasElement.
  * Поддерживаются прозрачность и режимы смешивания.
  *
+ * ### Z-fighting с тайлами
+ *
+ * Primary-тайлы карты пишут depth и на нулевом уровне высот оказываются
+ * строго coplanar с плоскостью изображения (`alt = 0`) — классический
+ * z-fighting. Решение — `polygonOffset` в материале: значение глубины
+ * сдвигается «к камере», не трогая геометрию. См. опции `alwaysOnTop`
+ * (полное отключение depthTest) и `elevationOffset` (подъём над y=0).
+ *
  * @module Image
  */
 
@@ -18,6 +26,18 @@ import { Layer } from './Layers.js';
  * @private
  */
 const IMAGE_RENDER_ORDER = 997;
+
+/**
+ * Величина `polygonOffsetFactor`/`polygonOffsetUnits` по умолчанию.
+ *
+ * Подобрана так, чтобы уверенно перекрывать coplanar-тайлы на любых
+ * разумных дистанциях камеры и при этом не «просвечивать» сквозь
+ * рельеф, стоящий перед камерой. Увеличивайте, если z-fighting всё
+ * ещё пробивается на дальних зумах; уменьшайте, если изображение
+ * «светится» сквозь холмы.
+ * @private
+ */
+const DEFAULT_POLYGON_OFFSET = -4;
 
 /**
  * Класс, представляющий плоское изображение на карте.
@@ -76,6 +96,23 @@ export class Image {
      * @param {string|THREE.Blending} [options.blending='normal'] - Режим смешивания: 'normal', 'additive', 'multiply', 'subtract' или константа THREE.Blending.
      * @param {number} [options.minZoom=-Infinity] - Минимальный зум видимости.
      * @param {number} [options.maxZoom=Infinity] - Максимальный зум видимости.
+     *
+     * @param {boolean} [options.alwaysOnTop=false] - Отключить depthTest
+     *     у материала: изображение рисуется поверх всей сцены. Полезно
+     *     для чисто 2D-оверлеев (компас, легенда, баннеры), но ломает
+     *     окклюзию рельефом. По умолчанию `false` — используется
+     *     `polygonOffset`, который сохраняет корректную окклюзию.
+     * @param {number} [options.elevationOffset=0] - Дополнительный
+     *     подъём плоскости над `alt` из `nodes`/`position` (world-метры).
+     *     Складывается с `alt` каждой вершины. Полезно, чтобы приподнять
+     *     маркеры/накладки над нулевым уровнем высот и над рельефом.
+     * @param {number} [options.polygonOffset=-4] - Значение
+     *     `polygonOffsetFactor`/`polygonOffsetUnits` (с отрицательным
+     *     знаком — «к камере»). Увеличивайте, если z-fighting всё ещё
+     *     пробивается; уменьшайте, если изображение «просвечивает»
+     *     сквозь рельеф, стоящий перед камерой. Игнорируется при
+     *     `alwaysOnTop: true`.
+     *
      * @param {string} [options.title=''] - Текст подписи (отображается через TextManager).
      * @param {Object} [options.titleStyle] - CSS-стили подписи.
      * @param {number} [options.titleMinZoom=-Infinity] - Мин. зум для подписи.
@@ -117,6 +154,28 @@ export class Image {
         /** @private */ this._blending = options.blending || 'normal';
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
+
+        // --- Z-fighting / рендер над тайлами ---
+        /**
+         * Не проверять depth-буфер: изображение всегда поверх сцены.
+         * @private @type {boolean}
+         */
+        this._alwaysOnTop = options.alwaysOnTop === true;
+        /**
+         * Дополнительный подъём плоскости над `alt` (world-метры).
+         * Складывается с `alt` каждой вершины.
+         * @private @type {number}
+         */
+        this._elevationOffset = Number.isFinite(options.elevationOffset)
+            ? options.elevationOffset
+            : 0;
+        /**
+         * Значение `polygonOffsetFactor`/`polygonOffsetUnits`.
+         * @private @type {number}
+         */
+        this._polygonOffset = Number.isFinite(options.polygonOffset)
+            ? options.polygonOffset
+            : DEFAULT_POLYGON_OFFSET;
 
         // Подпись
         /** @private */ this._title = options.title || '';
@@ -565,6 +624,12 @@ export class Image {
     /**
      * Вычисляет мировые координаты (без worldGroup) для заданных узлов.
      * Координаты узлов интерпретируются в СК `this._crs`.
+     *
+     * К `node.alt` каждой вершины добавляется `_elevationOffset` —
+     * это единый подъём всей плоскости над нулевым уровнем. Нужен,
+     * чтобы приподнять изображение над рельефом и уменьшить
+     * зависимость от `polygonOffset` на дальних зумах.
+     *
      * @returns {Array.<THREE.Vector3>} Массив векторов.
      * @private
      */
@@ -572,10 +637,11 @@ export class Image {
         if (!this._nodes || this._nodes.length < 3) return [];
 
         const map = this._map;
+        const yOffset = this._elevationOffset;
         const positions = this._nodes.map(node => {
             // Узел задаётся объектом { lon, lat, alt }; проект только первые два.
             const [x, z] = map.project([node.lon, node.lat], this._crs);
-            const y = node.alt || 0;
+            const y = (node.alt || 0) + yOffset;
             return new THREE.Vector3(x, y, z);
         });
 
@@ -601,60 +667,69 @@ export class Image {
     /**
      * Вычисляет мировые координаты узлов из альтернативного позиционирования (anchor, rotation, size).
      * Первые два элемента `_position` интерпретируются в СК `this._crs`,
-     * третий элемент (`alt`) — как мировая Y-координата.
+     * третий элемент (`alt`) — как мировая Y-координата. К ней
+     * прибавляется `_elevationOffset`.
      * @returns {Array.<THREE.Vector3>} Массив из четырёх векторов в порядке [нижний левый, нижний правый, верхний левый, верхний правый].
      * @private
      */
-_computeWorldPositionsFromAnchor() {
-    if (!this._position) return [];
+    _computeWorldPositionsFromAnchor() {
+        if (!this._position) return [];
 
-    const [lon, lat, alt] = this._position;
-    const [width, height] = this._size;
-    const [ax, ay] = this._anchor;
-    const [rx, ry, rz] = this._rotation;
+        const [lon, lat, alt] = this._position;
+        const [width, height] = this._size;
+        const [ax, ay] = this._anchor;
+        const [rx, ry, rz] = this._rotation;
 
-    const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-    const center = new THREE.Vector3(worldX, alt || 0, worldZ);
+        const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
+        // Подъём применяем к центру — все 4 угла получат его же
+        // (в локальных координатах они лежат в плоскости XZ).
+        const center = new THREE.Vector3(worldX, (alt || 0) + this._elevationOffset, worldZ);
 
-    const halfW = width / 2;
-    const halfH = height / 2;
+        const halfW = width / 2;
+        const halfH = height / 2;
 
-    // Локальные координаты углов в плоскости XZ (Y=0), центр в (0,0,0)
-    const cornersLocal = [
-        new THREE.Vector3(-halfW, 0, -halfH),
-        new THREE.Vector3( halfW, 0, -halfH),
-        new THREE.Vector3(-halfW, 0,  halfH),
-        new THREE.Vector3( halfW, 0,  halfH)
-    ];
+        // Локальные координаты углов в плоскости XZ (Y=0), центр в (0,0,0)
+        const cornersLocal = [
+            new THREE.Vector3(-halfW, 0, -halfH),
+            new THREE.Vector3( halfW, 0, -halfH),
+            new THREE.Vector3(-halfW, 0,  halfH),
+            new THREE.Vector3( halfW, 0,  halfH)
+        ];
 
-    // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
-    const anchorOffset = new THREE.Vector3(
-        (0.5 - ax) * width,
-        0,
-        (0.5 - ay) * height
-    );
-    cornersLocal.forEach(c => c.add(anchorOffset));
-
-    // Применяем вращение
-    const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
-    const quaternion = new THREE.Quaternion().setFromEuler(euler);
-    const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
-
-    // Добавляем к центру в мировых координатах (без перестановки осей)
-    const worldCorners = rotatedCorners.map(local => {
-        return new THREE.Vector3(
-            center.x + local.x,
-            center.y + local.y,
-            center.z + local.z
+        // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
+        const anchorOffset = new THREE.Vector3(
+            (0.5 - ax) * width,
+            0,
+            (0.5 - ay) * height
         );
-    });
+        cornersLocal.forEach(c => c.add(anchorOffset));
 
-    return worldCorners;
-}
+        // Применяем вращение
+        const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
+        const quaternion = new THREE.Quaternion().setFromEuler(euler);
+        const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
 
+        // Добавляем к центру в мировых координатах (без перестановки осей)
+        const worldCorners = rotatedCorners.map(local => {
+            return new THREE.Vector3(
+                center.x + local.x,
+                center.y + local.y,
+                center.z + local.z
+            );
+        });
+
+        return worldCorners;
+    }
 
     /**
      * Строит геометрию плоскости с вершинами в мировых координатах (локально относительно центроида).
+     *
+     * **Z-fighting.** Материал получает `polygonOffset` (по умолчанию
+     * `factor = units = -4`): значение глубины сдвигается «к камере»,
+     * не трогая геометрию. Это гарантирует, что изображение перекрывает
+     * coplanar-тайлы карты. При `alwaysOnTop: true` depthTest
+     * отключается полностью — изображение рисуется поверх всей сцены.
+     *
      * @param {Object} map - Экземпляр карты.
      * @private
      */
@@ -695,15 +770,15 @@ _computeWorldPositionsFromAnchor() {
             geometry = new THREE.BufferGeometry();
             const vertices = new Float32Array(9);
             worldPositions.forEach((p, i) => {
-                vertices[i*3] = p.x - centroid.x;
-                vertices[i*3+1] = p.y - centroid.y;
-                vertices[i*3+2] = p.z - centroid.z;
+                vertices[i * 3]     = p.x - centroid.x;
+                vertices[i * 3 + 1] = p.y - centroid.y;
+                vertices[i * 3 + 2] = p.z - centroid.z;
             });
             geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
             geometry.setIndex([0, 1, 2]);
             // UV для треугольника: сопоставим углам изображения (0,0), (1,0), (0,1) или (0,1), (1,1), (0,0)?
             // Для простоты установим UV: (0,0), (1,0), (0,1) в порядке вершин.
-            const uvs = new Float32Array([0,0, 1,0, 0,1]);
+            const uvs = new Float32Array([0, 0, 1, 0, 0, 1]);
             geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
         } else {
             // Четырёхугольник (PlaneGeometry с переопределёнными вершинами)
@@ -718,15 +793,24 @@ _computeWorldPositionsFromAnchor() {
             geometry.computeVertexNormals();
         }
 
-        // Материал
+        // Материал с polygonOffset — против z-fighting с coplanar-тайлами.
+        const onTop = this._alwaysOnTop;
         const material = new THREE.MeshBasicMaterial({
             map: this._texture || null,
             side: THREE.DoubleSide,
             transparent: this._opacity < 1,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
-            depthTest: true,
-            depthWrite: false // чтобы не мешать другим прозрачным объектам
+
+            // depthTest выключается только при alwaysOnTop. В обычном
+            // режиме изображение корректно окклюдируется рельефом,
+            // стоящим перед камерой, но перекрывает coplanar-тайлы
+            // за счёт polygonOffset.
+            depthTest:  !onTop,
+            depthWrite: false,
+            polygonOffset:       !onTop,
+            polygonOffsetFactor: this._polygonOffset,
+            polygonOffsetUnits:  this._polygonOffset
         });
 
         const mesh = new THREE.Mesh(geometry, material);
@@ -743,12 +827,11 @@ _computeWorldPositionsFromAnchor() {
 
         // Вычисляем ограничивающую сферу
         let maxRadiusSq = 0;
-        const localCenter = new THREE.Vector3(0, 0, 0); // группа в центроиде
         worldPositions.forEach(p => {
             const dx = p.x - centroid.x;
             const dy = p.y - centroid.y;
             const dz = p.z - centroid.z;
-            const rSq = dx*dx + dy*dy + dz*dz;
+            const rSq = dx * dx + dy * dy + dz * dz;
             if (rSq > maxRadiusSq) maxRadiusSq = rSq;
         });
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
@@ -814,6 +897,11 @@ _computeWorldPositionsFromAnchor() {
 
     /**
      * Проверяет, находится ли точка экрана над изображением.
+     *
+     * `polygonOffset` влияет только на рендер, не на рейкастинг —
+     * попадание по изображению работает независимо от того, что
+     * визуально оно может перекрывать тайл.
+     *
      * @param {MouseEvent} event - Событие мыши.
      * @returns {boolean} true, если луч пересекает изображение.
      * @private
@@ -982,6 +1070,9 @@ _computeWorldPositionsFromAnchor() {
      *    ещё не привязана, возвращается вырожденный прямоугольник по
      *    точке `position` (без карты размер в метрах и поворот однозначно
      *    в градусы не выражаются).
+     *
+     * `elevationOffset` на bounds не влияет: unproject использует только
+     * X/Z мировые координаты, Y игнорируется.
      *
      * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
      *     Целевая СК для результата (код или объект Projection).

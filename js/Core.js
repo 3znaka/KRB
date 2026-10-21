@@ -1,6 +1,7 @@
 import {
   THREE,
-  OrbitControls
+  OrbitControls,
+  TOUCH_MAP_CONTROLS
 } from '../js_TP/tpb.js';
 import { DEFAULTS, getOriginZ, getVirtKey } from './Utils.js';
 import { Projections } from './Projections.js';
@@ -432,10 +433,10 @@ export class KrbMap {
             MIDDLE: THREE.MOUSE.DOLLY,
             RIGHT: THREE.MOUSE.ROTATE
         };
-        this.controls.touches = {
-            ONE: THREE.TOUCH.PAN,
-            TWO: THREE.TOUCH.MAP_CONTROLS
-        };
+this.controls.touches = {
+    ONE: THREE.TOUCH.PAN,
+    TWO: TOUCH_MAP_CONTROLS
+};
         this.controls.maxPolarAngle = (85 * Math.PI) / 180;
         this.controls.minPolarAngle = 0.001;
         this.controls.enableDamping = true;

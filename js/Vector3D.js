@@ -1268,6 +1268,15 @@ export class Vector3D {
         }
     }
 
+addTo(map) {
+    if (this._map) this.remove();
+    const personalLayer = new Layer();
+    personalLayer.addTo(map);
+    personalLayer.add(this);
+    return this;
+}
+
+
     /** Удаляет вектор с карты, освобождает ресурсы и снимает регистрации. */
     remove() {
         if (this._unregisterInteraction) {

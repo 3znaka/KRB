@@ -10,6 +10,7 @@ import {
   THREE,
 } from '../js_TP/tpb.js';
 import { Projections } from './Projections.js';
+import { getOriginZ, getVirtKey } from './Utils.js';
 import { Layer } from './Layers.js';
 
 /**
@@ -83,8 +84,28 @@ export class SurfacePolygon {
 
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
-        /** @private */ this._overlayMeshes = [];   // все созданные меши
-        /** @private */ this._callback = null;      // колбэк в tileManager
+
+        /**
+         * Созданные меши-оверлеи, по ключу тайла.
+         *
+         * Храним именно `Map<virtKey, THREE.Mesh>`, а не массив: при LRU-
+         * вытеснении тайл может быть выгружен и снова загружен в течение
+         * жизни полигона. Колбэк `onTileHeightAppliedCallbacks` сработает
+         * для нового `inst` — и без дедупликации мы бы оставили в сцене
+         * «зомби»-оверлей от прошлой загрузки. Map позволяет перед
+         * созданием нового оверлея убрать старый.
+         *
+         * @private
+         * @type {Map<string, THREE.Mesh>}
+         */
+        this._overlays = new Map();
+
+        /**
+         * Колбэк, зарегистрированный в `tileManager.onTileHeightAppliedCallbacks`.
+         * @private
+         * @type {((inst: Object) => void)|null}
+         */
+        this._callback = null;
     }
 
     /**
@@ -104,8 +125,17 @@ export class SurfacePolygon {
 
     /**
      * Внутренний метод, вызываемый слоем при добавлении.
-     * Подписывается на событие применения высот к тайлам и сразу
-     * обрабатывает уже готовые тайлы.
+     *
+     * Подписывается на `tileManager.onTileHeightAppliedCallbacks` и сразу
+     * обрабатывает уже загруженные тайлы с высотами (например, если полигон
+     * добавили после того, как пользователь уже подеzoom'ил и тайлы успели
+     * загрузиться).
+     *
+     * Колбэк `TileManager`'а передаёт ровно один аргумент — `inst`.
+     * Никакого «контекста слоя» пока нет (он появится, когда в карте
+     * будет несколько тайловых слоёв), поэтому все нужные величины
+     * (`map.worldGroup`, `map.tileManager.tiles`, `WORLD_SIZE`) берём
+     * напрямую у карты.
      *
      * @param {Object} map - Карта.
      * @param {Layer} layer - Слой-владелец.
@@ -122,18 +152,16 @@ export class SurfacePolygon {
             ? Projections.get(this._crsCode)
             : map.inputCRS;
 
-        if (map.tileManager?.onTileHeightAppliedCallbacks) {
-            this._callback = (ctx, inst) => this._onTileHeightApplied(ctx, inst);
-            map.tileManager.onTileHeightAppliedCallbacks.push(this._callback);
+        const callbacks = map.tileManager?.onTileHeightAppliedCallbacks;
+        if (callbacks) {
+            this._callback = (inst) => this._onTileHeightApplied(inst);
+            callbacks.push(this._callback);
 
-            // Обрабатываем уже загруженные тайлы с высотами
-            const ctx = map.getCurrentContext();
-            if (ctx) {
-                for (const [key, inst] of ctx.instanceCache) {
-                    if (inst.heightsApplied) {
-                        this._onTileHeightApplied(ctx, inst);
-                    }
-                }
+            // Обрабатываем уже загруженные тайлы с высотами.
+            // `tileManager.tiles` — публичное хранилище инстансов
+            // (см. его использование в KrbMap#onClick и TileManager#update).
+            for (const inst of map.tileManager.tiles.values()) {
+                if (inst.heightsApplied) this._onTileHeightApplied(inst);
             }
         }
     }
@@ -142,15 +170,18 @@ export class SurfacePolygon {
      * Вычисляет ограничивающий прямоугольник тайла в мировых координатах.
      * `bottom` – северная кромка (минимальная Z), `top` – южная кромка (максимальная Z).
      *
-     * @param {Object} ctx - Контекст тайлового слоя.
-     * @param {Object} inst - Экземпляр тайла (содержит virtX, y).
+     * Размер тайла зависит от его `z` (WORLD_SIZE / 2^z), поэтому
+     * вычисляется здесь, а не хранится в каком-либо «контексте».
+     *
+     * @param {Object} inst - Экземпляр тайла (содержит z, virtX, y).
      * @returns {{left: number, right: number, bottom: number, top: number}} Границы тайла.
      * @private
      */
-    _getTileMercatorBBox(ctx, inst) {
-        const ts = ctx.tileSize;
-        const left = inst.virtX * ts - this._map.MAX_MERCATOR;
-        const bottom = -this._map.MAX_MERCATOR + inst.y * ts;   // getOriginZ
+    _getTileMercatorBBox(inst) {
+        const map = this._map;
+        const ts = map.WORLD_SIZE / Math.pow(2, inst.z);
+        const left = inst.virtX * ts - map.MAX_MERCATOR;
+        const bottom = getOriginZ(inst.y, ts, map.MAX_MERCATOR);
         return {
             left,
             right: left + ts,
@@ -185,14 +216,14 @@ export class SurfacePolygon {
      * Обработчик, вызываемый после применения высот к тайлу.
      * Если тайл пересекается с полигоном – создаёт оверлей.
      *
-     * @param {Object} ctx - Контекст тайлового слоя.
      * @param {Object} inst - Экземпляр тайла.
      * @private
      */
-    _onTileHeightApplied(ctx, inst) {
-        const bbox = this._getTileMercatorBBox(ctx, inst);
+    _onTileHeightApplied(inst) {
+        if (!this._map || !inst.geometry) return;
+        const bbox = this._getTileMercatorBBox(inst);
         if (!this._polygonIntersectsTile(bbox)) return;
-        this._createOverlayForTile(ctx, inst, bbox);
+        this._createOverlayForTile(inst, bbox);
     }
 
     /**
@@ -201,19 +232,30 @@ export class SurfacePolygon {
      * генерирует Canvas-текстуру с заливкой/обводкой полигона в UV-координатах тайла,
      * накладывает её на геометрию и добавляет в сцену.
      *
-     * @param {Object} ctx - Контекст тайла.
+     * Если для этого тайла уже есть оверлей (например, тайл был выгружен
+     * LRU-сборщиком и загружен заново), старый удаляется — иначе в сцене
+     * остался бы «зомби»-меш со старой геометрией.
+     *
      * @param {Object} inst - Экземпляр тайла.
      * @param {{left: number, right: number, bottom: number, top: number}} bbox - Границы тайла.
      * @private
      */
-    _createOverlayForTile(ctx, inst, bbox) {
+    _createOverlayForTile(inst, bbox) {
         const map = this._map;
-        const ts = ctx.tileSize;
+        const ts = map.WORLD_SIZE / Math.pow(2, inst.z);
+        const key = getVirtKey(inst.z, inst.virtX, inst.y);
 
-        // Копия геометрии тайла (с уже применёнными высотами)
+        // Дедупликация: убираем предыдущий оверлей для этого же тайла.
+        const old = this._overlays.get(key);
+        if (old) {
+            this._disposeOverlayMesh(old);
+            this._overlays.delete(key);
+        }
+
+        // Копия геометрии тайла (с уже применёнными высотами).
         const geomCopy = inst.geometry.clone();
 
-        // Поднимаем все вершины на offsetY
+        // Поднимаем все вершины на offsetY.
         const pos = geomCopy.attributes.position.array;
         for (let i = 0; i < pos.length; i += 3) {
             pos[i + 1] += this._offsetY;
@@ -221,26 +263,25 @@ export class SurfacePolygon {
         geomCopy.attributes.position.needsUpdate = true;
         geomCopy.computeVertexNormals();
 
-        // Готовим текстуру (Canvas)
+        // Готовим текстуру (Canvas).
         const canvas = document.createElement('canvas');
         canvas.width = canvas.height = map.TILE_PIXELS;
         const ctx2d = canvas.getContext('2d');
 
-        // Преобразуем координаты кольца полигона в UV тайла (могут выходить за 0..1)
+        // Преобразуем координаты кольца полигона в UV тайла (могут выходить за 0..1).
         const ring = this._rings[0];
         const uvPoints = ring.map((pt) => {
-            // Координата кольца → метры проекции карты.
             const [wx, wz] = map.project(pt, this._crs);
             const u = (wx - bbox.left) / ts;
             const v = (wz - bbox.bottom) / ts;   // 0 = север, 1 = юг
             return { u, v };
         });
 
-        // Рисуем на Canvas
+        // Рисуем на Canvas.
         ctx2d.clearRect(0, 0, canvas.width, canvas.height);
         if (uvPoints.length > 0) {
             ctx2d.beginPath();
-            // v=0 (север) → y=0 (верх canvas), инверсии не требуется
+            // v=0 (север) → y=0 (верх canvas), инверсии не требуется.
             ctx2d.moveTo(uvPoints[0].u * canvas.width, uvPoints[0].v * canvas.height);
             for (let i = 1; i < uvPoints.length; i++) {
                 ctx2d.lineTo(uvPoints[i].u * canvas.width, uvPoints[i].v * canvas.height);
@@ -274,8 +315,21 @@ export class SurfacePolygon {
 
         const overlayMesh = new THREE.Mesh(geomCopy, material);
         overlayMesh.renderOrder = 1;
-        ctx.worldGroup.add(overlayMesh);
-        this._overlayMeshes.push(overlayMesh);
+        map.worldGroup.add(overlayMesh);
+        this._overlays.set(key, overlayMesh);
+    }
+
+    /**
+     * Полностью освобождает ресурсы одного оверлея.
+     * @param {THREE.Mesh|null} mesh
+     * @private
+     */
+    _disposeOverlayMesh(mesh) {
+        if (!mesh) return;
+        mesh.parent?.remove(mesh);
+        mesh.geometry?.dispose();
+        if (mesh.material?.map) mesh.material.map.dispose();
+        mesh.material?.dispose();
     }
 
     /**
@@ -295,13 +349,10 @@ export class SurfacePolygon {
             this._callback = null;
         }
 
-        for (const mesh of this._overlayMeshes) {
-            mesh.parent?.remove(mesh);
-            mesh.geometry?.dispose();
-            if (mesh.material.map) mesh.material.map.dispose();
-            mesh.material.dispose();
+        for (const mesh of this._overlays.values()) {
+            this._disposeOverlayMesh(mesh);
         }
-        this._overlayMeshes = [];
+        this._overlays.clear();
 
         if (this._layer) {
             this._layer._removeRef(this);

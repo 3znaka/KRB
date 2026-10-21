@@ -113,7 +113,7 @@ export class Vector3D {
      * @param {number} [options.width=2] - Толщина линии, px.
      * @param {number} [options.arrowSize=10] - Длина стрелки, world-м.
      * @param {number} [options.opacity=1]
-     * @param {boolean} [options.depthTest=true]
+     * @param {boolean} [options.depthTest=false]
      * @param {number} [options.heightScale=1] - Множитель высоты.
      * @param {number} [options.altitudeOffset=0] - Аддитивный сдвиг Y, м.
      * @param {number} [options.minZoom=-Infinity]
@@ -148,7 +148,7 @@ export class Vector3D {
         /** @private */ this._width     = options.width ?? 2;
         /** @private */ this._arrowSize = options.arrowSize ?? 10;
         /** @private */ this._opacity   = options.opacity ?? 1;
-        /** @private */ this._depthTest = options.depthTest ?? true;
+        /** @private */ this._depthTest = options.depthTest ?? false;
         /** @private */ this._minZoom   = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom   = options.maxZoom ?? Infinity;
         /** @private */ this._heightScale    = options.heightScale ?? 1;

@@ -133,19 +133,19 @@ export class Layer {
         this.visible = visible;
         return this;
     }
-
-    /**
-     * Вызывается картой на каждом кадре для обновления всех объектов слоя.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    _postUpdate(map) {
-        if (!this.visible) return;
-        for (const obj of this._objects) {
-            if (obj._update) obj._update(map);
-        }
+/**
+ * Вызывается картой на каждом кадре для обновления всех объектов слоя.
+ *
+ * @param {Object} map - Экземпляр карты.
+ * @param {number} deltaTime - Время с прошлого кадра, сек.
+ * @private
+ */
+_postUpdate(map, deltaTime) {
+    if (!this.visible) return;
+    for (const obj of this._objects) {
+        if (obj._update) obj._update(map, deltaTime);
     }
+}
 
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
 
@@ -327,17 +327,22 @@ export class ClusterLayer extends Layer {
         this._clusterVisibleMarkers.clear();
     }
 
-    /**
-     * Обновляет состояние кластеров на каждом кадре с учётом троттлинга.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
-    _postUpdate(map) {
-        super._postUpdate(map);
-        const now = performance.now();
-        if (now - this._lastUpdateTime < this.updateThrottle) return;
-        this._lastUpdateTime = now;
+/**
+ * Обновляет состояние кластеров на каждом кадре с учётом троттлинга.
+ *
+ * @param {Object} map - Экземпляр карты.
+ * @param {number} deltaTime - Время с прошлого кадра, сек.
+ *     Пробрасывается в базовый `_postUpdate`, чтобы подписанные
+ *     на слой объекты (включая анимированные `Vector3D`) получали
+ *     корректный таймстеп. Сама кластеризация `deltaTime` не использует —
+ *     ей хватает `updateThrottle` в мс.
+ * @private
+ */
+_postUpdate(map, deltaTime) {
+    super._postUpdate(map, deltaTime);
+    const now = performance.now();
+    if (now - this._lastUpdateTime < this.updateThrottle) return;
+    this._lastUpdateTime = now;
 
         // Скрываем все существующие кластеры (не удаляем для переиспользования)
         for (const el of this._clusterElements) {

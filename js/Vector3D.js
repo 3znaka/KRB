@@ -14,6 +14,11 @@
  *  - иначе `[x, y]` — плоские координаты в `crs`, `z` — высота над
  *    эллипсоидом WGS84 в метрах.
  *
+ * Поддерживается анимация (см. опцию `animation`):
+ *  - `movingArrow` — единственный конус скользит по ломаной;
+ *  - `flowArrows`  — несколько конусов «текут» вдоль вектора;
+ *  - `pulse`       — концевой конус пульсирует размером.
+ *
  * @module Vector3D
  */
 
@@ -105,6 +110,9 @@ export function isEcefCrs(code) {
 /** Отношение радиуса конуса к его высоте. @private @type {number} */
 const CONE_RADIUS_RATIO = 0.35;
 
+/** Максимум одновременных конусов в `flowArrows`. @private @type {number} */
+const FLOW_MAX_CONES = 50;
+
 export class Vector3D {
     /**
      * @param {Object} options
@@ -143,6 +151,36 @@ export class Vector3D {
      * @param {string} [options.tooltip='']
      * @param {Function|null} [options.onClick=null]
      * @param {Function|null} [options.onHover=null]
+     *
+     * @param {Object|string|null} [options.animation=null] - Анимация вектора.
+     *     Может быть строкой (`'movingArrow' | 'flowArrows' | 'pulse' | 'none'`)
+     *     или объектом со следующими полями:
+     *
+     * @param {'movingArrow'|'flowArrows'|'pulse'|'none'} [options.animation.type='none']
+     *     `movingArrow` — один конус скользит по ломаной;
+     *     `flowArrows`  — N маленьких конусов текут вдоль вектора;
+     *     `pulse`       — концевой конус пульсирует размером.
+     * @param {number} [options.animation.period=3] - Секунд на один полный цикл.
+     * @param {number} [options.animation.speed=1] - Множитель скорости.
+     * @param {boolean} [options.animation.paused=false] - Стартовать на паузе.
+     * @param {boolean} [options.animation.reverse=false] - Гнать от конца к началу.
+     * @param {number} [options.animation.fadeRatio=0.15] - Доля пути у краёв
+     *     (0..0.5), на которой конусы плавно появляются/исчезают.
+     * @param {string|null} [options.animation.color=null] - null → `this._color`.
+     * @param {number|null} [options.animation.size=null] - null → `this._arrowSize`.
+     * @param {'px'|'world'|null} [options.animation.sizeMode=null] - null →
+     *     `this._arrowSizeMode`.
+     * @param {number|null} [options.animation.opacity=null] - null → `this._opacity`.
+     * @param {boolean} [options.animation.hideStaticArrow=true] - Скрыть
+     *     статичный концевой конус (для `movingArrow` / `flowArrows`;
+     *     для `pulse` игнорируется — `pulse` анимирует именно его).
+     * @param {number} [options.animation.count=3] - Кол-во конусов для `flowArrows`.
+     * @param {number|null} [options.animation.spacing=null] - Альтернатива `count`:
+     *     мировой шаг между конусами (если задан — `count` вычисляется
+     *     из длины пути).
+     * @param {number} [options.animation.minScale=0.4] - Для `pulse`.
+     * @param {number} [options.animation.maxScale=1.2] - Для `pulse`.
+     * @param {'sine'|'linear'} [options.animation.easing='sine'] - Для `pulse`.
      */
     constructor(options = {}) {
         if (!options.positions || options.positions.length < 2) {
@@ -202,6 +240,22 @@ export class Vector3D {
 
         /** @private @type {Array<[number,number,number]>} */
         this._worldPoints = [];
+
+        /* ---------- Анимация ---------- */
+        /** @private @type {Object|null} */
+        this._animOptions   = this._parseAnimationOptions(options.animation);
+        /** @private */ this._animTime      = 0;
+        /** @private */ this._animGroup     = null;
+        /** @private @type {Array<THREE.Mesh>|null} */
+        this._flowCones     = null;
+        /** @private @type {{lengths:number[], total:number}|null} */
+        this._animPolyline  = null;
+        /** @private */ this._lastUpdateTime = 0;
+
+        /* ---------- Temp-векторы (без аллокаций в кадре) ---------- */
+        /** @private */ this._tempVecA = new THREE.Vector3();
+        /** @private */ this._tempVecB = new THREE.Vector3();
+        /** @private */ this._Y_AXIS   = new THREE.Vector3(0, 1, 0);
     }
 
     /**
@@ -216,6 +270,335 @@ export class Vector3D {
         personalLayer.add(this);
         return this;
     }
+
+    /* ================================================================
+       Парсинг и настройка анимации
+       ================================================================ */
+
+    /**
+     * @param {Object|string|null|undefined|false} anim
+     * @returns {Object|null}
+     * @private
+     */
+    _parseAnimationOptions(anim) {
+        if (!anim || anim === false) return null;
+        if (typeof anim === 'string') anim = { type: anim };
+        const type = anim.type ?? 'none';
+        if (type === 'none') return null;
+        return {
+            type,
+            period:  anim.period  ?? 3,
+            speed:   anim.speed   ?? 1,
+            paused:  anim.paused  ?? false,
+            reverse: anim.reverse ?? false,
+            fadeRatio: Math.min(0.5, Math.max(0, anim.fadeRatio ?? 0.15)),
+
+            color:    anim.color    ?? null,
+            size:     anim.size     ?? null,
+            sizeMode: anim.sizeMode ?? null,
+            opacity:  anim.opacity  ?? null,
+            hideStaticArrow: anim.hideStaticArrow ?? true,
+
+            count:   anim.count   ?? 3,
+            spacing: anim.spacing ?? null,
+
+            minScale: anim.minScale ?? 0.4,
+            maxScale: anim.maxScale ?? 1.2,
+            easing:   anim.easing   ?? 'sine',
+        };
+    }
+
+    /**
+     * Готовит анимационные объекты. Вызывается из {@link #_attach} или
+     * {@link #setAnimation}.
+     *
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @private
+     */
+    _setupAnimation(map) {
+        this._animPolyline = this._computePolylineData();
+        if (!this._animPolyline) return; // нечего анимировать
+
+        const o = this._animOptions;
+        if (o.type === 'flowArrows') {
+            this._animGroup = new THREE.Group();
+            this._group.add(this._animGroup);
+
+            let count = o.count;
+            if (o.spacing > 0 && this._animPolyline.total > 0) {
+                count = Math.round(this._animPolyline.total / o.spacing);
+            }
+            count = Math.max(1, Math.min(FLOW_MAX_CONES, count));
+
+            const color   = o.color   ?? this._color;
+            const opacity = o.opacity ?? this._opacity;
+
+            this._flowCones = [];
+            for (let i = 0; i < count; i++) {
+                const g = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
+                g.translate(0, 0.5, 0);
+                const mat = new THREE.MeshBasicMaterial({
+                    color,
+                    opacity,
+                    transparent: opacity < 1,
+                    depthTest: this._depthTest,
+                    depthWrite: this._depthTest,
+                });
+                const cone = new THREE.Mesh(g, mat);
+                cone.renderOrder = 999;
+                this._animGroup.add(cone);
+                this._flowCones.push(cone);
+            }
+        }
+
+        // Скрываем статичный конус для movingArrow / flowArrows.
+        // Для pulse его не трогаем — pulse анимирует именно его.
+        if (o.type !== 'pulse' && o.hideStaticArrow && this._cone) {
+            this._cone.visible = false;
+        }
+    }
+
+    /**
+     * @private
+     * @returns {{lengths:number[], total:number}|null}
+     */
+    _computePolylineData() {
+        const pts = this._worldPoints;
+        if (!pts || pts.length < 2) return null;
+        const lengths = [0];
+        let total = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const dx = pts[i][0] - pts[i - 1][0];
+            const dy = pts[i][1] - pts[i - 1][1];
+            const dz = pts[i][2] - pts[i - 1][2];
+            total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+            lengths.push(total);
+        }
+        if (total <= 0) return null;
+        return { lengths, total };
+    }
+
+    /**
+     * Возвращает точку и тангенс на ломаной при параметре `t`.
+     * `t` может быть любым числом — приводится к `[0, 1)`.
+     *
+     * @param {number} t
+     * @param {THREE.Vector3} outPos
+     * @param {THREE.Vector3} outTangent
+     * @returns {boolean}
+     * @private
+     */
+    _getPointAtT(t, outPos, outTangent) {
+        const poly = this._animPolyline;
+        if (!poly || poly.total <= 0) return false;
+
+        const len = (((t % 1) + 1) % 1) * poly.total;
+        let i = 1;
+        while (i < poly.lengths.length && poly.lengths[i] < len) i++;
+        if (i >= poly.lengths.length) i = poly.lengths.length - 1;
+
+        const segStart = poly.lengths[i - 1];
+        const segLen   = poly.lengths[i] - segStart;
+        const localT   = segLen > 0 ? (len - segStart) / segLen : 0;
+
+        const p0 = this._worldPoints[i - 1];
+        const p1 = this._worldPoints[i];
+
+        outPos.set(
+            p0[0] + (p1[0] - p0[0]) * localT,
+            p0[1] + (p1[1] - p0[1]) * localT,
+            p0[2] + (p1[2] - p0[2]) * localT
+        );
+        outTangent.set(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+        if (outTangent.lengthSq() < 1e-12) outTangent.set(0, 1, 0);
+        else outTangent.normalize();
+        return true;
+    }
+
+    /* ================================================================
+       Шаг анимации
+       ================================================================ */
+
+    /** @private */
+    _stepAnimation(map, deltaTime) {
+        const o = this._animOptions;
+        if (!o) return;
+        if (!o.paused) this._animTime += deltaTime * o.speed;
+
+        const period = Math.max(0.05, o.period);
+        let phase = (this._animTime / period) % 1;
+        if (phase < 0) phase += 1;
+
+        if (o.type === 'movingArrow')      this._updateMovingArrow(map, phase);
+        else if (o.type === 'flowArrows')  this._updateFlowArrows(map, phase);
+        else if (o.type === 'pulse')       this._updatePulse(map, phase);
+    }
+
+    /** @private */
+    _updateMovingArrow(map, phase) {
+        if (!this._cone) return;
+        this._cone.visible = true;
+
+        const o = this._animOptions;
+        const t = o.reverse ? 1 - phase : phase;
+        if (!this._getPointAtT(t, this._tempVecA, this._tempVecB)) return;
+
+        this._cone.position.copy(this._tempVecA);
+        if (o.reverse) this._tempVecB.negate();
+        this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, this._tempVecB);
+
+        const baseOpacity = o.opacity ?? this._opacity;
+        let finalOpacity = baseOpacity;
+        if (o.fadeRatio > 0) {
+            const edge = Math.min(t, 1 - t) / o.fadeRatio;
+            finalOpacity = baseOpacity * Math.max(0, Math.min(1, edge));
+        }
+        this._cone.material.opacity = finalOpacity;
+        this._cone.material.transparent = finalOpacity < 1;
+
+        this._applyConeScale(map, this._cone, o.size, o.sizeMode);
+    }
+
+    /** @private */
+    _updateFlowArrows(map, phase) {
+        if (!this._flowCones || !this._flowCones.length) return;
+
+        const o = this._animOptions;
+        const n = this._flowCones.length;
+        const baseOpacity = o.opacity ?? this._opacity;
+
+        for (let i = 0; i < n; i++) {
+            const cone = this._flowCones[i];
+            let t = (phase + i / n) % 1;
+            if (o.reverse) t = 1 - t;
+
+            if (!this._getPointAtT(t, this._tempVecA, this._tempVecB)) {
+                cone.visible = false;
+                continue;
+            }
+            cone.visible = true;
+            cone.position.copy(this._tempVecA);
+            if (o.reverse) this._tempVecB.negate();
+            cone.quaternion.setFromUnitVectors(this._Y_AXIS, this._tempVecB);
+
+            let finalOpacity = baseOpacity;
+            if (o.fadeRatio > 0) {
+                const edge = Math.min(t, 1 - t) / o.fadeRatio;
+                finalOpacity = baseOpacity * Math.max(0, Math.min(1, edge));
+            }
+            cone.material.opacity = finalOpacity;
+            cone.material.transparent = finalOpacity < 1;
+
+            this._applyConeScale(map, cone, o.size, o.sizeMode);
+        }
+    }
+
+    /** @private */
+    _updatePulse(map, phase) {
+        if (!this._cone) return;
+        this._cone.visible = true;
+
+        const o = this._animOptions;
+        const s = o.easing === 'linear'
+            ? (phase < 0.5 ? phase * 2 : 2 - phase * 2)
+            : 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+
+        const mult = o.minScale + (o.maxScale - o.minScale) * s;
+        const base = o.size ?? this._arrowSize;
+        this._applyConeScale(map, this._cone, base * mult, o.sizeMode);
+    }
+
+    /**
+     * Возвращает статичный концевой конус в исходное положение/масштаб.
+     * Используется при `setAnimation(null)`.
+     * @private
+     */
+    _resetStaticConePosition() {
+        if (!this._cone || !this._map || this._worldPoints.length < 2) return;
+        const last = this._worldPoints.length - 1;
+        const pFrom = new THREE.Vector3(
+            this._worldPoints[last - 1][0],
+            this._worldPoints[last - 1][1],
+            this._worldPoints[last - 1][2]
+        );
+        const pTo = new THREE.Vector3(
+            this._worldPoints[last][0],
+            this._worldPoints[last][1],
+            this._worldPoints[last][2]
+        );
+        const dir = new THREE.Vector3().subVectors(pTo, pFrom);
+        const len = dir.length();
+        if (len < 1e-6) return;
+
+        this._cone.position.copy(pTo);
+        this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
+        this._lastSegLen = len;
+        this._cone.visible = true;
+        this._cone.material.opacity = this._opacity;
+        this._cone.material.transparent = this._opacity < 1;
+        this._applyConeScale(this._map);
+    }
+
+    /** @private */
+    _teardownAnimation() {
+        if (this._animGroup) {
+            for (const c of this._animGroup.children) {
+                if (c.geometry) c.geometry.dispose();
+                if (c.material) c.material.dispose();
+            }
+            this._animGroup.clear();
+            if (this._animGroup.parent) this._animGroup.parent.remove(this._animGroup);
+            this._animGroup = null;
+        }
+        this._flowCones    = null;
+        this._animPolyline = null;
+    }
+
+    /* ================================================================
+       Публичное API анимации
+       ================================================================ */
+
+    /**
+     * Задаёт / заменяет / снимает (`null`) анимацию.
+     * @param {Object|string|null} animation
+     * @returns {Vector3D} this
+     */
+    setAnimation(animation) {
+        this._teardownAnimation();
+        this._animOptions = this._parseAnimationOptions(animation);
+        this._animTime = 0;
+
+        if (this._map && this._line) {
+            if (this._animOptions) this._setupAnimation(this._map);
+            if (!this._animPolyline) this._resetStaticConePosition();
+        }
+        return this;
+    }
+
+    /** @returns {Vector3D} this */
+    pauseAnimation() {
+        if (this._animOptions) this._animOptions.paused = true;
+        return this;
+    }
+
+    /** @returns {Vector3D} this */
+    resumeAnimation() {
+        if (this._animOptions) this._animOptions.paused = false;
+        return this;
+    }
+
+    /**
+     * @param {number} speed
+     * @returns {Vector3D} this
+     */
+    setAnimationSpeed(speed) {
+        if (this._animOptions) this._animOptions.speed = speed;
+        return this;
+    }
+
+    /* ================================================================
+       Attach
+       ================================================================ */
 
     /**
      * @param {import('./KrbMap.js').KrbMap} map
@@ -284,10 +667,6 @@ export class Vector3D {
         const len   = dir.length();
 
         if (len > 1e-6) {
-            // Единичный конус: высота 1, радиус CONE_RADIUS_RATIO, база
-            // в Y=0, вершина в Y=1. Реальный размер задаётся через
-            // `mesh.scale` в _applyConeScale() — это позволяет
-            // пересчитывать размер при зуме (режим 'px').
             const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
             cGeo.translate(0, 0.5, 0);
 
@@ -300,17 +679,16 @@ export class Vector3D {
             }));
             this._cone.renderOrder = 999;
             this._cone.position.copy(pTo);
-            this._cone.setRotationFromQuaternion(
-                new THREE.Quaternion().setFromUnitVectors(
-                    new THREE.Vector3(0, 1, 0), dir.normalize()
-                )
-            );
+            this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
 
             this._lastSegLen = len;
             this._applyConeScale(map);
 
             this._group.add(this._cone);
         }
+
+        // --- Анимация ------------------------------------------------------
+        if (this._animOptions) this._setupAnimation(map);
 
         map.worldGroup.add(this._group);
 
@@ -320,7 +698,12 @@ export class Vector3D {
                 getMeshes: () => {
                     const meshes = [];
                     if (this._line) meshes.push(this._line);
-                    if (this._cone) meshes.push(this._cone);
+                    if (this._cone && this._cone.visible) meshes.push(this._cone);
+                    if (this._flowCones) {
+                        for (const c of this._flowCones) {
+                            if (c.visible) meshes.push(c);
+                        }
+                    }
                     return meshes;
                 },
                 onClick:    this._onClick || null,
@@ -337,34 +720,38 @@ export class Vector3D {
     }
 
     /**
-     * Пересчитывает масштаб конуса-стрелки под `arrowSize` с учётом
-     * `arrowSizeMode`. В режиме `'px'` переводит пиксели в world-метры
-     * по текущему состоянию камеры:
+     * Пересчитывает масштаб конуса. Может применяться как к статичному
+     * конусу (`this._cone`), так и к любому анимационному.
+     *
+     * В режиме `'px'` переводит пиксели в world-метры по текущему
+     * состоянию камеры:
      *
      *     worldPerPixel = 2 * dist * tan(fov/2) / canvas.clientHeight
      *
-     * где `dist` — расстояние от камеры до основания конуса.
-     *
-     * В режиме `'px'` размер не ограничивается — цель режима в том,
-     * чтобы стрелка всегда занимала ровно `arrowSize` пикселей на
-     * экране независимо от зума. В режиме `'world'` сохранён прежний
-     * предел 40 % длины последнего сегмента.
+     * В режиме `'world'` действует прежний предел 40 % длины последнего
+     * сегмента (`this._lastSegLen`), чтобы конус не «съедал» всю линию.
      *
      * @param {import('./KrbMap.js').KrbMap} map
+     * @param {THREE.Mesh} [cone=this._cone]
+     * @param {number|null} [size=null] - null → `this._arrowSize`.
+     * @param {'px'|'world'|null} [sizeMode=null] - null → `this._arrowSizeMode`.
      * @private
      */
-    _applyConeScale(map) {
-        if (!this._cone) return;
+    _applyConeScale(map, cone = this._cone, size = null, sizeMode = null) {
+        if (!cone) return;
+
+        const s    = size ?? this._arrowSize;
+        const mode = sizeMode ?? this._arrowSizeMode;
 
         let h;
-        if (this._arrowSizeMode === 'world') {
-            h = this._arrowSize;
+        if (mode === 'world') {
+            h = s;
             if (this._lastSegLen > 0) {
                 h = Math.min(h, this._lastSegLen * 0.4);
             }
         } else {
             const wgPos = map.worldGroup.position;
-            const pos   = this._cone.position;
+            const pos   = cone.position;
             const dist  = map.camera.position.distanceTo(
                 map.getVec3().set(
                     pos.x + wgPos.x,
@@ -378,26 +765,32 @@ export class Vector3D {
             const hPixels = Math.max(1, canvas.clientHeight);
             const worldPerPixel = (2 * dist * Math.tan(fovRad / 2)) / hPixels;
 
-            h = this._arrowSize * worldPerPixel;
+            h = s * worldPerPixel;
         }
 
         if (!isFinite(h) || h <= 0) h = 1e-6;
-
-        this._cone.scale.setScalar(h);
+        cone.scale.setScalar(h);
     }
 
     /**
      * @param {import('./KrbMap.js').KrbMap} map
+     * @param {number} [deltaTime] - Время с прошлого кадра, сек.
+     *     Если не передан — вычисляется из `performance.now()`.
      * @private
      */
-    _update(map) {
+    _update(map, deltaTime) {
         if (!this._map || !this._line) return;
 
-        // Режим 'px': размер стрелки зависит от зума — пересчитываем
-        // каждый кадр. В режиме 'world' масштаб уже задан в _attach().
-        if (this._arrowSizeMode === 'px' && this._cone) {
-            this._applyConeScale(map);
+        // Fallback для прямых вызовов (вне цепочки Layer._postUpdate)
+        if (typeof deltaTime !== 'number' || !isFinite(deltaTime) || deltaTime < 0) {
+            const now = performance.now();
+            deltaTime = this._lastUpdateTime
+                ? Math.min((now - this._lastUpdateTime) / 1000, 0.1)
+                : 0;
         }
+        // Защита от гигантских скачков (вкладка была в фоне и т.п.)
+        if (deltaTime > 0.1) deltaTime = 0.1;
+        this._lastUpdateTime = performance.now();
 
         const zoom = map.continuousZoom;
         let visible = (this._layer ? this._layer.visible : true)
@@ -414,6 +807,12 @@ export class Vector3D {
 
         this._group.visible = visible;
         if (!visible) return;
+
+        if (this._animOptions && this._animPolyline) {
+            this._stepAnimation(map, deltaTime);
+        } else if (this._arrowSizeMode === 'px' && this._cone && this._cone.visible) {
+            this._applyConeScale(map);
+        }
 
         const cv = map.renderer.domElement;
         const res = this._material.resolution;
@@ -434,13 +833,23 @@ export class Vector3D {
             this._textLabel = null;
         }
 
+        this._teardownAnimation();
+
         if (this._group.parent) this._group.parent.remove(this._group);
 
-        this._geometry?.dispose();
-        this._material?.dispose();
-        if (this._cone) {
-            this._cone.geometry.dispose();
-            this._cone.material.dispose();
+        // Чистим оставшихся детей (основная линия + статичный конус).
+        // Это же защищает от «накопления» мешей при повторном `_attach`.
+        for (const child of [...this._group.children]) {
+            if (child.geometry && typeof child.geometry.dispose === 'function') {
+                child.geometry.dispose();
+            }
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const m of mats) {
+                    if (m && typeof m.dispose === 'function') m.dispose();
+                }
+            }
+            this._group.remove(child);
         }
 
         this._line = null;
@@ -448,6 +857,8 @@ export class Vector3D {
         this._geometry = null;
         this._cone = null;
         this._lastSegLen = 0;
+        this._animTime = 0;
+        this._lastUpdateTime = 0;
 
         this._layer?._removeRef(this);
         this._layer = null;

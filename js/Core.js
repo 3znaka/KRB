@@ -1515,6 +1515,7 @@ this.controls.touches = {
         this._cameraAnimation = null;
         this._cameraAnimations.pitch = null;
         this._cameraAnimations.bearing = null;
+        this._currentDeltaTime = 0;
     }
 
     resume() {
@@ -1526,6 +1527,7 @@ this.controls.touches = {
         this.clock.getDelta();
 
         this.animate();
+        this._currentDeltaTime = 0;
     }
 
     isPaused() { return this._paused; }
@@ -1632,6 +1634,7 @@ this.controls.touches = {
         if (this._disposed || this._paused) return;
         this._rafId = requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
+        this._currentDeltaTime = deltaTime; 
 
         if (!this._cameraAnimation) {
             const diff = this.targetContinuousZoom - this.continuousZoom;

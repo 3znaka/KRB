@@ -131,6 +131,7 @@ export class TileManager {
         }
 
         this.onTileHeightAppliedCallbacks = [];
+        this.onTileDisposedCallbacks = [];
     }
 
     /** Строковый ключ тайла. @private */
@@ -1056,11 +1057,19 @@ export class TileManager {
 
     /** @private */
     disposeTile(inst) {
-        this.tiles.delete(this.key(inst.z, inst.virtX, inst.y));
+        const k = this.key(inst.z, inst.virtX, inst.y);
+        this.tiles.delete(k);
+
+        // Уведомляем подписчиков (SurfacePolygon) ДО удаления меша
+        for (const cb of this.onTileDisposedCallbacks) {
+            try { cb(inst); } catch (e) { console.warn('Tile disposed callback error', e); }
+        }
+
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
             inst.mesh.geometry.dispose();
             inst.mesh.material.dispose();
+            inst.mesh.clear(); // Очищаем детей (наши оверлеи)
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
     }

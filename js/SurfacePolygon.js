@@ -314,6 +314,7 @@ export class SurfacePolygon {
         });
 
         const overlayMesh = new THREE.Mesh(geomCopy, material);
+        overlayMesh.position.copy(inst.mesh.position); 
         overlayMesh.renderOrder = 1;
         map.worldGroup.add(overlayMesh);
         this._overlays.set(key, overlayMesh);

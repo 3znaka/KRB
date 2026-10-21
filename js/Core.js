@@ -12,33 +12,17 @@ import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
 
 /**
- * Параметры камеры/зума, задаваемые пользователем при создании карты.
- * Хранит центр (в градусах или world-метрах), zoom, minZoom/maxZoom,
- * чувствительность зума, pitch и bearing.
+ * Параметры камеры/зума.
  *
  * @example
  * new View({ centerLonLat: [37.6178, 55.7558], zoom: 10 });
  * new View({ center: [4187596, -7509138], zoom: 3 });
  */
 export class View {
-    /**
-     * @param {Object} options
-     * @param {Array<number>} [options.centerLonLat] - [lon, lat] в градусах.
-     * @param {Array<number>} [options.center] - [x, z] в метрах проекции (Z на юг).
-     * @param {string} [options.projection='EPSG:3857'] - Код проекции центра.
-     * @param {number} options.zoom
-     * @param {number} [options.minZoom]
-     * @param {number} [options.maxZoom]
-     * @param {number} [options.zoomSensitivity]
-     * @param {number} [options.pitch]
-     * @param {number} [options.bearing]
-     * @throws {Error} Если не задан ни center, ни centerLonLat.
-     */
     constructor(options) {
         const projectionCode = options.projection ?? 'EPSG:3857';
         const projection = Projections.get(projectionCode);
 
-        /** @type {string} */
         this.projection = projectionCode;
 
         if (options.centerLonLat && options.center) {
@@ -46,15 +30,11 @@ export class View {
         }
 
         if (options.centerLonLat) {
-            /** @type {Array<number>} */
             this.centerLonLat = options.centerLonLat.slice();
             const [x, y] = projection.fromLonLat(this.centerLonLat);
-            /** @type {Array<number>} */
             this.center = [x, -y];
         } else if (options.center) {
-            /** @type {Array<number>} */
             this.center = options.center.slice();
-            /** @type {Array<number>} */
             this.centerLonLat = projection.toLonLat([this.center[0], -this.center[1]]);
         } else {
             throw new Error('View: options.center или options.centerLonLat обязательны');
@@ -70,61 +50,22 @@ export class View {
 }
 
 /**
- * Основной класс карты: Three.js-сцена, тайлы, камера, ввод.
+ * Основной класс карты: сцена, тайлы, камера, ввод.
  *
- * **Публичные «спецзначения» полей слоя:**
- *
- *  - `texture: 'demo'` — вместо URL берутся картинки из папки
- *    `demotiles/` рядом с модулем (`1.webp` … `24.webp`). Позиция тайла
- *    игнорируется, картинка выбирается случайно при первой загрузке.
- *
- *  - `elevation: 'demo'` — вместо DEM-тайлов рельеф генерируется
- *    процедурно fBm-Перлином. Параметры мира задаются в
- *    `layer.noise` (`{ seed, amplitude, octaves, baseFrequency }`).
- *    Детерминирован по `seed`: один и тот же сид → один и тот же мир
- *    при любом зуме/панорамировании. `heightScale` в слое при этом
- *    игнорируется — масштаб «запечён» в самом шуме.
- *
- *  - `heightScale` (число) — применяется только к URL-источнику DEM.
- *
- * @example
- * // карта-«обои» + процедурный рельеф:
- * const map = new KrbMap({
- *     target: 'map',
- *     layers: [{
- *         texture: 'demo',
- *         elevation: 'demo',
- *         noise: { seed: 777, amplitude: 6000, octaves: 5, baseFrequency: 1 / 25 }
- *     }],
- *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 5 }),
- *     tileLighting: true,
- *     minCameraHeightOffset: 2000
- * });
- *
- * // обычный URL — работает как раньше:
- * const map = new KrbMap({
- *     target: 'map',
- *     layers: [{ texture: '.../{z}/{x}/{y}.png', elevation: '...', heightScale: 1 }],
- *     view: new View({ centerLonLat: [37.6178, 55.7558], zoom: 3 }),
- *     projection: 'EPSG:3857',
- *     inputCRS: 'EPSG:4326',
- *     R: 6378137,
- *     tileLighting: true
- * });
+ * Спецзначения полей слоя:
+ *  - `texture: 'demo'` — картинки из `demotiles/1.webp … 24.webp`.
+ *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider}.
+ *  - `heightScale` (число) — только для URL-источника DEM.
  */
 export class KrbMap {
     /**
      * @param {Object} options
-     * @param {string} options.target - ID DOM-элемента.
-     * @param {Array<Object>} options.layers - Слои. Поля:
-     *     `texture?: string | 'demo'`, `elevation?: string | 'demo'`,
-     *     `heightScale?: number`, `noise?: Object` (только для `elevation: 'demo'`).
+     * @param {string} options.target
+     * @param {Array<Object>} options.layers
      * @param {View} options.view
-     * @param {string} [options.projection='EPSG:3857'] - Проекция мира карты.
-     * @param {string} [options.inputCRS='EPSG:4326'] - СК по умолчанию для «географических» данных.
-     * @param {boolean} [options.deformedTiles] - Использовать ли билинейно-деформированные
-     *     тайлы (нужно для всех проекций, кроме Mercator). По умолчанию —
-     *     `!projection.isMercator`. Ручное `true`/`false` переопределяет авто-детект.
+     * @param {string} [options.projection='EPSG:3857']
+     * @param {string} [options.inputCRS='EPSG:4326']
+     * @param {boolean} [options.deformedTiles]
      * @param {number} [options.R]
      * @param {number} [options.segments]
      * @param {number} [options.animDuration]
@@ -138,20 +79,14 @@ export class KrbMap {
      * @param {number} [options.baseDistance]
      * @param {number} [options.objectRenderDistanceFactor]
      * @param {number} [options.staticBgZoom]
-     * @param {number} [options.minCameraHeightOffset]
+     * @param {number} [options.cameraTerrainClearance=5] — зазор между
+     *     камерой и рельефом в world-метрах. Заменяет прежний
+     *     `minCameraHeightOffset` (оставлен как алиас).
      * @param {boolean} [options.antialias=true]
-     * @param {boolean} [options.tileLighting=false] - Использовать ли
-     *     освещаемый материал (`MeshStandardMaterial`) для тайлов.
-     *     При `false` — быстрый `MeshBasicMaterial` без учёта света.
-     * @param {number} [options.tileLightingRoughness=0.7] - Roughness
-     *     освещаемого материала тайлов (только при `tileLighting === true`).
-     * @param {number} [options.tileLightingMetalness=0.0] - Metalness
-     *     освещаемого материала тайлов (только при `tileLighting === true`).
-     * @param {number} [options.tileLightingEmissive=0.5] - Доля «запечённой»
-     *     яркости текстуры (0..1). Компенсирует потемнение тайлов под PBR:
-     *     тайловая текстура обычно уже «освещена» сервером, и без эмиссии
-     *     `MeshStandardMaterial` выглядит заметно темнее, чем
-     *     `MeshBasicMaterial`. Только при `tileLighting === true`.
+     * @param {boolean} [options.tileLighting=false]
+     * @param {number} [options.tileLightingRoughness=0.7]
+     * @param {number} [options.tileLightingMetalness=0.0]
+     * @param {number} [options.tileLightingEmissive=0.5]
      */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
@@ -163,42 +98,13 @@ export class KrbMap {
         this.globalElevCache = new Map();
         this.view = options.view;
         this.hasElevation = options.layers.some(layer => !!layer.elevation);
-
-        /**
-         * Есть ли на карте хоть один слой, для которого нужен TileManager
-         * (текстура или рельеф). Если нет — TileManager полностью
-         * отключается в горячем пути (см. maybeUpdateVisibleTiles).
-         *
-         * Это принципиально: TileManager строит deformed-тайлы даже в
-         * проекциях с узким доменом (Equal Earth и т.п.), и на каждом
-         * кадре тратит CPU на proj4. Если тайловых слоёв нет, эта
-         * работа бессмысленна.
-         *
-         * Может быть поднят в `true` позже — через
-         * {@link KrbMap#enableGeotiffElevation}.
-         *
-         * @type {boolean}
-         */
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
 
-        // Мир карты в метрах этой проекции.
         this.projection = Projections.get(options.projection ?? 'EPSG:3857');
-        // СК по умолчанию для «географических» входных данных.
         this.inputCRS = options.inputCRS
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
 
-        /**
-         * Нужно ли деформировать тайлы под проекцию карты.
-         *
-         * Раньше (Mercator-онли) тайлы ложились прямоугольниками; для
-         * остальных проекций это неверно. При `deformedTiles === true`
-         * вершины тайла вычисляются через lon/lat углов XYZ-тайла,
-         * спроецированные в проекцию карты.
-         *
-         * По умолчанию — авто: включается, если проекция не Mercator.
-         * @type {boolean}
-         */
         this.deformedTiles = options.deformedTiles ?? !this.projection.isMercator;
 
         if (this.view.projection && this.view.projection !== this.projection.code) {
@@ -228,46 +134,29 @@ export class KrbMap {
         this.staticBgZoom = options.staticBgZoom ?? DEFAULTS.STATIC_BG_ZOOM;
         this.antialias = options.antialias ?? true;
 
-        /**
-         * Настройки освещения тайлов. Читаются в конструкторе
-         * {@link TileManager}, поэтому должны быть установлены до его
-         * создания (см. ниже `new TileManager(this)`).
-         *
-         * Дефолты согласованы с `Tiles.js`:
-         *  - roughness 0.7 — матово, но с лёгким блеском;
-         *  - metalness 0.0 — диэлектрик;
-         *  - emissive  0.5 — половина яркости текстуры идёт «как есть»,
-         *    чтобы тайлы под PBR не темнели относительно `MeshBasicMaterial`.
-         */
         this.tileLighting          = options.tileLighting          ?? false;
         this.tileLightingRoughness = options.tileLightingRoughness ?? 0.7;
         this.tileLightingMetalness = options.tileLightingMetalness ?? 0.0;
         this.tileLightingEmissive  = options.tileLightingEmissive  ?? 0.5;
 
-        const elevLayer = this.layers.find(l => l.elevation);
-        // ВАЖНО: ?? вместо тернарника. При `elevation: 'demo'` или при
-        // URL-слое без явного heightScale поле `heightScale` = undefined,
-        // и без фолбэка мы бы получили `200 * undefined = NaN` в
-        // MIN_CAMERA_HEIGHT_OFFSET, что ломает камеру в applyZoomDistance.
-        this.effectiveHeightScale = elevLayer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
-
         /**
-         * Пользователь задал minCameraHeightOffset явно. Если нет — при
-         * подключении внешнего источника высот (GeoTIFF/шум) значение
-         * пересчитывается.
-         * @private
+         * Зазор (world-метры) между камерой и поверхностью рельефа.
+         * Геометрическая константа, не зависит от heightScale.
+         * @type {number}
          */
-        this._minCameraHeightOffsetIsCustom = options.minCameraHeightOffset !== undefined;
-        this.MIN_CAMERA_HEIGHT_OFFSET = options.minCameraHeightOffset ?? (200 * this.effectiveHeightScale);
+        this.CAMERA_TERRAIN_CLEARANCE =
+            options.cameraTerrainClearance
+            ?? options.minCameraHeightOffset
+            ?? 5;
 
         this.continuousZoom = this.view.zoom;
         this.targetContinuousZoom = this.view.zoom;
         this.currentDiscreteZoom = this.view.zoom;
 
-        /** @private @type {boolean} */ this._disposed = false;
-        /** @private @type {boolean} */ this._paused = false;
-        /** @private @type {number|null} */ this._rafId = null;
-        /** @private @type {AbortController|null} */ this._abortController = null;
+        /** @private */ this._disposed = false;
+        /** @private */ this._paused = false;
+        /** @private */ this._rafId = null;
+        /** @private */ this._abortController = null;
 
         this.initThree();
         this.initControls();
@@ -277,16 +166,15 @@ export class KrbMap {
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
 
-        // Переиспользуемые векторы (коротко- и долгоживущие).
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();
         this._tempDir = new THREE.Vector3();
         this._tempTarget = new THREE.Vector3();
+        this._tempPlacementOut = new THREE.Vector3();
         this._tempRaycaster = new THREE.Raycaster();
         this._tempMouse = new THREE.Vector2();
 
-        // Пул временных векторов: ссылку нельзя удерживать между вызовами.
         this._tempPool = {
             v3: Array.from({ length: 16 }, () => new THREE.Vector3()),
             v2: Array.from({ length: 16 }, () => new THREE.Vector2()),
@@ -311,6 +199,7 @@ export class KrbMap {
         this.worldGroup = new THREE.Group();
         this.worldGroup.position.set(0, 0, 0);
         this.scene.add(this.worldGroup);
+
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
         this._cameraAnimFrame = null;
@@ -321,26 +210,15 @@ export class KrbMap {
         this.interaction = new InteractionManager(this);
         this.tileManager = new TileManager(this);
 
-const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
-if (demoElevLayer) {
-    const provider = new NoiseElevationProvider({
-        ...(demoElevLayer.noise || {}),
-        heightScale: demoElevLayer.heightScale ?? 1,   // ← НОВОЕ
-    });
-    this.tileManager.enableGeotiffElevation(provider);
-
-            if (!this._minCameraHeightOffsetIsCustom) {
-                const amp = provider.amplitude;
-                if (Number.isFinite(amp) && amp > 0) {
-                    this.MIN_CAMERA_HEIGHT_OFFSET = Math.max(
-                        this.MIN_CAMERA_HEIGHT_OFFSET,
-                        amp * 0.25
-                    );
-                }
-            }
+        const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
+        if (demoElevLayer) {
+            const provider = new NoiseElevationProvider({
+                ...(demoElevLayer.noise || {}),
+                heightScale: demoElevLayer.heightScale ?? 1,
+            });
+            this.tileManager.enableGeotiffElevation(provider);
         }
 
-        // LRU-кэш максимальной высоты поверхности; сбрасывается при новых тайлах.
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
         this.tileManager.onTileHeightAppliedCallbacks.push(() => {
@@ -364,13 +242,13 @@ if (demoElevLayer) {
         requestAnimationFrame(() => initUI(this));
     }
 
-    /** Временный Vector3 из пула. Ссылку удерживать нельзя. */
+    /** @returns {THREE.Vector3} */
     getVec3() { return this._tempPool.v3[this._tempPool.idx++ & 15]; }
 
-    /** Временный Vector2 из пула. Ссылку удерживать нельзя. */
+    /** @returns {THREE.Vector2} */
     getVec2() { return this._tempPool.v2[this._tempPool.idx++ & 15]; }
 
-    /** Инициализация сцены, камеры, рендерера и освещения. @private */
+    /** @private */
     initThree() {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
@@ -397,18 +275,12 @@ if (demoElevLayer) {
        Освещение
        ================================================================ */
 
-    /** @param {number|string} color @param {number} [intensity=0.8] */
     setAmbientLight(color, intensity = 0.8) {
         if (!this.ambientLight) { console.warn('Ambient light is not initialized.'); return; }
         this.ambientLight.color.set(color);
         this.ambientLight.intensity = intensity;
     }
 
-    /**
-     * @param {number|string} color
-     * @param {number} [intensity=1.3]
-     * @param {THREE.Vector3|{x:number,y:number,z:number}|Array<number>} [position]
-     */
     setSunLight(color, intensity = 1.3, position = null) {
         if (!this.sunLight) { console.warn('Directional (sun) light is not initialized.'); return; }
         this.sunLight.color.set(color);
@@ -426,10 +298,6 @@ if (demoElevLayer) {
         }
     }
 
-    /**
-     * Устанавливает оба источника света за один вызов.
-     * @param {{ambientColor?:*, ambientIntensity?:number, sunColor?:*, sunIntensity?:number, sunPosition?:*}} params
-     */
     setLighting({ ambientColor, ambientIntensity, sunColor, sunIntensity, sunPosition } = {}) {
         if (ambientColor !== undefined) {
             this.setAmbientLight(ambientColor, ambientIntensity);
@@ -450,43 +318,21 @@ if (demoElevLayer) {
         }
     }
 
-    /** @returns {THREE.AmbientLight|null} */
     getAmbientLight() { return this.ambientLight || null; }
-
-    /** @returns {THREE.DirectionalLight|null} */
     getSunLight() { return this.sunLight || null; }
 
     /* ================================================================
        Преобразование координат
        ================================================================ */
 
-    /**
-     * Координаты из `fromCrs` в world-метры карты. Без валидации.
-     * Для безопасного варианта используйте {@link KrbMap#projectSafe}.
-     *
-     * @param {Array<number>} coord - [x, y] в СК `fromCrs`.
-     * @param {Projection|string} [fromCrs=this.inputCRS]
-     * @returns {Array<number>} [x, z], Z на юг.
-     */
     project(coord, fromCrs = this.inputCRS) {
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;
-        if (src === this.projection) {
-            return [coord[0], -coord[1]];
-        }
+        if (src === this.projection) return [coord[0], -coord[1]];
         const lonLat = src.toLonLat(coord);
         const [x, y] = this.projection.fromLonLat(lonLat);
         return [x, -y];
     }
 
-    /**
-     * Безопасная версия {@link KrbMap#project}: возвращает `null` вместо
-     * невалидных координат (кламп широты для Mercator + отсев «мусора»
-     * от proj4).
-     *
-     * @param {Array<number>} coord
-     * @param {Projection|string} [fromCrs=this.inputCRS]
-     * @returns {Array<number>|null} [x, z] или null.
-     */
     projectSafe(coord, fromCrs = this.inputCRS) {
         if (!coord || coord.length < 2) return null;
         if (!Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) return null;
@@ -507,12 +353,6 @@ if (demoElevLayer) {
         return [proj[0], -proj[1]];
     }
 
-    /**
-     * World-метры карты → координаты в `toCrs`.
-     * @param {Array<number>} worldCoord - [x, z].
-     * @param {Projection|string} [toCrs=this.inputCRS]
-     * @returns {Array<number>} [x, y] в целевой СК.
-     */
     unproject(worldCoord, toCrs = this.inputCRS) {
         const dst = typeof toCrs === 'string' ? Projections.get(toCrs) : toCrs;
         const std = [worldCoord[0], -worldCoord[1]];
@@ -521,36 +361,15 @@ if (demoElevLayer) {
         return dst.fromLonLat(lonLat);
     }
 
-    /** Шорткат: (lon, lat) → [x, z]. @returns {Array<number>} */
     projectLonLat(lon, lat) {
         const [x, y] = this.projection.fromLonLat([lon, lat]);
         return [x, -y];
     }
 
-    /** Шорткат: (x, z) → [lon, lat]. @returns {Array<number>} */
     unprojectToLonLat(x, z) {
         return this.projection.toLonLat([x, -z]);
     }
 
-    /**
-     * World-координаты → дробные индексы XYZ-тайла.
-     *
-     * Для Mercator — линейное преобразование (быстро, без proj4).
-     * Для остальных — через lon/lat и стандартную формулу Web Mercator.
-     *
-     * ВАЖНО: результат проекции за пределами области определения
-     * отбраковывается. proj4 не валидирует домен и для координат вне
-     * Equal Earth (или другого узкого домена) легко возвращает
-     * lon ≈ 470°, что после формулы Web Mercator даёт абсурдные
-     * tile-индексы (например, -7..15 на zoom=3) и раздувает bbox
-     * в TileManager.update.
-     *
-     * @param {number} worldX
-     * @param {number} worldZ
-     * @param {number} z
-     * @returns {[number, number]} [tx, ty] — дробные индексы (могут быть NaN,
-     *     если world-координаты вне области определения проекции).
-     */
     worldToTileIndex(worldX, worldZ, z) {
         const lx = worldX - this.worldGroup.position.x;
         const lz = worldZ - this.worldGroup.position.z;
@@ -578,13 +397,6 @@ if (demoElevLayer) {
         return [mercX * n, mercY * n];
     }
 
-    /**
-     * Обратное к {@link KrbMap#worldToTileIndex}: дробный tile-index → world-метры.
-     * @param {number} tx
-     * @param {number} ty
-     * @param {number} z
-     * @returns {[number, number]} [worldX, worldZ]
-     */
     tileIndexToWorld(tx, ty, z) {
         const n = 1 << z;
         if (!this.deformedTiles) {
@@ -600,7 +412,7 @@ if (demoElevLayer) {
         return [x + this.worldGroup.position.x, zWorld + this.worldGroup.position.z];
     }
 
-    /** true, если проекция циклична по долготе (Mercator, longlat). @private */
+    /** @private */
     _wrapsLongitude() {
         const def = this.projection.def || '';
         return /\+proj=merc\b/.test(def) || /\+proj=longlat\b/.test(def);
@@ -610,7 +422,7 @@ if (demoElevLayer) {
        Управление камерой
        ================================================================ */
 
-    /** Инициализация OrbitControls. @private */
+    /** @private */
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableZoom = true;
@@ -632,7 +444,7 @@ if (demoElevLayer) {
         this.renderer.domElement.removeEventListener('wheel', this.controls.onMouseWheel);
     }
 
-    /** Инициализация инструментов drag-панорамирования. @private */
+    /** @private */
     initDragTools() {
         this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         this.raycasterDragger = new THREE.Raycaster();
@@ -645,7 +457,7 @@ if (demoElevLayer) {
         this._mouseMoved = false;
     }
 
-    /** Инициализация состояния touch-жестов. @private */
+    /** @private */
     initTouchState() {
         this.touchState = {
             isPinching: false,
@@ -655,6 +467,71 @@ if (demoElevLayer) {
             id0: null,
             id1: null
         };
+    }
+
+    /**
+     * Размещает камеру по орбитальным параметрам так, чтобы она
+     * гарантированно не оказалась под рельефом.
+     *
+     *  1. Если target стоит так высоко, что даже при pitch=0 (камера
+     *     строго над target) её Y ниже рельефа — увеличиваем `dist`.
+     *     Это единственный случай, когда dist обязан вырасти.
+     *  2. Иначе итеративно уменьшаем pitch (поднимаем камеру над
+     *     землёй), сохраняя dist и azimuth. Проверка рельефа — в
+     *     позиции камеры, а не target.
+     *
+     * Azimuth в конвенции `atan2(dz, dx)` (от оси +X). Если у
+     * вызывающего bearing (от +Z), нужно прибавить π/2.
+     *
+     * @param {THREE.Vector3} target
+     * @param {number} desiredDist
+     * @param {number} desiredPitch - polar angle, радианы
+     * @param {number} azimuth - радианы, `atan2(dz, dx)`
+     * @param {THREE.Vector3} outPos - сюда пишется позиция
+     * @returns {{ pitch: number, dist: number }}
+     * @private
+     */
+    _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
+        let dist = desiredDist;
+        let pitch = Math.max(0.001, Math.min(Math.PI - 0.001, desiredPitch));
+
+        if (this.hasElevation) {
+            const clearance = this.CAMERA_TERRAIN_CLEARANCE;
+
+            // Шаг 1: target на пике — увеличиваем dist.
+            const targetTerrain = this.getSurfaceHeightAt(target.x, target.z);
+            const minDistForTarget = targetTerrain + clearance;
+            if (dist < minDistForTarget) dist = minDistForTarget;
+
+            // Шаг 2: итеративно поднимаем камеру (уменьшаем pitch).
+            const cosAz = Math.cos(azimuth);
+            const sinAz = Math.sin(azimuth);
+            for (let iter = 0; iter < 6; iter++) {
+                const sinP = Math.sin(pitch);
+                const cosP = Math.cos(pitch);
+                const camX = target.x + dist * sinP * cosAz;
+                const camZ = target.z + dist * sinP * sinAz;
+                const camY = target.y + dist * cosP;
+
+                const terrain = this.getSurfaceHeightAt(camX, camZ);
+                const requiredY = terrain + clearance;
+
+                if (camY >= requiredY) break;
+
+                const requiredCosP = Math.min(1, requiredY / dist);
+                pitch = Math.acos(requiredCosP);
+                if (pitch <= 0.001) { pitch = 0.001; break; }
+            }
+        }
+
+        const sinP = Math.sin(pitch);
+        const cosP = Math.cos(pitch);
+        outPos.set(
+            target.x + dist * sinP * Math.cos(azimuth),
+            target.y + dist * cosP,
+            target.z + dist * sinP * Math.sin(azimuth)
+        );
+        return { pitch, dist };
     }
 
     /** @param {number} pitchDeg @param {number} [duration=0.3] */
@@ -669,7 +546,7 @@ if (demoElevLayer) {
         const currentDistance = dir.length();
         if (currentDistance < 1) return;
 
-        const currentPitchRad = Math.acos(dir.y / currentDistance);
+        const currentPitchRad = Math.acos(Math.max(-1, Math.min(1, dir.y / currentDistance)));
         this._cameraAnimations.pitch = {
             start: currentPitchRad,
             end: clampedRad,
@@ -688,22 +565,22 @@ if (demoElevLayer) {
         const currentDistance = dir.length();
         if (currentDistance < 1) return;
 
-        const currentAzimuth = Math.atan2(-dir.x, dir.z);
-        let delta = bearingRad - currentAzimuth;
+        const currentBearing = Math.atan2(-dir.x, dir.z);
+        let delta = bearingRad - currentBearing;
         while (delta > Math.PI) delta -= 2 * Math.PI;
         while (delta < -Math.PI) delta += 2 * Math.PI;
-        const endAzimuth = currentAzimuth + delta;
+        const endBearing = currentBearing + delta;
 
         this._cameraAnimations.bearing = {
-            start: currentAzimuth,
-            end: endAzimuth,
+            start: currentBearing,
+            end: endBearing,
             startTime: performance.now(),
             duration
         };
         this._startCameraAnimationLoopIfNeeded();
     }
 
-    /** Общий rAF-цикл для анимаций pitch/bearing. @private */
+    /** @private */
     _startCameraAnimationLoopIfNeeded() {
         if (this._disposed || this._paused) return;
         if (this._cameraAnimation || this._cameraAnimFrame) return;
@@ -731,8 +608,8 @@ if (demoElevLayer) {
                 return;
             }
 
-            let currentPitch = Math.acos(dir.y / currentDistance);
-            let currentAzimuth = Math.atan2(-dir.x, dir.z);
+            let currentPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / currentDistance)));
+            let currentBearing = Math.atan2(-dir.x, dir.z);
 
             if (this._cameraAnimations.pitch) {
                 const anim = this._cameraAnimations.pitch;
@@ -749,18 +626,18 @@ if (demoElevLayer) {
                 let t = (now - anim.startTime) / (anim.duration * 1000);
                 t = Math.min(t, 1.0);
                 const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-                currentAzimuth = anim.start + (anim.end - anim.start) * eased;
+                currentBearing = anim.start + (anim.end - anim.start) * eased;
                 if (t >= 1.0) this._cameraAnimations.bearing = null;
                 else anyActive = true;
             }
 
-            const sinP = Math.sin(currentPitch);
-            const cosP = Math.cos(currentPitch);
-            this.camera.position.set(
-                target.x - currentDistance * sinP * Math.sin(currentAzimuth),
-                target.y + currentDistance * cosP,
-                target.z + currentDistance * sinP * Math.cos(currentAzimuth)
+            // bearing → azimuth: azimuth = bearing + π/2.
+            const azimuth = currentBearing + Math.PI / 2;
+            this._resolveCameraPlacement(
+                target, currentDistance, currentPitch, azimuth,
+                this._tempPlacementOut
             );
+            this.camera.position.copy(this._tempPlacementOut);
             this.controls.target.copy(target);
             this.controls.update();
             this.maybeUpdateVisibleTiles();
@@ -791,17 +668,7 @@ if (demoElevLayer) {
        URL-хелперы
        ================================================================ */
 
-    /**
-     * Возвращает URL текстуры тайла.
-     *
-     * Спецзначение `layer.texture === 'demo'` → случайная картинка из
-     * `demotiles/1.webp … demotiles/24.webp` рядом с этим модулем.
-     * URL разрешается относительно `import.meta.url`, работает в
-     * нативном ESM и Vite/webpack без настройки.
-     *
-     * @param {number} z @param {number} x @param {number} y
-     * @returns {string|null}
-     */
+    /** @returns {string|null} */
     getTextureUrl(z, x, y) {
         const layer = this.layers[0];
         if (!layer || !layer.texture) return null;
@@ -815,29 +682,15 @@ if (demoElevLayer) {
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /**
-     * Возвращает URL DEM-тайла.
-     *
-     * Спецзначение `layer.elevation === 'demo'` → `null`: рельеф
-     * генерируется процедурно через {@link NoiseElevationProvider},
-     * зарегистрированный в конструкторе. Возврат `null` важен — иначе
-     * `TileManager.loadTile` запишет `'demo'` в `srcKeyToElevUrl` и
-     * попытается `fetch('demo')`.
-     *
-     * @param {number} z @param {number} x @param {number} y
-     * @returns {string|null}
-     */
+    /** @returns {string|null} */
     getElevationUrl(z, x, y) {
         const layer = this.layers[0];
         if (!layer || !layer.elevation) return null;
-
         if (layer.elevation === 'demo') return null;
-
         return layer.elevation
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /** @returns {number} */
     get maxObjectDistance() {
         if (!this.objectRenderDistanceFactor) return Infinity;
         const distToTarget = this.camera.position.distanceTo(this.controls.target);
@@ -845,61 +698,21 @@ if (demoElevLayer) {
     }
 
     /* ================================================================
-       Источник высот из GeoTIFF / процедурного шума
+       Источник высот
        ================================================================ */
 
-    /**
-     * Подключает внешний источник высот (GeoTIFF-слой или
-     * {@link NoiseElevationProvider}) к тайлам карты.
-     *
-     * Вызывается автоматически:
-     *  - из {@link module:GeoTiffLayer} при загрузке, если слой создан
-     *    с `asElevation: true`;
-     *  - из конструктора `KrbMap`, если в слое указано
-     *    `elevation: 'demo'` (тогда провайдер — процедурный шум).
-     *
-     * Может быть вызван и вручную — работает и «холодно» (до загрузки
-     * тайлов), и «горячо» (когда тайлы уже есть).
-     *
-     * @param {Object} layer
-     * @returns {void}
-     */
+    /** Подключает внешний источник высот (GeoTIFF или Noise). */
     enableGeotiffElevation(layer) {
         if (!layer || !this.tileManager) return;
 
-        // Подхватываем масштаб высот слоя (если он задан и валиден).
-        const hs = layer._elevationHeightScale;
-        if (Number.isFinite(hs) && hs > 0) {
-            this.effectiveHeightScale = hs;
-            if (!this._minCameraHeightOffsetIsCustom) {
-                this.MIN_CAMERA_HEIGHT_OFFSET = 200 * this.effectiveHeightScale;
-            }
-        }
-
         this.hasElevation = true;
-        // GeoTIFF/шум дают рельеф тайлам, значит TileManager должен
-        // работать даже если текстового слоя нет.
         if (!this.hasTileLayers) this.hasTileLayers = true;
 
         this.tileManager.enableGeotiffElevation(layer);
-
-        // Старые данные о максимальной высоте больше не валидны.
         this._surfaceMaxHeightCache.clear();
-
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /**
-     * Отключает текущий внешний источник высот.
-     *
-     * Полезно, если пользователь хочет вернуться к URL-источнику или
-     * убрать рельеф. Уже поднятые `hasElevation`/`hasTileLayers` карты
-     * не опускаются: возможно, у пользователя есть и другие источники
-     * рельефа. Тайлы с уже применёнными высотами «доживают» до
-     * вытеснения из LRU-кэша.
-     *
-     * @returns {void}
-     */
     disableGeotiffElevation() {
         if (!this.tileManager) return;
         this.tileManager.elevationProvider = null;
@@ -911,7 +724,7 @@ if (demoElevLayer) {
        Высоты поверхности
        ================================================================ */
 
-    /** LRU-обновление кэша max height. @private */
+    /** @private */
     _setSurfaceMaxHeight(key, value) {
         this._surfaceMaxHeightCache.delete(key);
         this._surfaceMaxHeightCache.set(key, value);
@@ -921,10 +734,7 @@ if (demoElevLayer) {
         }
     }
 
-    /**
-     * Максимальная высота рельефа в тайле под точкой.
-     * @param {number} worldX @param {number} worldZ @returns {number}
-     */
+    /** Максимальная высота рельефа в тайле под точкой (публичный API). */
     getSurfaceMaxHeight(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const z = this.currentDiscreteZoom;
@@ -955,44 +765,54 @@ if (demoElevLayer) {
     }
 
     /**
-     * Интерполированная высота рельефа в точке.
-     *
-     * Работает в tile-space: `u, v` — доли внутри тайла, независимо от
-     * того, прямоугольный он (Mercator) или деформированный. Это
-     * согласуется с раскладкой вершин PlaneGeometry (row-major от NW).
+     * Интерполированная высота рельефа в точке. Если тайл под точкой
+     * на текущем зуме не загружен — фолбэк на родительские зумы
+     * (грубее, но ненулевой).
      *
      * @param {number} worldX @param {number} worldZ @returns {number}
      */
     getSurfaceHeightAt(worldX, worldZ) {
         if (!this.hasElevation) return 0;
-        const z = this.currentDiscreteZoom;
-        const maxTile = (1 << z) - 1;
+        const zMax = this.currentDiscreteZoom;
+        const zMin = Math.max(0, this.MIN_RELIEF_Z);
+        for (let zz = zMax; zz >= zMin; zz--) {
+            const h = this._sampleHeightAtZoom(worldX, worldZ, zz);
+            if (h !== null) return h;
+        }
+        return 0;
+    }
 
+    /**
+     * @returns {number|null} Высота или null, если тайл на этом зуме
+     *     не загружен.
+     * @private
+     */
+    _sampleHeightAtZoom(worldX, worldZ, z) {
+        const maxTile = (1 << z) - 1;
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
-        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return 0;
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return null;
 
         const virtX = Math.floor(tx);
         const y = Math.floor(ty);
-        if (y < 0 || y > maxTile) return 0;
-        const vk = getVirtKey(z, virtX, y);
-        const inst = this.tileManager.tiles.get(vk);
-        if (!inst || !inst.heightsApplied || !inst.mesh) return 0;
+        if (y < 0 || y > maxTile) return null;
+
+        const inst = this.tileManager.tiles.get(getVirtKey(z, virtX, y));
+        if (!inst || !inst.heightsApplied || !inst.mesh) return null;
 
         const u = tx - virtX;
         const v = ty - y;
-
         const seg = this.SEGMENTS;
         const pos = inst.geometry.attributes.position.array;
+        const rowStride = seg + 1;
         const col = Math.min(seg, Math.max(0, Math.floor(u * seg)));
         const row = Math.min(seg, Math.max(0, Math.floor(v * seg)));
-        const nextCol = Math.min(seg, col + 1);
-        const nextRow = Math.min(seg, row + 1);
+        const nc  = Math.min(seg, col + 1);
+        const nr  = Math.min(seg, row + 1);
 
-        const idx = (row * (seg + 1) + col) * 3;
-        const h00 = pos[idx + 1];
-        const h10 = pos[(row * (seg + 1) + nextCol) * 3 + 1];
-        const h01 = pos[(nextRow * (seg + 1) + col) * 3 + 1];
-        const h11 = pos[(nextRow * (seg + 1) + nextCol) * 3 + 1];
+        const h00 = pos[(row * rowStride + col) * 3 + 1];
+        const h10 = pos[(row * rowStride + nc ) * 3 + 1];
+        const h01 = pos[(nr  * rowStride + col) * 3 + 1];
+        const h11 = pos[(nr  * rowStride + nc ) * 3 + 1];
 
         const fu = (u * seg) - col;
         const fv = (v * seg) - row;
@@ -1001,10 +821,7 @@ if (demoElevLayer) {
         return h0 + (h1 - h0) * fv + inst.mesh.position.y;
     }
 
-    /**
-     * Гарантирует загрузку тайла под точкой.
-     * @param {number} worldX @param {number} worldZ
-     */
+    /** Гарантирует загрузку тайла под точкой. */
     ensureTileForPoint(worldX, worldZ) {
         const z = this.currentDiscreteZoom;
         const maxTile = (1 << z) - 1;
@@ -1018,18 +835,10 @@ if (demoElevLayer) {
         this.tileManager.ensureTile(z, virtX, y);
     }
 
-    /**
-     * Статический фоновый слой из текстур.
-     *
-     * В deformed-режиме фон не строится: плоско-прямоугольные
-     * заглушки не соответствуют проекции и будут заметно «врать».
-     * В этом режиме вся отрисовка — на TileManager.
-     *
-     * При `tileLighting: true` BG-тайлы получают тот же освещаемый
-     * материал, что и подробные тайлы (`MeshStandardMaterial` с
-     * `emissiveMap`), — иначе подложка выделялась бы более ярким
-     * цветом на фоне затемнённых подробных тайлов.
-     */
+    /* ================================================================
+       Статический фон
+       ================================================================ */
+
     createStaticBackgroundLayer() {
         if (this.deformedTiles) return;
         if (!this.layers.length || !this.layers.some(l => l.texture)) return;
@@ -1057,14 +866,8 @@ if (demoElevLayer) {
                 this.staticBgGroup.add(mesh);
 
                 this.tileManager.loadTextureAsync(texUrl).then(tex => {
-                    // Защита от гонки с dispose(): если карта успела
-                    // уничтожиться, tileManager/staticBgGroup уже null.
                     if (this._disposed || !this.tileManager || !this.staticBgGroup) return;
                     if (tex && mesh.parent === this.staticBgGroup) {
-                        // setMeshTexture ставит и `map`, и `emissiveMap` —
-                        // без этого BG-тайлы под MeshStandardMaterial
-                        // остались бы без emissive-компенсации и выглядели
-                        // бы темнее подробных тайлов.
                         this.tileManager.setMeshTexture(mesh, tex);
                     }
                 }).catch(() => {});
@@ -1076,13 +879,11 @@ if (demoElevLayer) {
        Сдвиг мира
        ================================================================ */
 
-    /** @param {number} dx @param {number} dz */
     shiftWorld(dx, dz) {
         this.worldGroup.position.x -= dx;
         this.worldGroup.position.z -= dz;
     }
 
-    /** Ставит controls.target в центр экрана на плоскости земли. */
     syncControlsTarget() {
         this._tempMouse.set(0, 0);
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
@@ -1096,7 +897,6 @@ if (demoElevLayer) {
        Мышь
        ================================================================ */
 
-    /** @param {MouseEvent} e */
     onMouseDown(e) {
         if (this._cameraAnimation) return;
         if (e.button !== 0) return;
@@ -1115,7 +915,6 @@ if (demoElevLayer) {
         }
     }
 
-    /** @param {MouseEvent} e */
     onMouseMove(e) {
         if (this._cameraAnimation) return;
 
@@ -1143,7 +942,6 @@ if (demoElevLayer) {
         this.syncControlsTarget();
     }
 
-    /** @param {WheelEvent} e */
     onWheel(e) {
         if (this._cameraAnimation) return;
         e.preventDefault();
@@ -1155,14 +953,12 @@ if (demoElevLayer) {
        Тач
        ================================================================ */
 
-    /** @param {TouchList} touches @returns {number} */
     getTouchDistance(touches) {
         const dx = touches[0].clientX - touches[1].clientX;
         const dy = touches[0].clientY - touches[1].clientY;
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    /** @param {TouchEvent} e */
     onTouchStart(e) {
         if (this._cameraAnimation) return;
         if (e.touches.length === 1) {
@@ -1193,7 +989,6 @@ if (demoElevLayer) {
         }
     }
 
-    /** @param {TouchList} touches @param {number} id @returns {Touch|null} */
     findTouchById(touches, id) {
         for (let i = 0; i < touches.length; i++) {
             if (touches[i].identifier === id) return touches[i];
@@ -1201,7 +996,6 @@ if (demoElevLayer) {
         return null;
     }
 
-    /** @param {TouchEvent} e */
     onTouchMove(e) {
         if (this._cameraAnimation) return;
         if (this.touchDragActive && e.touches.length === 1) {
@@ -1232,7 +1026,6 @@ if (demoElevLayer) {
         }
     }
 
-    /** @param {TouchEvent} e */
     onTouchEnd(e) {
         if (e.touches.length < 2) this.touchState.isPinching = false;
         if (e.touches.length === 0 && this.touchDragActive) {
@@ -1252,7 +1045,6 @@ if (demoElevLayer) {
         this.maybeUpdateVisibleTiles();
     }
 
-    /** Shift+Click: лог координат точки под курсором. @param {MouseEvent} e */
     onClick(e) {
         if (!e.shiftKey) return;
         if (this._mouseMoved) return;
@@ -1283,11 +1075,7 @@ if (demoElevLayer) {
         }
     }
 
-    /**
-     * Навешивает все DOM-слушатели через единый AbortController,
-     * чтобы `dispose()` мог снять их одной командой.
-     * @private
-     */
+    /** @private */
     bindEvents() {
         this._abortController = new AbortController();
         const signal = this._abortController.signal;
@@ -1313,28 +1101,22 @@ if (demoElevLayer) {
     applyZoomDistance() {
         if (this._cameraAnimation) return;
         const target = this._tempTarget.copy(this.controls.target);
-        const currentDir = this._tempDir.subVectors(this.camera.position, target).normalize();
-        const pitch = Math.acos(currentDir.y);
+        const currentDir = this._tempDir.subVectors(this.camera.position, target);
+        const d0 = currentDir.length();
+        if (d0 < 1e-6) return;
+        currentDir.divideScalar(d0);
 
-        let minDist = 0;
-        if (this.hasElevation) {
-            const maxHeight = this.getSurfaceMaxHeight(target.x, target.z);
-            minDist = (maxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) / Math.cos(pitch);
-        }
-
-        let dist = this.getTargetDistanceForZoom(this.continuousZoom);
-        dist = Math.max(dist, minDist);
-
+        const pitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
         const azimuth = Math.atan2(currentDir.z, currentDir.x);
-        this.camera.position.set(
-            target.x + dist * Math.sin(pitch) * Math.cos(azimuth),
-            target.y + dist * Math.cos(pitch),
-            target.z + dist * Math.sin(pitch) * Math.sin(azimuth)
+        const desiredDist = this.getTargetDistanceForZoom(this.continuousZoom);
+
+        this._resolveCameraPlacement(
+            target, desiredDist, pitch, azimuth, this._tempPlacementOut
         );
+        this.camera.position.copy(this._tempPlacementOut);
         this.camera.lookAt(target);
     }
 
-    /** @param {number} delta */
     applyZoomDelta(delta) {
         this.targetContinuousZoom += delta;
         this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
@@ -1345,10 +1127,6 @@ if (demoElevLayer) {
         }
     }
 
-    /**
-     * Идеальный дискретный zoom с гистерезисом.
-     * @param {number} continuousZoom @returns {number}
-     */
     peekIdealZoom(continuousZoom) {
         const prev = this.currentDiscreteZoom;
         let idealZ = prev;
@@ -1357,22 +1135,6 @@ if (demoElevLayer) {
         return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, idealZ));
     }
 
-    /**
-     * Обновляет видимые тайлы.
-     *
-     * ВАЖНО: если на карте нет ни одного тайлового слоя (только
-     * векторные полигоны), метод выходит сразу после пересчёта
-     * currentDiscreteZoom. Это отключает весь TileManager в горячем
-     * пути — включая построение deformed-тайлов через proj4, которое
-     * для узких проекций (Equal Earth и т.п.) давало просадку до 1 FPS
-     * даже при пустом списке layers.
-     *
-     * Внешний источник высот (GeoTIFF / `elevation: 'demo'`) поднимает
-     * `hasTileLayers`, так что после его подключения тайлы будут
-     * обновляться.
-     *
-     * @param {boolean} [force]
-     */
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;
         const now = performance.now();
@@ -1390,7 +1152,6 @@ if (demoElevLayer) {
         );
     }
 
-    /** @param {number} lon @param {number} lat */
     moveCameraTo(lon, lat) {
         const [cx, cz] = this.projectLonLat(lon, lat);
         const z = this.currentDiscreteZoom;
@@ -1407,7 +1168,7 @@ if (demoElevLayer) {
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /** Перескок через антимеридиан для цикличных по долготе проекций. @private */
+    /** @private */
     _wrapLongitudeIfNeeded() {
         if (!this._wrapsLongitude()) return;
 
@@ -1440,23 +1201,24 @@ if (demoElevLayer) {
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         if (this._disposed || this._cameraAnimation) return;
 
-        const startTarget = this._tempVec3a.copy(this.controls.target);
-        const startPos = this._tempVec3b.copy(this.camera.position);
+        const startTarget = new THREE.Vector3().copy(this.controls.target);
+        const startPos = new THREE.Vector3().copy(this.camera.position);
         const startZoom = this.continuousZoom;
 
         const [cx, cz] = this.projectLonLat(lon, lat);
         const worldOffset = this.worldGroup.position;
-        const endTarget = this._tempVec3c.set(cx + worldOffset.x, 0, cz + worldOffset.z);
+        const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cz + worldOffset.z);
 
-        const currentDir = this._tempDir.subVectors(startPos, startTarget).normalize();
+        const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
+        const animPitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
+        const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
         const endZoom = targetZoom !== null ? targetZoom : startZoom;
 
         const startTime = performance.now();
         this._cameraAnimation = {
-            startTarget, startPos, endTarget,
+            startTarget, endTarget,
             startZoom, endZoom,
-            duration, startTime,
-            dir: currentDir.clone()
+            duration, startTime
         };
 
         this._controlsDampingWasEnabled = this.controls.enableDamping;
@@ -1472,14 +1234,14 @@ if (demoElevLayer) {
             const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
             const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
 
-            const maxHeight = this.hasElevation ? this.getSurfaceMaxHeight(anim.endTarget.x, anim.endTarget.z) : 0;
-            const minDist = this.hasElevation ? (maxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) : 0;
-            const desiredDist = this.getTargetDistanceForZoom(currentZoom);
-            const finalDist = Math.max(desiredDist, minDist);
-
-            const currentPos = this._tempVec3b.copy(currentTarget).addScaledVector(anim.dir, finalDist);
-
-            this.camera.position.copy(currentPos);
+            this._resolveCameraPlacement(
+                currentTarget,
+                this.getTargetDistanceForZoom(currentZoom),
+                animPitch,
+                animAzimuth,
+                this._tempPlacementOut
+            );
+            this.camera.position.copy(this._tempPlacementOut);
             this.controls.target.copy(currentTarget);
             this.controls.update();
 
@@ -1491,12 +1253,15 @@ if (demoElevLayer) {
                 this._cameraAnimation = null;
                 this.controls.enableDamping = this._controlsDampingWasEnabled;
 
-                const finalMaxHeight = this.hasElevation ? this.getSurfaceMaxHeight(anim.endTarget.x, anim.endTarget.z) : 0;
-                const finalMinDist = this.hasElevation ? (finalMaxHeight + this.MIN_CAMERA_HEIGHT_OFFSET) : 0;
-                const finalDesiredDist = this.getTargetDistanceForZoom(anim.endZoom);
-                this.camera.position.copy(
-                    this._tempVec3b.copy(anim.endTarget).addScaledVector(anim.dir, Math.max(finalDesiredDist, finalMinDist))
+                this._resolveCameraPlacement(
+                    anim.endTarget,
+                    this.getTargetDistanceForZoom(anim.endZoom),
+                    animPitch,
+                    animAzimuth,
+                    this._tempPlacementOut
                 );
+                this.camera.position.copy(this._tempPlacementOut);
+                this.controls.target.copy(anim.endTarget);
                 this.controls.update();
 
                 this.continuousZoom = anim.endZoom;
@@ -1516,39 +1281,38 @@ if (demoElevLayer) {
     rotateToNorth(duration = 0.3, resetPitch = true) {
         if (this._disposed || this._cameraAnimation) return;
 
-        const startTarget = this._tempVec3a.copy(this.controls.target);
-        const startPos = this._tempVec3b.copy(this.camera.position);
-        const dir = this._tempDir.subVectors(startPos, startTarget);
+        const startTarget = new THREE.Vector3().copy(this.controls.target);
+        const startPos = new THREE.Vector3().copy(this.camera.position);
+        const dir = new THREE.Vector3().subVectors(startPos, startTarget);
         const startDistance = dir.length();
         if (startDistance < 1) return;
 
-        const startPitch = Math.acos(dir.y / startDistance);
-        const startAzimuth = Math.atan2(-dir.x, dir.z);
-        const endAzimuth = 0;
-        const endPitch = resetPitch ? 0 : startPitch;
+        const startPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / startDistance)));
+        // bearing: 0 = камера к югу от target, смотрит на север.
+        const startBearing = Math.atan2(-dir.x, dir.z);
+        const endBearing = 0;
+        const endPitch = resetPitch ? 0.001 : startPitch;
 
         let endDistance = startDistance;
         if (resetPitch) {
-            const baseDist = this.getTargetDistanceForZoom(this.continuousZoom);
-            const maxHeight = this.getSurfaceMaxHeight(startTarget.x, startTarget.z);
-            const minDist = maxHeight + this.MIN_CAMERA_HEIGHT_OFFSET;
-            endDistance = Math.max(baseDist, minDist);
+            endDistance = this.getTargetDistanceForZoom(this.continuousZoom);
         }
 
-        let deltaAzimuth = endAzimuth - startAzimuth;
-        while (deltaAzimuth > Math.PI) deltaAzimuth -= 2 * Math.PI;
-        while (deltaAzimuth < -Math.PI) deltaAzimuth += 2 * Math.PI;
+        let deltaBearing = endBearing - startBearing;
+        while (deltaBearing > Math.PI) deltaBearing -= 2 * Math.PI;
+        while (deltaBearing < -Math.PI) deltaBearing += 2 * Math.PI;
         const deltaPitch = endPitch - startPitch;
 
-        if (Math.abs(deltaAzimuth) < 0.001 && Math.abs(deltaPitch) < 0.001 && Math.abs(endDistance - startDistance) < 1) return;
+        if (Math.abs(deltaBearing) < 0.001 && Math.abs(deltaPitch) < 0.001 &&
+            Math.abs(endDistance - startDistance) < 1) return;
 
         this._controlsDampingWasEnabled = this.controls.enableDamping;
         this.controls.enableDamping = false;
 
         const startTime = performance.now();
         this._cameraAnimation = {
-            startTarget, startAzimuth, startPitch, startDistance,
-            endAzimuth, endPitch, endDistance, duration, startTime
+            startTarget, startBearing, startPitch, startDistance,
+            endBearing, endPitch, endDistance, duration, startTime
         };
 
         const animateStep = (now) => {
@@ -1558,17 +1322,16 @@ if (demoElevLayer) {
             t = Math.min(t, 1.0);
             const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
-            const currentAzimuth = anim.startAzimuth + (anim.endAzimuth - anim.startAzimuth) * eased;
-            const currentPitch = anim.startPitch + (anim.endPitch - anim.startPitch) * eased;
-            const currentDistance = anim.startDistance + (anim.endDistance - anim.startDistance) * eased;
+            const curBearing = anim.startBearing + (anim.endBearing - anim.startBearing) * eased;
+            const curPitch   = anim.startPitch   + (anim.endPitch   - anim.startPitch)   * eased;
+            const curDist    = anim.startDistance + (anim.endDistance - anim.startDistance) * eased;
 
-            const sinPitch = Math.sin(currentPitch);
-            const cosPitch = Math.cos(currentPitch);
-            const x = anim.startTarget.x - currentDistance * sinPitch * Math.sin(currentAzimuth);
-            const y = anim.startTarget.y + currentDistance * cosPitch;
-            const z = anim.startTarget.z + currentDistance * sinPitch * Math.cos(currentAzimuth);
-
-            this.camera.position.set(x, y, z);
+            const azimuth = curBearing + Math.PI / 2;
+            this._resolveCameraPlacement(
+                anim.startTarget, curDist, curPitch, azimuth,
+                this._tempPlacementOut
+            );
+            this.camera.position.copy(this._tempPlacementOut);
             this.controls.target.copy(anim.startTarget);
             this.controls.update();
             this.maybeUpdateVisibleTiles();
@@ -1576,7 +1339,12 @@ if (demoElevLayer) {
             if (t >= 1.0) {
                 this._cameraAnimation = null;
                 this.controls.enableDamping = this._controlsDampingWasEnabled;
-                this.camera.position.set(x, y, z);
+                const endAz = anim.endBearing + Math.PI / 2;
+                this._resolveCameraPlacement(
+                    anim.startTarget, anim.endDistance, anim.endPitch, endAz,
+                    this._tempPlacementOut
+                );
+                this.camera.position.copy(this._tempPlacementOut);
                 this.controls.target.copy(anim.startTarget);
                 this.controls.update();
                 this.maybeUpdateVisibleTiles();
@@ -1591,15 +1359,6 @@ if (demoElevLayer) {
        fitToBounds / fitTo
        ================================================================ */
 
-    /**
-     * Подгоняет вид под прямоугольник. Сохраняет текущий pitch/bearing.
-     * @param {Array<Array<number>>} bounds - [[minX, minY], [maxX, maxY]].
-     * @param {Object} [options]
-     * @param {Projection|string} [options.crs=this.inputCRS]
-     * @param {number|Array<number>} [options.padding=0]
-     * @param {number} [options.duration=0.5]
-     * @param {number} [options.maxZoom=this.MAX_ZOOM]
-     */
     fitToBounds(bounds, options = {}) {
         if (!bounds || !bounds[0] || !bounds[1]) {
             console.warn('fitToBounds: bounds must be [[minX, minY], [maxX, maxY]]');
@@ -1659,11 +1418,6 @@ if (demoElevLayer) {
         this.moveCameraToSlow(targetLon, targetLat, duration, z);
     }
 
-    /**
-     * Подгоняет вид под объект(ы) с методом `getBounds(crs)`.
-     * @param {Object|Array<Object>} objectOrArray
-     * @param {Object} [options]
-     */
     fitTo(objectOrArray, options = {}) {
         const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
         const crsCode = options.crs ?? 'EPSG:4326';
@@ -1690,7 +1444,7 @@ if (demoElevLayer) {
         this.fitToBounds([[minX, minY], [maxX, maxY]], { ...options, crs });
     }
 
-    /** Минимальная дистанция, при которой bounds влезает в кадр. @private */
+    /** @private */
     _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
         const canvas = this.renderer.domElement;
         const W = canvas.clientWidth;
@@ -1745,12 +1499,6 @@ if (demoElevLayer) {
        Пауза / уничтожение
        ================================================================ */
 
-    /**
-     * Ставит карту на паузу: останавливает главный rAF-цикл и цикл
-     * камерных анимаций. DOM-слушатели, менеджеры, GPU-ресурсы остаются
-     * на месте — карту можно вернуть через {@link KrbMap#resume}.
-     * @returns {void}
-     */
     pause() {
         if (this._disposed || this._paused) return;
         this._paused = true;
@@ -1768,10 +1516,6 @@ if (demoElevLayer) {
         this._cameraAnimations.bearing = null;
     }
 
-    /**
-     * Возобновляет работу после {@link KrbMap#pause}.
-     * @returns {void}
-     */
     resume() {
         if (this._disposed || !this._paused) return;
         this._paused = false;
@@ -1783,22 +1527,13 @@ if (demoElevLayer) {
         this.animate();
     }
 
-    /** @returns {boolean} `true`, если карта сейчас на паузе. */
     isPaused() { return this._paused; }
-
-    /** @returns {boolean} `true`, если карта уничтожена через `dispose()`. */
     isDisposed() { return this._disposed; }
 
-    /**
-     * Полностью уничтожает карту: останавливает циклы, снимает все
-     * DOM-слушатели, освобождает GPU-ресурсы и обнуляет ссылки.
-     * @returns {void}
-     */
     dispose() {
         if (this._disposed) return;
         this._disposed = true;
 
-        // 1. Стоп всех rAF-циклов.
         if (this._rafId !== null) {
             cancelAnimationFrame(this._rafId);
             this._rafId = null;
@@ -1810,13 +1545,11 @@ if (demoElevLayer) {
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
 
-        // 2. Снять DOM-слушатели.
         if (this._abortController) {
             try { this._abortController.abort(); } catch (e) { console.warn(e); }
             this._abortController = null;
         }
 
-        // 3. Менеджеры.
         const managers = ['tileManager', 'textManager', 'popupManager', 'interaction'];
         for (const name of managers) {
             const m = this[name];
@@ -1826,16 +1559,13 @@ if (demoElevLayer) {
             this[name] = null;
         }
 
-        // 4. Геометрии и материалы сцены.
         this._disposeObject3D(this.scene);
 
-        // 5. OrbitControls.
         if (this.controls && typeof this.controls.dispose === 'function') {
             try { this.controls.dispose(); } catch (e) { console.warn(e); }
         }
         this.controls = null;
 
-        // 6. Рендерер.
         if (this.renderer) {
             const canvas = this.renderer.domElement;
             try { this.renderer.dispose(); } catch (e) { console.warn(e); }
@@ -1851,7 +1581,6 @@ if (demoElevLayer) {
         this.ambientLight = null;
         this.sunLight = null;
 
-        // 7. Прочие ссылки.
         this._dynamicLayers = [];
         this.layers = [];
         this.globalElevCache?.clear?.();
@@ -1864,17 +1593,13 @@ if (demoElevLayer) {
         this._tempVec3c = null;
         this._tempDir = null;
         this._tempTarget = null;
+        this._tempPlacementOut = null;
         this._tempRaycaster = null;
         this._tempMouse = null;
         this.targetElement = null;
     }
 
-    /**
-     * Рекурсивно обходит поддерево и освобождает геометрии/материалы.
-     * Текстуры не трогаем: они могут быть закэшированы менеджерами.
-     * @param {THREE.Object3D|null} root
-     * @private
-     */
+    /** @private */
     _disposeObject3D(root) {
         if (!root) return;
         root.traverse((obj) => {

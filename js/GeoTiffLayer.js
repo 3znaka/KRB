@@ -26,6 +26,16 @@
  * (`map.projection`) и ложатся в плоскость через `THREE.PlaneGeometry` —
  * ровно так же, как это делает `Image` со своими `nodes`.
  *
+ * ### Z-fighting с тайлами
+ *
+ * Плоскость GeoTIFF по умолчанию лежит на `y = elevationOffset` (0).
+ * Primary-тайлы карты после недавней правки TileManager тоже пишут
+ * depth и на нулевом уровне высот оказываются строго coplanar с
+ * GeoTIFF — это классический z-fighting. Решение — `polygonOffset`
+ * в материале: значение глубины сдвигается без изменения геометрии,
+ * и GeoTIFF гарантированно «ближе к камере» в coplanar-пикселях.
+ * См. опции `alwaysOnTop` и `elevationOffset`.
+ *
  * ### Режим источника высот (`asElevation: true`)
  *
  * Если задан `asElevation: true`, одноканальные значения растра
@@ -71,6 +81,18 @@ const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url
  * @private
  */
 const DEFAULT_HEIGHT_SCALE = 1.0;
+
+/**
+ * Величина `polygonOffsetFactor`/`polygonOffsetUnits` по умолчанию.
+ *
+ * Подобрана так, чтобы уверенно перекрывать coplanar-тайлы на любых
+ * разумных дистанциях камеры и при этом не «просвечивать» GeoTIFF
+ * сквозь рельеф, стоящий перед камерой. Если z-fighting всё же
+ * пробивается на дальних зумах — увеличьте; если GeoTIFF «светится»
+ * сквозь холмы — уменьшите (или используйте `alwaysOnTop`/`elevationOffset`).
+ * @private
+ */
+const DEFAULT_POLYGON_OFFSET = -4;
 
 /**
  * Слой GeoTIFF-растра.
@@ -126,6 +148,21 @@ export class GeoTiffLayer extends Layer {
      * @param {Function} [options.onLoad] - Колбэк успешной загрузки,
      *     получает экземпляр слоя.
      * @param {Function} [options.onError] - Колбэк ошибки, получает Error.
+     *
+     * @param {boolean} [options.alwaysOnTop=false] - Отключить depthTest у
+     *     материала: GeoTIFF рисуется поверх всей сцены. Простейший способ
+     *     победить z-fighting, но `polygonOffset` (по умолчанию) лучше —
+     *     он сохраняет корректную окклюзию рельефом. Используйте
+     *     `alwaysOnTop`, если GeoTIFF — чисто 2D-оверлей.
+     * @param {number} [options.elevationOffset=0] - Подъём плоскости
+     *     GeoTIFF над нулевым уровнем в world-метрах. Полезно, когда
+     *     GeoTIFF должен «висеть» над рельефом, но не драпируется
+     *     (например, при `asElevation: true` с видимой текстурой).
+     * @param {number} [options.polygonOffset=-4] - Значение
+     *     `polygonOffsetFactor`/`polygonOffsetUnits` (с отрицательным
+     *     знаком — «к камере»). Увеличивайте, если z-fighting всё же
+     *     пробивается; уменьшайте, если GeoTIFF «просвечивает» сквозь
+     *     рельеф, стоящий перед камерой. Игнорируется при `alwaysOnTop`.
      *
      * @param {string|Array} [options.colorRamp=undefined] - Палитра для
      *     одноканальных (DEM) данных. Строка — имя пресета
@@ -195,6 +232,30 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private */ this._renderOrder = options.renderOrder ?? GEOTIFF_RENDER_ORDER;
 
+        // --- Рендеринг над тайлами (z-fighting fix) ---
+        /**
+         * Не проверять depth-буфер: GeoTIFF всегда рисуется поверх
+         * сцены. Простейший способ победить z-fighting, но ломает
+         * окклюзию рельефом. По умолчанию выключено — используется
+         * polygonOffset.
+         * @private @type {boolean}
+         */
+        this._alwaysOnTop = options.alwaysOnTop === true;
+        /**
+         * Подъём плоскости GeoTIFF над нулевым уровнем в world-метрах.
+         * @private @type {number}
+         */
+        this._elevationOffset = Number.isFinite(options.elevationOffset)
+            ? options.elevationOffset
+            : 0;
+        /**
+         * Значение `polygonOffsetFactor`/`polygonOffsetUnits`.
+         * @private @type {number}
+         */
+        this._polygonOffset = Number.isFinite(options.polygonOffset)
+            ? options.polygonOffset
+            : DEFAULT_POLYGON_OFFSET;
+
         // --- Пул воркеров ---
         /** @private */ this._useWorker = options.useWorker === true;
         /** @private */ this._poolSize = options.poolSize ?? 2;
@@ -202,15 +263,14 @@ export class GeoTiffLayer extends Layer {
         /** @private @type {Pool|null} */ this._pool = options.pool || null;
         /** @private */ this._ownsPool = false;
 
-
         /**
- * Blob URL, из которого создан воркер (для revokeObjectURL).
- * Используется, когда `workerUrl` кросс-доменный: браузер
- * запрещает `new Worker(crossOriginUrl)` даже с CORS, поэтому
- * мы скачиваем исходник воркера через `fetch` и оборачиваем в Blob.
- * @private @type {string|null}
- */
-this._blobWorkerUrl = null;
+         * Blob URL, из которого создан воркер (для revokeObjectURL).
+         * Используется, когда `workerUrl` кросс-доменный: браузер
+         * запрещает `new Worker(crossOriginUrl)` даже с CORS, поэтому
+         * мы скачиваем исходник воркера через `fetch` и оборачиваем в Blob.
+         * @private @type {string|null}
+         */
+        this._blobWorkerUrl = null;
 
         // --- Колбэки загрузки ---
         /** @private */ this._onProgress = options.onProgress || null;
@@ -294,12 +354,6 @@ this._blobWorkerUrl = null;
          * @private @type {(() => void)|null}
          */
         this._unregisterInteraction = null;
-
-        if (this._asElevation && !this._colorRampInput) {
-            // Принудительно включаем ramp-путь, чтобы гарантированно
-            // читать сырые значения, а не RGB.
-            // Палитра по умолчанию — grayscale (см. resolveColorRamp).
-        }
     }
 
     /* ================================================================
@@ -362,9 +416,9 @@ this._blobWorkerUrl = null;
         }
 
         if (this._blobWorkerUrl) {
-    try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
-    this._blobWorkerUrl = null;
-}
+            try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
+            this._blobWorkerUrl = null;
+        }
 
         this._image = null;
         this._tiff = null;
@@ -529,10 +583,10 @@ this._blobWorkerUrl = null;
      * @returns {Promise<void>}
      */
     async _load() {
-    this._loading = true;
-    this._progress(0);
-    try {
-        await this._ensurePool();
+        this._loading = true;
+        this._progress(0);
+        try {
+            await this._ensurePool();
 
             const tiff = await this._openTiff();
             this._tiff = tiff;
@@ -577,59 +631,59 @@ this._blobWorkerUrl = null;
         }
     }
 
-/**
- * Создаёт Pool, если пользователь запросил `useWorker` и не передал
- * готовый пул.
- *
- * Если `workerUrl` кросс-доменный, браузер блокирует
- * `new Worker(url)` из-за same-origin политики воркеров (CORS для
- * этого конструктора не применяется). Обходим: скачиваем исходник
- * воркера через `fetch` (CORS на CDN уже настроен), заворачиваем в
- * Blob и создаём воркер из Blob URL — он считается same-origin с
- * документом.
- *
- * @private
- * @returns {Promise<void>}
- */
-async _ensurePool() {
-    if (this._pool) return;
-    if (!this._useWorker) return;
+    /**
+     * Создаёт Pool, если пользователь запросил `useWorker` и не передал
+     * готовый пул.
+     *
+     * Если `workerUrl` кросс-доменный, браузер блокирует
+     * `new Worker(url)` из-за same-origin политики воркеров (CORS для
+     * этого конструктора не применяется). Обходим: скачиваем исходник
+     * воркера через `fetch` (CORS на CDN уже настроен), заворачиваем в
+     * Blob и создаём воркер из Blob URL — он считается same-origin с
+     * документом.
+     *
+     * @private
+     * @returns {Promise<void>}
+     */
+    async _ensurePool() {
+        if (this._pool) return;
+        if (!this._useWorker) return;
 
-    try {
-        const url = this._workerUrl;
+        try {
+            const url = this._workerUrl;
 
-        const resp = await fetch(url, { mode: 'cors' });
-        if (!resp.ok) {
-            throw new Error(`worker fetch failed: ${resp.status} ${resp.statusText}`);
+            const resp = await fetch(url, { mode: 'cors' });
+            if (!resp.ok) {
+                throw new Error(`worker fetch failed: ${resp.status} ${resp.statusText}`);
+            }
+            const code = await resp.text();
+
+            // На случай, если сервер вернул HTML-страницу ошибки
+            // с кодом 200 (бывает с SPA-fallback'ами).
+            const trimmed = code.trimStart();
+            if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+                throw new Error('worker URL вернул HTML вместо JavaScript');
+            }
+
+            const blob = new Blob([code], { type: 'application/javascript' });
+            const blobUrl = URL.createObjectURL(blob);
+
+            this._pool = new Pool(this._poolSize, () => new Worker(blobUrl));
+            this._ownsPool = true;
+            this._blobWorkerUrl = blobUrl;
+        } catch (e) {
+            console.warn(
+                'GeoTiffLayer: не удалось создать Pool, декодирование в основном потоке',
+                e
+            );
+            if (this._blobWorkerUrl) {
+                try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
+                this._blobWorkerUrl = null;
+            }
+            this._pool = null;
+            this._ownsPool = false;
         }
-        const code = await resp.text();
-
-        // На случай, если сервер вернул HTML-страницу ошибки
-        // с кодом 200 (бывает с SPA-fallback'ами).
-        const trimmed = code.trimStart();
-        if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-            throw new Error('worker URL вернул HTML вместо JavaScript');
-        }
-
-        const blob = new Blob([code], { type: 'application/javascript' });
-        const blobUrl = URL.createObjectURL(blob);
-
-        this._pool = new Pool(this._poolSize, () => new Worker(blobUrl));
-        this._ownsPool = true;
-        this._blobWorkerUrl = blobUrl;
-    } catch (e) {
-        console.warn(
-            'GeoTiffLayer: не удалось создать Pool, декодирование в основном потоке',
-            e
-        );
-        if (this._blobWorkerUrl) {
-            try { URL.revokeObjectURL(this._blobWorkerUrl); } catch (_) { /* swallow */ }
-            this._blobWorkerUrl = null;
-        }
-        this._pool = null;
-        this._ownsPool = false;
     }
-}
 
     /**
      * Открывает GeoTIFF из любого поддерживаемого источника.
@@ -1085,6 +1139,10 @@ async _ensurePool() {
      * Порядок вершин — как у `THREE.PlaneGeometry`:
      *  v0 = top-left, v1 = top-right, v2 = bottom-left, v3 = bottom-right.
      *
+     * Y-координата всех углов равна `_elevationOffset` (по умолчанию 0).
+     * Это позволяет поднять плоскость GeoTIFF над уровнем тайлов, если
+     * нужно — см. описание `options.elevationOffset`.
+     *
      * @private
      * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
      */
@@ -1106,11 +1164,12 @@ async _ensurePool() {
         ];
 
         const map = this._map;
+        const y = this._elevationOffset;
         /** @type {THREE.Vector3[]} */
         const positions = [];
-        for (const [x, y] of cornersCrs) {
-            const [wx, wz] = map.project([x, y], this._crs);
-            positions.push(new THREE.Vector3(wx, 0, wz));
+        for (const [x, yCrs] of cornersCrs) {
+            const [wx, wz] = map.project([x, yCrs], this._crs);
+            positions.push(new THREE.Vector3(wx, y, wz));
         }
         this._worldPositions = positions;
     }
@@ -1118,6 +1177,14 @@ async _ensurePool() {
     /**
      * Строит `PlaneGeometry` с вершинами в мировых координатах
      * (локально относительно центроида) и материал с текстурой.
+     *
+     * **Z-fighting.** Материал получает `polygonOffset` (по умолчанию
+     * `factor = units = -4`): значение глубины сдвигается «к камере»,
+     * не трогая геометрию. Это гарантирует, что GeoTIFF перекрывает
+     * coplanar-тайлы карты (после правки TileManager primary-тайлы
+     * пишут depth и без polygonOffset дают мерцание). См. также
+     * `options.alwaysOnTop` (отключает depthTest полностью).
+     *
      * @private
      */
     _buildMesh() {
@@ -1149,6 +1216,7 @@ async _ensurePool() {
         // привязку: строка 0 массива (север растра) попадает на север карты.
 
         const transparent = this._opacity < 1;
+        const onTop = this._alwaysOnTop;
 
         const material = new THREE.MeshBasicMaterial({
             map: this._texture,
@@ -1156,8 +1224,16 @@ async _ensurePool() {
             transparent,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
-            depthTest: true,
-            depthWrite: false
+
+            // polygonOffset сдвигает значение глубины, не трогая геометрию.
+            // Это устраняет z-fighting с coplanar primary-тайлами карты:
+            // GeoTIFF гарантированно «ближе к камере», но по-прежнему
+            // корректно скрыт рельефом, стоящим перед ним.
+            depthTest:  !onTop,
+            depthWrite: false,
+            polygonOffset:       !onTop,
+            polygonOffsetFactor: this._polygonOffset,
+            polygonOffsetUnits:  this._polygonOffset
         });
 
         const mesh = new THREE.Mesh(geometry, material);

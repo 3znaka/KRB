@@ -23,7 +23,18 @@
  *  - `movingArrow` — конус скользит по ломаной;
  *  - `flowArrows`  — несколько конусов текут вдоль вектора;
  *  - `pulse`       — концевой конус пульсирует размером;
- *  - `part`        — частичная отрисовка линии (extend / center / boomerang / dash).
+ *  - `part`        — частичная отрисовка линии.
+ *
+ * Режимы `part` — визуально РАЗНЫЕ:
+ *  - `'extend'`    — «пила»: линия линейно растёт 0→1, в конце периода
+ *                    мгновенно сбрасывается в 0 и начинает заново
+ *                    (`/|/|/|`). По умолчанию `easing: 'linear'`.
+ *  - `'boomerang'` — «туда-обратно»: плавно вырос, плавно вернулся
+ *                    (`∧∧∧`). По умолчанию `easing: 'easeInOut'`.
+ *  - `'center'`    — растёт от середины наружу и обратно (`<>`).
+ *                    По умолчанию `easing: 'sine'`.
+ *  - `'dash'`      — пунктир, бегущий вдоль линии.
+ *                    По умолчанию `easing: 'linear'`.
  *
  * @module Vector3D
  */
@@ -162,6 +173,33 @@ export class Vector3D {
      *     Общие поля: `type`, `period`, `speed`, `paused`, `reverse`,
      *     `fadeRatio`, `color`, `size`, `sizeMode`, `opacity`,
      *     `hideStaticArrow`.
+     *
+     *     `type: 'movingArrow'` — один конус скользит по ломаной.
+     *     `type: 'flowArrows'`  — N конусов (поле `count` / `spacing`).
+     *     `type: 'pulse'`       — концевой конус пульсирует (`_cone`).
+     *         Доп. поля: `minScale`, `maxScale`, `easing`.
+     *     `type: 'part'` — частичная отрисовка линии. Поля:
+     *       @param {'extend'|'center'|'boomerang'|'dash'} [options.animation.mode='extend']
+     *       @param {number} [options.animation.dashLength=20] - В world-метрах
+     *           (или в долях от длины линии при `dashLengthMode: 'fraction'`).
+     *       @param {'world'|'fraction'} [options.animation.dashLengthMode='world']
+     *       @param {number} [options.animation.gapRatio=1] - Отношение gap/dashLength.
+     *       @param {number} [options.animation.offsetStep=1] - Сколько «шагов»
+     *           (dash+gap) смещать за период. Для бесшовного цикла — целое.
+     *       @param {boolean} [options.animation.headCone=false] - Конус на краю
+     *           каждого dash (marching ants).
+     *       @param {number|null} [options.animation.headConeSize=null]
+     *       @param {string|null} [options.animation.headConeColor=null]
+     *       @param {number|null} [options.animation.width=null] - Толщина линии.
+     *       @param {boolean} [options.animation.hideBaseLine=true] - Скрыть
+     *           базовую `Line2` (обязательно true, если вы не хотите смешивать
+     *           её с overlay).
+     *       @param {'linear'|'sine'|'easeIn'|'easeOut'|'easeInOut'} [options.animation.easing]
+     *           Значение по умолчанию зависит от `mode`:
+     *             - `extend`    → `'linear'`    (пила, мгновенный сброс)
+     *             - `boomerang` → `'easeInOut'` (плавный одиночный пик)
+     *             - `center`    → `'sine'`      (плавный out-and-back)
+     *             - `dash`      → `'linear'`    (равномерное течение)
      */
     constructor(options = {}) {
         if (!options.positions || options.positions.length < 2) {
@@ -401,8 +439,24 @@ export class Vector3D {
         }
 
         if (type === 'part') {
-            base.mode           = anim.mode           ?? 'extend';
-            base.easing         = anim.easing         ?? (base.mode === 'dash' ? 'linear' : 'sine');
+            base.mode = anim.mode ?? 'extend';
+
+            // Дефолтный easing зависит от режима — именно это делает
+            // `extend` и `boomerang` визуально РАЗНЫМИ:
+            //   extend    — пила (линейный рост + мгновенный сброс);
+            //   boomerang — плавный одиночный out-and-back;
+            //   center    — плавный рост от середины;
+            //   dash      — равномерное течение пунктира.
+            let defaultEasing;
+            switch (base.mode) {
+                case 'dash':      defaultEasing = 'linear';    break;
+                case 'extend':    defaultEasing = 'linear';    break;
+                case 'boomerang': defaultEasing = 'easeInOut'; break;
+                case 'center':
+                default:          defaultEasing = 'sine';      break;
+            }
+            base.easing = anim.easing ?? defaultEasing;
+
             base.dashLength     = anim.dashLength     ?? 20;
             base.dashLengthMode = anim.dashLengthMode ?? 'world';
             base.gapRatio       = anim.gapRatio       ?? 1;
@@ -420,15 +474,36 @@ export class Vector3D {
     }
 
     /**
+     * Применяет функцию плавности к фазе `phase ∈ [0, 1]`.
+     *
+     *  - `'linear'`    — `f(t) = t`.                                     (пила при `extend`)
+     *  - `'sine'`      — `f(t) = 0.5 − 0.5·cos(2πt)`: 0→1→0.             (полный цикл)
+     *  - `'easeIn'`    — `t²`: медленный старт.
+     *  - `'easeOut'`   — `1 − (1−t)²`: быстрый старт.
+     *  - `'easeInOut'` — S-кривая 0→1: плавный старт и финиш.
+     *
+     * Для `boomerang` (где поверх этой кривой ещё накладывается
+     * треугольная волна) корректны только `'linear'`, `'easeIn'`,
+     * `'easeOut'`, `'easeInOut'` — они монотонны на `[0,1]` и дают
+     * одиночный пик. `'sine'` не монотонен и даст две осцилляции.
+     *
      * @param {string} easing
      * @param {number} phase
      * @returns {number}
      * @private
      */
     _applyEasing(easing, phase) {
-        if (easing === 'linear')  return phase;
-        if (easing === 'easeIn')  return phase * phase;
-        if (easing === 'easeOut') return 1 - (1 - phase) * (1 - phase);
+        if (easing === 'linear')    return phase;
+        if (easing === 'easeIn')    return phase * phase;
+        if (easing === 'easeOut')   return 1 - (1 - phase) * (1 - phase);
+        if (easing === 'easeInOut') {
+            // FIX: монотонная S-кривая 0→1 (не путать с 'sine' ниже,
+            // который даёт 0→1→0).
+            return phase < 0.5
+                ? 2 * phase * phase
+                : 1 - 2 * (1 - phase) * (1 - phase);
+        }
+        // 'sine' или неизвестное: 0→1→0 (полный цикл за фазу)
         return 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
     }
 
@@ -539,12 +614,6 @@ export class Vector3D {
        ================================================================ */
 
     /**
-     * Создаёт GPU-ресурсы для всех анимаций и применяет их «статичные»
-     * эффекты (скрытие базовой линии / концевого конуса).
-     *
-     * FIX: сбрасывает `anim.time = 0`, чтобы после повторного
-     * `remove() → addTo()` анимация начиналась заново.
-     *
      * @param {import('./KrbMap.js').KrbMap} map
      * @private
      */
@@ -656,12 +725,9 @@ export class Vector3D {
     }
 
     /**
-     * Освобождает GPU-ресурсы всех анимаций, но **сохраняет** сами
-     * конфиги в `_animList` — чтобы после повторного `_attach()`
-     * анимации могли быть созданы заново.
-     *
-     * FIX: строка `this._animList = []` убрана.
-     * FIX: обнуляются `overlayGeo` / `overlayMat`.
+     * Освобождает GPU-ресурсы всех анимаций, но **сохраняет** конфиги
+     * в `_animList` — чтобы после повторного `_attach()` анимации могли
+     * быть созданы заново.
      *
      * @private
      */
@@ -710,8 +776,7 @@ export class Vector3D {
             }
         }
 
-        // FIX: НЕ очищаем _animList — конфиги должны переживать remove().
-        // Очистка списка остаётся за _parseAnimationsInto().
+        // НЕ очищаем _animList — конфиги должны переживать remove().
         this._animPolyline = null;
 
         if (this._cone) {
@@ -808,20 +873,50 @@ export class Vector3D {
         }
     }
 
-    /** @private */
+    /**
+     * Пульс масштаба концевого конуса.
+     *
+     * `easing` управляет формой волны:
+     *  - `'sine'`      — плавный 0→1→0 (по умолчанию);
+     *  - `'linear'`    — треугольная волна 0→1→0 (резкая);
+     *  - `'easeIn'`    — `easeIn(tri(t))` — медленный рост/спад;
+     *  - `'easeOut'`   — `easeOut(tri(t))` — быстрый рост/спад;
+     *  - `'easeInOut'` — `easeInOut(tri(t))` — S-кривая.
+     *
+     * @private
+     */
     _stepPulse(anim, map, phase) {
         const o = anim.config;
         if (!this._cone || !this._cone.visible) return;
 
-        const s = o.easing === 'linear'
-            ? (phase < 0.5 ? phase * 2 : 2 - phase * 2)
-            : 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+        let s;
+        if (o.easing === 'linear') {
+            s = phase < 0.5 ? phase * 2 : 2 - phase * 2;
+        } else if (o.easing === 'sine' || !o.easing) {
+            s = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+        } else {
+            const tri = 1 - Math.abs(2 * phase - 1);
+            s = this._applyEasing(o.easing, tri);
+        }
+
         const mult = o.minScale + (o.maxScale - o.minScale) * s;
         const base = o.size ?? this._arrowSize;
         this._applyConeScale(map, this._cone, base * mult, o.sizeMode);
     }
 
     /**
+     * Разные режимы `part` дают визуально разные анимации:
+     *
+     *  - `extend`    — `f = easing(phase)`;  диапазон `[0, f]`.
+     *                  По умолчанию `linear` — линейный рост, снап в 0
+     *                  в начале нового периода (пила `/|/|`).
+     *  - `center`    — `f = easing(phase)`;  диапазон `[0.5−f/2, 0.5+f/2]`.
+     *                  По умолчанию `sine` — плавный out-and-back от центра.
+     *  - `boomerang` — `f = easing(tri(phase))`, где `tri` — треугольная
+     *                  волна. По умолчанию `easeInOut` — плавный одиночный
+     *                  out-and-back.
+     *  - `dash`      — строит набор диапазонов через `_computeDashRanges`.
+     *
      * @param {{config:Object, time:number}} anim
      * @param {import('./KrbMap.js').KrbMap} map
      * @param {number} phase
@@ -834,12 +929,17 @@ export class Vector3D {
         let ranges = [];
 
         if (o.mode === 'extend') {
+            // Пила: линейный рост (по умолчанию). Пользователь может
+            // переопределить easing — тогда рост будет с ускорением,
+            // но снап в 0 всё равно произойдёт в конце периода.
             const f = this._applyEasing(o.easing, phase);
             ranges = [o.reverse ? [1 - f, 1] : [0, f]];
         } else if (o.mode === 'center') {
             const f = this._applyEasing(o.easing, phase);
             ranges = [[0.5 - f / 2, 0.5 + f / 2]];
         } else if (o.mode === 'boomerang') {
+            // Треугольная волна 0→1→0, поверх неё — монотонный easing.
+            // По умолчанию `easeInOut` — плавный одиночный пик.
             const tri = 1 - Math.abs(2 * phase - 1);
             const f = this._applyEasing(o.easing, tri);
             ranges = [o.reverse ? [1 - f, 1] : [0, f]];
@@ -855,7 +955,7 @@ export class Vector3D {
     }
 
     /**
-     * FIX: стартуем с `i = -1`, чтобы при integer `offsetStep` цикл
+     * Стартуем с `i = -1`, чтобы при integer `offsetStep` цикл
      * dash-паттерна был бесшовным (первый «dash» на phase=1 совпадает
      * с первым «dash» на phase=0).
      *
@@ -1030,7 +1130,7 @@ export class Vector3D {
        ================================================================ */
 
     /**
-     * FIX: `remove()` вызывается только если объект уже куда-то привязан.
+     * `remove()` вызывается только если объект уже куда-то привязан.
      * Иначе первый `_attach` уничтожал `_animList`.
      *
      * @param {import('./KrbMap.js').KrbMap} map
@@ -1039,7 +1139,7 @@ export class Vector3D {
      */
     _attach(map, layer) {
         if (this._map === map && this._layer === layer) return;
-        if (this._map || this._layer) this.remove();   // FIX
+        if (this._map || this._layer) this.remove();
         this._map = map;
         this._layer = layer;
 
@@ -1257,14 +1357,14 @@ export class Vector3D {
     }
 
     /**
-     * FIX: если уже на этой карте — ранний выход; иначе `remove()`
-     * с последующим созданием персонального слоя.
+     * Если уже на этой карте — ранний выход; иначе `remove()` с
+     * последующим созданием персонального слоя.
      *
      * @param {import('./KrbMap.js').KrbMap} map
      * @returns {Vector3D}
      */
     addTo(map) {
-        if (this._map === map && this._layer) return this;   // FIX
+        if (this._map === map && this._layer) return this;
         if (this._map) this.remove();
         const personalLayer = new Layer();
         personalLayer.addTo(map);

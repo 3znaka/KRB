@@ -4,13 +4,6 @@ import {
 import { getOriginZ, getVirtKey, DEFAULTS } from './Utils.js';
 
 /**
- * Шаг по вертикали между уровнями тайлов.
- * @type {number}
- * @private
- */
-const LEVEL_Y_STEP = 1;
-
-/**
  * Максимальное количество кэшируемых тайлов.
  * @type {number}
  * @private
@@ -34,8 +27,7 @@ const MAX_COVER_DEPTH = 2;
 /**
  * Количество сегментов по стороне для деформированного тайла
  * в режиме БЕЗ рельефа. В режиме с рельефом используется
- * `engine.SEGMENTS` — чтобы сетка совпала с сеткой высот,
- * которую возвращает воркер.
+ * `engine.SEGMENTS`.
  * @type {number}
  * @private
  */
@@ -43,15 +35,6 @@ const DEFORM_SEGMENTS_FLAT = 8;
 
 /**
  * Значения по умолчанию для освещаемых тайлов.
- *
- * `roughness = 0.7` — матово, но с лёгким блеском, чтобы плоские
- * участки не выглядели «пластилиновыми».
- *
- * `emissive = 0.5` — половина яркости текстуры идёт «как есть»
- * (эмуляция запечённой освещённости), половина — модулируется
- * динамическим светом. Без этого тайл под `MeshStandardMaterial`
- * темнее, чем под `MeshBasicMaterial`, примерно вдвое.
- *
  * @private
  */
 const TILE_DEFAULT_ROUGHNESS = 0.7;
@@ -60,117 +43,46 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
 
 /**
  * Тайл карты с текстурой, данными высоты и атрибуцией.
- *
- * @example
- * const tile = new Tile({
- *     texture: 'https://example.com/tms/{z}/{x}/{y}.png',
- *     elevation: 'https://example.com/elevation/{z}/{x}/{y}.png',
- *     attributionTitle: 'Example',
- *     attributionUrl: 'https://example.com',
- *     heightScale: 1.5
- * });
  */
 export class Tile {
-    /**
-     * @param {Object} options
-     * @param {THREE.Texture} options.texture - Текстура тайла.
-     * @param {*} options.elevation - Данные о высоте тайла.
-     * @param {string} [options.attributionTitle]
-     * @param {string} [options.attributionUrl]
-     * @param {number} [options.heightScale] - По умолчанию DEFAULTS.HEIGHT_SCALE.
-     */
     constructor(options) {
-    this.texture = options.texture;
-    this.elevation = options.elevation;
-    this.noise = options.noise;
-    this.attributionTitle = options.attributionTitle || '';
-    this.attributionUrl = options.attributionUrl || '';
-    this.heightScale = options.heightScale;   // ← undefined, если не задан
-}
+        this.texture = options.texture;
+        this.elevation = options.elevation;
+        this.noise = options.noise;
+        this.attributionTitle = options.attributionTitle || '';
+        this.attributionUrl = options.attributionUrl || '';
+        this.heightScale = options.heightScale;
+    }
 }
 
 /**
- * Менеджер тайлов: загрузка текстур и высот, управление кэшем и видимостью.
+ * Менеджер тайлов.
  *
- * Поддерживает два режима геометрии:
- *  - Прямоугольный (Mercator): `PlaneGeometry(tileSize, tileSize, seg, seg)`.
- *  - Деформированный: четырёхугольник, углы (и вся сетка) которого
- *    вычисляются через lon/lat XYZ-тайла, спроецированные в проекцию
- *    карты. Режим включается флагом `engine.deformedTiles` (в Core —
- *    авто, если `!projection.isMercator`).
+ * ## Управление глубиной и LOD-переходами
  *
- * Поддерживает два источника высот:
- *  - **URL-источник DEM-тайлов** (`engine.getElevationUrl` → worker);
- *  - **внешний провайдер** (`elevationProvider`, например GeoTiffLayer
- *    в режиме `asElevation`). Подключается методом
- *    {@link TileManager#enableGeotiffElevation}.
+ * На каждый кадр в {@link TileManager#update} формируется `renderSet`:
+ * для каждой видимой «клетки» на `idealZ` выбирается ЛИБО сам primary-тайл,
+ * ЛИБО (если он ещё грузится) полностью покрывающие его потомки, ЛИБО
+ * (если и их нет) готовый предок-фолбэк. Все видимые тайлы, кроме того,
+ * получают `depthWrite` в зависимости от роли:
  *
- * **Освещение.** При `engine.tileLighting === true` тайлы используют
- * `MeshStandardMaterial`, при `false` — быстрый `MeshBasicMaterial`.
- * Запечённая тайловая текстура обычно «уже освещена» сервером, поэтому
- * чисто физический PBR даёт заметно более тёмную картинку. Чтобы
- * компенсировать это, при `tileLighting === true` текстура дублируется
- * в `emissiveMap` с интенсивностью `engine.tileLightingEmissive`
- * (по умолчанию `0.5`): половина яркости идёт «как есть», половина
- * модулируется сценным светом. Это касается и фоновых (static BG)
- * тайлов — они используют тот же материал.
+ *  - **primary** (`inst.z >= idealZ`) — `depthWrite = true`. Это тайлы
+ *    целевого зума плюс более детальные потомки, взятые через `collectCover`.
+ *    Именно они пишут в z-буфер и корректно перекрывают 3D-объекты.
+ *  - **fallback** (`inst.z < idealZ`) — `depthWrite = false`. Рисуются
+ *    первыми (по `renderOrder = z`), заполняют цвет, но не пишут глубину.
+ *    Primary поверх них гарантированно проходит depth test и перекрывает
+ *    фолбэк везде, где загружен. Где primary ещё не готов — фолбэк остаётся
+ *    видимым. Атомарность достигается тем, что и видимость, и `depthWrite`
+ *    выставляются в одном проходе по `this.tiles` в конце `update()`.
  *
- * @example
- * const engine = {
- *     currentDiscreteZoom: 3,
- *     TILE_MARGIN: 0.1,
- *     WORLD_SIZE: 2 * Math.PI * 6371000,
- *     MAX_MERCATOR: Math.PI * 6371000,
- *     SEGMENTS: 32,
- *     MIN_ZOOM: 0, MAX_ZOOM: 18,
- *     MIN_RELIEF_Z: 5, MAX_RELIEF_Z: 15,
- *     TILE_PIXELS: 256,
- *     hasElevation: true,
- *     deformedTiles: false,
- *     tileLighting: true,
- *     tileLightingRoughness: 0.7,
- *     tileLightingMetalness: 0.0,
- *     tileLightingEmissive: 0.5,
- *     globalElevCache: new Map(),
- *     worldGroup: new THREE.Group(),
- *     projection: Projections.get('EPSG:3857'),
- *     getTextureUrl: (z, x, y) => `https://example.com/tiles/${z}/${x}/${y}.png`,
- *     getElevationUrl: (z, x, y) => `https://example.com/elevation/${z}/${x}/${y}.png`,
- *     MAX_WORKER_REQUESTS: 4,
- *     layers: [{ elevation: true, heightScale: 1.2 }]
- * };
- * const tileManager = new TileManager(engine);
+ * Раньше `depthWrite` включался для всех elevation-тайлов одновременно, а
+ * разделение LOD делалось микроскопическим Y-offset'ом (0.05 world-метра).
+ * На больших дистанциях это давало z-fighting и «наезд» родителя на ребёнка.
+ * Теперь Y-offset убран, а разделение LOD обеспечивается флагом записи
+ * глубины — без z-fighting и без смещения реальных высот.
  */
 export class TileManager {
-    /**
-     * @param {Object} engine - Объект движка карты.
-     * @param {boolean} engine.hasElevation
-     * @param {boolean} engine.deformedTiles
-     * @param {boolean} [engine.tileLighting=false] - Использовать ли
-     *     освещаемый материал (`MeshStandardMaterial`) для тайлов,
-     *     включая фоновые BG-тайлы.
-     * @param {number} [engine.tileLightingRoughness=0.7]
-     * @param {number} [engine.tileLightingMetalness=0.0]
-     * @param {number} [engine.tileLightingEmissive=0.5] - Доля «запечённой»
-     *     яркости текстуры (0..1). Компенсирует потемнение под PBR.
-     * @param {Map} [engine.globalElevCache]
-     * @param {THREE.Group} engine.worldGroup
-     * @param {number} engine.MAX_MERCATOR
-     * @param {number} engine.WORLD_SIZE
-     * @param {number} engine.SEGMENTS
-     * @param {number} engine.MIN_ZOOM
-     * @param {number} engine.MAX_ZOOM
-     * @param {number} engine.MIN_RELIEF_Z
-     * @param {number} engine.MAX_RELIEF_Z
-     * @param {number} engine.TILE_PIXELS
-     * @param {Function} engine.getTextureUrl
-     * @param {Function} engine.getElevationUrl
-     * @param {number} engine.TILE_MARGIN
-     * @param {number} engine.MAX_WORKER_REQUESTS
-     * @param {Array.<Object>} engine.layers
-     * @param {import('./Projections.js').Projection} engine.projection
-     * @param {Function} engine.worldToTileIndex
-     */
     constructor(engine) {
         this.engine = engine;
         this.tiles = new Map();
@@ -180,18 +92,10 @@ export class TileManager {
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
-        /**
-         * Активен ли рельеф. Может быть поднят в `true` позже методом
-         * {@link TileManager#enableGeotiffElevation}.
-         * @type {boolean}
-         */
+        /** @type {boolean} */
         this.hasElevation = engine.hasElevation;
 
-        /**
-         * Настройки освещения тайлов. Значения фиксируем в конструкторе,
-         * чтобы хот-пас создания материала не трогал `engine` лишний раз.
-         * @private
-         */
+        /** @private */
         this.tileLighting = engine.tileLighting === true;
         this.tileRoughness = Number.isFinite(engine.tileLightingRoughness)
             ? engine.tileLightingRoughness
@@ -203,10 +107,7 @@ export class TileManager {
             ? engine.tileLightingEmissive
             : TILE_DEFAULT_EMISSIVE;
 
-        /**
-         * Внешний провайдер высот.
-         * @type {Object|null}
-         */
+        /** @type {Object|null} */
         this.elevationProvider = null;
 
         this.pendingWorkerJobs = [];
@@ -221,6 +122,9 @@ export class TileManager {
         this.elevationQueue = [];
         this.activeElevationFetches = 0;
         this.MAX_ELEVATION_FETCHES = 4;
+
+        /** @private Последний idealZ, для которого запускали пре-фетч. */
+        this._lastPrefetchZoom = -1;
 
         if (this.hasElevation) {
             this.initWorker();
@@ -241,28 +145,23 @@ export class TileManager {
     /**
      * Создаёт материал для тайла.
      *
-     * При `tileLighting === false` — быстрый `MeshBasicMaterial`, как
-     * раньше. При `true` — `MeshStandardMaterial` с эмуляцией
-     * «запечённой» яркости через `emissiveMap`: та же текстура, что и
-     * `map`, но с `emissiveIntensity = tileEmissive`. Это компенсирует
-     * потемнение под PBR (текстура-то уже «освещена» сервером).
+     * `depthWrite` здесь ВСЕГДА `false` (кроме override'ов вроде BG-тайлов).
+     * Запись глубины включается динамически в {@link TileManager#update}
+     * только для primary-тайлов на текущем idealZ (и готовых потомков,
+     * взятых через `collectCover`). Это ключевое отличие от прежней
+     * логики, где `depthWrite` завязывался на `hasElevation` целиком —
+     * что и приводило к z-fighting и «наезду» родителя на ребёнка.
      *
      * @param {THREE.Texture|null} texture
      * @param {Object} [opts]
-     * @param {boolean} [opts.depthWrite] - Переопределить `depthWrite`.
-     *     По умолчанию `this.hasElevation`.
-     * @param {boolean} [opts.depthTest] - Переопределить `depthTest`.
-     *     По умолчанию `this.hasElevation`.
+     * @param {boolean} [opts.depthWrite=false]
+     * @param {boolean} [opts.depthTest=true]
      * @returns {THREE.Material}
      * @private
      */
     _createTileMaterial(texture, opts = {}) {
-        const depthWrite = opts.depthWrite !== undefined
-            ? opts.depthWrite
-            : this.hasElevation;
-        const depthTest = opts.depthTest !== undefined
-            ? opts.depthTest
-            : this.hasElevation;
+        const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : false;
+        const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : true;
 
         const common = { map: texture, depthWrite, depthTest };
 
@@ -280,8 +179,6 @@ export class TileManager {
             mat.emissive = new THREE.Color(0xffffff);
             mat.emissiveIntensity = this.tileEmissive;
             if (texture) {
-                // Та же текстура, что и в `map`. Её `colorSpace` уже
-                // выставлен в SRGB при загрузке через loadTextureAsync.
                 mat.emissiveMap = texture;
             }
         }
@@ -290,13 +187,7 @@ export class TileManager {
     }
 
     /**
-     * Заменяет текстуру у меша-тайла: и `map`, и `emissiveMap` (если
-     * материал освещаемый и `tileEmissive > 0`).
-     *
-     * Нужен для фоновых BG-тайлов: они создаются до загрузки текстуры,
-     * а `emissiveMap` без явной установки останется `null` — и BG
-     * будет заметно темнее подробных тайлов.
-     *
+     * Заменяет текстуру у меша-тайла: и `map`, и `emissiveMap`.
      * @param {THREE.Mesh} mesh
      * @param {THREE.Texture|null} texture
      */
@@ -309,10 +200,16 @@ export class TileManager {
         mesh.material.needsUpdate = true;
     }
 
-    /* ---- основной метод, вызывается из Core.maybeUpdateVisibleTiles ---- */
+    /* ================================================================
+       Основной метод — вызывается из Core.maybeUpdateVisibleTiles
+       ================================================================ */
 
     /**
      * Обновляет видимые тайлы на основе положения камеры и зума.
+     *
+     * Помимо `renderSet`, здесь же атомарно (в одном проходе) выставляется
+     * `material.depthWrite` для каждого видимого тайла в зависимости от
+     * его роли: primary (пишет depth) или fallback (не пишет).
      *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
@@ -391,14 +288,43 @@ export class TileManager {
             }
         }
 
+        // Атомарно применяем видимость И роль depthWrite для каждого тайла.
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
             if (inst.mesh.visible !== show) inst.mesh.visible = show;
-            if (show) inst.lastUsed = this.frame;
+            if (!show) continue;
+
+            // primary = тайл на idealZ или более детальный потомок (cover).
+            // fallback = предок, взятый ради ещё не загруженных primary.
+            // Только primary пишет глубину — fallback рисуется первым
+            // (меньший renderOrder), цвет ложится, но z-буфер не трогает.
+            // Поэтому primary поверх него гарантированно проходит depth test
+            // и перекрывает фолбэк ровно в тех пикселях, где уже загружен.
+            const shouldWriteDepth = inst.z >= idealZ;
+            const mat = inst.mesh.material;
+            if (mat.depthWrite !== shouldWriteDepth) {
+                // depthWrite — render state, needsUpdate НЕ требуется.
+                mat.depthWrite = shouldWriteDepth;
+            }
+
+            inst.lastUsed = this.frame;
         }
 
         this.gc(renderSet);
+
+        // Пре-фетч следующего уровня зума — сокращает окно fallback при
+        // приближении. Порог 0.3 согласован с Core.peekIdealZoom (там
+        // переключение при 0.6).
+        if (
+            continuousZoom > idealZ + 0.3 &&
+            idealZ < this.engine.MAX_ZOOM &&
+            this._lastPrefetchZoom < idealZ
+        ) {
+            this._lastPrefetchZoom = idealZ;
+            this.prefetchNextZoomLevel(controlsTarget, idealZ + 1, worldGroupPos);
+        }
+
         return idealZ;
     }
 
@@ -461,7 +387,7 @@ export class TileManager {
     }
 
     /* ================================================================
-       Подключение внешнего источника высот (GeoTIFF)
+       Внешний источник высот (GeoTIFF / Noise)
        ================================================================ */
 
     /**
@@ -569,6 +495,12 @@ export class TileManager {
 
     /**
      * Создаёт меш тайла (прямоугольный режим).
+     *
+     * Обратите внимание: никакого Y-offset'а больше нет. Раньше здесь
+     * был `-(MAX_ZOOM - z) * 0.05`, из-за чего рельеф оказывался ниже
+     * «истинных» высот (и ломал позиционирование маркеров). Разделение
+     * LOD теперь обеспечивается флагом depthWrite в `update()`.
+     *
      * @private
      */
     createTileMesh(inst, texture) {
@@ -596,7 +528,7 @@ export class TileManager {
         const mesh = new THREE.Mesh(geometry, mat);
         mesh.position.set(
             originX + tileSize / 2,
-            this.hasElevation ? -(this.engine.MAX_ZOOM - z) * 0.05 : 0,
+            0,
             originZ + tileSize / 2
         );
         mesh.renderOrder = z;
@@ -683,11 +615,8 @@ export class TileManager {
         const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geom, mat);
-        mesh.position.set(
-            cx,
-            this.hasElevation ? -(this.engine.MAX_ZOOM - z) * 0.05 : 0,
-            cz
-        );
+        // Y-offset убран: разделение LOD делается через depthWrite.
+        mesh.position.set(cx, 0, cz);
         mesh.renderOrder = z;
         mesh.visible = false;
         mesh.userData.deformedTile = true;
@@ -697,14 +626,10 @@ export class TileManager {
     /**
      * Создаёт статический фоновый меш тайла.
      *
-     * Используется для `staticBgGroup` — подложки в Mercator-режиме.
-     * **Теперь использует тот же материал, что и подробные тайлы**:
-     * при `tileLighting: true` это `MeshStandardMaterial` с
-     * `emissiveMap`, и BG-тайлы освещаются так же, как подробные.
-     * Переопределяем только `depthWrite`/`depthTest` — BG должен
-     * рисоваться поверх depth-буфера (`renderOrder = -2`).
-     *
-     * Текстура приходит позже (асинхронно) — см. {@link TileManager#setMeshTexture}.
+     * BG не пишет и не тестирует глубину (`depthWrite: false`,
+     * `depthTest: false`) и рисуется первым (`renderOrder = -2`). Его Y
+     * (`-1.5`) — чисто визуальный «отступ назад», на depth-разрешение
+     * между LOD-тайлами не влияет.
      *
      * @param {number} tileSize
      * @param {number} originX
@@ -1006,11 +931,14 @@ export class TileManager {
 
     /** @private */
     getElevationHeightScale() {
-    const layerWithElev = this.engine.layers.find(l => l.elevation);
-    return layerWithElev?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
-}
+        const layerWithElev = this.engine.layers.find(l => l.elevation);
+        return layerWithElev?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
+    }
 
-    /** @param {THREE.Vector3} center @param {number} z @param {THREE.Vector3} worldGroupPos */
+    /**
+     * Пре-фетч DEM-предков при отдалении (вызывается из Core).
+     * @param {THREE.Vector3} center @param {number} z @param {THREE.Vector3} worldGroupPos
+     */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation || z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return;
         if (this.elevationProvider) return;
@@ -1065,9 +993,52 @@ export class TileManager {
         }
     }
 
+    /**
+     * Пре-фетч тайлов следующего уровня (при приближении).
+     *
+     * Вызывается автоматически из {@link TileManager#update}, когда
+     * `continuousZoom` подходит к порогу смены зума. Сокращает окно, в
+     * котором видны fallback-предки, до одного-двух кадров.
+     *
+     * @param {THREE.Vector3} center
+     * @param {number} z — целевой зум (idealZ + 1)
+     * @param {THREE.Vector3} worldGroupPos
+     */
+    prefetchNextZoomLevel(center, z, worldGroupPos) {
+        if (z < 0 || z > this.engine.MAX_ZOOM) return;
+        const maxTile = (1 << z) - 1;
+
+        const [txF, tyF] = this.engine.worldToTileIndex(center.x, center.z, z);
+        if (!Number.isFinite(txF) || !Number.isFinite(tyF)) return;
+
+        const cx = Math.floor(txF);
+        const cy = Math.floor(tyF);
+
+        // 5×5 вокруг центра — покрывает видимую область при разумном FOV
+        // и не заваливает очередь запросами.
+        const xMin = Math.max(0, cx - 2);
+        const xMax = Math.min(maxTile, cx + 2);
+        const yMin = Math.max(0, cy - 2);
+        const yMax = Math.min(maxTile, cy + 2);
+
+        for (let y = yMin; y <= yMax; y++) {
+            for (let x = xMin; x <= xMax; x++) {
+                this.ensureTile(z, x, y);
+            }
+        }
+    }
+
     /* ---- LRU сборщик мусора ---- */
 
-    /** @private */
+    /**
+     * Освобождает тайлы за пределами renderSet. Кэш ограничен
+     * MAX_CACHED_TILES.
+     *
+     * Тайлы, на которые ещё ссылается renderSet (включая fallback-предков),
+     * не трогаются. Загружающиеся тайлы тоже.
+     *
+     * @private
+     */
     gc(renderSet) {
         if (this.tiles.size <= MAX_CACHED_TILES) return;
         const candidates = [];
@@ -1089,7 +1060,6 @@ export class TileManager {
         if (inst.mesh) {
             this.engine.worldGroup.remove(inst.mesh);
             inst.mesh.geometry.dispose();
-            // Material.dispose() не трогает текстуру — она в ref-кэше.
             inst.mesh.material.dispose();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);

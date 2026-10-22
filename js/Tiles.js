@@ -238,14 +238,40 @@ const tileSize = cullUnit / Math.pow(2, idealZ);
 
         let xMin, xMax, yMin, yMax;
 
-        if (this.engine.deformedTiles) {
-            const samples = [
-                [minX, minZ], [maxX, minZ], [minX, maxZ], [maxX, maxZ],
-                [(minX + maxX) * 0.5, minZ], [(minX + maxX) * 0.5, maxZ],
-                [minX, (minZ + maxZ) * 0.5], [maxX, (minZ + maxZ) * 0.5]
-            ];
-            let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
-            for (const [wx, wz] of samples) {
+if (this.engine.deformedTiles) {
+
+    let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
+
+    const spanW = maxX - minX;
+    const spanH = maxZ - minZ;
+
+    // Сетка по видимому bbox.
+    const G = 16;
+    for (let i = 0; i <= G; i++) {
+        const wx = minX + spanW * (i / G);
+        for (let j = 0; j <= G; j++) {
+            const wz = minZ + spanH * (j / G);
+            const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
+            if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+            if (tx < minTx) minTx = tx;
+            if (tx > maxTx) maxTx = tx;
+            if (ty < minTy) minTy = ty;
+            if (ty > maxTy) maxTy = ty;
+        }
+    }
+
+    // Контур домена проекции.
+    const proj = this.engine.projection;
+    if (proj && typeof proj.fromLonLatSafe === 'function') {
+        const B = 64;
+        for (let k = 0; k <= B; k++) {
+            const lat = -90 + 180 * (k / B);
+            for (let e = 0; e < 2; e++) {
+                const lon = e === 0 ? -180 : 180;
+                const p = proj.fromLonLatSafe([lon, lat]);
+                if (!p) continue;
+                const wx = p[0], wz = -p[1];
+                if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
                 const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
                 if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
                 if (tx < minTx) minTx = tx;
@@ -253,21 +279,50 @@ const tileSize = cullUnit / Math.pow(2, idealZ);
                 if (ty < minTy) minTy = ty;
                 if (ty > maxTy) maxTy = ty;
             }
-            if (Number.isFinite(minTx)) {
-                xMin = Math.max(0, Math.floor(minTx));
-                xMax = Math.min(maxTile, Math.ceil(maxTx));
-                yMin = Math.max(0, Math.floor(minTy));
-                yMax = Math.min(maxTile, Math.ceil(maxTy));
-            } else {
-                xMin = 1; xMax = 0; yMin = 1; yMax = 0;
-            }
-        } else {
-            const off = worldGroupPos;
-            xMin = Math.floor((minX - off.x + this.engine.MAX_MERCATOR) / tileSize);
-            xMax = Math.floor((maxX - off.x + this.engine.MAX_MERCATOR) / tileSize);
-            yMin = Math.max(0, Math.floor((minZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
-            yMax = Math.min(maxTile, Math.floor((maxZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
         }
+        for (let k = 0; k <= B; k++) {
+            const lon = -180 + 360 * (k / B);
+            for (let e = 0; e < 2; e++) {
+                const lat = e === 0 ? -90 : 90;
+                const p = proj.fromLonLatSafe([lon, lat]);
+                if (!p) continue;
+                const wx = p[0], wz = -p[1];
+                if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
+                const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
+                if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+                if (tx < minTx) minTx = tx;
+                if (tx > maxTx) maxTx = tx;
+                if (ty < minTy) minTy = ty;
+                if (ty > maxTy) maxTy = ty;
+            }
+        }
+    }
+
+    if (Number.isFinite(minTx)) {
+        // Запас в один тайл на дискретизацию краёв.
+        xMin = Math.max(0, Math.floor(minTx) - 1);
+        xMax = Math.min(maxTile, Math.ceil(maxTx) + 1);
+        yMin = Math.max(0, Math.floor(minTy) - 1);
+        yMax = Math.min(maxTile, Math.ceil(maxTy) + 1);
+    } else {
+
+        const halfExtent = (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE) / 2;
+        if (maxX > -halfExtent && minX < halfExtent &&
+            maxZ > -halfExtent && minZ < halfExtent) {
+            xMin = 0; xMax = maxTile;
+            yMin = 0; yMax = maxTile;
+        } else {
+            xMin = 1; xMax = 0; yMin = 1; yMax = 0;
+        }
+    }
+} else {
+    // ---------- Mercator: без изменений ----------
+    const off = worldGroupPos;
+    xMin = Math.floor((minX - off.x + this.engine.MAX_MERCATOR) / tileSize);
+    xMax = Math.floor((maxX - off.x + this.engine.MAX_MERCATOR) / tileSize);
+    yMin = Math.max(0, Math.floor((minZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
+    yMax = Math.min(maxTile, Math.floor((maxZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
+}
 
         const visibleKeys = new Set();
         for (let y = yMin; y <= yMax; y++) {

@@ -15,31 +15,48 @@ import { NoiseElevationProvider } from './NoiseElevation.js';
 /**
  * Параметры камеры/зума.
  *
+ * `View` описывает начальное состояние камеры и НЕ знает, в какой
+ * проекции будет рендериться карта. Поэтому координаты хранятся «как
+ * передали»:
+ *
+ *  - `centerLonLat` — всегда WGS84 (lon, lat), проекция не важна;
+ *  - `center` — в CRS, заданном в `projection` (по умолчанию EPSG:3857).
+ *
+ * Пересчёт в проекцию конкретной карты выполняет `KrbMap` в своём
+ * конструкторе (см. `KrbMap._resolveViewCenter`). После создания
+ * карты `map.view.center` и `map.view.centerLonLat` согласованы между
+ * собой и лежат в CRS карты / WGS84 соответственно.
+ *
  * @example
  * new View({ centerLonLat: [37.6178, 55.7558], zoom: 10 });
  * new View({ center: [4187596, -7509138], zoom: 3 });
+ * new View({ center: [418013, -6170966], projection: 'EPSG:32637', zoom: 8 });
  */
 export class View {
     constructor(options) {
-        const projectionCode = options.projection ?? 'EPSG:3857';
-        const projection = Projections.get(projectionCode);
-
-        this.projection = projectionCode;
-
+        if (!options) throw new Error('View: options object is required');
+        if (!options.centerLonLat && !options.center) {
+            throw new Error('View: options.center или options.centerLonLat обязательны');
+        }
         if (options.centerLonLat && options.center) {
             console.warn('View: одновременно заданы centerLonLat и center — приоритет centerLonLat.');
         }
 
-        if (options.centerLonLat) {
-            this.centerLonLat = options.centerLonLat.slice();
-            const [x, y] = projection.fromLonLat(this.centerLonLat);
-            this.center = [x, -y];
-        } else if (options.center) {
-            this.center = options.center.slice();
-            this.centerLonLat = projection.toLonLat([this.center[0], -this.center[1]]);
-        } else {
-            throw new Error('View: options.center или options.centerLonLat обязательны');
-        }
+        /** @type {Array<number>|null} — WGS84 (lon, lat). */
+        this.centerLonLat = options.centerLonLat ? options.centerLonLat.slice() : null;
+
+        /** @type {Array<number>|null} — в CRS `projection` (y → -z). */
+        this.center = options.center ? options.center.slice() : null;
+
+        /**
+         * CRS координат `center` (игнорируется, если задан `centerLonLat`).
+         * По умолчанию — Web Mercator, как и раньше. Реальная проекция
+         * карты может быть другой — `KrbMap` пересчитает `center` в свою
+         * проекцию (при необходимости) и перезапишет это поле на CRS
+         * карты.
+         * @type {string}
+         */
+        this.projection = options.projection ?? 'EPSG:3857';
 
         this.zoom = options.zoom;
         this.minZoom = options.minZoom ?? DEFAULTS.MIN_ZOOM;
@@ -102,17 +119,18 @@ export class KrbMap {
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
 
         this.projection = Projections.get(options.projection ?? 'EPSG:3857');
+
+        // Приводим view.center к проекции карты. Единственное место, где
+        // координаты из View сопоставляются с реальной CRS рендера —
+        // ниже по коду и во всех остальных файлах view.center считается
+        // уже в проекции карты.
+        this._resolveViewCenter();
+
         this.inputCRS = options.inputCRS
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
 
         this.deformedTiles = options.deformedTiles ?? !this.projection.isMercator;
-
-        if (this.view.projection && this.view.projection !== this.projection.code) {
-            console.warn(
-                `KrbMap: view.projection (${this.view.projection}) != map.projection (${this.projection.code}).`
-            );
-        }
 
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
@@ -241,6 +259,60 @@ export class KrbMap {
 
         this.animate();
         requestAnimationFrame(() => initUI(this));
+    }
+
+    /**
+     * Приводит `view.center` к проекции карты.
+     *
+     * `View` не знает CRS карты, поэтому координаты разрешаются здесь,
+     * в контексте конкретной карты. После вызова гарантируется:
+     *
+     *  - `view.center`       — в CRS карты (world-координаты, y → -z);
+     *  - `view.centerLonLat` — WGS84 (lon, lat);
+     *  - `view.projection`   — код CRS карты.
+     *
+     * Приоритет источников — `centerLonLat`, как и раньше. Если задан
+     * только `center`, он интерпретируется в `view.projection`
+     * (по умолчанию EPSG:3857).
+     *
+     * @private
+     */
+    _resolveViewCenter() {
+        const v = this.view;
+        const mapCode = this.projection.code;
+
+        // 1) centerLonLat — приоритетный источник, всегда WGS84.
+        if (v.centerLonLat) {
+            const [x, y] = this.projection.fromLonLat(v.centerLonLat);
+            v.center = [x, -y];
+            v.projection = mapCode;
+            return;
+        }
+
+        // 2) center уже в CRS карты — только досчитываем lon/lat.
+        const srcCode = v.projection ?? mapCode;
+        if (srcCode === mapCode) {
+            const [lon, lat] = this.projection.toLonLat([v.center[0], -v.center[1]]);
+            v.centerLonLat = [lon, lat];
+            v.projection = mapCode;
+            return;
+        }
+
+        // 3) center в чужой CRS — конвертируем через WGS84.
+        console.warn(
+            `KrbMap: view.center пересчитан из ${srcCode} в ${mapCode}. ` +
+            `Если view.center уже был в ${mapCode}, укажите ` +
+            `view.projection = '${mapCode}' или передавайте координаты ` +
+            `в centerLonLat.`
+        );
+        const src = typeof srcCode === 'string'
+            ? Projections.get(srcCode)
+            : srcCode;
+        const lonLat = src.toLonLat([v.center[0], -v.center[1]]);
+        const [x, y] = this.projection.fromLonLat(lonLat);
+        v.centerLonLat = lonLat;
+        v.center = [x, -y];
+        v.projection = mapCode;
     }
 
     /** @returns {THREE.Vector3} */

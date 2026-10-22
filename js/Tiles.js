@@ -52,6 +52,7 @@ export class Tile {
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale;
+        this.crs = options.crs ?? 'EPSG:3857';
     }
 }
 
@@ -599,48 +600,60 @@ if (this.engine.deformedTiles) {
      * Создаёт деформированный меш тайла.
      * @private
      */
-    _createDeformedTileMesh(inst, texture) {
-        const { z, virtX, y } = inst;
-        const n = 1 << z;
-        const proj = this.engine.projection;
+_createDeformedTileMesh(inst, texture) {
+    const { z, virtX, y } = inst;
+    const n = 1 << z;
+    const mapProj = this.engine.projection;
+    const tileCrs = this.engine.tileCRS;
+    const MAX = this.engine.MAX_MERCATOR;
 
-        const seg = this.hasElevation ? this.engine.SEGMENTS : DEFORM_SEGMENTS_FLAT;
-        const grid = seg + 1;
-        const count = grid * grid;
+    const seg = this.hasElevation ? this.engine.SEGMENTS : DEFORM_SEGMENTS_FLAT;
+    const grid = seg + 1;
+    const count = grid * grid;
 
-        const geom = new THREE.PlaneGeometry(1, 1, seg, seg);
-        geom.rotateX(-Math.PI / 2);
+    const geom = new THREE.PlaneGeometry(1, 1, seg, seg);
+    geom.rotateX(-Math.PI / 2);
 
-        const arr = geom.attributes.position.array;
+    const arr = geom.attributes.position.array;
 
-        let sumX = 0, sumZ = 0;
-        let hasInvalid = false;
+    let sumX = 0, sumZ = 0;
+    let hasInvalid = false;
 
-        for (let j = 0; j < grid; j++) {
-            const v = j / seg;
-            const tileY = y + v;
-            const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / n))) * 180 / Math.PI;
-            for (let i = 0; i < grid; i++) {
-                const u = i / seg;
-                const tileX = virtX + u;
-                const lon = tileX / n * 360 - 180;
+    for (let j = 0; j < grid; j++) {
+        const v = j / seg;
+        const tileY = y + v;
+        // tile_crs world Y (положительный на север)
+        const tileWorldY = MAX - (tileY / n) * 2 * MAX;
+        for (let i = 0; i < grid; i++) {
+            const u = i / seg;
+            const tileX = virtX + u;
+            // tile_crs world X
+            const tileWorldX = (tileX / n) * 2 * MAX - MAX;
 
-                const proj2 = proj.fromLonLatSafe([lon, lat]);
-                const k = (j * grid + i) * 3;
-                if (!proj2) {
-                    hasInvalid = true;
-                    arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0;
-                    continue;
-                }
-                const wx = proj2[0];
-                const wz = -proj2[1];
-                arr[k] = wx;
-                arr[k + 1] = 0;
-                arr[k + 2] = wz;
-                sumX += wx;
-                sumZ += wz;
+            const lonLat = tileCrs.toLonLat([tileWorldX, tileWorldY]);
+            const k = (j * grid + i) * 3;
+            if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+                hasInvalid = true;
+                arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0;
+                continue;
             }
+            const proj2 = typeof mapProj.fromLonLatSafe === 'function'
+                ? mapProj.fromLonLatSafe(lonLat)
+                : mapProj.fromLonLat(lonLat);
+            if (!proj2) {
+                hasInvalid = true;
+                arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0;
+                continue;
+            }
+            const wx = proj2[0];
+            const wz = -proj2[1];
+            arr[k] = wx;
+            arr[k + 1] = 0;
+            arr[k + 2] = wz;
+            sumX += wx;
+            sumZ += wz;
         }
+    }
 
         if (hasInvalid) return null;
 

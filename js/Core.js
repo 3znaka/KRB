@@ -13,23 +13,15 @@ import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
 
 /**
- * Параметры камеры/зума.
+ * Параметры камеры/зума. `View` не знает CRS карты — координаты
+ * хранятся «как передали», а согласование с проекцией рендера делает
+ * `KrbMap._resolveViewCenter` в своём конструкторе.
  *
- * `View` описывает начальное состояние камеры и НЕ знает, в какой
- * проекции будет рендериться карта. Поэтому координаты хранятся «как
- * передали»:
- *
- *  - `centerLonLat` — всегда WGS84 (lon, lat), проекция не важна;
- *  - `center` — в CRS, заданном в `projection` (по умолчанию EPSG:3857).
- *
- * Пересчёт в проекцию конкретной карты выполняет `KrbMap` в своём
- * конструкторе (см. `KrbMap._resolveViewCenter`). После создания
- * карты `map.view.center` и `map.view.centerLonLat` согласованы между
- * собой и лежат в CRS карты / WGS84 соответственно.
+ *  - `centerLonLat` — WGS84 (lon, lat);
+ *  - `center` — в CRS `projection` (по умолчанию EPSG:3857).
  *
  * @example
  * new View({ centerLonLat: [37.6178, 55.7558], zoom: 10 });
- * new View({ center: [4187596, -7509138], zoom: 3 });
  * new View({ center: [418013, -6170966], projection: 'EPSG:32637', zoom: 8 });
  */
 export class View {
@@ -42,20 +34,11 @@ export class View {
             console.warn('View: одновременно заданы centerLonLat и center — приоритет centerLonLat.');
         }
 
-        /** @type {Array<number>|null} — WGS84 (lon, lat). */
+        /** @type {Array<number>|null} WGS84 (lon, lat). */
         this.centerLonLat = options.centerLonLat ? options.centerLonLat.slice() : null;
-
-        /** @type {Array<number>|null} — в CRS `projection` (y → -z). */
+        /** @type {Array<number>|null} в CRS `projection` (y → -z). */
         this.center = options.center ? options.center.slice() : null;
-
-        /**
-         * CRS координат `center` (игнорируется, если задан `centerLonLat`).
-         * По умолчанию — Web Mercator, как и раньше. Реальная проекция
-         * карты может быть другой — `KrbMap` пересчитает `center` в свою
-         * проекцию (при необходимости) и перезапишет это поле на CRS
-         * карты.
-         * @type {string}
-         */
+        /** @type {string} CRS для `center` (игнорируется, если задан `centerLonLat`). */
         this.projection = options.projection ?? 'EPSG:3857';
 
         this.zoom = options.zoom;
@@ -74,6 +57,7 @@ export class View {
  *  - `texture: 'demo'` — картинки из `demotiles/1.webp … 24.webp`.
  *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider}.
  *  - `heightScale` (число) — только для URL-источника DEM.
+ *  - `crs` (строка) — CRS тайлового сервера, по умолчанию 'EPSG:3857'.
  */
 export class KrbMap {
     /**
@@ -97,9 +81,7 @@ export class KrbMap {
      * @param {number} [options.baseDistance]
      * @param {number} [options.objectRenderDistanceFactor]
      * @param {number} [options.staticBgZoom]
-     * @param {number} [options.cameraTerrainClearance=5] — зазор между
-     *     камерой и рельефом в world-метрах. Заменяет прежний
-     *     `minCameraHeightOffset` (оставлен как алиас).
+     * @param {number} [options.cameraTerrainClearance=5]
      * @param {boolean} [options.antialias=true]
      * @param {boolean} [options.tileLighting=false]
      * @param {number} [options.tileLightingRoughness=0.7]
@@ -119,35 +101,40 @@ export class KrbMap {
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
 
         this.projection = Projections.get(options.projection ?? 'EPSG:3857');
-
-        // Приводим view.center к проекции карты. Единственное место, где
-        // координаты из View сопоставляются с реальной CRS рендера —
-        // ниже по коду и во всех остальных файлах view.center считается
-        // уже в проекции карты.
         this._resolveViewCenter();
 
         this.inputCRS = options.inputCRS
             ? Projections.get(options.inputCRS)
             : Projections.get('EPSG:4326');
 
-        this.deformedTiles = options.deformedTiles ?? !this.projection.isMercator;
+        /**
+         * CRS источника тайлов. Все тайловые слои считаются в одной CRS;
+         * берётся из первого слоя с `texture` или `elevation`, дефолт —
+         * EPSG:3857. Именно она определяет, как `{z}/{x}/{y}` от
+         * тайлового сервера переводится в lon/lat.
+         * @type {Projection}
+         */
+        const firstTileLayer = this.layers.find(l => l.texture || l.elevation);
+        this.tileCRS = Projections.get(firstTileLayer?.crs ?? 'EPSG:3857');
+
+        // Линейная сетка тайлов работает только если тайлы и карта — обе
+        // в Mercator-семействе (3857/3395): там world-координата тайла
+        // совпадает с world-координатой карты без проекции. Во всех
+        // остальных случаях — deformed-путь через lon/lat.
+        const tileAndMapMatch =
+            this.tileCRS === this.projection &&
+            this.projection.isMercator;
+        this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
         this.MAX_MERCATOR = this.WORLD_SIZE / 2;
 
         /**
-         * Характерный размер «мира» в world-координатах для текущей
-         * проекции. Используется ТОЛЬКО для каллинга (`margin`,
-         * `radius`) в deformed-режиме (см. `Tiles.js`); Mercator-математика
-         * (`MAX_MERCATOR`, tile-индексы в non-deformed) по-прежнему
-         * опирается на `WORLD_SIZE`.
-         *
-         * Для Mercator совпадает с `WORLD_SIZE`. Для немеркаторовских
-         * проекций калибруется в `_calibrateBaseDistance` по экранному
-         * размеру тайла и хранит `WORLD_SIZE * factor` — то есть
-         * масштаб, при котором `zoom = z` даёт тайл 256×256 px.
-         *
+         * Характерный размер «мира» в world-координатах карты для каллинга
+         * (`margin`, `radius`) в deformed-режиме. Для Mercator-карт
+         * совпадает с `WORLD_SIZE`; для остальных калибруется в
+         * `_calibrateBaseDistance`.
          * @type {number}
          */
         this.WORLD_EXTENT = this.WORLD_SIZE;
@@ -175,11 +162,6 @@ export class KrbMap {
         this.tileLightingMetalness = options.tileLightingMetalness ?? 0.0;
         this.tileLightingEmissive  = options.tileLightingEmissive  ?? 0.5;
 
-        /**
-         * Зазор (world-метры) между камерой и поверхностью рельефа.
-         * Геометрическая константа, не зависит от heightScale.
-         * @type {number}
-         */
         this.CAMERA_TERRAIN_CLEARANCE =
             options.cameraTerrainClearance
             ?? options.minCameraHeightOffset
@@ -267,10 +249,7 @@ export class KrbMap {
             this.createStaticBackgroundLayer();
         }
 
-        // Калибровка масштаба под немеркаторовские проекции. Меняет
-        // BASE_DISTANCE и WORLD_EXTENT, перепозиционирует камеру так,
-        // чтобы при continuousZoom = z тайл рендерился в ~256 px.
-        // Для Mercator и non-deformed — no-op.
+        // Калибровка масштаба под немеркаторовские проекции — см. метод.
         this._calibrateBaseDistance();
 
         this.lastVisibleUpdateTime = 0;
@@ -285,18 +264,13 @@ export class KrbMap {
     }
 
     /**
-     * Приводит `view.center` к проекции карты.
-     *
-     * `View` не знает CRS карты, поэтому координаты разрешаются здесь,
-     * в контексте конкретной карты. После вызова гарантируется:
-     *
+     * Приводит `view.center` к проекции карты. После вызова:
      *  - `view.center`       — в CRS карты (world-координаты, y → -z);
      *  - `view.centerLonLat` — WGS84 (lon, lat);
      *  - `view.projection`   — код CRS карты.
      *
-     * Приоритет источников — `centerLonLat`, как и раньше. Если задан
-     * только `center`, он интерпретируется в `view.projection`
-     * (по умолчанию EPSG:3857).
+     * Приоритет источников — `centerLonLat`. Если задан только `center`,
+     * он интерпретируется в `view.projection`.
      *
      * @private
      */
@@ -304,7 +278,6 @@ export class KrbMap {
         const v = this.view;
         const mapCode = this.projection.code;
 
-        // 1) centerLonLat — приоритетный источник, всегда WGS84.
         if (v.centerLonLat) {
             const [x, y] = this.projection.fromLonLat(v.centerLonLat);
             v.center = [x, -y];
@@ -312,7 +285,6 @@ export class KrbMap {
             return;
         }
 
-        // 2) center уже в CRS карты — только досчитываем lon/lat.
         const srcCode = v.projection ?? mapCode;
         if (srcCode === mapCode) {
             const [lon, lat] = this.projection.toLonLat([v.center[0], -v.center[1]]);
@@ -321,16 +293,13 @@ export class KrbMap {
             return;
         }
 
-        // 3) center в чужой CRS — конвертируем через WGS84.
         console.warn(
             `KrbMap: view.center пересчитан из ${srcCode} в ${mapCode}. ` +
             `Если view.center уже был в ${mapCode}, укажите ` +
             `view.projection = '${mapCode}' или передавайте координаты ` +
             `в centerLonLat.`
         );
-        const src = typeof srcCode === 'string'
-            ? Projections.get(srcCode)
-            : srcCode;
+        const src = typeof srcCode === 'string' ? Projections.get(srcCode) : srcCode;
         const lonLat = src.toLonLat([v.center[0], -v.center[1]]);
         const [x, y] = this.projection.fromLonLat(lonLat);
         v.centerLonLat = lonLat;
@@ -339,22 +308,11 @@ export class KrbMap {
     }
 
     /**
-     * Измеряет экранный AABB тайла уровня z, содержащего точку
-     * (worldX, worldZ). Возвращает размеры в пикселях.
-     *
-     * Углы тайла берутся через `tileIndexToWorld` — это работает и в
-     * Mercator, и в deformed-режиме, потому что deformed-ветка внутри
-     * сама делает lon/lat → project.
-     *
-     * Используется только для калибровки BASE_DISTANCE (см.
-     * `_calibrateBaseDistance`). Возвращает null, если тайл под точкой
-     * выходит за домен проекции или камера смотрит мимо.
+     * Экранный AABB тайла уровня z под точкой (worldX, worldZ), в пикселях.
+     * Возвращает null, если тайл выходит за домен проекции или камера
+     * смотрит мимо.
      *
      * @private
-     * @param {number} z
-     * @param {number} worldX
-     * @param {number} worldZ
-     * @returns {{ width: number, height: number, size: number } | null}
      */
     _measureTileScreenSize(z, worldX, worldZ) {
         const [txf, tyf] = this.worldToTileIndex(worldX, worldZ, z);
@@ -400,26 +358,16 @@ export class KrbMap {
     }
 
     /**
-     * Калибрует BASE_DISTANCE и WORLD_EXTENT под текущую проекцию,
-     * измеряя экранный размер тайла у `controls.target`.
+     * Калибрует `BASE_DISTANCE` и `WORLD_EXTENT` под текущую проекцию:
+     * после калибровки `continuousZoom = z` означает, что тайл уровня z
+     * у `controls.target` рендерится в `TILE_PIXELS` пикселей.
      *
-     * После калибровки `continuousZoom = z` означает: тайл уровня z в
-     * окрестности `controls.target` рендерится в `TILE_PIXELS` (256)
-     * экранных пикселей — для ЛЮБОЙ проекции, не только Mercator.
+     * Достаточно одного измерения, потому что при `continuousZoom = z`
+     * экранный размер тайла от z не зависит:
+     *     (WORLD_EXTENT / 2^z) * focal / (BASE_DISTANCE * 2^(BASE_ZOOM-z))
+     *     = const
      *
-     * Почему достаточно одного измерения: при continuousZoom = z
-     * экранный размер тайла не зависит от z:
-     *
-     *     screenSize(z) = tileWorldSize(z) * focal / dist(z)
-     *                   = (WORLD_EXTENT / 2^z) * focal
-     *                     / (BASE_DISTANCE * 2^(BASE_ZOOM - z))
-     *                   = WORLD_EXTENT * focal / (BASE_DISTANCE * 2^BASE_ZOOM)
-     *
-     * — z сократился. Значит, поправочный коэффициент factor, посчитанный
-     * на любом зуме, применим ко всем.
-     *
-     * Для Mercator и принудительного non-deformed (это всё Mercator-
-     * математика) — no-op: формула из DEFAULTS уже верна.
+     * Для Mercator-карт с Mercator-тайлами (линейный путь) — no-op.
      *
      * @private
      */
@@ -449,7 +397,6 @@ export class KrbMap {
 
         if (!Number.isFinite(newBD) || newBD <= 0 ||
             !Number.isFinite(newExtent) || newExtent <= 0) {
-            // Что-то пошло не так с измерением — откатываемся.
             return;
         }
 
@@ -462,9 +409,6 @@ export class KrbMap {
             `WORLD_EXTENT ${oldExtent.toFixed(0)} → ${newExtent.toFixed(0)}`
         );
 
-        // Возвращаем камеру на «правильную» дистанцию при текущем
-        // continuousZoom. Сохраняем направление от target к камере
-        // (pitch и bearing остаются как были), меняем только dist.
         const newDist = this.getTargetDistanceForZoom(this.continuousZoom);
         const dir = new THREE.Vector3().subVectors(this.camera.position, target);
         if (dir.lengthSq() < 1e-6) return;
@@ -602,6 +546,14 @@ export class KrbMap {
         return this.projection.toLonLat([x, -z]);
     }
 
+    /**
+     * world (CRS карты) → дробный tile-индекс в `tileCRS`.
+     *
+     * В линейном режиме (Mercator-карта + Mercator-тайлы) — прямая
+     * линейная формула. В deformed — через lon/lat: world → lon/lat
+     * (map.projection), lon/lat → tile-world (tileCRS), tile-world →
+     * tile-индекс.
+     */
     worldToTileIndex(worldX, worldZ, z) {
         const lx = worldX - this.worldGroup.position.x;
         const lz = worldZ - this.worldGroup.position.z;
@@ -622,13 +574,22 @@ export class KrbMap {
         if (Math.abs(lonLat[0]) > 180.0001 || Math.abs(lonLat[1]) > 90.0001) {
             return [NaN, NaN];
         }
-        const latC = Math.max(-85.05112878, Math.min(85.05112878, lonLat[1]));
-        const sin = Math.sin(latC * Math.PI / 180);
-        const mercX = (lonLat[0] + 180) / 360;
-        const mercY = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
-        return [mercX * n, mercY * n];
+        const tileWorld = typeof this.tileCRS.fromLonLatSafe === 'function'
+            ? this.tileCRS.fromLonLatSafe(lonLat)
+            : this.tileCRS.fromLonLat(lonLat);
+        if (!tileWorld || !Number.isFinite(tileWorld[0]) || !Number.isFinite(tileWorld[1])) {
+            return [NaN, NaN];
+        }
+        return [
+            (tileWorld[0] + this.MAX_MERCATOR) / (2 * this.MAX_MERCATOR) * n,
+            (this.MAX_MERCATOR - tileWorld[1]) / (2 * this.MAX_MERCATOR) * n
+        ];
     }
 
+    /**
+     * tile-индекс (в `tileCRS`) → world (CRS карты). Обратная операция
+     * к `worldToTileIndex`. В deformed-режиме — через lon/lat.
+     */
     tileIndexToWorld(tx, ty, z) {
         const n = 1 << z;
         if (!this.deformedTiles) {
@@ -638,10 +599,23 @@ export class KrbMap {
                 ty * tileSize - this.MAX_MERCATOR + this.worldGroup.position.z
             ];
         }
-        const lon = tx / n * 360 - 180;
-        const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / n))) * 180 / Math.PI;
-        const [x, zWorld] = this.projectLonLat(lon, lat);
-        return [x + this.worldGroup.position.x, zWorld + this.worldGroup.position.z];
+
+        const tileWorldX = (tx / n) * 2 * this.MAX_MERCATOR - this.MAX_MERCATOR;
+        const tileWorldY = this.MAX_MERCATOR - (ty / n) * 2 * this.MAX_MERCATOR;
+        const lonLat = this.tileCRS.toLonLat([tileWorldX, tileWorldY]);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return [NaN, NaN];
+        }
+        const proj = typeof this.projection.fromLonLatSafe === 'function'
+            ? this.projection.fromLonLatSafe(lonLat)
+            : this.projection.fromLonLat(lonLat);
+        if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) {
+            return [NaN, NaN];
+        }
+        return [
+            proj[0] + this.worldGroup.position.x,
+            -proj[1] + this.worldGroup.position.z
+        ];
     }
 
     /** @private */
@@ -702,25 +676,9 @@ this.controls.touches = {
     }
 
     /**
-     * Размещает камеру по орбитальным параметрам так, чтобы она
-     * гарантированно не оказалась под рельефом.
+     * Размещает камеру по орбитальным параметрам (pitch/azimuth/dist)
+     * так, чтобы она не оказалась под рельефом. Подробнее — см. историю.
      *
-     *  1. Если target стоит так высоко, что даже при pitch=0 (камера
-     *     строго над target) её Y ниже рельефа — увеличиваем `dist`.
-     *     Это единственный случай, когда dist обязан вырасти.
-     *  2. Иначе итеративно уменьшаем pitch (поднимаем камеру над
-     *     землёй), сохраняя dist и azimuth. Проверка рельефа — в
-     *     позиции камеры, а не target.
-     *
-     * Azimuth в конвенции `atan2(dz, dx)` (от оси +X). Если у
-     * вызывающего bearing (от +Z), нужно прибавить π/2.
-     *
-     * @param {THREE.Vector3} target
-     * @param {number} desiredDist
-     * @param {number} desiredPitch - polar angle, радианы
-     * @param {number} azimuth - радианы, `atan2(dz, dx)`
-     * @param {THREE.Vector3} outPos - сюда пишется позиция
-     * @returns {{ pitch: number, dist: number }}
      * @private
      */
     _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
@@ -729,13 +687,10 @@ this.controls.touches = {
 
         if (this.hasElevation) {
             const clearance = this.CAMERA_TERRAIN_CLEARANCE;
-
-            // Шаг 1: target на пике — увеличиваем dist.
             const targetTerrain = this.getSurfaceHeightAt(target.x, target.z);
             const minDistForTarget = targetTerrain + clearance;
             if (dist < minDistForTarget) dist = minDistForTarget;
 
-            // Шаг 2: итеративно поднимаем камеру (уменьшаем pitch).
             const cosAz = Math.cos(azimuth);
             const sinAz = Math.sin(azimuth);
             for (let iter = 0; iter < 6; iter++) {
@@ -863,7 +818,6 @@ this.controls.touches = {
                 else anyActive = true;
             }
 
-            // bearing → azimuth: azimuth = bearing + π/2.
             const azimuth = currentBearing + Math.PI / 2;
             this._resolveCameraPlacement(
                 target, currentDistance, currentPitch, azimuth,
@@ -933,7 +887,6 @@ this.controls.touches = {
        Источник высот
        ================================================================ */
 
-    /** Подключает внешний источник высот (GeoTIFF или Noise). */
     enableGeotiffElevation(layer) {
         if (!layer || !this.tileManager) return;
 
@@ -966,7 +919,6 @@ this.controls.touches = {
         }
     }
 
-    /** Максимальная высота рельефа в тайле под точкой (публичный API). */
     getSurfaceMaxHeight(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const z = this.currentDiscreteZoom;
@@ -996,13 +948,6 @@ this.controls.touches = {
         return maxY;
     }
 
-    /**
-     * Интерполированная высота рельефа в точке. Если тайл под точкой
-     * на текущем зуме не загружен — фолбэк на родительские зумы
-     * (грубее, но ненулевой).
-     *
-     * @param {number} worldX @param {number} worldZ @returns {number}
-     */
     getSurfaceHeightAt(worldX, worldZ) {
         if (!this.hasElevation) return 0;
         const zMax = this.currentDiscreteZoom;
@@ -1014,11 +959,7 @@ this.controls.touches = {
         return 0;
     }
 
-    /**
-     * @returns {number|null} Высота или null, если тайл на этом зуме
-     *     не загружен.
-     * @private
-     */
+    /** @private */
     _sampleHeightAtZoom(worldX, worldZ, z) {
         const maxTile = (1 << z) - 1;
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
@@ -1053,7 +994,6 @@ this.controls.touches = {
         return h0 + (h1 - h0) * fv + inst.mesh.position.y;
     }
 
-    /** Гарантирует загрузку тайла под точкой. */
     ensureTileForPoint(worldX, worldZ) {
         const z = this.currentDiscreteZoom;
         const maxTile = (1 << z) - 1;
@@ -1329,7 +1269,6 @@ this.controls.touches = {
        Зум и видимость
        ================================================================ */
 
-    /** Применяет дистанцию камеры по текущему непрерывному зуму. */
     applyZoomDistance() {
         if (this._cameraAnimation) return;
         const target = this._tempTarget.copy(this.controls.target);
@@ -1520,7 +1459,6 @@ this.controls.touches = {
         if (startDistance < 1) return;
 
         const startPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / startDistance)));
-        // bearing: 0 = камера к югу от target, смотрит на север.
         const startBearing = Math.atan2(-dir.x, dir.z);
         const endBearing = 0;
         const endPitch = resetPitch ? 0.001 : startPitch;
@@ -1865,7 +1803,7 @@ this.controls.touches = {
         if (this._disposed || this._paused) return;
         this._rafId = requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
-        this._currentDeltaTime = deltaTime; 
+        this._currentDeltaTime = deltaTime;
 
         if (!this._cameraAnimation) {
             const diff = this.targetContinuousZoom - this.continuousZoom;

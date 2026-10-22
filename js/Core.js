@@ -141,14 +141,6 @@ const tileAndMapMatch =
     this.projection.isMercator;
 this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
-        // Линейная сетка тайлов работает только если тайлы и карта — обе
-        // в Mercator-семействе (3857/3395): там world-координата тайла
-        // совпадает с world-координатой карты без проекции. Во всех
-        // остальных случаях — deformed-путь через lon/lat.
-        const tileAndMapMatch =
-            this.tileCRS === this.projection &&
-            this.projection.isMercator;
-        this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;

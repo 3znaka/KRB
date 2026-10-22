@@ -135,6 +135,23 @@ export class KrbMap {
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
         this.MAX_MERCATOR = this.WORLD_SIZE / 2;
+
+        /**
+         * Характерный размер «мира» в world-координатах для текущей
+         * проекции. Используется ТОЛЬКО для каллинга (`margin`,
+         * `radius`) в deformed-режиме (см. `Tiles.js`); Mercator-математика
+         * (`MAX_MERCATOR`, tile-индексы в non-deformed) по-прежнему
+         * опирается на `WORLD_SIZE`.
+         *
+         * Для Mercator совпадает с `WORLD_SIZE`. Для немеркаторовских
+         * проекций калибруется в `_calibrateBaseDistance` по экранному
+         * размеру тайла и хранит `WORLD_SIZE * factor` — то есть
+         * масштаб, при котором `zoom = z` даёт тайл 256×256 px.
+         *
+         * @type {number}
+         */
+        this.WORLD_EXTENT = this.WORLD_SIZE;
+
         this.TILE_PIXELS = 256;
         this.SEGMENTS = options.segments ?? DEFAULTS.SEGMENTS;
         this.ANIM_DURATION = options.animDuration ?? DEFAULTS.ANIM_DURATION;
@@ -250,6 +267,12 @@ export class KrbMap {
             this.createStaticBackgroundLayer();
         }
 
+        // Калибровка масштаба под немеркаторовские проекции. Меняет
+        // BASE_DISTANCE и WORLD_EXTENT, перепозиционирует камеру так,
+        // чтобы при continuousZoom = z тайл рендерился в ~256 px.
+        // Для Mercator и non-deformed — no-op.
+        this._calibrateBaseDistance();
+
         this.lastVisibleUpdateTime = 0;
         this._lastWrapCheck = 0;
         this.clock = new THREE.Clock();
@@ -313,6 +336,142 @@ export class KrbMap {
         v.centerLonLat = lonLat;
         v.center = [x, -y];
         v.projection = mapCode;
+    }
+
+    /**
+     * Измеряет экранный AABB тайла уровня z, содержащего точку
+     * (worldX, worldZ). Возвращает размеры в пикселях.
+     *
+     * Углы тайла берутся через `tileIndexToWorld` — это работает и в
+     * Mercator, и в deformed-режиме, потому что deformed-ветка внутри
+     * сама делает lon/lat → project.
+     *
+     * Используется только для калибровки BASE_DISTANCE (см.
+     * `_calibrateBaseDistance`). Возвращает null, если тайл под точкой
+     * выходит за домен проекции или камера смотрит мимо.
+     *
+     * @private
+     * @param {number} z
+     * @param {number} worldX
+     * @param {number} worldZ
+     * @returns {{ width: number, height: number, size: number } | null}
+     */
+    _measureTileScreenSize(z, worldX, worldZ) {
+        const [txf, tyf] = this.worldToTileIndex(worldX, worldZ, z);
+        if (!Number.isFinite(txf) || !Number.isFinite(tyf)) return null;
+        const tx = Math.floor(txf);
+        const ty = Math.floor(tyf);
+        const maxTile = (1 << z) - 1;
+        if (ty < 0 || ty > maxTile) return null;
+
+        const [x0, z0] = this.tileIndexToWorld(tx, ty, z);
+        const [x1, z1] = this.tileIndexToWorld(tx + 1, ty + 1, z);
+        if (![x0, z0, x1, z1].every(Number.isFinite)) return null;
+
+        const canvas = this.renderer.domElement;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        if (W <= 0 || H <= 0) return null;
+
+        this.camera.updateMatrixWorld();
+        const v = new THREE.Vector3();
+        let minSX = Infinity, maxSX = -Infinity;
+        let minSY = Infinity, maxSY = -Infinity;
+
+        const corners = [[x0, z0], [x1, z0], [x0, z1], [x1, z1]];
+        for (const [wx, wz] of corners) {
+            v.set(wx, 0, wz);
+            v.project(this.camera);
+            if (!Number.isFinite(v.x) || !Number.isFinite(v.y)) return null;
+            const sx = (v.x + 1) * 0.5 * W;
+            const sy = (1 - v.y) * 0.5 * H;
+            if (sx < minSX) minSX = sx;
+            if (sx > maxSX) maxSX = sx;
+            if (sy < minSY) minSY = sy;
+            if (sy > maxSY) maxSY = sy;
+        }
+
+        const width = maxSX - minSX;
+        const height = maxSY - minSY;
+        if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+        if (width <= 0 || height <= 0) return null;
+
+        return { width, height, size: Math.max(width, height) };
+    }
+
+    /**
+     * Калибрует BASE_DISTANCE и WORLD_EXTENT под текущую проекцию,
+     * измеряя экранный размер тайла у `controls.target`.
+     *
+     * После калибровки `continuousZoom = z` означает: тайл уровня z в
+     * окрестности `controls.target` рендерится в `TILE_PIXELS` (256)
+     * экранных пикселей — для ЛЮБОЙ проекции, не только Mercator.
+     *
+     * Почему достаточно одного измерения: при continuousZoom = z
+     * экранный размер тайла не зависит от z:
+     *
+     *     screenSize(z) = tileWorldSize(z) * focal / dist(z)
+     *                   = (WORLD_EXTENT / 2^z) * focal
+     *                     / (BASE_DISTANCE * 2^(BASE_ZOOM - z))
+     *                   = WORLD_EXTENT * focal / (BASE_DISTANCE * 2^BASE_ZOOM)
+     *
+     * — z сократился. Значит, поправочный коэффициент factor, посчитанный
+     * на любом зуме, применим ко всем.
+     *
+     * Для Mercator и принудительного non-deformed (это всё Mercator-
+     * математика) — no-op: формула из DEFAULTS уже верна.
+     *
+     * @private
+     */
+    _calibrateBaseDistance() {
+        if (this.projection.isMercator) return;
+        if (!this.deformedTiles) return;
+
+        const z = this.currentDiscreteZoom;
+        const target = this.controls.target;
+        const m = this._measureTileScreenSize(z, target.x, target.z);
+        if (!m || !Number.isFinite(m.size) || m.size <= 0.01) {
+            console.warn(
+                `KrbMap: не удалось измерить экранный размер тайла для ${this.projection.code}, ` +
+                `BASE_DISTANCE оставлен по умолчанию. Укажите options.baseDistance вручную, ` +
+                `если масштаб выглядит неверно.`
+            );
+            return;
+        }
+
+        const factor = m.size / this.TILE_PIXELS;
+        if (!Number.isFinite(factor) || factor <= 0) return;
+
+        const oldBD = this.BASE_DISTANCE;
+        const oldExtent = this.WORLD_EXTENT;
+        const newBD = oldBD * factor;
+        const newExtent = this.WORLD_SIZE * factor;
+
+        if (!Number.isFinite(newBD) || newBD <= 0 ||
+            !Number.isFinite(newExtent) || newExtent <= 0) {
+            // Что-то пошло не так с измерением — откатываемся.
+            return;
+        }
+
+        this.BASE_DISTANCE = newBD;
+        this.WORLD_EXTENT = newExtent;
+
+        console.info(
+            `KrbMap: BASE_DISTANCE калиброван для ${this.projection.code}: ` +
+            `${oldBD.toFixed(0)} → ${newBD.toFixed(0)} (factor=${factor.toFixed(3)}), ` +
+            `WORLD_EXTENT ${oldExtent.toFixed(0)} → ${newExtent.toFixed(0)}`
+        );
+
+        // Возвращаем камеру на «правильную» дистанцию при текущем
+        // continuousZoom. Сохраняем направление от target к камере
+        // (pitch и bearing остаются как были), меняем только dist.
+        const newDist = this.getTargetDistanceForZoom(this.continuousZoom);
+        const dir = new THREE.Vector3().subVectors(this.camera.position, target);
+        if (dir.lengthSq() < 1e-6) return;
+        dir.normalize().multiplyScalar(newDist);
+        this.camera.position.copy(target).add(dir);
+        this.camera.lookAt(target);
+        this.controls.update();
     }
 
     /** @returns {THREE.Vector3} */

@@ -224,7 +224,10 @@ export class TileManager {
 
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
-        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, idealZ);
+        const cullUnit = this.engine.deformedTiles
+    ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
+    : this.engine.WORLD_SIZE;
+const tileSize = cullUnit / Math.pow(2, idealZ);
         const maxTile = (1 << idealZ) - 1;
         const vFov = (camera.fov * Math.PI) / 180;
         const aspect = camera.aspect;
@@ -943,7 +946,10 @@ export class TileManager {
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation || z < this.engine.MIN_RELIEF_Z || z > this.engine.MAX_RELIEF_Z) return;
         if (this.elevationProvider) return;
-        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
+        const cullUnit = this.engine.deformedTiles
+    ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
+    : this.engine.WORLD_SIZE;
+const tileSize = cullUnit / Math.pow(2, z);
         const margin = 2;
         const radius = tileSize * margin;
         const maxTile = (1 << z) - 1;

@@ -863,29 +863,21 @@ export class GeoTiffLayer extends Layer {
         centroid.divideScalar(positions.length);
         this._centroidWorld.copy(centroid);
 
-        const canDrape = this._drape
-            && this._rawData
-            && this._geoOrigin
-            && this._geoResolution
-            && this._imageWidth > 0
-            && this._imageHeight > 0;
-
+        const canDrape = this._drape && this._rawData && this._geoOrigin && this._geoResolution;
         const seg  = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
         const grid = seg + 1;
 
         const geometry = new THREE.PlaneGeometry(1, 1, seg, seg);
         const posAttr  = geometry.attributes.position;
+        const uvAttr   = geometry.attributes.uv;
 
         if (!canDrape) {
+            // Плоский режим (как было)
             for (let i = 0; i < 4; i++) {
-                posAttr.setXYZ(
-                    i,
-                    positions[i].x - centroid.x,
-                    positions[i].y - centroid.y,
-                    positions[i].z - centroid.z
-                );
+                posAttr.setXYZ(i, positions[i].x - centroid.x, positions[i].y - centroid.y, positions[i].z - centroid.z);
             }
         } else {
+            // Режим драпировки: сетка равномерна по МИРУ (Web Mercator), а не по GeoTIFF
             const [ox, oy] = this._geoOrigin;
             const [rx, ry] = this._geoResolution;
             const W = this._imageWidth;
@@ -893,32 +885,52 @@ export class GeoTiffLayer extends Layer {
             const hs = this._elevationHeightScale;
             const map = this._map;
             const crs = this._crs;
-            const maxPx = W - 1;
-            const maxPy = H - 1;
+
+            const p0 = positions[0]; // TL
+            const p1 = positions[1]; // TR
+            const p2 = positions[2]; // BL
+            const p3 = positions[3]; // BR
 
             for (let j = 0; j < grid; j++) {
                 const v = j / seg;
-                const srcY = oy + v * H * ry;
-                const py   = Math.min(maxPy, v * H);
-
                 for (let i = 0; i < grid; i++) {
                     const u = i / seg;
-                    const srcX = ox + u * W * rx;
-                    const px   = Math.min(maxPx, u * W);
 
+                    // 1. Интерполируем координаты равномерно по миру (Web Mercator)
+                    const wxTop = p0.x + (p1.x - p0.x) * u;
+                    const wzTop = p0.z + (p1.z - p0.z) * u;
+                    const wxBot = p2.x + (p3.x - p2.x) * u;
+                    const wzBot = p2.z + (p3.z - p2.z) * u;
+
+                    const wx = wxTop + (wxBot - wxTop) * v;
+                    const wz = wzTop + (wzBot - wzTop) * v;
+
+                    // 2. Переводим в lon/lat
+                    const [lon, lat] = map.unprojectToLonLat(wx, wz);
+
+                    // 3. Проецируем в CRS GeoTIFF, чтобы найти пиксель (px, py)
+                    let xy;
+                    if (crs.code === 'EPSG:4326' || crs.code === 'CRS:84') {
+                        xy = [lon, lat];
+                    } else {
+                        xy = crs.fromLonLat([lon, lat]);
+                    }
+
+                    const px = (xy[0] - ox) / rx;
+                    const py = (xy[1] - oy) / ry;
+
+                    // 4. Берем высоту
                     let hgt = this._bilinearSample(px, py);
                     if (hgt === null || !Number.isFinite(hgt)) hgt = 0;
 
-                    const [wx, wz] = map.project([srcX, srcY], crs);
                     const idx = j * grid + i;
-                    posAttr.setXYZ(
-                        idx,
-                        wx - centroid.x,
-                        hgt * hs,               // локальный Y; offset — в group.position.y
-                        wz - centroid.z
-                    );
+
+                    posAttr.setXYZ(idx, wx - centroid.x, hgt * hs, wz - centroid.z);
+
+                    uvAttr.setXY(idx, px / W, 1 - (py / H));
                 }
             }
+            uvAttr.needsUpdate = true;
         }
 
         posAttr.needsUpdate = true;

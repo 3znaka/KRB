@@ -158,7 +158,8 @@ export class Marker {
          * @private
          * @type {string|null}
          */
-        this._crsCode = options.crs ?? null;
+
+this._crsCode = options.crs ?? null;
         /**
          * Зарезолвленный объект Projection. Устанавливается в `_attach`.
          * @private

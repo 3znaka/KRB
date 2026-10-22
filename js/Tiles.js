@@ -52,7 +52,25 @@ export class Tile {
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale;
-        this.crs = options.crs ?? 'EPSG:3857';
+
+        // crs — каноническое имя, projection — алиас (обратная совместимость).
+        if (options.crs && options.projection && options.crs !== options.projection) {
+            console.warn(
+                `Tile: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
+                `использую crs.`
+            );
+        }
+        /**
+         * CRS, в которой тайловый сервер отдаёт сетку `{z}/{x}/{y}`.
+         * Ожидается Mercator-семейство (3857, 3395) — extent ±πR.
+         * По умолчанию 'EPSG:3857'.
+         *
+         * Yandex: 'EPSG:3395'
+         * OSM / Mapbox: 'EPSG:3857' (или не задавать)
+         *
+         * @type {string}
+         */
+        this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
     }
 }
 

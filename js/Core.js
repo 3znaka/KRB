@@ -34,12 +34,20 @@ export class View {
             console.warn('View: одновременно заданы centerLonLat и center — приоритет centerLonLat.');
         }
 
+        // crs — каноническое имя, projection — алиас (обратная совместимость).
+        if (options.crs && options.projection && options.crs !== options.projection) {
+            console.warn(
+                `View: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
+                `использую crs.`
+            );
+        }
+
         /** @type {Array<number>|null} WGS84 (lon, lat). */
         this.centerLonLat = options.centerLonLat ? options.centerLonLat.slice() : null;
-        /** @type {Array<number>|null} в CRS `projection` (y → -z). */
+        /** @type {Array<number>|null} в CRS `crs` (y → -z). */
         this.center = options.center ? options.center.slice() : null;
         /** @type {string} CRS для `center` (игнорируется, если задан `centerLonLat`). */
-        this.projection = options.projection ?? 'EPSG:3857';
+        this.projection = options.crs ?? options.projection ?? 'EPSG:3857';
 
         this.zoom = options.zoom;
         this.minZoom = options.minZoom ?? DEFAULTS.MIN_ZOOM;
@@ -100,22 +108,38 @@ export class KrbMap {
         this.hasElevation = options.layers.some(layer => !!layer.elevation);
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
 
-        this.projection = Projections.get(options.projection ?? 'EPSG:3857');
-        this._resolveViewCenter();
+// crs — каноническое имя, projection — алиас (обратная совместимость).
+if (options.crs && options.projection && options.crs !== options.projection) {
+    console.warn(
+        `KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
+        `использую crs.`
+    );
+}
+this.projection = Projections.get(options.crs ?? options.projection ?? 'EPSG:3857');
+this._resolveViewCenter();
 
-        this.inputCRS = options.inputCRS
-            ? Projections.get(options.inputCRS)
-            : Projections.get('EPSG:4326');
+this.inputCRS = options.inputCRS
+    ? Projections.get(options.inputCRS)
+    : Projections.get('EPSG:4326');
 
-        /**
-         * CRS источника тайлов. Все тайловые слои считаются в одной CRS;
-         * берётся из первого слоя с `texture` или `elevation`, дефолт —
-         * EPSG:3857. Именно она определяет, как `{z}/{x}/{y}` от
-         * тайлового сервера переводится в lon/lat.
-         * @type {Projection}
-         */
-        const firstTileLayer = this.layers.find(l => l.texture || l.elevation);
-        this.tileCRS = Projections.get(firstTileLayer?.crs ?? 'EPSG:3857');
+/**
+ * CRS источника тайлов. Все тайловые слои считаются в одной CRS;
+ * берётся из первого слоя с `texture` или `elevation`, дефолт —
+ * EPSG:3857. У слоя тоже принимаются оба имени (`crs` и `projection`),
+ * с приоритетом `crs`.
+ * @type {Projection}
+ */
+const firstTileLayer = this.layers.find(l => l.texture || l.elevation);
+const tileCrsCode = firstTileLayer?.crs ?? firstTileLayer?.projection ?? 'EPSG:3857';
+this.tileCRS = Projections.get(tileCrsCode);
+
+// Линейная сетка тайлов работает только если тайлы и карта — обе в
+// Mercator-семействе (3857/3395): world-координата тайла совпадает с
+// world-координатой карты без проекции. Иначе — deformed через lon/lat.
+const tileAndMapMatch =
+    this.tileCRS === this.projection &&
+    this.projection.isMercator;
+this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         // Линейная сетка тайлов работает только если тайлы и карта — обе
         // в Mercator-семействе (3857/3395): там world-координата тайла

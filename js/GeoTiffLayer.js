@@ -3,50 +3,16 @@
  *
  * Поддерживает:
  *  - загрузку из URL, ArrayBuffer, Blob и URL-объекта;
- *  - автоопределение СК по GeoKeys (`ProjectedCSTypeGeoKey` /
- *    `GeographicTypeGeoKey`) с фолбэком на `map.inputCRS` / WGS84;
- *  - корректное размещение с учётом `ModelPixelScale` / `ModelTiepoint`
- *    (используются методы `image.getOrigin()` / `getResolution()`);
- *  - чтение многоканальных/палитровых 8-битных снимков через `image.readRGB()`;
- *  - чтение одноканальных (DEM) растров (float / >8 бит) через
- *    `image.readRasters()` с нормализацией значений и раскраской палитрой
- *    (по умолчанию — чёрно-белая);
- *  - произвольные цветовые палитры и пресеты (`terrain`, `viridis`, …)
- *    через общий модуль {@link module:ColorRamps};
- *  - обработку NoData (авто из GDAL_NODATA или явно);
- *  - опциональный Web Worker Pool (см. `geotiff.worker.js`) — сильно
- *    ускоряет декодирование сжатых GeoTIFF (LZW, Deflate);
- *  - события hover/click/tooltip через общий `map.interaction`;
- *  - подписи через `TextManager` (тот же интерфейс, что у `Image`);
+ *  - автоопределение СК по GeoKeys с фолбэком на WGS84;
+ *  - корректное размещение с учётом `ModelPixelScale` / `ModelTiepoint`;
+ *  - чтение RGB/palette (8-бит) и одноканальных DEM (float / >8 бит);
+ *  - произвольные палитры через {@link module:ColorRamps};
+ *  - NoData (авто из GDAL_NODATA или явно);
+ *  - Web Worker Pool для декодирования сжатых GeoTIFF;
+ *  - интерактивность через `map.interaction`, подписи через `TextManager`;
  *  - `getBounds(crs)` для `map.fitTo(layer)`;
- *  - **режим источника высот** (`asElevation: true`) — см. ниже.
- *
- * Координаты внутри TIFF интерпретируются в его собственной СК (см. выше).
- * Для отображения все четыре угла растра проецируются в СК карты
- * (`map.projection`) и ложатся в плоскость через `THREE.PlaneGeometry` —
- * ровно так же, как это делает `Image` со своими `nodes`.
- *
- * ### Z-fighting с тайлами
- *
- * Плоскость GeoTIFF по умолчанию лежит на `y = elevationOffset` (0).
- * Primary-тайлы карты после недавней правки TileManager тоже пишут
- * depth и на нулевом уровне высот оказываются строго coplanar с
- * GeoTIFF — это классический z-fighting. Решение — `polygonOffset`
- * в материале: значение глубины сдвигается без изменения геометрии,
- * и GeoTIFF гарантированно «ближе к камере» в coplanar-пикселях.
- * См. опции `alwaysOnTop` и `elevationOffset`.
- *
- * ### Режим источника высот (`asElevation: true`)
- *
- * Если задан `asElevation: true`, одноканальные значения растра
- * сохраняются в памяти и слой регистрируется в `TileManager` как
- * провайдер высот. Тайлы карты в этом случае получают рельеф не из
- * тайлового DEM-источника, а напрямую из GeoTIFF: `TileManager`
- * вызывает {@link GeoTiffLayer#getTileHeights} для каждого тайла и
- * раскладывает полученный массив в геометрию.
- *
- * Слой может быть одновременно и «провайдером высот», и обычной
- * подложкой (например, с `opacity: 0` — тогда виден только рельеф).
+ *  - **режим источника высот** (`asElevation: true`);
+ *  - **драпировку меша по рельефу** (`drape`, по умолчанию = `asElevation`).
  *
  * @module GeoTiffLayer
  */
@@ -61,37 +27,16 @@ import {
     parseColorToRGBA
 } from './ColorRamps.js';
 
-/**
- * Приоритет рендера. Чуть выше, чем у тайлов, но ниже, чем у Image —
- * GeoTIFF обычно играет роль «подложки»/«снимка».
- * @private
- */
+/** @private */
 const GEOTIFF_RENDER_ORDER = 995;
 
-/**
- * URL воркера по умолчанию. Рассчитывается относительно текущего модуля,
- * так что файл `geotiff.worker.js` должен лежать рядом с `tpb.js`.
- * @private
- */
+/** @private */
 const DEFAULT_WORKER_URL = new URL('../js_TP/geotiff.worker.js', import.meta.url).href;
 
-/**
- * Масштаб высот по умолчанию (совпадает с `DEFAULTS.HEIGHT_SCALE` в Utils,
- * но мы не тянем зависимость ради одной константы).
- * @private
- */
+/** @private */
 const DEFAULT_HEIGHT_SCALE = 1.0;
 
-/**
- * Величина `polygonOffsetFactor`/`polygonOffsetUnits` по умолчанию.
- *
- * Подобрана так, чтобы уверенно перекрывать coplanar-тайлы на любых
- * разумных дистанциях камеры и при этом не «просвечивать» GeoTIFF
- * сквозь рельеф, стоящий перед камерой. Если z-fighting всё же
- * пробивается на дальних зумах — увеличьте; если GeoTIFF «светится»
- * сквозь холмы — уменьшите (или используйте `alwaysOnTop`/`elevationOffset`).
- * @private
- */
+/** @private */
 const DEFAULT_POLYGON_OFFSET = -4;
 
 /**
@@ -100,118 +45,65 @@ const DEFAULT_POLYGON_OFFSET = -4;
  * @example
  * const tiff = new GeoTiffLayer({
  *     source: 'https://example.com/dem.tif',
- *     useWorker: true,
- *     poolSize: 2,
- *     opacity: 1,
- *     colorRamp: 'terrain',       // опционально, по умолчанию grayscale
- *     onLoad: (layer) => console.log('loaded:', layer.getBounds(), layer.getDataRange()),
- *     onProgress: (p) => console.log(`progress: ${(p * 100).toFixed(0)}%`)
+ *     colorRamp: 'terrain',
+ *     opacity: 0.8,
+ *     onLoad: (layer) => map.fitTo(layer)
  * });
  * tiff.addTo(map);
  *
  * @example
- * // Только как источник высот (без отрисовки растра):
- * const dem = new GeoTiffLayer({
+ * // Раскрашенный DEM + физический рельеф тайлов одновременно:
+ * new GeoTiffLayer({
  *     source: 'https://example.com/dem.tif',
  *     asElevation: true,
- *     heightScale: 1.5,
- *     opacity: 0
- * });
- * dem.addTo(map);
+ *     colorRamp: 'terrain',
+ *     opacity: 0.6,
+ *     heightScale: 1.2
+ * }).addTo(map);
  */
 export class GeoTiffLayer extends Layer {
     /**
      * @param {Object} options
-     * @param {string|URL|ArrayBuffer|ArrayBufferView|Blob} options.source -
-     *     Источник данных. URL-строка или URL-объект — грузится по сети;
-     *     ArrayBuffer / typed array / Blob — парсится in-memory.
-     * @param {string} [options.crs] - Принудительно задать СК растра
-     *     (например, 'EPSG:32637'). Если не указан — определяется
-     *     автоматически по GeoKeys, с фолбэком на WGS84.
-     * @param {boolean} [options.useWorker=false] - Использовать Web Worker
-     *     Pool для декодирования. Требует наличия `geotiff.worker.js`
-     *     рядом с бандлом. Для больших сжатых файлов — обязательно.
-     * @param {number} [options.poolSize=2] - Число воркеров в пуле.
-     * @param {string} [options.workerUrl] - Переопределить URL воркера
-     *     (по умолчанию — `geotiff.worker.js` рядом с бандлом).
-     * @param {Pool} [options.pool] - Готовый пул от пользователя.
-     *     Если задан — `useWorker`/`poolSize`/`workerUrl` игнорируются.
-     * @param {number} [options.opacity=1] - Прозрачность (0..1).
-     * @param {string|THREE.Blending} [options.blending='normal'] - Режим
-     *     смешивания: 'normal', 'additive', 'multiply', 'subtract'
-     *     или константа THREE.Blending.
-     * @param {number} [options.minZoom=-Infinity] - Минимальный зум видимости.
-     * @param {number} [options.maxZoom=Infinity] - Максимальный зум видимости.
-     * @param {number} [options.renderOrder=995] - Порядок рендера меша.
-     * @param {Function} [options.onProgress] - Колбэк прогресса загрузки,
-     *     получает число 0..1 (грубая оценка — download + decode).
-     * @param {Function} [options.onLoad] - Колбэк успешной загрузки,
-     *     получает экземпляр слоя.
-     * @param {Function} [options.onError] - Колбэк ошибки, получает Error.
-     *
-     * @param {boolean} [options.alwaysOnTop=false] - Отключить depthTest у
-     *     материала: GeoTIFF рисуется поверх всей сцены. Простейший способ
-     *     победить z-fighting, но `polygonOffset` (по умолчанию) лучше —
-     *     он сохраняет корректную окклюзию рельефом. Используйте
-     *     `alwaysOnTop`, если GeoTIFF — чисто 2D-оверлей.
-     * @param {number} [options.elevationOffset=0] - Подъём плоскости
-     *     GeoTIFF над нулевым уровнем в world-метрах. Полезно, когда
-     *     GeoTIFF должен «висеть» над рельефом, но не драпируется
-     *     (например, при `asElevation: true` с видимой текстурой).
-     * @param {number} [options.polygonOffset=-4] - Значение
-     *     `polygonOffsetFactor`/`polygonOffsetUnits` (с отрицательным
-     *     знаком — «к камере»). Увеличивайте, если z-fighting всё же
-     *     пробивается; уменьшайте, если GeoTIFF «просвечивает» сквозь
-     *     рельеф, стоящий перед камерой. Игнорируется при `alwaysOnTop`.
-     *
-     * @param {string|Array} [options.colorRamp=undefined] - Палитра для
-     *     одноканальных (DEM) данных. Строка — имя пресета
-     *     (`'grayscale'`, `'terrain'`, `'viridis'`, `'magma'`, `'coolwarm'`),
-     *     либо массив стопов:
-     *       - `[[0, '#000000'], [0.5, '#808080'], [1, '#ffffff']]`
-     *       - `[{ value: 0, color: '#000' }, { value: 1, color: '#fff' }]`
-     *       - `[{ value: 0, r: 0, g: 0, b: 0, a: 255 }, ...]`
-     *     Если не задан — для float / >8 бит одноканальных GeoTIFF
-     *     автоматически включается `'grayscale'`.
-     *     Полный список пресетов — см. {@link module:ColorRamps}.
-     * @param {number|null} [options.minValue=null] - Нижняя граница
-     *     нормализации. `null` — авто по данным.
-     * @param {number|null} [options.maxValue=null] - Верхняя граница
-     *     нормализации. `null` — авто по данным.
-     * @param {number|null} [options.noDataValue=null] - Значение NoData.
-     *     `null` — авто (пытаемся прочитать GDAL_NODATA из TIFF).
-     * @param {string|null} [options.noDataColor='transparent'] - Цвет для
-     *     NoData (`'transparent'` / `null` = не рисовать, иначе CSS-цвет).
-     *
-     * @param {boolean} [options.asElevation=false] - Включить режим
-     *     источника высот: слой зарегистрируется в `TileManager` и
-     *     будет отдавать рельеф для тайлов карты через
-     *     {@link GeoTiffLayer#getTileHeights}. Требует одноканального
-     *     (DEM) растра — RGB/палитровые будут проигнорированы с
-     *     предупреждением. Слой при этом продолжает рисоваться как
-     *     обычный растр (можно скрыть через `opacity: 0`).
-     * @param {number} [options.heightScale=1.0] - Множитель высот при
-     *     работе в режиме источника высот. Значения растра умножаются
-     *     на этот коэффициент перед записью в Y-координату вершин
-     *     тайлов карты.
-     * @param {boolean} [options.keepRawData=false] - Хранить сырые
-     *     (не раскрашенные) значения растра в памяти. Автоматически
-     *     включается при `asElevation: true`. Для больших DEM это
-     *     ощутимый объём (например, 5000×5000 float = 100 МБ).
-     *
-     * @param {string} [options.title=''] - Текст подписи.
-     * @param {Object} [options.titleStyle] - CSS-стили подписи.
-     * @param {number} [options.titleMinZoom=-Infinity] - Мин. зум подписи.
-     * @param {number} [options.titleMaxZoom=Infinity] - Макс. зум подписи.
-     * @param {string} [options.titleAlign='center'] - Выравнивание подписи.
-     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи (px).
-     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход
-     *     подписи за границы экрана.
-     * @param {number} [options.titlePriority=0] - Приоритет подписи.
-     *
-     * @param {string} [options.tooltip=''] - HTML тултипа (через PopupManager).
-     * @param {Function} [options.onClick] - Обработчик клика (event, layer).
-     * @param {Function} [options.onHover] - Обработчик наведения (isHovered).
+     * @param {string|URL|ArrayBuffer|ArrayBufferView|Blob} options.source
+     * @param {string} [options.crs] — принудительный CRS растра.
+     * @param {boolean} [options.useWorker=false]
+     * @param {number} [options.poolSize=2]
+     * @param {string} [options.workerUrl]
+     * @param {Pool} [options.pool]
+     * @param {number} [options.opacity=1]
+     * @param {string|number} [options.blending='normal']
+     * @param {number} [options.minZoom=-Infinity]
+     * @param {number} [options.maxZoom=Infinity]
+     * @param {number} [options.renderOrder=995]
+     * @param {Function} [options.onProgress]
+     * @param {Function} [options.onLoad]
+     * @param {Function} [options.onError]
+     * @param {boolean} [options.alwaysOnTop=false]
+     * @param {number} [options.elevationOffset=0]
+     * @param {number} [options.polygonOffset=-4]
+     * @param {string|Array} [options.colorRamp]
+     * @param {number|null} [options.minValue=null]
+     * @param {number|null} [options.maxValue=null]
+     * @param {number|null} [options.noDataValue=null]
+     * @param {string|null} [options.noDataColor='transparent']
+     * @param {boolean} [options.asElevation=false]
+     * @param {number} [options.heightScale=1.0]
+     * @param {boolean} [options.keepRawData=false]
+     * @param {boolean} [options.drape] — драпировать меш по рельефу.
+     *     По умолчанию = `asElevation`. Требует `_keepRawData` и геопривязки.
+     * @param {number|null} [options.meshSegments] — сегментов сетки драпировки.
+     *     null → авто: max(64, min(256, ceil(max(W,H)/8))).
+     * @param {string} [options.title='']
+     * @param {Object} [options.titleStyle]
+     * @param {number} [options.titleMinZoom=-Infinity]
+     * @param {number} [options.titleMaxZoom=Infinity]
+     * @param {string} [options.titleAlign='center']
+     * @param {Array.<number>} [options.titleOffset=[0,0]]
+     * @param {boolean} [options.titleAllowOverflow=false]
+     * @param {number} [options.titlePriority=0]
+     * @param {string} [options.tooltip='']
+     * @param {Function} [options.onClick]
+     * @param {Function} [options.onHover]
      */
     constructor(options = {}) {
         super();
@@ -232,26 +124,14 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private */ this._renderOrder = options.renderOrder ?? GEOTIFF_RENDER_ORDER;
 
-        // --- Рендеринг над тайлами (z-fighting fix) ---
-        /**
-         * Не проверять depth-буфер: GeoTIFF всегда рисуется поверх
-         * сцены. Простейший способ победить z-fighting, но ломает
-         * окклюзию рельефом. По умолчанию выключено — используется
-         * polygonOffset.
-         * @private @type {boolean}
-         */
+        // --- Z-fighting ---
+        /** @private @type {boolean} */
         this._alwaysOnTop = options.alwaysOnTop === true;
-        /**
-         * Подъём плоскости GeoTIFF над нулевым уровнем в world-метрах.
-         * @private @type {number}
-         */
+        /** @private @type {number} */
         this._elevationOffset = Number.isFinite(options.elevationOffset)
             ? options.elevationOffset
             : 0;
-        /**
-         * Значение `polygonOffsetFactor`/`polygonOffsetUnits`.
-         * @private @type {number}
-         */
+        /** @private @type {number} */
         this._polygonOffset = Number.isFinite(options.polygonOffset)
             ? options.polygonOffset
             : DEFAULT_POLYGON_OFFSET;
@@ -262,17 +142,9 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._workerUrl = options.workerUrl ?? DEFAULT_WORKER_URL;
         /** @private @type {Pool|null} */ this._pool = options.pool || null;
         /** @private */ this._ownsPool = false;
+        /** @private @type {string|null} */ this._blobWorkerUrl = null;
 
-        /**
-         * Blob URL, из которого создан воркер (для revokeObjectURL).
-         * Используется, когда `workerUrl` кросс-доменный: браузер
-         * запрещает `new Worker(crossOriginUrl)` даже с CORS, поэтому
-         * мы скачиваем исходник воркера через `fetch` и оборачиваем в Blob.
-         * @private @type {string|null}
-         */
-        this._blobWorkerUrl = null;
-
-        // --- Колбэки загрузки ---
+        // --- Колбэки ---
         /** @private */ this._onProgress = options.onProgress || null;
         /** @private */ this._onLoad = options.onLoad || null;
         /** @private */ this._onError = options.onError || null;
@@ -293,12 +165,9 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
 
-        // --- Рендеринг одноканальных (DEM) данных ---
+        // --- Рамповый режим ---
         /** @private */ this._colorRampInput = options.colorRamp ?? undefined;
-        /**
-         * Кэш нормализованной палитры. Заполняется в `_getColorRamp()`.
-         * @private @type {Array<{value:number,r:number,g:number,b:number,a:number}>|null}
-         */
+        /** @private @type {Array<{value:number,r:number,g:number,b:number,a:number}>|null} */
         this._colorRampNormalized = null;
         /** @private */ this._minValue = options.minValue ?? null;
         /** @private */ this._maxValue = options.maxValue ?? null;
@@ -311,25 +180,33 @@ export class GeoTiffLayer extends Layer {
         /** @private @type {number|null} */ this._effectiveMax = null;
         /** @private @type {number|null} */ this._effectiveNoData = null;
 
-        // --- Режим источника высот ---
+        // --- Источник высот ---
         /** @private @type {boolean} */
         this._asElevation = options.asElevation === true;
         /** @private @type {number} */
         this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
-        /**
-         * Хранить ли сырые значения растра. Автоматически включается в
-         * elevation-режиме. В остальных случаях — по явному запросу.
-         * @private @type {boolean}
-         */
+        /** @private @type {boolean} */
         this._keepRawData = this._asElevation || options.keepRawData === true;
 
-        /** @private @type {Float32Array|Uint16Array|Uint8Array|Int16Array|null} */
-        this._rawData = null;
+        /** @private @type {ArrayLike<number>|null} */ this._rawData = null;
         /** @private @type {number} */ this._rawWidth = 0;
         /** @private @type {number} */ this._rawHeight = 0;
         /** @private @type {[number, number]|null} */ this._geoOrigin = null;
         /** @private @type {[number, number]|null} */ this._geoResolution = null;
         /** @private @type {number|null} */ this._geoNoData = null;
+
+        // --- Драпировка меша по рельефу ---
+        /** @private @type {boolean} */
+        this._drape = options.drape !== undefined
+            ? options.drape === true
+            : this._asElevation;
+        /** @private @type {number|null} */
+        this._meshSegments = (typeof options.meshSegments === 'number'
+            && options.meshSegments > 0)
+            ? Math.floor(options.meshSegments)
+            : null;
+        /** @private @type {number} */ this._imageWidth = 0;
+        /** @private @type {number} */ this._imageHeight = 0;
 
         // --- Внутреннее состояние ---
         /** @private @type {THREE.Group} */ this._group = new THREE.Group();
@@ -342,17 +219,14 @@ export class GeoTiffLayer extends Layer {
         /** @private */ this._tiff = null;
         /** @private @type {THREE.Vector3[]} */ this._worldPositions = [];
         /** @private @type {THREE.Vector3} */ this._centroidWorld = new THREE.Vector3();
-        /** @private */ this._boundingSphereRadius = 0;
+        /** @private @type {number} */ this._boundingSphereRadius = 0;
         /** @private @type {THREE.Vector3} */ this._tempVec3 = new THREE.Vector3();
 
         /** @private */ this._loaded = false;
         /** @private */ this._loading = false;
         /** @private */ this._isVisible = false;
 
-        /**
-         * Отмена регистрации в `map.interaction`.
-         * @private @type {(() => void)|null}
-         */
+        /** @private @type {(() => void)|null} */
         this._unregisterInteraction = null;
     }
 
@@ -360,15 +234,7 @@ export class GeoTiffLayer extends Layer {
        Публичный API
        ================================================================ */
 
-    /**
-     * Добавляет слой на карту и запускает асинхронную загрузку GeoTIFF.
-     *
-     * Возвращает `this` синхронно; готовность отслеживается через
-     * `onLoad` либо по флагу {@link GeoTiffLayer#isLoaded}.
-     *
-     * @param {import('./Core.js').KrbMap} map - Экземпляр карты.
-     * @returns {GeoTiffLayer} this
-     */
+    /** @param {import('./Core.js').KrbMap} map @returns {GeoTiffLayer} */
     addTo(map) {
         if (this._map === map) return this;
         super.addTo(map);
@@ -378,22 +244,12 @@ export class GeoTiffLayer extends Layer {
         return this;
     }
 
-    /**
-     * Удаляет слой с карты, освобождает GPU-ресурсы и (если пул создавали
-     * мы сами) уничтожает Web Worker Pool.
-     *
-     * Если слой был зарегистрирован как источник высот в `TileManager`,
-     * регистрация снимается.
-     *
-     * @returns {void}
-     */
     removeFromMap() {
         if (this._unregisterInteraction) {
             try { this._unregisterInteraction(); } catch (e) { /* swallow */ }
             this._unregisterInteraction = null;
         }
 
-        // Отвязываемся от TileManager, если мы — текущий провайдер высот.
         if (this._map?.tileManager?.elevationProvider === this) {
             this._map.tileManager.elevationProvider = null;
         }
@@ -426,13 +282,15 @@ export class GeoTiffLayer extends Layer {
         this._isVisible = false;
         this._worldPositions.length = 0;
 
-        // Освобождаем сырые DEM-данные.
         this._rawData = null;
         this._rawWidth = 0;
         this._rawHeight = 0;
         this._geoOrigin = null;
         this._geoResolution = null;
         this._geoNoData = null;
+
+        this._imageWidth = 0;
+        this._imageHeight = 0;
 
         this._colorRampNormalized = null;
         this._effectiveMin = null;
@@ -442,45 +300,24 @@ export class GeoTiffLayer extends Layer {
         super.removeFromMap();
     }
 
-    /**
-     * @returns {boolean} true, если растр успешно загружен.
-     */
+    /** @returns {boolean} */
     isLoaded() { return this._loaded; }
 
-    /**
-     * @returns {boolean} true, если сейчас идёт загрузка.
-     */
+    /** @returns {boolean} */
     isLoading() { return this._loading; }
 
-    /**
-     * Возвращает ссылку на распарсенный `GeoTIFFImage` (может быть null).
-     * Полезно для ручного чтения пикселей.
-     *
-     * @returns {import('../js_TP/geotiff.bundle.js').GeoTIFFImage|null}
-     */
+    /** @returns {import('../js_TP/geotiff.bundle.js').GeoTIFFImage|null} */
     getImage() { return this._image; }
 
-    /**
-     * Фактический диапазон значений, использованный для нормализации.
-     * Заполняется только для рампового режима (одноканальные DEM).
-     * Для RGB-растров вернёт `null`.
-     *
-     * @returns {{min:number, max:number}|null}
-     */
+    /** @returns {{min:number, max:number}|null} */
     getDataRange() {
         if (this._effectiveMin === null) return null;
         return { min: this._effectiveMin, max: this._effectiveMax };
     }
 
     /**
-     * Меняет палитру и перестраивает текстуру «на лету».
-     *
-     * Имеет смысл только для одноканальных (DEM) растров.
-     * Для RGB/палитровых снимков метод ничего не делает
-     * (возвращает `Promise.resolve()`).
-     *
-     * @param {string|Array} ramp - Строка-пресет или массив стопов
-     *     (формат см. в описании `options.colorRamp` и {@link module:ColorRamps}).
+     * Меняет палитру и перестраивает текстуру на лету (только ramp-режим).
+     * @param {string|Array} ramp
      * @returns {Promise<void>}
      */
     async setColorRamp(ramp) {
@@ -502,38 +339,20 @@ export class GeoTiffLayer extends Layer {
     }
 
     /* ================================================================
-       Публичный API провайдера высот
+       Провайдер высот
        ================================================================ */
 
-    /**
-     * Готов ли слой отдавать высоты. Возвращает `true` только после
-     * того, как сырые DEM-данные прочитаны из TIFF.
-     *
-     * @returns {boolean}
-     */
+    /** @returns {boolean} */
     isElevationProvider() {
         return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0;
     }
 
     /**
-     * Возвращает высоты для сетки тайла `(z, virtX, y)` размером
-     * `(segments+1) × (segments+1)`, row-major от NW к SE — ровно
-     * в той раскладке, которую ожидает `TileManager.applyHeightsToGeometry`.
+     * Возвращает высоты для сетки тайла (segments+1)², row-major от NW к SE,
+     * уже умноженные на `heightScale`. Используется `TileManager`.
      *
-     * `virtX` — «виртуальный» X-индекс тайла (может быть < 0 или >= 2^z
-     * для тайлов, развёрнутых через антимеридиан). Lon/lat вычисляются
-     * по стандартной XYZ-Web-Mercator формуле, значение сэмплится
-     * билинейно из сырого растра.
-     *
-     * Для точек за пределами экстента GeoTIFF возвращается `0`
-     * (плоская поверхность на уровне моря).
-     *
-     * @param {number} z - Дискретный зум (XYZ).
-     * @param {number} virtX - Виртуальный X-индекс тайла.
-     * @param {number} y - Y-индекс тайла.
-     * @param {number} segments - Число сегментов сетки (SEGMENTS движка).
-     * @returns {Float32Array} Массив высот длиной `(segments+1)²`,
-     *     уже умноженный на `options.heightScale`.
+     * @param {number} z @param {number} virtX @param {number} y @param {number} segments
+     * @returns {Float32Array}
      */
     getTileHeights(z, virtX, y, segments) {
         const grid = segments + 1;
@@ -572,16 +391,7 @@ export class GeoTiffLayer extends Layer {
        Загрузка
        ================================================================ */
 
-    /**
-     * Асинхронная загрузка: открывает TIFF, читает растр, строит текстуру
-     * и геометрию, добавляет меш в `map.worldGroup`.
-     *
-     * Если слой создан с `asElevation: true`, после чтения растра он
-     * автоматически регистрируется как источник высот в `TileManager`.
-     *
-     * @private
-     * @returns {Promise<void>}
-     */
+    /** @private */
     async _load() {
         this._loading = true;
         this._progress(0);
@@ -611,7 +421,6 @@ export class GeoTiffLayer extends Layer {
 
             this._registerInteraction();
 
-            // Регистрация в TileManager как источника высот.
             if (this._asElevation && typeof this._map.enableGeotiffElevation === 'function') {
                 this._map.enableGeotiffElevation(this);
             }
@@ -631,35 +440,19 @@ export class GeoTiffLayer extends Layer {
         }
     }
 
-    /**
-     * Создаёт Pool, если пользователь запросил `useWorker` и не передал
-     * готовый пул.
-     *
-     * Если `workerUrl` кросс-доменный, браузер блокирует
-     * `new Worker(url)` из-за same-origin политики воркеров (CORS для
-     * этого конструктора не применяется). Обходим: скачиваем исходник
-     * воркера через `fetch` (CORS на CDN уже настроен), заворачиваем в
-     * Blob и создаём воркер из Blob URL — он считается same-origin с
-     * документом.
-     *
-     * @private
-     * @returns {Promise<void>}
-     */
+    /** @private */
     async _ensurePool() {
         if (this._pool) return;
         if (!this._useWorker) return;
 
         try {
             const url = this._workerUrl;
-
             const resp = await fetch(url, { mode: 'cors' });
             if (!resp.ok) {
                 throw new Error(`worker fetch failed: ${resp.status} ${resp.statusText}`);
             }
             const code = await resp.text();
 
-            // На случай, если сервер вернул HTML-страницу ошибки
-            // с кодом 200 (бывает с SPA-fallback'ами).
             const trimmed = code.trimStart();
             if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
                 throw new Error('worker URL вернул HTML вместо JavaScript');
@@ -685,12 +478,7 @@ export class GeoTiffLayer extends Layer {
         }
     }
 
-    /**
-     * Открывает GeoTIFF из любого поддерживаемого источника.
-     *
-     * @private
-     * @returns {Promise<import('../js_TP/geotiff.bundle.js').GeoTIFF>}
-     */
+    /** @private */
     async _openTiff() {
         const src = this._source;
 
@@ -712,19 +500,7 @@ export class GeoTiffLayer extends Layer {
         throw new Error('GeoTiffLayer: неподдерживаемый тип source');
     }
 
-    /**
-     * Определяет СК растра.
-     *
-     * Приоритет:
-     *  1. явный `options.crs`;
-     *  2. `ProjectedCSTypeGeoKey` из GeoKeys;
-     *  3. `GeographicTypeGeoKey` из GeoKeys;
-     *  4. WGS84 (с предупреждением).
-     *
-     * @private
-     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
-     * @returns {import('./Projections.js').Projection}
-     */
+    /** @private */
     _resolveCrs(image) {
         if (this._crsCode) {
             return Projections.get(this._crsCode);
@@ -756,19 +532,7 @@ export class GeoTiffLayer extends Layer {
         return Projections.get('EPSG:4326');
     }
 
-    /**
-     * Читает пиксели и создаёт `THREE.DataTexture` в формате RGBA.
-     *
-     * Ветвление:
-     *  - **рамповый режим** (одноканальный float / >8 бит, либо явный
-     *    `colorRamp`, либо `asElevation`): чтение сырых значений через
-     *    `readRasters()` с нормализацией и палитрой;
-     *  - **RGB/palette режим**: старый путь через `readRGB()`.
-     *
-     * @private
-     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
-     * @returns {Promise<{texture: THREE.DataTexture, width: number, height: number}>}
-     */
+    /** @private */
     async _readAsTexture(image) {
         const width = image.getWidth();
         const height = image.getHeight();
@@ -777,7 +541,6 @@ export class GeoTiffLayer extends Layer {
             return await this._readAsRampTexture(image, width, height);
         }
 
-        // --- Старый путь: RGB / palette / 8-бит grayscale ---
         const readOpts = {};
         if (this._pool) readOpts.pool = this._pool;
 
@@ -794,27 +557,9 @@ export class GeoTiffLayer extends Layer {
         return { texture: this._makeDataTexture(rgba, width, height), width, height };
     }
 
-    /**
-     * Решает, нужно ли применять палитру для данного изображения.
-     *
-     * Логика:
-     *  - RGB (PhotometricInterpretation=2) и palette (Photometric=3) —
-     *    всегда через `readRGB` (палитра встроена в файл);
-     *  - одноканальное (SamplesPerPixel=1) + (`SampleFormat=3` (float)
-     *    или `BitsPerSample>8` или явно задан `colorRamp`, или включён
-     *    режим `asElevation`) — рампа;
-     *  - всё остальное — `readRGB`.
-     *
-     * В режиме `asElevation` для RGB/палитровых файлов выводим
-     * предупреждение — они не годятся как DEM.
-     *
-     * @private
-     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
-     * @returns {boolean}
-     */
+    /** @private */
     _isRampImage(image) {
         const photometric = image.fileDirectory?.PhotometricInterpretation;
-        // RGB (2) или Palette (3) — раскраска уже «внутри» файла.
         if (photometric === 2 || photometric === 3) {
             if (this._asElevation) {
                 console.warn(
@@ -848,13 +593,9 @@ export class GeoTiffLayer extends Layer {
             return false;
         }
 
-        // Пользователь явно попросил палитру.
         if (this._colorRampInput !== undefined) return true;
-
-        // Режим источника высот: гарантированно читаем сырые значения.
         if (this._asElevation) return true;
 
-        // Авто: float или >8 бит одноканальные.
         const bitsRaw = typeof image.getBitsPerSample === 'function'
             ? image.getBitsPerSample()
             : (image.fileDirectory?.BitsPerSample);
@@ -865,38 +606,24 @@ export class GeoTiffLayer extends Layer {
             : (image.fileDirectory?.SampleFormat);
         const fmt = Array.isArray(fmtRaw) ? fmtRaw[0] : fmtRaw;
 
-        if (fmt === 3) return true;                         // IEEE float
-        if (Number.isFinite(bits) && bits > 8) return true; // >8 бит
+        if (fmt === 3) return true;
+        if (Number.isFinite(bits) && bits > 8) return true;
         return false;
     }
 
     /* ================================================================
-       Рамповый режим (одноканальные DEM)
+       Рамповый режим
        ================================================================ */
 
-    /**
-     * Читает сырые значения и раскрашивает их палитрой.
-     *
-     * Если включён `_keepRawData`, сырые значения и геопривязка
-     * сохраняются в поля экземпляра — они используются методом
-     * {@link GeoTiffLayer#getTileHeights} в режиме источника высот.
-     *
-     * @private
-     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
-     * @param {number} width
-     * @param {number} height
-     * @returns {Promise<{texture: THREE.DataTexture, width: number, height: number}>}
-     */
+    /** @private */
     async _readAsRampTexture(image, width, height) {
         const readOpts = { samples: [0] };
         if (this._pool) readOpts.pool = this._pool;
 
         const rasters = await image.readRasters(readOpts);
-        /** @type {ArrayLike<number>} */
         const data = rasters[0];
         if (!data) throw new Error('GeoTiffLayer: readRasters вернул пустой результат');
 
-        // NoData: явный или GDAL_NODATA
         let noData = this._noDataValue;
         if (noData === null) {
             try {
@@ -907,7 +634,6 @@ export class GeoTiffLayer extends Layer {
             } catch (e) { /* ignore */ }
         }
 
-        // Сохраняем сырые данные и геопривязку, если нужно.
         if (this._keepRawData) {
             this._rawData = data;
             this._rawWidth = width;
@@ -920,13 +646,10 @@ export class GeoTiffLayer extends Layer {
                 console.warn('GeoTiffLayer: не удалось прочитать origin/resolution', e);
                 this._geoOrigin = null;
                 this._geoResolution = null;
-                // Без геопривязки сэмплировать по lon/lat нельзя —
-                // сбрасываем rawData, чтобы провайдер не отдавал мусор.
                 this._rawData = null;
             }
         }
 
-        // Диапазон нормализации
         let minV = this._minValue;
         let maxV = this._maxValue;
         if (minV === null || maxV === null) {
@@ -965,7 +688,6 @@ export class GeoTiffLayer extends Layer {
                     rgba[j + 2] = ndColor[2];
                     rgba[j + 3] = ndColor[3];
                 }
-                // иначе — (0,0,0,0), прозрачно
                 continue;
             }
 
@@ -983,14 +705,9 @@ export class GeoTiffLayer extends Layer {
         return { texture: this._makeDataTexture(rgba, width, height), width, height };
     }
 
-    /**
-     * Создаёт `THREE.DataTexture` из RGBA-байтов.
-     * @private
-     */
+    /** @private */
     _makeDataTexture(rgba, width, height) {
         const texture = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat);
-        // flipY=true: строка 0 массива (север растра) → верх плоскости,
-        // что совпадает с UV-раскладкой PlaneGeometry (v0=TL → (0,1)).
         texture.flipY = true;
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.minFilter = THREE.LinearFilter;
@@ -1000,27 +717,14 @@ export class GeoTiffLayer extends Layer {
         return texture;
     }
 
-    /**
-     * Возвращает нормализованную палитру (сортированную по `value`).
-     * Результат кэшируется в `_colorRampNormalized`.
-     *
-     * Вся логика разбора пресетов/массивов — в {@link module:ColorRamps}.
-     *
-     * @private
-     * @returns {Array<{value:number,r:number,g:number,b:number,a:number}>}
-     */
+    /** @private */
     _getColorRamp() {
         if (this._colorRampNormalized) return this._colorRampNormalized;
         this._colorRampNormalized = resolveColorRamp(this._colorRampInput);
         return this._colorRampNormalized;
     }
 
-    /**
-     * Приводит `noDataColor` к `[r,g,b,a]` или `null` (не рисовать).
-     * @private
-     * @param {*} c
-     * @returns {[number,number,number,number]|null}
-     */
+    /** @private */
     _parseNoDataColor(c) {
         if (c === null || c === undefined) return null;
         if (typeof c === 'string' && c.toLowerCase() === 'transparent') return null;
@@ -1032,26 +736,7 @@ export class GeoTiffLayer extends Layer {
        Сэмплирование сырых DEM-данных
        ================================================================ */
 
-    /**
-     * Возвращает значение растра в точке `(lon, lat)` (в градусах WGS84)
-     * с билинейной интерполяцией.
-     *
-     * Внутри:
-     *  1. `lon/lat` → координаты СК растра (`this._crs`) через proj4
-     *     (для `EPSG:4326`/`CRS:84` — без преобразования);
-     *  2. смещение по `_geoOrigin` / `_geoResolution` → пиксельные
-     *     координаты (с учётом того, что `_geoOrigin` — это центр
-     *     TL-пикселя, а не его угол);
-     *  3. билинейная интерполяция по 4 соседним пикселям.
-     *
-     * Возвращает `null`, если точка вне экстента растра, или
-     * `_geoNoData`, если все 4 соседа — NoData.
-     *
-     * @private
-     * @param {number} lon
-     * @param {number} lat
-     * @returns {number|null}
-     */
+    /** @private */
     _sampleAtLonLat(lon, lat) {
         if (!this._rawData || !this._geoOrigin || !this._geoResolution) return null;
 
@@ -1084,14 +769,7 @@ export class GeoTiffLayer extends Layer {
         return this._bilinearSample(px, py);
     }
 
-    /**
-     * Билинейная интерполяция в пиксельных координатах.
-     *
-     * @private
-     * @param {number} px - Дробный X (0..width-1).
-     * @param {number} py - Дробный Y (0..height-1).
-     * @returns {number|null}
-     */
+    /** @private */
     _bilinearSample(px, py) {
         const w = this._rawWidth;
         const h = this._rawHeight;
@@ -1112,14 +790,12 @@ export class GeoTiffLayer extends Layer {
 
         const isValid = (v) => Number.isFinite(v) && (nd === null || v !== nd);
 
-        // Если все 4 валидны — обычная билинейная интерполяция.
         if (isValid(v00) && isValid(v10) && isValid(v01) && isValid(v11)) {
             const a = v00 * (1 - fx) + v10 * fx;
             const b = v01 * (1 - fx) + v11 * fx;
             return a * (1 - fy) + b * fy;
         }
 
-        // Иначе — среднее по валидным (сглаживаем NoData на границе).
         let sum = 0;
         let cnt = 0;
         if (isValid(v00)) { sum += v00; cnt++; }
@@ -1133,39 +809,28 @@ export class GeoTiffLayer extends Layer {
        Геопривязка и геометрия
        ================================================================ */
 
-    /**
-     * Считает 4 угла растра в мировых координатах карты.
-     *
-     * Порядок вершин — как у `THREE.PlaneGeometry`:
-     *  v0 = top-left, v1 = top-right, v2 = bottom-left, v3 = bottom-right.
-     *
-     * Y-координата всех углов равна `_elevationOffset` (по умолчанию 0).
-     * Это позволяет поднять плоскость GeoTIFF над уровнем тайлов, если
-     * нужно — см. описание `options.elevationOffset`.
-     *
-     * @private
-     * @param {import('../js_TP/geotiff.bundle.js').GeoTIFFImage} image
-     */
+    /** @private */
     _computeWorldCorners(image) {
         const width = image.getWidth();
         const height = image.getHeight();
-        const origin = image.getOrigin();          // [ox, oy] — координаты TL-угла
-        const resolution = image.getResolution();  // [rx, ry], ry обычно отрицательный
+        const origin = image.getOrigin();
+        const resolution = image.getResolution();
+
+        this._imageWidth = width;
+        this._imageHeight = height;
 
         const ox = origin[0], oy = origin[1];
         const rx = resolution[0], ry = resolution[1];
 
-        // 4 угла в исходной СК растра
         const cornersCrs = [
-            [ox,               oy],               // TL
-            [ox + width * rx,  oy],               // TR
-            [ox,               oy + height * ry], // BL
-            [ox + width * rx,  oy + height * ry]  // BR
+            [ox,               oy],
+            [ox + width * rx,  oy],
+            [ox,               oy + height * ry],
+            [ox + width * rx,  oy + height * ry]
         ];
 
         const map = this._map;
         const y = this._elevationOffset;
-        /** @type {THREE.Vector3[]} */
         const positions = [];
         for (const [x, yCrs] of cornersCrs) {
             const [wx, wz] = map.project([x, yCrs], this._crs);
@@ -1174,16 +839,18 @@ export class GeoTiffLayer extends Layer {
         this._worldPositions = positions;
     }
 
+    /** @private */
+    _autoMeshSegments() {
+        const w = this._imageWidth  || 512;
+        const h = this._imageHeight || 512;
+        const maxDim = Math.max(w, h);
+        return Math.min(256, Math.max(64, Math.ceil(maxDim / 8)));
+    }
+
     /**
-     * Строит `PlaneGeometry` с вершинами в мировых координатах
-     * (локально относительно центроида) и материал с текстурой.
-     *
-     * **Z-fighting.** Материал получает `polygonOffset` (по умолчанию
-     * `factor = units = -4`): значение глубины сдвигается «к камере»,
-     * не трогая геометрию. Это гарантирует, что GeoTIFF перекрывает
-     * coplanar-тайлы карты (после правки TileManager primary-тайлы
-     * пишут depth и без polygonOffset дают мерцание). См. также
-     * `options.alwaysOnTop` (отключает depthTest полностью).
+     * Строит геометрию меша. Если `drape` включён и есть сырые данные,
+     * вершины сетки поднимаются по тем же высотам, что отдаются тайлам.
+     * Иначе — плоский quad, как раньше.
      *
      * @private
      */
@@ -1196,24 +863,67 @@ export class GeoTiffLayer extends Layer {
         centroid.divideScalar(positions.length);
         this._centroidWorld.copy(centroid);
 
-        const geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
-        const posAttr = geometry.attributes.position;
-        for (let i = 0; i < 4; i++) {
-            posAttr.setXYZ(
-                i,
-                positions[i].x - centroid.x,
-                positions[i].y - centroid.y,
-                positions[i].z - centroid.z
-            );
+        const canDrape = this._drape
+            && this._rawData
+            && this._geoOrigin
+            && this._geoResolution
+            && this._imageWidth > 0
+            && this._imageHeight > 0;
+
+        const seg  = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
+        const grid = seg + 1;
+
+        const geometry = new THREE.PlaneGeometry(1, 1, seg, seg);
+        const posAttr  = geometry.attributes.position;
+
+        if (!canDrape) {
+            for (let i = 0; i < 4; i++) {
+                posAttr.setXYZ(
+                    i,
+                    positions[i].x - centroid.x,
+                    positions[i].y - centroid.y,
+                    positions[i].z - centroid.z
+                );
+            }
+        } else {
+            const [ox, oy] = this._geoOrigin;
+            const [rx, ry] = this._geoResolution;
+            const W = this._imageWidth;
+            const H = this._imageHeight;
+            const hs = this._elevationHeightScale;
+            const map = this._map;
+            const crs = this._crs;
+            const maxPx = W - 1;
+            const maxPy = H - 1;
+
+            for (let j = 0; j < grid; j++) {
+                const v = j / seg;
+                const srcY = oy + v * H * ry;
+                const py   = Math.min(maxPy, v * H);
+
+                for (let i = 0; i < grid; i++) {
+                    const u = i / seg;
+                    const srcX = ox + u * W * rx;
+                    const px   = Math.min(maxPx, u * W);
+
+                    let hgt = this._bilinearSample(px, py);
+                    if (hgt === null || !Number.isFinite(hgt)) hgt = 0;
+
+                    const [wx, wz] = map.project([srcX, srcY], crs);
+                    const idx = j * grid + i;
+                    posAttr.setXYZ(
+                        idx,
+                        wx - centroid.x,
+                        hgt * hs,               // локальный Y; offset — в group.position.y
+                        wz - centroid.z
+                    );
+                }
+            }
         }
+
         posAttr.needsUpdate = true;
         geometry.computeVertexNormals();
-
-        // UV у PlaneGeometry по умолчанию:
-        //   v0 (TL) → (0, 1), v1 (TR) → (1, 1),
-        //   v2 (BL) → (0, 0), v3 (BR) → (1, 0)
-        // Порядок вершин у нас совпадает, а flipY=true даёт корректную
-        // привязку: строка 0 массива (север растра) попадает на север карты.
+        geometry.computeBoundingSphere();
 
         const transparent = this._opacity < 1;
         const onTop = this._alwaysOnTop;
@@ -1224,11 +934,6 @@ export class GeoTiffLayer extends Layer {
             transparent,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
-
-            // polygonOffset сдвигает значение глубины, не трогая геометрию.
-            // Это устраняет z-fighting с coplanar primary-тайлами карты:
-            // GeoTIFF гарантированно «ближе к камере», но по-прежнему
-            // корректно скрыт рельефом, стоящим перед ним.
             depthTest:  !onTop,
             depthWrite: false,
             polygonOffset:       !onTop,
@@ -1247,13 +952,14 @@ export class GeoTiffLayer extends Layer {
         this._material = material;
         this._mesh = mesh;
 
-        // Ограничивающая сфера для быстрого отсечения по расстоянию
+        // Bounding sphere — по фактическим вершинам.
         let maxRadiusSq = 0;
-        for (const p of positions) {
-            const dx = p.x - centroid.x;
-            const dy = p.y - centroid.y;
-            const dz = p.z - centroid.z;
-            const rSq = dx * dx + dy * dy + dz * dz;
+        const cnt = posAttr.count;
+        for (let k = 0; k < cnt; k++) {
+            const x = posAttr.getX(k);
+            const y = posAttr.getY(k);
+            const z = posAttr.getZ(k);
+            const rSq = x * x + y * y + z * z;
             if (rSq > maxRadiusSq) maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
@@ -1263,11 +969,7 @@ export class GeoTiffLayer extends Layer {
        Интерактивность
        ================================================================ */
 
-    /**
-     * Регистрирует меш в общем `map.interaction`, если у слоя есть
-     * тултип/onClick/onHover.
-     * @private
-     */
+    /** @private */
     _registerInteraction() {
         const hasHandlers = this._onClick || this._onHover || this._tooltipText;
         if (!hasHandlers || !this._map.interaction || !this._mesh) return;
@@ -1300,13 +1002,7 @@ export class GeoTiffLayer extends Layer {
        Апдейт / видимость
        ================================================================ */
 
-    /**
-     * Вызывается картой каждый кадр (через `Layer._postUpdate`).
-     * Управляет видимостью меша по зуму и расстоянию до камеры.
-     *
-     * @param {import('./Core.js').KrbMap} map
-     * @private
-     */
+    /** @private */
     _postUpdate(map) {
         if (!this._loaded || !this._group) return;
 
@@ -1360,12 +1056,7 @@ export class GeoTiffLayer extends Layer {
         this._mesh = null;
     }
 
-    /**
-     * Приводит строковый режим смешивания к константе THREE.
-     * @private
-     * @param {string|number} blending
-     * @returns {number}
-     */
+    /** @private */
     _normalizeBlending(blending) {
         if (typeof blending === 'number') return blending;
         switch (String(blending).toLowerCase()) {
@@ -1381,8 +1072,7 @@ export class GeoTiffLayer extends Layer {
        Интерфейс для TextManager
        ================================================================ */
 
-    /** @returns {string} */
-    getText() { return this._title; }
+    /** @returns {string} */ getText() { return this._title; }
 
     /** @returns {Object} */
     getTextStyle() {
@@ -1399,11 +1089,8 @@ export class GeoTiffLayer extends Layer {
         return { min: this._titleMinZoom, max: this._titleMaxZoom };
     }
 
-    /** @returns {string} */
-    getLabelType() { return 'geotiff'; }
-
-    /** @returns {boolean} */
-    isVisible() { return this._isVisible; }
+    /** @returns {string} */ getLabelType() { return 'geotiff'; }
+    /** @returns {boolean} */ isVisible() { return this._isVisible; }
 
     /** @returns {{x:number, y:number}|null} */
     getScreenPosition() {
@@ -1422,37 +1109,19 @@ export class GeoTiffLayer extends Layer {
         };
     }
 
-    /** @returns {string} */
-    getTitleAlign() { return this._titleAlign; }
-
-    /** @returns {Array.<number>} */
-    getTitleOffset() { return this._titleOffset; }
-
-    /** @returns {string} */
-    getTitleVerticalAlign() { return 'center'; }
-
-    /** @returns {boolean} */
-    getAllowOverflow() { return this._titleAllowOverflow; }
-
-    /** @returns {number} */
-    getPriority() { return this._titlePriority; }
+    /** @returns {string} */ getTitleAlign() { return this._titleAlign; }
+    /** @returns {Array.<number>} */ getTitleOffset() { return this._titleOffset; }
+    /** @returns {string} */ getTitleVerticalAlign() { return 'center'; }
+    /** @returns {boolean} */ getAllowOverflow() { return this._titleAllowOverflow; }
+    /** @returns {number} */ getPriority() { return this._titlePriority; }
 
     /* ================================================================
        Интерфейс для KrbMap#fitTo / getBounds
        ================================================================ */
 
     /**
-     * Возвращает прямоугольник растра в заданной СК.
-     *
-     * До загрузки вернёт `null`. После загрузки — bbox по четырём углам,
-     * преобразованный из СК растра (`this._crs`) в `crs`.
-     *
      * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326']
      * @returns {Array.<Array.<number>>|null}
-     *
-     * @example
-     * const b = layer.getBounds();              // → [[lon0, lat0], [lon1, lat1]]
-     * const bUtm = layer.getBounds('EPSG:32637');
      */
     getBounds(crs = 'EPSG:4326') {
         if (!this._image || !this._crs) return null;

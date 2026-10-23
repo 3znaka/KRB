@@ -18,9 +18,9 @@ KRB is a high-performance, feature-rich cartographic library designed for render
 To include KRB in your project, use the provided CDN mirror. This ensures reliable access even if primary repository hosting is temporarily unavailable.
 
 ```html
-<link href="https://cdn.mapengine.ru/KRB/KRB.css" rel="stylesheet">
+<link href="https://cdn.mapengine.ru/min/KRB.css" rel="stylesheet">
 <script type="module">
-  import * as KRB from 'https://cdn.mapengine.ru/KRB/js/KRB.js';
+  import * as KRB from 'https://cdn.mapengine.ru/min/js/KRB.js';
 </script>
 ```
 
@@ -57,8 +57,7 @@ const map = new KRB.KrbMap({
 // 3. Add a sample marker
 const marker = new KRB.Marker({
     position: [37.6173, 55.7558],
-    tooltip: '<b>Sample Location</b>',
-    clusterable: true
+    tooltip: '<b>Sample Location</b>'
 });
 marker.addTo(map);
 ```
@@ -66,6 +65,4 @@ marker.addTo(map);
 ## Resources
 
 - **Homepage**: [https://mapengine.ru/](https://mapengine.ru/)
-- **Documentation**: [https://mapengine.ru/krb/docs/](https://mapengine.ru/krb/docs/)
-- **Interactive Playground**: [https://mapengine.ru/krb/v9/playground.php](https://mapengine.ru/krb/v9/playground.php)
-- **Source Code**: [https://github.com/3znaka/KRB/tree/main](https://github.com/3znaka/KRB/tree/main)
+- **Documentation**: [https://mapengine.ru/docs/)

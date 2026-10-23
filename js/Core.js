@@ -1339,21 +1339,9 @@ this.controls.touches = {
         );
     }
 
-    moveCameraTo(lon, lat) {
-        const [cx, cz] = this.projectLonLat(lon, lat);
-        const z = this.currentDiscreteZoom;
-        const worldOffset = this.worldGroup.position;
-        const targetX = cx + worldOffset.x;
-        const targetZ = cz + worldOffset.z;
-
-        this.controls.target.set(targetX, 0, targetZ);
-        this.camera.position.set(targetX, this.getTargetDistanceForZoom(z), targetZ);
-        this.controls.update();
-        this.continuousZoom = z;
-        this.targetContinuousZoom = z;
-        this.applyZoomDistance();
-        this.maybeUpdateVisibleTiles(true);
-    }
+    moveCameraTo(lon, lat, targetZoom = null) {
+    this.moveCameraToSlow(lon, lat, 0, targetZoom);
+}
 
     /** @private */
     _wrapLongitudeIfNeeded() {
@@ -1379,87 +1367,138 @@ this.controls.touches = {
         this.maybeUpdateVisibleTiles(true);
     }
 
-    /**
-     * Анимированный перелёт к (lon, lat).
-     * @param {number} lon @param {number} lat
-     * @param {number} [duration=1.0]
-     * @param {number|null} [targetZoom=null]
-     */
-    moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
-        if (this._disposed || this._cameraAnimation) return;
+/**
+ * Анимированный перелёт к (lon, lat).
+ * При duration <= 0 выполняется синхронно, без rAF и без _cameraAnimation.
+ *
+ * @param {number} lon
+ * @param {number} lat
+ * @param {number} [duration=1.0]
+ * @param {number|null} [targetZoom=null]
+ */
+moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
+    if (this._disposed) return;
 
-        const startTarget = new THREE.Vector3().copy(this.controls.target);
-        const startPos = new THREE.Vector3().copy(this.camera.position);
-        const startZoom = this.continuousZoom;
+    // --- Синхронный fast-path ---------------------------------------
+    if (!(duration > 0)) {
+        // Гасим любую идущую анимацию, иначе её rAF-шаг перезапишет камеру.
+        if (this._cameraAnimation) {
+            this._cameraAnimation = null;
+            if (this._cameraAnimFrame !== null) {
+                cancelAnimationFrame(this._cameraAnimFrame);
+                this._cameraAnimFrame = null;
+            }
+            this._cameraAnimations.pitch = null;
+            this._cameraAnimations.bearing = null;
+            this.controls.enableDamping = this._controlsDampingWasEnabled;
+        }
 
         const [cx, cz] = this.projectLonLat(lon, lat);
-        const worldOffset = this.worldGroup.position;
-        const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cz + worldOffset.z);
+        const off = this.worldGroup.position;
+        const endTarget = this._tempVec3a.set(cx + off.x, 0, cz + off.z);
 
-        const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
-        const animPitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
+        const currentDir = this._tempDir.subVectors(this.camera.position, this.controls.target);
+        const dist0 = currentDir.length();
+        const animPitch = dist0 > 1e-6
+            ? Math.acos(Math.max(-1, Math.min(1, currentDir.y / dist0)))
+            : 0.001;
         const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
-        const endZoom = targetZoom !== null ? targetZoom : startZoom;
 
-        const startTime = performance.now();
-        this._cameraAnimation = {
-            startTarget, endTarget,
-            startZoom, endZoom,
-            duration, startTime
-        };
+        const endZoom = targetZoom !== null ? targetZoom : this.continuousZoom;
 
-        this._controlsDampingWasEnabled = this.controls.enableDamping;
-        this.controls.enableDamping = false;
+        this._resolveCameraPlacement(
+            endTarget,
+            this.getTargetDistanceForZoom(endZoom),
+            animPitch,
+            animAzimuth,
+            this._tempPlacementOut
+        );
+        this.camera.position.copy(this._tempPlacementOut);
+        this.controls.target.copy(endTarget);
+        this.controls.update();
 
-        const animateStep = (now) => {
-            if (this._disposed || !this._cameraAnimation) return;
-            const anim = this._cameraAnimation;
-            let t = (now - anim.startTime) / (anim.duration * 1000);
-            t = Math.min(t, 1.0);
-            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        this.continuousZoom = endZoom;
+        this.targetContinuousZoom = endZoom;
+        this.maybeUpdateVisibleTiles(true);
+        return;
+    }
+    // ----------------------------------------------------------------
 
-            const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
-            const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
+    if (this._cameraAnimation) return;
+
+    const startTarget = new THREE.Vector3().copy(this.controls.target);
+    const startPos = new THREE.Vector3().copy(this.camera.position);
+    const startZoom = this.continuousZoom;
+
+    const [cx, cz] = this.projectLonLat(lon, lat);
+    const worldOffset = this.worldGroup.position;
+    const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cz + worldOffset.z);
+
+    const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
+    const animPitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
+    const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
+    const endZoom = targetZoom !== null ? targetZoom : startZoom;
+
+    const startTime = performance.now();
+    this._cameraAnimation = {
+        startTarget, endTarget,
+        startZoom, endZoom,
+        duration, startTime
+    };
+
+    this._controlsDampingWasEnabled = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+
+    const animateStep = (now) => {
+        if (this._disposed || !this._cameraAnimation) return;
+        const anim = this._cameraAnimation;
+        let t = (now - anim.startTime) / (anim.duration * 1000);
+        t = Math.min(t, 1.0);
+        const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+        const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
+        const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
+
+        this._resolveCameraPlacement(
+            currentTarget,
+            this.getTargetDistanceForZoom(currentZoom),
+            animPitch,
+            animAzimuth,
+            this._tempPlacementOut
+        );
+        this.camera.position.copy(this._tempPlacementOut);
+        this.controls.target.copy(currentTarget);
+        this.controls.update();
+
+        this.continuousZoom = currentZoom;
+        this.targetContinuousZoom = currentZoom;
+        this.maybeUpdateVisibleTiles();
+
+        if (t >= 1.0) {
+            this._cameraAnimation = null;
+            this.controls.enableDamping = this._controlsDampingWasEnabled;
 
             this._resolveCameraPlacement(
-                currentTarget,
-                this.getTargetDistanceForZoom(currentZoom),
+                anim.endTarget,
+                this.getTargetDistanceForZoom(anim.endZoom),
                 animPitch,
                 animAzimuth,
                 this._tempPlacementOut
             );
             this.camera.position.copy(this._tempPlacementOut);
-            this.controls.target.copy(currentTarget);
+            this.controls.target.copy(anim.endTarget);
             this.controls.update();
 
-            this.continuousZoom = currentZoom;
-            this.targetContinuousZoom = currentZoom;
-            this.maybeUpdateVisibleTiles();
-
-            if (t >= 1.0) {
-                this._cameraAnimation = null;
-                this.controls.enableDamping = this._controlsDampingWasEnabled;
-
-                this._resolveCameraPlacement(
-                    anim.endTarget,
-                    this.getTargetDistanceForZoom(anim.endZoom),
-                    animPitch,
-                    animAzimuth,
-                    this._tempPlacementOut
-                );
-                this.camera.position.copy(this._tempPlacementOut);
-                this.controls.target.copy(anim.endTarget);
-                this.controls.update();
-
-                this.continuousZoom = anim.endZoom;
-                this.targetContinuousZoom = anim.endZoom;
-                this.maybeUpdateVisibleTiles(true);
-                return;
-            }
-            requestAnimationFrame(animateStep);
-        };
+            this.continuousZoom = anim.endZoom;
+            this.targetContinuousZoom = anim.endZoom;
+            this.maybeUpdateVisibleTiles(true);
+            return;
+        }
         requestAnimationFrame(animateStep);
-    }
+    };
+    requestAnimationFrame(animateStep);
+}
+
 
     /**
      * Поворот к северу (и сброс pitch, если надо).

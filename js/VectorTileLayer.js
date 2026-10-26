@@ -17,23 +17,18 @@ import { Projections } from './Projections.js';
 // -----------------------------------------------------------------------------
 // Кэш Blob-URL для кода воркера (разделяется между всеми инстансами слоя).
 //
-// Раньше каждый VectorTileLayer делал fetch(tpb.js) + fetch(earcut.js) +
-// base64 + Blob + URL.createObjectURL — независимо от других слоёв. На
-// странице с десятком карт это давало N-кратную повторную работу и заметный
-// старт-ап delay. Теперь первый слой скачивает и кодирует скрипты, остальные
-// переиспользуют уже готовый blob-URL. Сами Worker'ы по-прежнему создаются
-// на каждый слой отдельно (это отдельные потоки), но разделяемая часть
-// (потенциально тяжёлая: fetch + base64 + Blob) выполняется один раз.
+// Первый слой скачивает и кодирует скрипты, остальные переиспользуют готовый
+// blob-URL. Сами Worker'ы по-прежнему создаются на каждый слой отдельно,
+// но разделяемая часть (fetch + base64 + Blob) выполняется один раз.
 // -----------------------------------------------------------------------------
 const _workerBlobUrlCache = new Map();
 
 /**
- * Возвращает (кэширует) Promise на Blob-URL готового кода воркера для пары
- * (tpb, earcut). При ошибке кэш не отравляется — следующий вызов попробует
- * заново.
+ * Возвращает (кэширует) Promise на Blob-URL готового кода воркера.
+ * При ошибке кэш не отравляется.
  *
- * @param {string} tpbUrl - URL tpb.js.
- * @param {string} earcutUrl - URL earcut.js.
+ * @param {string} tpbUrl
+ * @param {string} earcutUrl
  * @returns {Promise<string>}
  */
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
@@ -65,57 +60,22 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 }
 
 // -----------------------------------------------------------------------------
-// Класс источника подписи для точечных объектов векторных тайлов
+// Источник подписи для точечных объектов векторных тайлов.
+//
+// `worldPos` хранится в координатах worldGroup (без учёта смещения мира).
+// Итоговая мировая позиция собирается в getScreenPosition.
 // -----------------------------------------------------------------------------
-/**
- * Источник подписи для точечных объектов векторных тайлов.
- * Используется для создания текстовых подписей через TextManager.
- *
- * `worldPos` хранится в групповых координатах (то есть координаты уже
- * включают позицию группы тайла, но НЕ включают `map.worldGroup.position`).
- * Итоговая мировая позиция собирается в `getScreenPosition` уже с учётом
- * текущего смещения мира.
- *
- * @private
- */
 class VectorPointLabelSource {
-    /**
-     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
-     * @param {number} worldX - X в координатах worldGroup.
-     * @param {number} worldZ - Z в координатах worldGroup.
-     * @param {string} text - Текст подписи.
-     * @param {Object} [options] - Параметры стилизации и зума.
-     */
     constructor(map, worldX, worldZ, text, options = {}) {
-        /** @private @type {import('./KrbMap.js').KrbMap} */ this.map = map;
-        /** @private @type {THREE.Vector3} */ this.worldPos = new THREE.Vector3(worldX, 0, worldZ);
-        /** @private @type {string} */ this.text = text;
-        /** @private @type {Object} */ this.options = options;
+        this.map = map;
+        this.worldPos = new THREE.Vector3(worldX, 0, worldZ);
+        this.text = text;
+        this.options = options;
     }
 
-    /**
-     * @returns {string} Текст подписи.
-     */
-    getText() {
-        return this.text;
-    }
+    getText() { return this.text; }
+    getLabelType() { return 'point'; }
 
-    /**
-     * @returns {'point'} Тип метки.
-     */
-    getLabelType() {
-        return 'point';
-    }
-
-    /**
-     * Возвращает экранную позицию подписи.
-     *
-     * Использует пул временных векторов карты (`map.getVec3()`) —
-     * метод вызывается TextManager'ом каждый кадр для каждой активной
-     * подписи, поэтому аллокации здесь недопустимы.
-     *
-     * @returns {{x: number, y: number}} Экранные координаты.
-     */
     getScreenPosition() {
         const v = this.map.getVec3()
             .copy(this.worldPos)
@@ -128,9 +88,6 @@ class VectorPointLabelSource {
         };
     }
 
-    /**
-     * @returns {Object} CSS-стили подписи.
-     */
     getTextStyle() {
         return {
             color: this.options.textColor || '#333333',
@@ -141,54 +98,17 @@ class VectorPointLabelSource {
         };
     }
 
-    /**
-     * @returns {number} Приоритет подписи.
-     */
-    getPriority() {
-        return this.options.priority || 0;
-    }
-
-    /**
-     * @returns {string} Горизонтальное выравнивание.
-     */
-    getTitleAlign() {
-        return this.options.textAlign || 'center';
-    }
-
-    /**
-     * @returns {string} Вертикальное выравнивание.
-     */
-    getTitleVerticalAlign() {
-        return this.options.textVerticalAlign || 'center';
-    }
-
-    /**
-     * @returns {[number, number]} Смещение подписи в пикселях.
-     */
-    getTitleOffset() {
-        return this.options.textOffset || [0, 0];
-    }
-
-    /**
-     * @returns {{min: number, max: number}} Границы зума.
-     */
-    getTextZoomBounds() {
-        return this.options.zoomBounds || { min: 0, max: 24 };
-    }
-
-    /**
-     * @returns {boolean} Видима ли подпись.
-     */
-    isVisible() {
-        return this.options.visible !== false;
-    }
+    getPriority() { return this.options.priority || 0; }
+    getTitleAlign() { return this.options.textAlign || 'center'; }
+    getTitleVerticalAlign() { return this.options.textVerticalAlign || 'center'; }
+    getTitleOffset() { return this.options.textOffset || [0, 0]; }
+    getTextZoomBounds() { return this.options.zoomBounds || { min: 0, max: 24 }; }
+    isVisible() { return this.options.visible !== false; }
 }
 
 /**
  * Порядок отрисовки элементов векторного тайла.
- * Меньше — раньше (глубже в сцене).
- *
- * @type {{FILL: number, LINE: number, STROKE: number, POINT: number, BUILDING: number, EDGE: number}}
+ * @type {{FILL:number, LINE:number, STROKE:number, POINT:number, BUILDING:number, EDGE:number}}
  */
 export const VECTOR_TILE_RENDER_ORDER = {
     FILL:     10,
@@ -200,92 +120,18 @@ export const VECTOR_TILE_RENDER_ORDER = {
 };
 
 // -----------------------------------------------------------------------------
-// Основной класс
+// Основной класс.
+//
+// Ключевые новые опции (помимо существующих):
+//  - `labelMaxCameraDistance` — жёсткий cull подписей по 3D-расстоянию до
+//    камеры. 0 = авто-режим: порог сужается с ростом pitch (при наклоне
+//    дальние подписи «кашей» висят на горизонте). Рекомендуется оставить 0.
 // -----------------------------------------------------------------------------
-/**
- * Класс слоя векторных тайлов с поддержкой 3D-зданий и выделением острых рёбер.
- * Управляет загрузкой, кешированием и отображением тайлов, материалов и подписей.
- *
- * @param {Object} options - Объект с настройками слоя.
- * @property {string} options.url - URL шаблона тайлов с плейсхолдерами {z}, {x}, {y}.
- * @property {string} [options.crs] - Код системы координат для GeoJSON-координат,
- *   передаваемых в `addExclusionArea`. Если не указан — используется `map.inputCRS`
- *   (по умолчанию EPSG:4326 = WGS84).
- * @property {number} [options.minZoom=0] - Минимальный зум, при котором слой видим.
- * @property {number} [options.maxZoom=Infinity] - Максимальный зум, при котором слой видим.
- * @property {number} [options.maxSourceZoom=14] - Максимальный исходный зум тайлов.
- * @property {number} [options.lineWidthMultiplier=1.0] - Множитель ширины линий.
- * @property {number} [options.fillOpacity=1.0] - Общая непрозрачность заливки.
- * @property {boolean} [options.depthTest=false] - Включить тест глубины.
- * @property {Array.<string>|null} [options.visibleLayers=null] - Список видимых слоёв или null.
- * @property {boolean} [options.buildings3d=true] - Включить 3D-здания.
- * @property {number} [options.buildings3dMinZoom=17] - Минимальный зум для отображения 3D-зданий.
- * @property {boolean} [options.buildingEdges=true] - Выделять острые рёбра зданий.
- * @property {number} [options.maxTextLabels=500] - Максимальное общее количество
- *   текстовых подписей (глобальный бюджет на всю карту, распределяется между тайлами
- *   по приоритету/расстоянию, а не по порядку загрузки тайлов).
- * @property {number} [options.maxTextPointsPerTile=50] - Максимум подписей на тайл
- *   (мягкий лимит для одного тайла при глобальной сортировке; в текущей реализации
- *   не применяется жёстко, оставлен для совместимости и будущих оптимизаций).
- * @property {number} [options.labelDistanceSortZoom=17] - Зум, начиная с которого сортировка по расстоянию.
- * @property {number} [options.labelMaxPerTileClose=20] - Максимум подписей на тайл при близком зуме.
- * @property {number} [options.labelCullMargin=250] - Отступ за границами экрана для
- *   отсечения подписей. Большое значение (по умолчанию 250 px) позволяет готовить
- *   подписи заранее за пределами видимой области, чтобы они не «выскакивали»
- *   при панорамировании.
- * @property {number} [options.tileDataCacheMaxSize=200] - Максимум сырых PBF-буферов в LRU-кэше.
- * @property {number} [options.tileGroupRenderOrder=1000000] - renderOrder для tileGroup
- *   (КРИТИЧНО, см. описание модуля). Только если понимаешь, что делаешь.
- * @property {boolean} [options.debug=false] - Режим отладки.
- * @property {Object} [options.styles={}] - Пользовательские стили, объединяются с DEFAULT_STYLES.
- * @property {Array.<string>} [options.workerScripts=['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js']] - Массив из двух URL скриптов для воркера.
- *
- * @example
- * const layer = new VectorTileLayer({
- *     url: 'https://example.com/tiles/{z}/{x}/{y}.pbf',
- *     minZoom: 0,
- *     maxZoom: 22,
- *     maxSourceZoom: 14,
- *     lineWidthMultiplier: 1.2,
- *     fillOpacity: 0.9,
- *     depthTest: false,
- *     visibleLayers: ['buildings', 'roads'],
- *     buildings3d: true,
- *     buildings3dMinZoom: 17,
- *     buildingEdges: true,
- *     maxTextLabels: 500,
- *     maxTextPointsPerTile: 50,
- *     labelDistanceSortZoom: 17,
- *     labelMaxPerTileClose: 20,
- *     labelCullMargin: 250,
- *     debug: false,
- *     styles: { building: { color: 0xff0000, stroke: 'black' } },
- *     workerScripts: [
- *         'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
- *         'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'
- *     ]
- * });
- *
- * layer.addTo(map);
- * layer.addExclusionArea(geojsonExclusion, ['water', 'landcover']);
- * layer.removeFromMap();
- */
 export class VectorTileLayer {
     constructor(options = {}) {
         this.url = options.url;
 
-        /**
-         * Код СК для GeoJSON-координат exclusion-областей.
-         * null — использовать `map.inputCRS` (по умолчанию WGS84).
-         * @private
-         * @type {string|null}
-         */
         this._crsCode = options.crs ?? null;
-        /**
-         * Зарезолвленный объект Projection. Устанавливается в `addTo`.
-         * @private
-         * @type {import('./Projections.js').Projection|null}
-         */
         this._crs = null;
 
         this.minZoom = options.minZoom ?? 0;
@@ -306,27 +152,21 @@ export class VectorTileLayer {
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;
+        /**
+         * Максимальное 3D-расстояние от подписи до камеры.
+         * 0 = авто: порог = camTargetDist × max(2, 12 / (1 + sinPitch·4)).
+         * При pitch=0 — фактически «без отсечения»; при pitch≈85° — только
+         * то, что рядом с целью камеры.
+         * @type {number}
+         */
+        this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
 
         this._debug = options.debug ?? false;
 
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
-        // =====================================================================
-        // КРИТИЧНО: renderOrder для Group.
-        //
-        // Three.js при обходе сцены НЕ наследует groupOrder через промежуточные
-        // Group — каждая Group сбрасывает унаследованный groupOrder в своё
-        // значение renderOrder. Если у tileGroup (промежуточной) renderOrder
-        // остаётся 0 (по умолчанию), все её дети (Line2, Mesh) получают
-        // groupOrder = 0 — ту же категорию, что и растровые тайлы
-        // (у них renderOrder = z = 18+). Тогда painterSortStable сравнивает
-        // только их собственные renderOrder: line (15) < raster (18) →
-        // растровый тайл рисуется ПОСЛЕ и перекрывает линии.
-        //
-        // Выставление большого renderOrder на tileGroup сдвигает groupOrder
-        // всех её детей выше растра, и они рисуются поверх независимо от
-        // их индивидуального renderOrder.
-        // =====================================================================
+        // См. комментарий в исходной версии: три критичные строки для
+        // корректного z-order относительно растровых тайлов.
         this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
 
         this._map = null;
@@ -345,12 +185,10 @@ export class VectorTileLayer {
         this._lastUpdateTime = 0;
         this._throttle = 500;
 
-        // Счётчик «поколения» загрузок. Увеличивается при любой инвалидации
-        // кэша тайлов (смена sourceZoom, clearAllTiles, invalidateAllTiles).
-        // Ответы воркера, полученные с устаревшим generation, утилизируются.
+        // Поколение загрузок. Инвалидация кэша увеличивает счётчик,
+        // устаревшие ответы воркера утилизируются.
         this._generation = 0;
 
-        // LRU-кэш сырых PBF-буферов. Ограничен по количеству тайлов.
         this._tileDataCache = new Map();
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
 
@@ -363,28 +201,9 @@ export class VectorTileLayer {
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
 
-        /**
-         * Множество материалов, владение которыми принадлежит этому слою и
-         * которые живут в `_fillMaterialCache`/`_lineMaterialCache`. Такие
-         * материалы НЕ должны диспозиться при уничтожении отдельного тайла
-         * (`_disposeTile`) — они разделяются между тайлами и освобождаются
-         * централизованно в `removeFromMap`. Материалы, которых нет в этом
-         * множестве (например, созданные извне), будут диспозиться вместе
-         * с тайлом.
-         * @private
-         * @type {WeakSet<THREE.Material>}
-         */
+        // Материалы/геометрии, разделяемые между тайлами и диспозящиеся
+        // централизованно в removeFromMap. См. _disposeTile.
         this._managedMaterials = new WeakSet();
-
-        /**
-         * Множество геометрий, владение которыми принадлежит этому слою и
-         * которые живут в `_pointGeometryCache` (шарики/точки переиспользуются
-         * между тайлами). Их нельзя диспозить в `_disposeTile` — иначе
-         * сломается отрисовка точек в других тайлах. Освобождаются
-         * централизованно в `removeFromMap`.
-         * @private
-         * @type {WeakSet<THREE.BufferGeometry>}
-         */
         this._managedGeometries = new WeakSet();
 
         this._pointGeometryCache = new Map();
@@ -394,84 +213,29 @@ export class VectorTileLayer {
         this._exclusionLayers = new Set();
 
         this._lastCanvasSize = { width: 0, height: 0 };
-        // Отслеживание перемещения мира для обновления подписей
         this._lastWorldPos = new THREE.Vector3();
         this._lastMovementTime = 0;
         this._lastLabelUpdateTime = 0;
 
-        // --------------------------------------------------------------------
         // Снимок состояния для skip-логики в _postUpdate.
-        //
-        // Если камера/мир/зум не менялись с прошлого полного пересчёта —
-        // не гоняем дорогой `_getVisibleTileKeys` (25 raycast'ов по сетке)
-        // каждый throttle-tick. См. _postUpdate.
-        // --------------------------------------------------------------------
-        /** @private */ this._lastCheckCamPos = new THREE.Vector3();
-        /** @private */ this._lastCheckZoom = -1;
-        /** @private */ this._lastCheckInit = false;
+        this._lastCheckCamPos = new THREE.Vector3();
+        this._lastCheckZoom = -1;
+        this._lastCheckInit = false;
 
-        /**
-         * Флаг «подписи нуждаются в пересборке». Устанавливается при загрузке
-         * нового тайла или при удалении старого. Сбрасывается в _postUpdate
-         * после пересборки. Позволяет избежать немедленной пересборки подписей
-         * при каждом событии загрузки/выгрузки тайла.
-         * @private
-         * @type {boolean}
-         */
         this._labelsDirty = false;
 
-        // --------------------------------------------------------------------
-        // Временные объекты для hot-path (см. заголовок модуля).
-        // --------------------------------------------------------------------
-
-        /**
-         * Raycaster для `_getVisibleTileKeys`. Создаётся один раз и
-         * переиспользуется между вызовами.
-         * @private
-         * @type {THREE.Raycaster}
-         */
+        // Временные объекты для hot-path
         this._raycaster = new THREE.Raycaster();
-
-        /**
-         * NDC-координаты для `_getVisibleTileKeys`.
-         * @private
-         * @type {THREE.Vector2}
-         */
         this._raycastNDC = new THREE.Vector2();
-
-        /**
-         * Плоскость `y = 0` (земля) для пересечений луча.
-         * @private
-         * @type {THREE.Plane}
-         */
         this._raycastPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-
-        /**
-         * Точка пересечения луча с землёй.
-         * @private
-         * @type {THREE.Vector3}
-         */
         this._raycastHit = new THREE.Vector3();
-
-        /**
-         * Временный вектор для проекции мировых координат в NDC
-         * в `_collectLabelCandidates`.
-         * @private
-         * @type {THREE.Vector3}
-         */
         this._tempVec3 = new THREE.Vector3();
-
-        /**
-         * Временный Vector2 для установки resolution у LineMaterial
-         * при изменении размеров canvas.
-         * @private
-         * @type {THREE.Vector2}
-         */
         this._canvasSizeVec = new THREE.Vector2();
 
-        // --------------------------------------------------------------------
-
-        const rawScripts = options.workerScripts || ['https://cdn.mapengine.ru/KRB/js_TP/tpb.js', 'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'];
+        const rawScripts = options.workerScripts || [
+            'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
+            'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'
+        ];
         this._workerScriptUrls = rawScripts.map(s => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
             try {
@@ -492,16 +256,10 @@ export class VectorTileLayer {
     }
 
     /**
-     * Инициализирует Web Worker.
-     *
-     * Код воркера собирается один раз на пару (tpbUrl, earcutUrl) и кэшируется
-     * на уровне модуля (см. `_getSharedWorkerBlobUrl`). Первый слой на странице
-     * платит за fetch/base64/Blob, остальные переиспользуют готовый blob-URL.
-     * Каждый слой всё равно создаёт свой Worker — это отдельный поток со своим
-     * V8 isolate, но разделяемая часть (сборка кода) — общая.
-     *
+     * Создаёт воркер. Код собирается один раз на пару (tpbUrl, earcutUrl)
+     * и кэшируется на уровне модуля.
      * @private
-     * @returns {Promise<void>} Промис готовности воркера.
+     * @returns {Promise<void>}
      */
     async _initWorker() {
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
@@ -510,7 +268,6 @@ export class VectorTileLayer {
             this._worker = new Worker(blobUrl, { type: 'module' });
             this._worker.onmessage = (e) => this._onWorkerMessage(e.data);
             this._worker.onerror = (err) => console.error('VectorTile worker error:', err);
-
             this._worker.postMessage({ type: 'config', styles: this._styles });
         } catch (err) {
             console.error('Failed to initialize worker:', err);
@@ -518,11 +275,8 @@ export class VectorTileLayer {
     }
 
     /**
-     * Обрабатывает сообщение от воркера.
-     * Проверяет актуальность полученного результата по generation.
-     *
+     * Обработка ответа воркера. Проверяет актуальность по generation.
      * @private
-     * @param {Object} data - Данные сообщения.
      */
     _onWorkerMessage(data) {
         if (!data || typeof data.id === 'undefined') return;
@@ -531,21 +285,11 @@ export class VectorTileLayer {
         if (!pending) return;
         this._pendingWorkerRequests.delete(data.id);
 
-        if (data.error) {
-            pending.reject(new Error(data.error));
-            return;
-        }
+        if (data.error) { pending.reject(new Error(data.error)); return; }
+        if (!data.result) { pending.reject(new Error('Worker returned no result')); return; }
 
-        if (!data.result) {
-            pending.reject(new Error('Worker returned no result'));
-            return;
-        }
-
-        // Устаревший ответ — утилизируем без добавления в сцену.
         if (pending.generation !== this._generation) {
-            if (pending.group) {
-                this._disposeTile(pending.group);
-            }
+            if (pending.group) this._disposeTile(pending.group);
             pending.resolve(null);
             return;
         }
@@ -568,48 +312,27 @@ export class VectorTileLayer {
             if (existing && existing !== group) this._disposeTile(existing);
             this._tileCache.set(key, group);
         }
-        // Подписи нового/перестроенного тайла должны быть пересобраны
-        // в рамках глобального пула (см. _refreshTextLabelsForVisibleTiles).
         this._labelsDirty = true;
         pending.resolve(group);
     }
 
     /**
      * Строит Three.js-группу тайла из результата воркера.
-     *
-     * Здесь вызывается «жёсткий» сброс подписей группы: при пересборке
-     * геометрии старые подписи удаляются из TextManager, а новые будут
-     * пересозданы (или переиспользованы с обновлёнными источниками) в
-     * рамках ближайшего {@link VectorTileLayer#_refreshTextLabelsForVisibleTiles}.
-     *
      * @private
-     * @param {THREE.Group} group - Целевая группа.
-     * @param {Object} result - Результат обработки воркера.
+     * @param {THREE.Group} group
+     * @param {Object} result
      */
     _buildGroupFromWorkerResult(group, result) {
         this._removeTextLabelsForGroup(group);
 
-        // =====================================================================
-        // КРИТИЧНО: renderOrder для tileGroup.
-        //
-        // Three.js при обходе сцены НЕ наследует groupOrder через промежуточные
-        // Group — каждая Group сбрасывает унаследованный groupOrder в своё
-        // значение renderOrder. Если здесь НЕ выставить renderOrder, он
-        // останется 0 (по умолчанию), и все дети этой группы получат
-        // groupOrder = 0 — тот же, что у растровых тайлов (renderOrder = z = 18+).
-        // В результате растр рисуется ПОСЛЕ линий и перекрывает их.
-        //
-        // НЕ УДАЛЯТЬ. Отсутствие этой строки = линии не видны ближе к камере
-        // (там, где растр перекрывает периферию). См. описание модуля.
-        // =====================================================================
+        // КРИТИЧНО: см. исходный комментарий. Не удалять — иначе
+        // растр перекрывает линии из-за сброса groupOrder через Group.
         group.renderOrder = this._tileGroupRenderOrder;
 
         if (result.centerX !== undefined && result.centerZ !== undefined) {
             group.position.set(result.centerX, 0, result.centerZ);
         }
 
-        // Освобождаем старые ресурсы перед пересборкой. Управляемые материалы
-        // и геометрии (_managedMaterials/_managedGeometries) не трогаем.
         while (group.children.length) {
             const child = group.children[0];
             if (child.geometry && !this._managedGeometries.has(child.geometry)) {
@@ -689,26 +412,20 @@ export class VectorTileLayer {
             group.add(mesh);
         }
 
-        // Сохраняем «сырые» текстовые точки тайла — DOM-подписи будут
-        // созданы позже в _refreshTextLabelsForVisibleTiles уже с глобальной
-        // сортировкой и глобальным бюджетом.
         group.userData.textPointsData = result.textPoints || [];
         group.userData.textLabels = [];
         group.userData.is3d = result.is3d;
     }
 
     /**
-     * Пересобирает все текстовые подписи для всех видимых тайлов.
+     * Пересобирает подписи для всех видимых тайлов с глобальной сортировкой
+     * и глобальным бюджетом. Подписи переиспользуются по stableId — без
+     * мерцания при массовой пересборке.
      *
-     * Ключевое отличие от старой реализации: НЕ удаляет DOM-подписи всех
-     * групп в начале. Вместо этого каждый кандидат передаётся в TextManager
-     * вместе со стабильным id (`group.uuid + ':' + индексВTextPointsData`).
-     * Если подпись с таким id уже существует — она переиспользуется (без
-     * пересоздания DOM), если нет — создаётся. По завершении вызывается
-     * `pruneStaleLabels(activeIds)` для удаления тех, чьи id больше не активны.
-     *
-     * Это устраняет мерцание: DOM-узлы не уничтожаются и не создаются заново
-     * при каждом обновлении, а переиспользуются.
+     * Сортировка идёт по 3D-расстоянию до камеры (`camDistSq`): при наклоне
+     * это даёт правильный порядок «ближние к камере — первыми», в отличие
+     * от расстояния до controls.target, которое при высоком pitch ведёт себя
+     * иначе.
      *
      * @private
      */
@@ -716,28 +433,21 @@ export class VectorTileLayer {
         if (!this._map || !this._map.textManager) return;
         const textManager = this._map.textManager;
 
-        // 1. Собираем кандидатов со всех видимых групп. Каждый кандидат
-        //    теперь несёт стабильный id (см. _collectLabelCandidates).
         const { candidates, isClose } = this._collectLabelCandidates();
 
-        // 2. Глобальная сортировка и отбор top-N по бюджету.
         let selected;
         if (candidates.length === 0) {
             selected = [];
         } else {
             if (isClose) {
-                candidates.sort((a, b) => a.distSq - b.distSq || b.priority - a.priority);
+                candidates.sort((a, b) => a.camDistSq - b.camDistSq || b.priority - a.priority);
             } else {
-                candidates.sort((a, b) => b.priority - a.priority || a.distSq - b.distSq);
+                candidates.sort((a, b) => b.priority - a.priority || a.camDistSq - b.camDistSq);
             }
             const limit = Math.min(candidates.length, this.maxTextLabels);
             selected = candidates.slice(0, limit);
         }
 
-        // 3. Создаём / переиспользуем подписи, попутно аккумулируя:
-        //    - activeIds: stableId всех живых в этом кадре подписей;
-        //    - groupLabels: Map<group, label[]> — какой группе какие
-        //      подписи сейчас принадлежат (для пересборки userData).
         const activeIds = new Set();
         const groupLabels = new Map();
 
@@ -775,13 +485,8 @@ export class VectorTileLayer {
             arr.push(label);
         }
 
-        // 4. Удаляем из TextManager все подписи, чьи stableId не попали
-        //    в activeIds (вышли из бюджета, потеряли видимость, тайл
-        //    выгрузился и т.п.).
         textManager.pruneStaleLabels(activeIds);
 
-        // 5. Пересобираем userData.textLabels для всех видимых групп.
-        //    Группы, у которых подписей нет, получают пустой массив.
         this._tileCache.forEach(g => {
             const arr = groupLabels.get(g);
             g.userData.textLabels = arr || [];
@@ -789,20 +494,17 @@ export class VectorTileLayer {
     }
 
     /**
-     * Проходит по всем видимым группам тайлов, собирает «сырые» текстовые точки
-     * и возвращает массив кандидатов вместе с флагом isClose (близкий ли зум).
+     * Собирает кандидатов на подпись со всех видимых тайлов.
      *
-     * Каждый кандидат содержит:
-     *  - `pt` — исходная запись из `group.userData.textPointsData`;
-     *  - `group` — THREE.Group тайла;
-     *  - `id` — **стабильный** идентификатор подписи вида `group.uuid + ':' + i`,
-     *    где `i` — индекс записи в `textPointsData`. Стабилен, пока жив объект
-     *    группы; при пересоздании тайла группа получает новый uuid, а значит
-     *    старые подписи корректно «вымываются» через pruneStaleLabels.
-     *  - `distSq` — квадрат расстояния до цели камеры;
-     *  - `priority` — приоритет;
-     *  - `sx`, `sy` — экранные координаты (для отладки; кешировать не нужно,
-     *    т.к. используется только для отсечения).
+     * Cull выполняется в два этапа:
+     *  1. Hard-cull по 3D-расстоянию от подписи (y=0) до камеры. Порог
+     *     в авто-режиме сужается при наклоне камеры — на горизонте подписи
+     *     перестают сливаться в «кашу».
+     *  2. Экранный cull по labelCullMargin — отсекает то, что за пределами
+     *     viewport'а (с запасом на prep).
+     *
+     * Каждый кандидат содержит `camDistSq` (квадрат 3D-расстояния до камеры)
+     * — используется для сортировки в _refreshTextLabelsForVisibleTiles.
      *
      * @private
      * @returns {{candidates: Array<Object>, isClose: boolean}}
@@ -812,16 +514,36 @@ export class VectorTileLayer {
         const camera = map.camera;
         const continuousZoom = map.continuousZoom;
         const discreteZoom = map.currentDiscreteZoom;
-        const targetWorld = map.controls.target;
         const worldOffset = map.worldGroup.position;
         const rect = map.renderer.domElement.getBoundingClientRect();
 
         const cullMargin = this.labelCullMargin ?? 250;
         const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
 
-        // Один переиспользуемый вектор — избегаем аллокаций в цикле.
-        const tempVec = this._tempVec3;
+        // -------- Cull по расстоянию до камеры ------------------------------
+        // При высоком pitch горизонт заполняется дальними подписями. Порог
+        // масштабируется с camTargetDist и сужается по sinPitch.
+        const cameraPos = camera.position;
+        const camTargetDist = cameraPos.distanceTo(map.controls.target);
 
+        let maxLabelDist = this.labelMaxCameraDistance;
+        if (!(maxLabelDist > 0)) {
+            const sinPitch = camTargetDist > 0
+                ? Math.max(0, Math.min(1, (cameraPos.y - map.controls.target.y) / camTargetDist))
+                : 0;
+            // pitch=0:   ~12 × camTargetDist (без отсечения)
+            // pitch=85°: ~2.4 × camTargetDist (только у цели)
+            // Нижний предел 2.0 — страховка от вырожденных случаев.
+            maxLabelDist = camTargetDist * Math.max(2.0, 12 / (1 + sinPitch * 4));
+        }
+        const maxLabelDistSq = maxLabelDist * maxLabelDist;
+
+        const camPosX = cameraPos.x;
+        const camPosY = cameraPos.y;
+        const camPosZ = cameraPos.z;
+        // ------------------------------------------------------------------
+
+        const tempVec = this._tempVec3;
         const candidates = [];
         const rectW = rect.width;
         const rectH = rect.height;
@@ -842,13 +564,15 @@ export class VectorTileLayer {
                 const worldX = pt.x + gx;
                 const worldZ = pt.z + gz;
 
-                const dx = worldX - targetWorld.x;
-                const dz = worldZ - targetWorld.z;
-                const distSq = dx * dx + dz * dz;
+                // 3D-расстояние от подписи (лежит на y=0) до камеры.
+                const camDx = worldX - camPosX;
+                const camDy = -camPosY;
+                const camDz = worldZ - camPosZ;
+                const camDistSq = camDx * camDx + camDy * camDy + camDz * camDz;
+
+                if (camDistSq > maxLabelDistSq) continue;
 
                 tempVec.set(worldX, 0, worldZ).project(camera);
-                // NDC z за пределами [-1, 1] — точка позади камеры или вне
-                // ближней/дальней плоскостей.
                 if (tempVec.z > 1 || tempVec.z < -1) continue;
 
                 const sx = (tempVec.x * 0.5 + 0.5) * rectW;
@@ -867,7 +591,7 @@ export class VectorTileLayer {
                     pt,
                     group,
                     id: groupIdPrefix + i,
-                    distSq,
+                    camDistSq,
                     priority: pt.priority || 0,
                     sx,
                     sy,
@@ -879,15 +603,10 @@ export class VectorTileLayer {
     }
 
     /**
-     * Удаляет все DOM-подписи, привязанные к конкретной группе тайла.
-     *
-     * «Жёсткий» путь очистки: используется при уничтожении/пересборке группы.
-     * В штатном цикле обновления ({@link VectorTileLayer#_refreshTextLabelsForVisibleTiles})
-     * этот метод НЕ вызывается — там подписи переиспользуются по stableId,
-     * а устаревшие удаляются через `TextManager.pruneStaleLabels`.
-     *
+     * Жёстко снимает DOM-подписи с конкретной группы (при её уничтожении
+     * или пересборке). В штатном цикле не вызывается — там работает pruneStaleLabels.
      * @private
-     * @param {THREE.Group} group - Группа тайла.
+     * @param {THREE.Group} group
      */
     _removeTextLabelsForGroup(group) {
         if (group.userData.textLabels && this._map && this._map.textManager) {
@@ -898,31 +617,14 @@ export class VectorTileLayer {
         group.userData.textLabels = [];
     }
 
-    /**
-     * Возвращает материал заливки по данным из воркера.
-     *
-     * @private
-     * @param {string} layerName - Имя слоя.
-     * @param {number} color - Цвет в 0xRRGGBB.
-     * @param {number} [opacity] - Прозрачность (0..1).
-     * @returns {THREE.MeshBasicMaterial}
-     */
+    /** @private */
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
         return this._getFillMaterial(key);
     }
 
-    /**
-     * Возвращает материал линии по данным из воркера.
-     *
-     * @private
-     * @param {string} layerName - Имя слоя.
-     * @param {number} color - Цвет в 0xRRGGBB.
-     * @param {number} width - Ширина линии в пикселях.
-     * @param {number[]} [dash] - Массив [dashSize, gapSize].
-     * @returns {LineMaterial}
-     */
+    /** @private */
     _getLineMaterialFromData(layerName, color, width, dash) {
         const dashKey = dash ? dash.join(',') : 'none';
         const key = `line:${layerName}:${color.toString(16)}:${width}:${dashKey}`;
@@ -934,20 +636,17 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
 
     /**
-     * Добавляет область исключения. Геометрия указанных слоёв, пересекающаяся с этой областью,
-     * не будет отображаться.
-     *
-     * @param {Object} collection - GeoJSON (FeatureCollection, Feature или Geometry).
-     * @param {Array<string>} layers - Список имён слоёв, к которым применяется исключение.
-     * @returns {VectorTileLayer} Текущий экземпляр слоя.
-     * @throws {Error} Если слой не добавлен на карту или передан некорректный GeoJSON.
+     * Добавляет область исключения. Геометрия указанных слоёв внутри
+     * области не будет отображаться. Вызывать после addTo.
+     * @param {Object} collection - GeoJSON
+     * @param {Array<string>} layers
+     * @returns {VectorTileLayer}
      */
     addExclusionArea(collection, layers) {
         if (!this._map) {
             throw new Error('VectorTileLayer.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
         }
 
-        // Извлекаем полигоны из GeoJSON
         const geometries = [];
         if (collection.type === 'FeatureCollection') {
             for (const feature of collection.features) geometries.push(feature.geometry);
@@ -959,7 +658,6 @@ export class VectorTileLayer {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
 
-        // Резолвим CRS: либо заданный у слоя, либо inputCRS карты.
         const crs = this._crsCode
             ? Projections.get(this._crsCode)
             : this._map.inputCRS;
@@ -969,7 +667,7 @@ export class VectorTileLayer {
             if (!geom) continue;
             let rings = [];
             if (geom.type === 'Polygon') {
-                rings = [geom.coordinates[0]]; // внешнее кольцо
+                rings = [geom.coordinates[0]];
             } else if (geom.type === 'MultiPolygon') {
                 rings = geom.coordinates.map(poly => poly[0]);
             } else {
@@ -979,7 +677,6 @@ export class VectorTileLayer {
 
             for (const ring of rings) {
                 const worldRing = ring.map(pt => {
-                    // Координата [x, y] в СК слоя → метры проекции карты.
                     const [x, z] = this._map.project(pt, crs);
                     return { x, z };
                 });
@@ -990,16 +687,11 @@ export class VectorTileLayer {
         this._exclusionAreas = worldPolygons;
         this._exclusionLayers = new Set(layers);
 
-        // Принудительно пересоздаём все тайлы
         this._invalidateAllTiles();
-
         return this;
     }
 
-    /**
-     * Полностью сбрасывает кэш тайлов и состояния, принуждая к пересозданию всех тайлов.
-     * @private
-     */
+    /** @private */
     _invalidateAllTiles() {
         this._clearAllTiles();
         this._clearGroupCache();
@@ -1007,19 +699,10 @@ export class VectorTileLayer {
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;
         this._labelsDirty = true;
-        // После явной инвалидации не хотим, чтобы skip-логика в _postUpdate
-        // решила «ничего не поменялось» и пропустила пересчёт.
         this._lastCheckInit = false;
     }
 
-    /**
-     * Рекурсивно сливает пользовательские стили с базовыми.
-     *
-     * @private
-     * @param {Object} base - Базовые стили.
-     * @param {Object} overrides - Переопределения.
-     * @returns {Object} Новый объект стилей.
-     */
+    /** @private */
     _mergeStyles(base, overrides) {
         const merged = JSON.parse(JSON.stringify(base));
         for (const [key, val] of Object.entries(overrides)) {
@@ -1033,26 +716,18 @@ export class VectorTileLayer {
     }
 
     /**
-     * Добавляет слой на карту и подписывается на обновления.
-     *
-     * @param {import('./KrbMap.js').KrbMap} map - Объект карты, к которой добавляется слой.
-     * @returns {VectorTileLayer} Текущий экземпляр слоя для цепочки вызовов.
-     * @throws {Error} Если карта не содержит необходимых методов или свойств.
+     * Добавляет слой на карту.
+     * @param {import('./KrbMap.js').KrbMap} map
+     * @returns {VectorTileLayer}
      */
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
 
-        // Резолвим СК для exclusion-областей.
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
 
-        // См. комментарий у _tileGroupRenderOrder. Здесь выставляем renderOrder
-        // на корневую группу слоя. Само по себе это ничего не даёт (промежуточные
-        // tileGroup всё равно сбросят groupOrder), но пусть будет — на случай,
-        // если в будущем дерево упростится и tileGroup станет прямой дочерью
-        // _rootGroup без посредников.
         this._rootGroup.renderOrder = this._tileGroupRenderOrder;
 
         map.worldGroup.add(this._rootGroup);
@@ -1063,30 +738,19 @@ export class VectorTileLayer {
         }
 
         this._labelsDirty = true;
-        // Новый слой — никакого состояния для skip-логики ещё нет.
         this._lastCheckInit = false;
-
         return this;
     }
 
     /**
-     * Удаляет слой с карты и освобождает все занятые ресурсы.
-     *
-     * @returns {void} Ничего не возвращает.
+     * Удаляет слой с карты и освобождает все ресурсы.
      */
     removeFromMap() {
         if (!this._map) return;
 
-        // Останавливаем все таймеры и реджектим висящие промисы,
-        // иначе они повиснут навсегда.
-        if (this._queueTimer) {
-            clearTimeout(this._queueTimer);
-            this._queueTimer = null;
-        }
-        if (this._oldTileCleanupTimer) {
-            clearTimeout(this._oldTileCleanupTimer);
-            this._oldTileCleanupTimer = null;
-        }
+        if (this._queueTimer) { clearTimeout(this._queueTimer); this._queueTimer = null; }
+        if (this._oldTileCleanupTimer) { clearTimeout(this._oldTileCleanupTimer); this._oldTileCleanupTimer = null; }
+
         for (const pending of this._pendingWorkerRequests.values()) {
             try { pending.reject(new Error('Layer removed')); } catch (e) {}
         }
@@ -1117,39 +781,24 @@ export class VectorTileLayer {
         this._lastCheckInit = false;
     }
 
-    /**
-     * Полностью очищает все активные тайлы и инвалидирует in-flight загрузки.
-     *
-     * @private
-     */
+    /** @private */
     _clearAllTiles() {
-        // Инвалидация: все in-flight ответы воркера считаются устаревшими.
         this._generation++;
         this._tileCache.forEach(group => this._disposeTile(group));
         this._tileCache.clear();
         this._pendingLoads.clear();
         this._sortedLoadQueue = [];
         this._clearOldTilesNow();
-        // НЕ сбрасываем _activeLoads: реальные in-flight запросы
-        // сами уменьшат его в finally.
         this._labelsDirty = true;
     }
 
-    /**
-     * Очищает кэш готовых групп тайлов.
-     *
-     * @private
-     */
+    /** @private */
     _clearGroupCache() {
         this._groupCache.forEach(group => this._disposeTile(group));
         this._groupCache.clear();
     }
 
-    /**
-     * Немедленно освобождает группы старых тайлов (previous generation).
-     *
-     * @private
-     */
+    /** @private */
     _clearOldTilesNow() {
         if (this._oldTileCleanupTimer) {
             clearTimeout(this._oldTileCleanupTimer);
@@ -1162,31 +811,19 @@ export class VectorTileLayer {
     }
 
     /**
-     * Полностью освобождает ресурсы тайла: подписи, геометрии и материалы.
-     *
+     * Освобождает ресурсы тайла. Управляемые материалы/геометрии не трогает.
      * @private
-     * @param {THREE.Group} group - Группа тайла, подлежащая уничтожению.
+     * @param {THREE.Group} group
      */
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
 
-        // Обходим всё дерево: у группы теоретически могут быть вложенные
-        // узлы, и мы не хотим оставить висящие GPU-ресурсы.
         group.traverse(child => {
             if (child === group) return;
-
             const geom = child.geometry;
-            if (geom && !this._managedGeometries.has(geom)) {
-                geom.dispose();
-            }
-
+            if (geom && !this._managedGeometries.has(geom)) geom.dispose();
             const mat = child.material;
-            if (mat && !this._managedMaterials.has(mat)) {
-                // LineMaterial/MeshBasicMaterial/MeshLambertMaterial/
-                // LineBasicMaterial — все наследуют Material.dispose().
-                // Опциональный вызов на случай экзотических реализаций.
-                mat.dispose?.();
-            }
+            if (mat && !this._managedMaterials.has(mat)) mat.dispose?.();
         });
 
         while (group.children.length) {
@@ -1196,21 +833,15 @@ export class VectorTileLayer {
     }
 
     /**
-     * Убирает тайл из активного кэша. Готовую группу кладёт в `_groupCache`
-     * (LRU), при переполнении — диспозит самую старую.
-     *
+     * Убирает тайл из активного кэша, готовую группу кладёт в LRU `_groupCache`.
      * @private
-     * @param {string} key - Ключ тайла "z,x,y".
-     * @param {THREE.Group} group - Группа тайла.
+     * @param {string} key
+     * @param {THREE.Group} group
      */
     _removeTile(key, group) {
         this._rootGroup.remove(group);
         this._tileCache.delete(key);
         if (!this._groupCache.has(key)) {
-            // «Жёсткий» путь: тайл уходит из сцены, подписи удаляются
-            // немедленно. Альтернатива — дать pruneStaleLabels сделать это
-            // в ближайшем refresh; но так как группа кэшируется без подписей,
-            // удаляем сразу, чтобы не тащить висячие ссылки.
             this._removeTextLabelsForGroup(group);
             this._groupCache.set(key, group);
             if (this._groupCache.size > this._groupCacheMaxSize) {
@@ -1223,12 +854,7 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Планирует отложенную очистку групп предыдущего поколения.
-     *
-     * @private
-     * @param {number} [delay=1500] - Задержка в мс.
-     */
+    /** @private */
     _scheduleOldTilesCleanup(delay = 1500) {
         if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
         this._oldTileCleanupTimer = setTimeout(() => {
@@ -1244,15 +870,8 @@ export class VectorTileLayer {
     // LRU-кэш сырых PBF-буферов
     // -------------------------------------------------------------------------
 
-    /**
-     * Записывает буфер в LRU-кэш сырых PBF.
-     *
-     * @private
-     * @param {string} key - Ключ тайла "z/x/y".
-     * @param {ArrayBuffer} buffer - Сырые данные.
-     */
+    /** @private */
     _setTileDataCache(key, buffer) {
-        // Перезапись перемещает ключ в конец (как «свежий»).
         this._tileDataCache.delete(key);
         this._tileDataCache.set(key, buffer);
         while (this._tileDataCache.size > this._tileDataCacheMaxSize) {
@@ -1261,49 +880,31 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Возвращает буфер из LRU-кэша (с «освежением» ключа).
-     *
-     * @private
-     * @param {string} key - Ключ тайла "z/x/y".
-     * @returns {ArrayBuffer|undefined}
-     */
+    /** @private */
     _getTileDataCache(key) {
         const val = this._tileDataCache.get(key);
         if (val === undefined) return undefined;
-        // Освежаем «свежесть».
         this._tileDataCache.delete(key);
         this._tileDataCache.set(key, val);
         return val;
     }
 
     /**
-     * Ежекадровый пост-апдейт слоя, вызывается из KrbMap.animate().
+     * Ежекадровый пост-апдейт слоя.
      *
-     * Занимается:
-     *  - отслеживанием перемещения мира (для триггера обновления подписей);
-     *  - проверкой видимости слоя по зуму;
-     *  - инвалидацией кэша при смене sourceZoom;
-     *  - обновлением resolution LineMaterial при смене размера canvas;
-     *  - вычислением видимых тайлов и запуском загрузки недостающих;
-     *  - пересборкой подписей по триггерам (_labelsDirty, settle, periodic).
-     *
-     * Внутри троттлится (раз в `_throttle` мс). Между троттл-тиками
-     * выполняется дешёвая проверка «изменилось ли что-то существенное»
-     * (камера/мир/дискретный зум) — если нет, дорогие вычисления
-     * (`_getVisibleTileKeys` с 25 raycast'ами, пересборка подписей)
-     * пропускаются. Остаётся только `_processQueue()` — на случай,
-     * если освободились слоты параллельных загрузок.
+     * Троттлится раз в `_throttle` мс. Между троттл-тиками выполняется
+     * дешёвая skip-проверка (камера/мир/зум не изменились и подписи не
+     * dirty) — в этом случае дорогие вычисления пропускаются, остаётся
+     * только `_processQueue()`.
      *
      * @private
-     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * @param {import('./KrbMap.js').KrbMap} map
      */
     _postUpdate(map) {
         if (!this._map) return;
 
-        // Обновляем информацию о перемещении мира (легковесная проверка каждый кадр)
         const worldPos = map.worldGroup.position;
-        if (this._lastWorldPos.distanceToSquared(worldPos) > 1) { // порог 1 метр
+        if (this._lastWorldPos.distanceToSquared(worldPos) > 1) {
             this._lastWorldPos.copy(worldPos);
             this._lastMovementTime = performance.now();
         }
@@ -1315,13 +916,8 @@ export class VectorTileLayer {
         }
         this._lastUpdateTime = now;
 
-        // -----------------------------------------------------------------
-        // Skip-логика: если камера/мир/дискретный зум не менялись
-        // с прошлого полного пересчёта и подписи не помечены dirty —
-        // не гоняем дорогой `_getVisibleTileKeys` (25 raycast'ов)
-        // и не пересобираем подписи. Остаётся только `_processQueue()`,
-        // чтобы дозагрузить недостающие тайлы, если освободились слоты.
-        // -----------------------------------------------------------------
+        // Skip-логика: камера/мир/зум не менялись, подписи не dirty —
+        // не гоняем дорогие вычисления.
         const camPos = map.camera.position;
         const discreteZoom = map.currentDiscreteZoom;
 
@@ -1336,12 +932,9 @@ export class VectorTileLayer {
             return;
         }
 
-        // Снимок состояния для следующей skip-проверки.
         this._lastCheckInit = true;
         this._lastCheckCamPos.copy(camPos);
         this._lastCheckZoom = discreteZoom;
-
-        // -----------------------------------------------------------------
 
         if (discreteZoom < this.minZoom || discreteZoom > this.maxZoom) {
             if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
@@ -1358,8 +951,6 @@ export class VectorTileLayer {
             if (was3d !== is3d) {
                 this._lastSourceZoom = -1;
             }
-            // Смена дискретного зума всегда инвалидирует подписи —
-            // изменилась видимость по zoomBounds.
             this._labelsDirty = true;
         }
         this._lastDiscreteZoom = discreteZoom;
@@ -1367,8 +958,6 @@ export class VectorTileLayer {
         const sourceZoom = Math.max(this.minZoom, Math.min(discreteZoom, this.maxSourceZoom));
 
         if (sourceZoom !== this._lastSourceZoom) {
-            // Смена sourceZoom = полная инвалидация кэша тайлов.
-            // Увеличиваем generation — все in-flight ответы будут отброшены.
             this._generation++;
             this._clearOldTilesNow();
             if (this._tileCache.size > 0) {
@@ -1395,7 +984,6 @@ export class VectorTileLayer {
             (this._lastCanvasSize.width !== w || this._lastCanvasSize.height !== h)) {
             this._lastCanvasSize.width = w;
             this._lastCanvasSize.height = h;
-            // Переиспользуем Vector2, чтобы не аллоцировать в hot-path.
             this._canvasSizeVec.set(w, h);
             this._lineMaterialsSet.forEach(mat => mat.resolution.copy(this._canvasSizeVec));
         }
@@ -1411,10 +999,7 @@ export class VectorTileLayer {
             }
         }
 
-        // Пересборка подписей — по любому из триггеров:
-        //  - _labelsDirty (загрузился/удалился тайл, сменился зум);
-        //  - движение мира завершилось недавно (settleUpdateDue);
-        //  - мир движется и прошла секунда (periodicUpdateDue).
+        // Пересборка подписей: dirty / settle / periodic.
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
@@ -1431,16 +1016,11 @@ export class VectorTileLayer {
         const target = map.controls.target;
         const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
 
-        // ВАЖНО: сортировка ключей по расстоянию до цели камеры.
-        // Раньше компаратор делал split(',') на каждое сравнение — при сотнях
-        // тайлов это давало O(n log n) × 4 split'а. Теперь парсим каждый ключ
-        // ровно один раз и сортируем по предвычисленной distSq.
         const targetX = target.x;
         const targetZ = target.z;
         const unsortedNewKeys = [];
         visibleTiles.forEach(key => {
             if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
-            // Формат ключа — "z,x,y" (см. _getVisibleTileKeys).
             const comma1 = key.indexOf(',');
             const comma2 = key.indexOf(',', comma1 + 1);
             const xa = +key.slice(comma1 + 1, comma2);
@@ -1461,11 +1041,7 @@ export class VectorTileLayer {
         this._processQueue();
     }
 
-    /**
-     * Запускает загрузку из очереди в пределах лимита параллельных запросов.
-     *
-     * @private
-     */
+    /** @private */
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) {
@@ -1484,13 +1060,9 @@ export class VectorTileLayer {
     }
 
     /**
-     * Загружает тайл: либо берёт готовую группу из кэша (при совпадении is3d),
-     * либо тянет PBF (из LRU-кэша или по URL) и отправляет в воркер.
-     *
+     * Загружает тайл: из groupCache (если is3d совпадает) либо
+     * fetch + sendToWorker.
      * @private
-     * @param {number} z - Зум.
-     * @param {number} xSlippy - X в slippy-нотации.
-     * @param {number} ySlippy - Y в slippy-нотации.
      */
     async _loadTile(z, xSlippy, ySlippy) {
         const key = `${z},${xSlippy},${ySlippy}`;
@@ -1517,7 +1089,7 @@ export class VectorTileLayer {
                             this._labelsDirty = true;
                         }
                     } catch (err) {
-                        // игнорируем
+                        // ignore
                     } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
@@ -1561,7 +1133,7 @@ export class VectorTileLayer {
                 this._labelsDirty = true;
             }
         } catch (err) {
-            // игнорируем ошибки загрузки
+            // ignore fetch/worker errors
         } finally {
             this._pendingLoads.delete(key);
             this._activeLoads--;
@@ -1575,16 +1147,9 @@ export class VectorTileLayer {
     }
 
     /**
-     * Отправляет буфер тайла в воркер и возвращает промис с результатом.
-     *
+     * Отправляет буфер тайла в воркер.
      * @private
-     * @param {ArrayBuffer} buffer - Сырые PBF-данные.
-     * @param {number} z - Зум.
-     * @param {number} x - X в slippy-нотации.
-     * @param {number} y - Y в slippy-нотации.
-     * @param {boolean} is3d - Строить ли 3D-здания.
-     * @param {THREE.Group} [existingGroup] - Существующая группа (для пересборки).
-     * @returns {Promise<THREE.Group|null>} Промис с группой тайла.
+     * @returns {Promise<THREE.Group|null>}
      */
     async _sendToWorker(buffer, z, x, y, is3d, existingGroup) {
         await this._workerReady;
@@ -1630,12 +1195,11 @@ export class VectorTileLayer {
     }
 
     /**
-     * Вычисляет множество ключей тайлов, которые нужно загрузить/держать
-     * для текущего вида камеры.
-     *
+     * Вычисляет множество видимых тайлов текущего вида.
+     * 5×5 raycast'ов по земле + fallback по FOV + margin.
      * @private
-     * @param {number} z - Уровень зума тайлов.
-     * @returns {Set<string>} Множество ключей вида "z,x,y".
+     * @param {number} z
+     * @returns {Set<string>}
      */
     _getVisibleTileKeys(z) {
         const map = this._map;
@@ -1650,8 +1214,6 @@ export class VectorTileLayer {
         const plane = this._raycastPlane;
         const hit = this._raycastHit;
 
-        // Всегда добавляем в AABB точку под камерой — гарантия, что тайл
-        // «под ногами» точно будет загружен.
         const camXLocal = camera.position.x - off.x;
         const camZLocal = camera.position.z - off.z;
         let minX = camXLocal, maxX = camXLocal;
@@ -1661,11 +1223,8 @@ export class VectorTileLayer {
         const maxLoadDist = Math.max(camTargetDist * 6, tileSize * 48);
         const maxLoadDistSq = maxLoadDist * maxLoadDist;
 
-        // Отсекаем лучи, которые почти параллельны земле: их пересечение
-        // с плоскостью неустойчиво и даёт точки «у горизонта».
         const MIN_RAY_Y = Math.sin(3 * Math.PI / 180);
-
-        const GRID = 5; // 5×5 = 25 лучей
+        const GRID = 5;
         let hitsCount = 0;
 
         for (let i = 0; i < GRID; i++) {
@@ -1692,8 +1251,6 @@ export class VectorTileLayer {
             }
         }
 
-        // Fallback: слишком мало успешных пересечений (например, камера
-        // смотрит почти в небо) — расширяем AABB от цели камеры по её FOV.
         if (hitsCount < 4) {
             const target = map.controls.target;
             const distance = camera.position.distanceTo(target);
@@ -1709,8 +1266,6 @@ export class VectorTileLayer {
             if (targetZLocal + hv > maxZ) maxZ = targetZLocal + hv;
         }
 
-        // Буфер в 1.5 тайла вокруг AABB — компенсирует быстрый пан и
-        // даёт время на загрузку при подлёте к границе экрана.
         const margin = tileSize * 1.5;
         minX -= margin; maxX += margin;
         minZ -= margin; maxZ += margin;
@@ -1733,15 +1288,7 @@ export class VectorTileLayer {
     // Кеширование материалов
     // -------------------------------------------------------------------------
 
-    /**
-     * Возвращает (при необходимости создаёт) разделяемый материал заливки.
-     * Созданный материал регистрируется в `_managedMaterials` — он общий
-     * для всех тайлов и не должен диспозиться в `_disposeTile`.
-     *
-     * @private
-     * @param {string} styleKey - Ключ вида `fill:<layer>:<hex>:<opacity>`.
-     * @returns {THREE.MeshBasicMaterial}
-     */
+    /** @private */
     _getFillMaterial(styleKey) {
         if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1764,17 +1311,7 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /**
-     * Возвращает (при необходимости создаёт) разделяемый материал линии.
-     * Созданный материал регистрируется в `_managedMaterials` и добавляется
-     * в `_lineMaterialsSet` для централизованного обновления `resolution`
-     * при изменении размера канваса.
-     *
-     * @private
-     * @param {string} styleKey - Ключ вида `line:<layer>:<hex>:<width>:<dash>`.
-     * @param {number[]} [dash] - Опциональный массив [dashSize, gapSize].
-     * @returns {LineMaterial}
-     */
+    /** @private */
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1803,17 +1340,7 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /**
-     * Возвращает (при необходимости создаёт) разделяемую геометрию точки
-     * (горизонтальный круг радиуса `radius`). Геометрия кэшируется и
-     * регистрируется в `_managedGeometries` — её нельзя диспозить в
-     * `_disposeTile`, потому что она используется во всех тайлах
-     * с точками того же радиуса.
-     *
-     * @private
-     * @param {number} radius - Радиус круга в метрах мира.
-     * @returns {THREE.CircleGeometry}
-     */
+    /** @private */
     _getPointGeometry(radius) {
         const key = `point_${radius}`;
         if (this._pointGeometryCache.has(key)) return this._pointGeometryCache.get(key);
@@ -1824,13 +1351,7 @@ export class VectorTileLayer {
         return geom;
     }
 
-    /**
-     * Конкатенирует несколько Float32Array в один.
-     *
-     * @private
-     * @param {Float32Array[]} arrays - Массив массивов.
-     * @returns {Float32Array} Объединённый массив.
-     */
+    /** @private */
     _concatF32(arrays) {
         let total = 0;
         for (const a of arrays) total += a.length;
@@ -1840,14 +1361,7 @@ export class VectorTileLayer {
         return out;
     }
 
-    /**
-     * Возвращает (при необходимости создаёт) разделяемый материал 3D-здания.
-     * Хранится в `_fillMaterialCache` и регистрируется в `_managedMaterials`.
-     *
-     * @private
-     * @param {number} color - Цвет в формате 0xRRGGBB.
-     * @returns {THREE.MeshLambertMaterial}
-     */
+    /** @private */
     _getBuildingMaterial(color) {
         const key = 'bld:' + color;
         if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
@@ -1867,15 +1381,7 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /**
-     * Возвращает (при необходимости создаёт) разделяемый материал рёбер
-     * зданий. Хранится в `_lineMaterialCache` и регистрируется в
-     * `_managedMaterials`.
-     *
-     * @private
-     * @param {number} color - Цвет в формате 0xRRGGBB.
-     * @returns {THREE.LineBasicMaterial}
-     */
+    /** @private */
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;
         if (this._lineMaterialCache.has(key)) return this._lineMaterialCache.get(key);

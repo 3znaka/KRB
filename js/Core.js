@@ -95,6 +95,8 @@ export class KrbMap {
      * @param {number} [options.tileLightingRoughness=0.7]
      * @param {number} [options.tileLightingMetalness=0.0]
      * @param {number} [options.tileLightingEmissive=0.5]
+     * @param {boolean} [options.autoPause=true] — автоматически ставить карту на паузу,
+     *   когда вкладка скрыта или карта вне вьюпорта. По умолчанию `true`.
      */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
@@ -189,6 +191,18 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         /** @private */ this._disposed = false;
         /** @private */ this._paused = false;
+        /**
+         * Причины, по которым карта сейчас должна быть на паузе.
+         * Пока множество непустое — карта не рендерит.
+         * Причины: 'tab' (вкладка скрыта), 'viewport' (вне экрана),
+         * 'manual' (пользователь вызвал pause()).
+         * @private
+         * @type {Set<string>}
+         */
+        this._pauseReasons = new Set();
+        /** @private */ this._autoPauseDisabled = options.autoPause === false;
+        /** @private */ this._onVisChange = null;
+        /** @private */ this._io = null;
         /** @private */ this._rafId = null;
         /** @private */ this._abortController = null;
 
@@ -275,8 +289,62 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
         this.bindEvents();
         this.maybeUpdateVisibleTiles(true);
 
+        // Авто-пауза должна быть установлена ДО animate(): если вкладка
+        // уже скрыта, _doPause() успеет выставить _paused = true, и
+        // animate() не запустит цикл.
+        this._setupAutoPause();
+
         this.animate();
         requestAnimationFrame(() => initUI(this));
+    }
+
+    /**
+     * Настраивает авто-паузу: карта встаёт на паузу, когда вкладка
+     * скрыта или её контейнер ушёл за пределы вьюпорта (с запасом
+     * 200px по краям, чтобы подгрузка шла заранее).
+     *
+     * Отключается через `options.autoPause: false`.
+     *
+     * @private
+     */
+    _setupAutoPause() {
+        if (this._autoPauseDisabled) return;
+
+        const apply = () => {
+            if (this._disposed) return;
+            const shouldPause = this._pauseReasons.size > 0;
+            if (shouldPause && !this._paused) this._doPause();
+            else if (!shouldPause && this._paused) this._doResume();
+        };
+
+        // 1. Скрытие вкладки браузера — глобальная пауза.
+        this._onVisChange = () => {
+            if (document.hidden) this._pauseReasons.add('tab');
+            else this._pauseReasons.delete('tab');
+            apply();
+        };
+        document.addEventListener('visibilitychange', this._onVisChange);
+
+        // 2. Уход карты за пределы вьюпорта (с запасом 200px).
+        if (typeof IntersectionObserver !== 'undefined' && this.targetElement) {
+            this._io = new IntersectionObserver(entries => {
+                for (const e of entries) {
+                    if (e.isIntersecting) this._pauseReasons.delete('viewport');
+                    else this._pauseReasons.add('viewport');
+                }
+                apply();
+            }, { rootMargin: '200px' });
+            this._io.observe(this.targetElement);
+        }
+
+        // Синхронная проверка стартового состояния: если вкладка уже
+        // скрыта на момент конструирования — сразу ставим на паузу,
+        // чтобы не тратить кадры впустую. Положение во вьюпорте
+        // подтянется асинхронно через IntersectionObserver.
+        if (document.hidden) {
+            this._pauseReasons.add('tab');
+            apply();
+        }
     }
 
     /**
@@ -1227,6 +1295,7 @@ this.controls.touches = {
         if (this._disposed) return;
         const w = this.targetElement.clientWidth;
         const h = this.targetElement.clientHeight;
+        if (w <= 0 || h <= 0) return;
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
@@ -1724,7 +1793,40 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
        Пауза / уничтожение
        ================================================================ */
 
+    /**
+     * Публичная пауза. Пока карта «на паузе», её rAF-цикл не крутится,
+     * ничего не рендерится и не считается.
+     *
+     * Внутренне работает через набор причин (`_pauseReasons`): вызов
+     * `pause()` добавляет причину `'manual'`. Если карта вне вьюпорта
+     * или вкладка скрыта — она останется на паузе даже после `resume()`,
+     * пока не вернётся в зону видимости (это ожидаемое поведение и
+     * не тратит кадры впустую).
+     */
     pause() {
+        if (this._disposed) return;
+        this._pauseReasons.add('manual');
+        this._doPause();
+    }
+
+    /**
+     * Публичное возобновление. Снимает причину `'manual'`. Если других
+     * причин (скрытая вкладка, вне вьюпорта) нет — карта возобновит
+     * рендеринг. В противном случае — останется на паузе до того
+     * момента, пока не станет снова видимой.
+     */
+    resume() {
+        if (this._disposed) return;
+        this._pauseReasons.delete('manual');
+        if (this._pauseReasons.size === 0) this._doResume();
+    }
+
+    /**
+     * Внутренняя реализация паузы. Вызывается либо из публичного
+     * `pause()`, либо из авто-логики (`_setupAutoPause`).
+     * @private
+     */
+    _doPause() {
         if (this._disposed || this._paused) return;
         this._paused = true;
 
@@ -1742,11 +1844,20 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         this._currentDeltaTime = 0;
     }
 
-    resume() {
+    /**
+     * Внутренняя реализация возобновления. Защищена от нулевых размеров
+     * контейнера (когда карта «просыпается» раньше, чем браузер успел
+     * пересчитать layout).
+     * @private
+     */
+    _doResume() {
         if (this._disposed || !this._paused) return;
         this._paused = false;
 
-        this.onResize();
+        const w = this.targetElement?.clientWidth ?? 0;
+        const h = this.targetElement?.clientHeight ?? 0;
+        if (w > 0 && h > 0) this.onResize();
+
         this.lastVisibleUpdateTime = 0;
         this.clock.getDelta();
 
@@ -1760,6 +1871,17 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
     dispose() {
         if (this._disposed) return;
         this._disposed = true;
+
+        // Отписываемся от глобальных обработчиков авто-паузы.
+        if (this._onVisChange) {
+            try { document.removeEventListener('visibilitychange', this._onVisChange); }
+            catch (e) { console.warn(e); }
+            this._onVisChange = null;
+        }
+        if (this._io) {
+            try { this._io.disconnect(); } catch (e) { console.warn(e); }
+            this._io = null;
+        }
 
         if (this._rafId !== null) {
             cancelAnimationFrame(this._rafId);
@@ -1824,6 +1946,7 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         this._tempRaycaster = null;
         this._tempMouse = null;
         this.targetElement = null;
+        this._pauseReasons.clear();
     }
 
     /** @private */

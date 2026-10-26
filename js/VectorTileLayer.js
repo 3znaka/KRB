@@ -1,7 +1,7 @@
 // VectorTileLayer.js
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
- * Основная логика управления тайлами, материалами и подписями.
+ * Основная логика управления тайлами, материалов и подписей.
  */
 
 import {
@@ -13,6 +13,56 @@ import {
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { Projections } from './Projections.js';
+
+// -----------------------------------------------------------------------------
+// Кэш Blob-URL для кода воркера (разделяется между всеми инстансами слоя).
+//
+// Раньше каждый VectorTileLayer делал fetch(tpb.js) + fetch(earcut.js) +
+// base64 + Blob + URL.createObjectURL — независимо от других слоёв. На
+// странице с десятком карт это давало N-кратную повторную работу и заметный
+// старт-ап delay. Теперь первый слой скачивает и кодирует скрипты, остальные
+// переиспользуют уже готовый blob-URL. Сами Worker'ы по-прежнему создаются
+// на каждый слой отдельно (это отдельные потоки), но разделяемая часть
+// (потенциально тяжёлая: fetch + base64 + Blob) выполняется один раз.
+// -----------------------------------------------------------------------------
+const _workerBlobUrlCache = new Map();
+
+/**
+ * Возвращает (кэширует) Promise на Blob-URL готового кода воркера для пары
+ * (tpb, earcut). При ошибке кэш не отравляется — следующий вызов попробует
+ * заново.
+ *
+ * @param {string} tpbUrl - URL tpb.js.
+ * @param {string} earcutUrl - URL earcut.js.
+ * @returns {Promise<string>}
+ */
+function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
+    const key = tpbUrl + '|' + earcutUrl;
+    const cached = _workerBlobUrlCache.get(key);
+    if (cached) return cached;
+
+    const promise = (async () => {
+        const [tpbRes, earcutRes] = await Promise.all([
+            fetch(tpbUrl),
+            fetch(earcutUrl),
+        ]);
+        if (!tpbRes.ok) throw new Error(`HTTP ${tpbRes.status} for ${tpbUrl}`);
+        if (!earcutRes.ok) throw new Error(`HTTP ${earcutRes.status} for ${earcutUrl}`);
+        const [tpbCode, earcutCode] = await Promise.all([
+            tpbRes.text(),
+            earcutRes.text(),
+        ]);
+        const tpbDataURL = 'data:text/javascript;base64,' + stringToBase64(tpbCode);
+        const earcutDataURL = 'data:text/javascript;base64,' + stringToBase64(earcutCode);
+        const workerCode = createWorkerCode(tpbDataURL, earcutDataURL);
+        const blob = new Blob([workerCode], { type: 'text/javascript' });
+        return URL.createObjectURL(blob);
+    })();
+
+    _workerBlobUrlCache.set(key, promise);
+    promise.catch(() => _workerBlobUrlCache.delete(key));
+    return promise;
+}
 
 // -----------------------------------------------------------------------------
 // Класс источника подписи для точечных объектов векторных тайлов
@@ -349,6 +399,17 @@ export class VectorTileLayer {
         this._lastMovementTime = 0;
         this._lastLabelUpdateTime = 0;
 
+        // --------------------------------------------------------------------
+        // Снимок состояния для skip-логики в _postUpdate.
+        //
+        // Если камера/мир/зум не менялись с прошлого полного пересчёта —
+        // не гоняем дорогой `_getVisibleTileKeys` (25 raycast'ов по сетке)
+        // каждый throttle-tick. См. _postUpdate.
+        // --------------------------------------------------------------------
+        /** @private */ this._lastCheckCamPos = new THREE.Vector3();
+        /** @private */ this._lastCheckZoom = -1;
+        /** @private */ this._lastCheckInit = false;
+
         /**
          * Флаг «подписи нуждаются в пересборке». Устанавливается при загрузке
          * нового тайла или при удалении старого. Сбрасывается в _postUpdate
@@ -431,8 +492,13 @@ export class VectorTileLayer {
     }
 
     /**
-     * Инициализирует Web Worker: подгружает скрипты (tpb, earcut) через fetch,
-     * кодирует их в data:URL, собирает код воркера и создаёт Blob Worker.
+     * Инициализирует Web Worker.
+     *
+     * Код воркера собирается один раз на пару (tpbUrl, earcutUrl) и кэшируется
+     * на уровне модуля (см. `_getSharedWorkerBlobUrl`). Первый слой на странице
+     * платит за fetch/base64/Blob, остальные переиспользуют готовый blob-URL.
+     * Каждый слой всё равно создаёт свой Worker — это отдельный поток со своим
+     * V8 isolate, но разделяемая часть (сборка кода) — общая.
      *
      * @private
      * @returns {Promise<void>} Промис готовности воркера.
@@ -440,19 +506,8 @@ export class VectorTileLayer {
     async _initWorker() {
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
         try {
-            const [tpbResponse, earcutResponse] = await Promise.all([
-                fetch(tpbUrl),
-                fetch(earcutUrl)
-            ]);
-            const tpbCode = await tpbResponse.text();
-            const earcutCode = await earcutResponse.text();
-
-            const tpbDataURL = 'data:text/javascript;base64,' + stringToBase64(tpbCode);
-            const earcutDataURL = 'data:text/javascript;base64,' + stringToBase64(earcutCode);
-
-            const workerCode = createWorkerCode(tpbDataURL, earcutDataURL);
-            const blob = new Blob([workerCode], { type: 'text/javascript' });
-            this._worker = new Worker(URL.createObjectURL(blob), { type: 'module' });
+            const blobUrl = await _getSharedWorkerBlobUrl(tpbUrl, earcutUrl);
+            this._worker = new Worker(blobUrl, { type: 'module' });
             this._worker.onmessage = (e) => this._onWorkerMessage(e.data);
             this._worker.onerror = (err) => console.error('VectorTile worker error:', err);
 
@@ -952,6 +1007,9 @@ export class VectorTileLayer {
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;
         this._labelsDirty = true;
+        // После явной инвалидации не хотим, чтобы skip-логика в _postUpdate
+        // решила «ничего не поменялось» и пропустила пересчёт.
+        this._lastCheckInit = false;
     }
 
     /**
@@ -1005,6 +1063,8 @@ export class VectorTileLayer {
         }
 
         this._labelsDirty = true;
+        // Новый слой — никакого состояния для skip-логики ещё нет.
+        this._lastCheckInit = false;
 
         return this;
     }
@@ -1053,6 +1113,8 @@ export class VectorTileLayer {
             this._worker.terminate();
             this._worker = null;
         }
+
+        this._lastCheckInit = false;
     }
 
     /**
@@ -1226,6 +1288,13 @@ export class VectorTileLayer {
      *  - вычислением видимых тайлов и запуском загрузки недостающих;
      *  - пересборкой подписей по триггерам (_labelsDirty, settle, periodic).
      *
+     * Внутри троттлится (раз в `_throttle` мс). Между троттл-тиками
+     * выполняется дешёвая проверка «изменилось ли что-то существенное»
+     * (камера/мир/дискретный зум) — если нет, дорогие вычисления
+     * (`_getVisibleTileKeys` с 25 raycast'ами, пересборка подписей)
+     * пропускаются. Остаётся только `_processQueue()` — на случай,
+     * если освободились слоты параллельных загрузок.
+     *
      * @private
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      */
@@ -1246,7 +1315,34 @@ export class VectorTileLayer {
         }
         this._lastUpdateTime = now;
 
+        // -----------------------------------------------------------------
+        // Skip-логика: если камера/мир/дискретный зум не менялись
+        // с прошлого полного пересчёта и подписи не помечены dirty —
+        // не гоняем дорогой `_getVisibleTileKeys` (25 raycast'ов)
+        // и не пересобираем подписи. Остаётся только `_processQueue()`,
+        // чтобы дозагрузить недостающие тайлы, если освободились слоты.
+        // -----------------------------------------------------------------
+        const camPos = map.camera.position;
         const discreteZoom = map.currentDiscreteZoom;
+
+        const camChanged =
+            !this._lastCheckInit ||
+            this._lastCheckCamPos.distanceToSquared(camPos) > 0.01 ||
+            this._lastWorldPos.distanceToSquared(worldPos) > 1 ||
+            this._lastCheckZoom !== discreteZoom;
+
+        if (!camChanged && !this._labelsDirty && this._tileCache.size > 0) {
+            this._processQueue();
+            return;
+        }
+
+        // Снимок состояния для следующей skip-проверки.
+        this._lastCheckInit = true;
+        this._lastCheckCamPos.copy(camPos);
+        this._lastCheckZoom = discreteZoom;
+
+        // -----------------------------------------------------------------
+
         if (discreteZoom < this.minZoom || discreteZoom > this.maxZoom) {
             if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
                 this._clearAllTiles();

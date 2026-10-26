@@ -214,7 +214,6 @@ function orientRing(ring, ccw) {
     return ring;
 }
 
-
 function isVertexOnTileBoundary(x, z, halfTile, eps) {
     return Math.abs(Math.abs(x) - halfTile) < eps ||
            Math.abs(Math.abs(z) - halfTile) < eps;
@@ -543,11 +542,22 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const buildings = [];
     const points = [];
     const textPoints = [];
-    const textLines = [];  // NEW: подписи линейных объектов
+    const textLines = [];
 
     const textLayers = ['place', 'poi', 'housenumber'];
 
-    const layerOrder = ['water', 'landcover', 'landuse', 'park', 'transportation', 'building', 'boundary', 'place'];
+    // Порядок обхода: сначала слои, дающие подписи (чтобы при срабатывании
+    // maxTextPointsPerTile / maxTextLinesPerTile важные подписи не обрезались),
+    // затем остальные — по визуальной иерархии.
+    const layerOrder = [
+        'place', 'poi', 'housenumber',
+        'transportation', 'transportation_name',
+        'waterway', 'water_name',
+        'water', 'landcover', 'landuse',
+        'park', 'leisure', 'aeroway',
+        'boundary', 'building'
+    ];
+
     const processLayer = (name) => {
         if (visibleLayers && !visibleLayers.includes(name)) return;
         const layer = tile.layers[name];
@@ -671,7 +681,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     }
                 }
 
-                const fillKey = `fill:${name}:${style.color.toString(16)}:${(style.opacity ?? 1)}`;
+                const fillKey = \`fill:\${name}:\${style.color.toString(16)}:\${(style.opacity ?? 1)}\`;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
                 const triData = [];
@@ -695,7 +705,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 }
 
                 if (style.stroke) {
-                    const strokeKey = `stroke:${name}:${style.stroke.toString(16)}:${(style.width ?? 1)}`;
+                    const strokeKey = \`stroke:\${name}:\${style.stroke.toString(16)}:\${(style.width ?? 1)}\`;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
                     for (const ring of rings) {
@@ -715,7 +725,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
                 }
 
-                const lineKey = `line:${name}:${style.color.toString(16)}:${style.width ?? 1}:${style.dash ? style.dash.join(',') : 'none'}`;
+                const lineKey = \`line:\${name}:\${style.color.toString(16)}:\${style.width ?? 1}:\${style.dash ? style.dash.join(',') : 'none'}\`;
                 let lineGroup = linesMap.get(lineKey);
                 if (!lineGroup) {
                     lineGroup = {
@@ -729,10 +739,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
                 }
 
-                // NEW: генерация подписей линейных объектов.
-                // Условия: есть имя и в стиле явно задан хотя бы один
-                // текстовый атрибут — иначе подписи на всех линиях были бы
-                // нежелательны.
                 const featureName = props.name || props.ref;
                 const hasTextStyle =
                     style.textColor || style.fontSize ||
@@ -783,7 +789,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         if (!layerOrder.includes(name)) processLayer(name);
     }
 
-    // Ограничиваем количество текстовых точек/линий
     if (textPoints.length > maxTextPointsPerTile) {
         textPoints.length = maxTextPointsPerTile;
     }

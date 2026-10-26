@@ -6,9 +6,7 @@
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
 
-/**
- * Преобразует строку в base64 (для data: URL).
- */
+/** Преобразует строку в base64 (для data: URL). */
 export function stringToBase64(str) {
     const bytes = new TextEncoder().encode(str);
     let binary = '';
@@ -18,9 +16,7 @@ export function stringToBase64(str) {
     return btoa(binary);
 }
 
-/**
- * Генерирует код модульного воркера с внедрёнными data: URL библиотек.
- */
+/** Генерирует код модульного воркера с внедрёнными data: URL библиотек. */
 export function createWorkerCode(tpbDataURL, earcutDataURL) {
     return `
 // Динамический импорт библиотек из data: URL (не зависит от серверных MIME-типов)
@@ -53,14 +49,17 @@ function onMessage(e) {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
             visibleLayers, buildingEdges,
-            exclusionPolygons = [], exclusionLayers = []
+            exclusionPolygons = [], exclusionLayers = [],
+            maxTextPointsPerTile = 300,
+            maxTextLinesPerTile = 30
         } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = processTile(
                 tile, z, x, y, tileSize, maxMerc, is3d,
                 visibleLayers, buildingEdges,
-                exclusionPolygons, exclusionLayers
+                exclusionPolygons, exclusionLayers,
+                maxTextPointsPerTile, maxTextLinesPerTile
             );
             const transferList = [];
             const payload = { id, result };
@@ -89,15 +88,13 @@ function collectTransferables(obj, list) {
     }
 }
 
-// Явный allowlist ключей стиля, которые реально читаются в processTile.
-// Раньше копировались ВСЕ поля styleConfig (включая вложенные объекты-
-// подклассы, если они по какой-то причине там окажутся).
 const KNOWN_STYLE_KEYS = [
     'color', 'opacity', 'stroke', 'width', 'dash',
     'radius', 'height',
     'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textShadow',
     'textOffset', 'textAlign', 'textVerticalAlign', 'textPriority',
-    'textZoomMin', 'textZoomMax'
+    'textZoomMin', 'textZoomMax',
+    'textPlacement'
 ];
 
 function getFeatureStyle(feature, layerName, styles) {
@@ -217,28 +214,12 @@ function orientRing(ring, ccw) {
     return ring;
 }
 
-// ---------------------------------------------------------------------------
-// Проверки принадлежности рёбер/вершин границе тайла.
-// Нужны, чтобы не генерировать «искусственные» стенки, созданные клиппером
-// на границе тайла. Соседний тайл достроит свою часть стены, а крышки
-// (верхняя и нижняя) горизонтальны и стыкуются между тайлами без шва.
-// ---------------------------------------------------------------------------
 
-/**
- * Возвращает true, если вершина лежит на любой из четырёх границ тайла
- * (в локальных координатах относительно центра тайла).
- */
 function isVertexOnTileBoundary(x, z, halfTile, eps) {
     return Math.abs(Math.abs(x) - halfTile) < eps ||
            Math.abs(Math.abs(z) - halfTile) < eps;
 }
 
-/**
- * Возвращает true, если оба конца ребра лежат на одной и той же границе
- * тайла (обе точки на x = +halfTile, или обе на x = -halfTile, или обе
- * на z = +halfTile, или обе на z = -halfTile).
- * Такое ребро — артефакт клиппера и не должно давать стенку.
- */
 function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
     const onXPlus1  = Math.abs(x1 - halfTile)  < eps;
     const onXMinus1 = Math.abs(x1 + halfTile)  < eps;
@@ -281,7 +262,6 @@ function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx
     const cry = uz * vx - ux * vz;
     const crz = ux * vy - uy * vx;
 
-    // если порядок вершин не совпадает с нужной нормалью — меняем b и c местами
     if (crx * nx + cry * ny + crz * nz < 0) {
         positions.push(ax, ay, az, cx, cy, cz, bx, by, bz);
     } else {
@@ -298,11 +278,9 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
     if (cleaned.length === 0) return null;
 
-    // Проверка границы включается только если передан размер половины тайла.
     const checkBoundary = halfTile > 0;
     const boundaryEps = Math.max(eps, halfTile * 1e-4);
 
-    // Отбираем кольца с ненулевой площадью.
     const validRings = [];
     for (const ring of cleaned) {
         const area = ringArea(ring);
@@ -311,9 +289,6 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
     }
     if (validRings.length === 0) return null;
 
-    // Внешним считаем кольцо того знака, которого больше.
-    // Нельзя полагаться на первое попавшееся кольцо: после клиппинга
-    // порядок может быть нарушен, и первым может идти дырка.
     let posCount = 0, negCount = 0;
     for (const { area } of validRings) {
         if (area > 0) posCount++; else negCount++;
@@ -328,8 +303,6 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
         } else if (polygons.length > 0) {
             polygons[polygons.length - 1].holes.push(ring);
         } else {
-            // Защитный случай: если дырка встретилась раньше внешнего кольца,
-            // не теряем её, а считаем внешним кольцом.
             polygons.push({ outer: ring, holes: [] });
         }
     }
@@ -348,44 +321,32 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
         if (!triData) continue;
         const { vertices, indices } = triData;
 
-        // Верхняя крышка (рисуется всегда, в т.ч. на границе тайла —
-        // горизонтальна, стыкуется с соседним тайлом без шва).
         for (let i = 0; i < indices.length; i += 3) {
             const a = indices[i], b = indices[i + 1], c = indices[i + 2];
-
             const ax = vertices[a * 2], az = vertices[a * 2 + 1];
             const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
             const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
-
             pushTriangle(
                 positions, normals,
-                ax, height, az,
-                bx, height, bz,
-                cx, height, cz,
+                ax, height, az, bx, height, bz, cx, height, cz,
                 0, 1, 0
             );
         }
 
-        // Нижняя крышка (только для зданий с minHeight > 0).
         if (minHeight > 0) {
             for (let i = 0; i < indices.length; i += 3) {
                 const a = indices[i], b = indices[i + 1], c = indices[i + 2];
-
                 const ax = vertices[a * 2], az = vertices[a * 2 + 1];
                 const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
                 const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
-
                 pushTriangle(
                     positions, normals,
-                    ax, minHeight, az,
-                    bx, minHeight, bz,
-                    cx, minHeight, cz,
+                    ax, minHeight, az, bx, minHeight, bz, cx, minHeight, cz,
                     0, -1, 0
                 );
             }
         }
 
-        // Стенки по периметру (outer + holes).
         for (const ring of [outer, ...holes]) {
             const n = ring.length;
 
@@ -401,13 +362,10 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                 const nx = dz / len;
                 const nz = -dx / len;
 
-                // Ребро лежит целиком на границе тайла → это шов клиппера.
-                // Соседний тайл достроит свою часть. Стенку не генерируем.
                 const onBoundary = checkBoundary &&
                     isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
 
                 if (!onBoundary) {
-                    // Первый треугольник стенки
                     pushTriangle(
                         positions, normals,
                         p0.x, minHeight, p0.z,
@@ -415,8 +373,6 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                         p1.x, height, p1.z,
                         nx, 0, nz
                     );
-
-                    // Второй треугольник стенки
                     pushTriangle(
                         positions, normals,
                         p0.x, minHeight, p0.z,
@@ -427,7 +383,6 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                 }
 
                 if (includeEdges) {
-                    // Горизонтальные рёбра по верхнему/нижнему контуру.
                     if (!onBoundary) {
                         edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
                         if (minHeight > 0) {
@@ -435,18 +390,13 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                         }
                     }
 
-                    // Вертикальное ребро в остром углу.
                     const p2 = ring[(i + 2) % n];
                     const dx2 = p2.x - p1.x;
                     const dz2 = p2.z - p1.z;
                     const len2 = Math.hypot(dx2, dz2);
 
-                    if (
-                        len2 > eps &&
-                        (dx * dx2 + dz * dz2) / (len * len2) < sharpCos
-                    ) {
-                        // Если угол лежит на границе тайла — вертикальное ребро
-                        // в нём тоже артефакт клиппера, пропускаем.
+                    if (len2 > eps &&
+                        (dx * dx2 + dz * dz2) / (len * len2) < sharpCos) {
                         const cornerOnBoundary = checkBoundary &&
                             isVertexOnTileBoundary(p1.x, p1.z, halfTile, boundaryEps);
                         if (!cornerOnBoundary) {
@@ -499,7 +449,7 @@ function computePointScale(z) {
     return 1.0 + (z - 14) * 0.25;
 }
 
-// --- Функции для проверки пересечений с exclusion areas ---
+// --- Проверки пересечений с exclusion areas ---
 function pointInPolygon(pt, polygon) {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -527,13 +477,11 @@ function segmentsIntersect(a, b, c, d) {
 
 function polygonIntersectsAny(rings, exclusionPolygons) {
     for (const ring of rings) {
-        // Проверка точек
         for (const pt of ring) {
             for (const exPoly of exclusionPolygons) {
                 if (pointInPolygon(pt, exPoly)) return true;
             }
         }
-        // Проверка пересечения рёбер
         for (let i = 0; i < ring.length; i++) {
             const a = ring[i];
             const b = ring[(i + 1) % ring.length];
@@ -556,13 +504,10 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
             const a = line[i];
             const b = line[i + 1];
 
-            // Проверка: точка линии внутри exclusion-полигона
-            // (без неё линия, целиком лежащая внутри области, не исключалась).
             for (const exPoly of exclusionPolygons) {
                 if (pointInPolygon(a, exPoly) || pointInPolygon(b, exPoly)) return true;
             }
 
-            // Проверка пересечения сегментов
             for (const exPoly of exclusionPolygons) {
                 for (let j = 0; j < exPoly.length; j++) {
                     const c = exPoly[j];
@@ -576,16 +521,16 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 }
 // --- Конец функций для exclusion ---
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges, exclusionPolygons = [], exclusionLayers = []) {
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges,
+                     exclusionPolygons = [], exclusionLayers = [],
+                     maxTextPointsPerTile = 300, maxTextLinesPerTile = 30) {
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
     const halfTile = tileSize / 2;
 
-    // Центр тайла в мировых координатах. Используется и для exclusion, и для точек.
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
 
-    // Преобразуем exclusion полигоны в локальные координаты тайла
     const localExclusionPolygons = exclusionPolygons.map(poly => poly.map(p => ({
         x: p.x - centerX,
         z: p.z - centerZ
@@ -598,6 +543,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const buildings = [];
     const points = [];
     const textPoints = [];
+    const textLines = [];  // NEW: подписи линейных объектов
 
     const textLayers = ['place', 'poi', 'housenumber'];
 
@@ -623,12 +569,9 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
 
-                // Локальные координаты точки относительно центра тайла.
-                // Эквивалентно originX + (p.x/4095)*tileSize - centerX.
                 const worldX = (pt.x / 4095 - 0.5) * tileSize;
                 const worldZ = (pt.y / 4095 - 0.5) * tileSize;
 
-                // Проверка exclusion для точек
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
                     const localPt = { x: worldX, z: worldZ };
                     let excluded = false;
@@ -685,7 +628,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
 
             if (geomType === 3) {
-                // Проверка exclusion для полигонов
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
                     if (polygonIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
@@ -712,8 +654,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             const isPart = props['building:part'] === 'yes';
                             const isSimpleBuilding = props['building:part'] === undefined;
                             if (is3d && (isPart || isSimpleBuilding)) {
-                                // Передаём halfTile, чтобы воркер мог отбросить
-                                // стенки и рёбра, лежащие на границе тайла.
                                 const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
                                 if (geo) {
                                     buildings.push({
@@ -731,7 +671,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     }
                 }
 
-                const fillKey = \`fill:\${name}:\${style.color.toString(16)}:\${(style.opacity ?? 1)}\`;
+                const fillKey = `fill:${name}:${style.color.toString(16)}:${(style.opacity ?? 1)}`;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
                 const triData = [];
@@ -755,7 +695,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 }
 
                 if (style.stroke) {
-                    const strokeKey = \`stroke:\${name}:\${style.stroke.toString(16)}:\${(style.width ?? 1)}\`;
+                    const strokeKey = `stroke:${name}:${style.stroke.toString(16)}:${(style.width ?? 1)}`;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
                     for (const ring of rings) {
@@ -763,7 +703,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     }
                 }
             } else if (geomType === 2) {
-                // Проверка exclusion для линий
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
                     if (lineIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
@@ -776,7 +715,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
                 }
 
-                const lineKey = \`line:\${name}:\${style.color.toString(16)}:\${style.width ?? 1}:\${style.dash ? style.dash.join(',') : 'none'}\`;
+                const lineKey = `line:${name}:${style.color.toString(16)}:${style.width ?? 1}:${style.dash ? style.dash.join(',') : 'none'}`;
                 let lineGroup = linesMap.get(lineKey);
                 if (!lineGroup) {
                     lineGroup = {
@@ -789,6 +728,52 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 for (const ring of rings) {
                     if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
                 }
+
+                // NEW: генерация подписей линейных объектов.
+                // Условия: есть имя и в стиле явно задан хотя бы один
+                // текстовый атрибут — иначе подписи на всех линиях были бы
+                // нежелательны.
+                const featureName = props.name || props.ref;
+                const hasTextStyle =
+                    style.textColor || style.fontSize ||
+                    style.textZoomMin !== undefined ||
+                    style.textPlacement !== undefined;
+
+                if (featureName && hasTextStyle && textLines.length < maxTextLinesPerTile) {
+                    const minLen = tileSize * 0.15;
+                    for (const ring of rings) {
+                        if (ring.length < 2) continue;
+                        let len = 0;
+                        for (let k = 0; k < ring.length - 1; k++) {
+                            const dx = ring[k + 1].x - ring[k].x;
+                            const dz = ring[k + 1].z - ring[k].z;
+                            len += Math.hypot(dx, dz);
+                        }
+                        if (len < minLen) continue;
+
+                        textLines.push({
+                            points: ring.map(p => ({ x: p.x, z: p.z })),
+                            text: featureName,
+                            layerName: name,
+                            textColor: style.textColor || '#333333',
+                            fontSize: style.fontSize || '11px',
+                            fontFamily: style.fontFamily || 'sans-serif',
+                            fontWeight: style.fontWeight || 'normal',
+                            textShadow: style.textShadow || '',
+                            textOffset: style.textOffset || [0, 0],
+                            textAlign: style.textAlign || 'center',
+                            textVerticalAlign: style.textVerticalAlign || 'middle',
+                            placement: style.textPlacement || 'along',
+                            priority:
+                                (style.textPriority ?? (LAYER_RENDER_ORDER[name] ?? 20)) +
+                                sortKey * 0.001,
+                            zoomBounds: {
+                                min: style.textZoomMin ?? 14,
+                                max: style.textZoomMax ?? 24
+                            }
+                        });
+                    }
+                }
             }
         }
     };
@@ -798,9 +783,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         if (!layerOrder.includes(name)) processLayer(name);
     }
 
-    // Ограничиваем количество текстовых точек, чтобы не передавать слишком много
-    if (textPoints.length > 300) {
-        textPoints.length = 300;
+    // Ограничиваем количество текстовых точек/линий
+    if (textPoints.length > maxTextPointsPerTile) {
+        textPoints.length = maxTextPointsPerTile;
+    }
+    if (textLines.length > maxTextLinesPerTile) {
+        textLines.length = maxTextLinesPerTile;
     }
 
     const result = {
@@ -810,6 +798,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         buildings: [],
         points: points,
         textPoints: textPoints,
+        textLines: textLines,
         centerX: centerX,
         centerZ: centerZ
     };

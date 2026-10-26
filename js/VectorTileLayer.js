@@ -16,21 +16,9 @@ import { Projections } from './Projections.js';
 
 // -----------------------------------------------------------------------------
 // Кэш Blob-URL для кода воркера (разделяется между всеми инстансами слоя).
-//
-// Первый слой скачивает и кодирует скрипты, остальные переиспользуют готовый
-// blob-URL. Сами Worker'ы по-прежнему создаются на каждый слой отдельно,
-// но разделяемая часть (fetch + base64 + Blob) выполняется один раз.
 // -----------------------------------------------------------------------------
 const _workerBlobUrlCache = new Map();
 
-/**
- * Возвращает (кэширует) Promise на Blob-URL готового кода воркера.
- * При ошибке кэш не отравляется.
- *
- * @param {string} tpbUrl
- * @param {string} earcutUrl
- * @returns {Promise<string>}
- */
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const key = tpbUrl + '|' + earcutUrl;
     const cached = _workerBlobUrlCache.get(key);
@@ -61,9 +49,6 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 
 // -----------------------------------------------------------------------------
 // Источник подписи для точечных объектов векторных тайлов.
-//
-// `worldPos` хранится в координатах worldGroup (без учёта смещения мира).
-// Итоговая мировая позиция собирается в getScreenPosition.
 // -----------------------------------------------------------------------------
 class VectorPointLabelSource {
     constructor(map, worldX, worldZ, text, options = {}) {
@@ -106,6 +91,225 @@ class VectorPointLabelSource {
     isVisible() { return this.options.visible !== false; }
 }
 
+// -----------------------------------------------------------------------------
+// Источник подписи для линейных объектов векторных тайлов.
+//
+// Построен по образцу Polyline: LabelType='line', поддержка
+// getVisibleInterval/getScreenPositionAt/getScreenAngleAt/getLabelParameter.
+//
+// Экранные данные (points3D, segLengths, visibleInterval) пересчитываются
+// лениво и кэшируются по сигнатуре (camera.position, worldGroup.position +
+// group.position, continuousZoom). Это критично: TextManager в процессе
+// разрешения коллизий дёргает getScreenPositionAt/getScreenAngleAt
+// многократно за кадр на каждую линию. Без кэша это O(N_iters × samples).
+//
+// `_labelT` живёт на объекте источника и сохраняется между кадрами.
+// Поэтому источник нельзя пересоздавать каждый кадр — кэшируется на
+// group.userData.lineLabelSources (см. _refreshTextLabelsForVisibleTiles).
+// -----------------------------------------------------------------------------
+class VectorLineLabelSource {
+    constructor(map, lineData, group) {
+        this.map = map;
+        this.lineData = lineData;
+        this.group = group;
+        this._labelT = 0.5;
+        this._screenData = null;
+        this._screenDataSig = null;
+    }
+
+    getText() { return this.lineData.text; }
+    getLabelType() { return 'line'; }
+    isVisible() { return this.lineData.visible !== false; }
+    getAllowOverflow() { return false; }
+    getPriority() { return this.lineData.priority || 0; }
+    getPlacement() { return this.lineData.placement || 'along'; }
+    getTitleAlign() { return this.lineData.textAlign || 'center'; }
+    getTitleVerticalAlign() { return this.lineData.textVerticalAlign || 'middle'; }
+    getTitleOffset() { return this.lineData.textOffset || [0, 0]; }
+    getTextZoomBounds() { return this.lineData.zoomBounds || { min: 0, max: 24 }; }
+
+    getLabelParameter() { return this._labelT; }
+    setLabelParameter(t) { this._labelT = t; }
+
+    getTextStyle() {
+        return {
+            color: this.lineData.textColor || '#333333',
+            fontSize: this.lineData.fontSize || '11px',
+            fontFamily: this.lineData.fontFamily || 'sans-serif',
+            fontWeight: this.lineData.fontWeight || 'normal',
+            textShadow: this.lineData.textShadow || ''
+        };
+    }
+
+    // -- экранные данные (ленивый кэш) ---------------------------------------
+
+    _getScreenData() {
+        const map = this.map;
+        const cam = map.camera;
+        const wp = map.worldGroup.position;
+        const gp = this.group.position;
+        const offX = wp.x + gp.x;
+        const offZ = wp.z + gp.z;
+        const zoom = map.continuousZoom;
+
+        // Округление до 0.01 world-единицы — субмиллиметровое смещение
+        // визуально неразличимо, но пересчёт не триггерит.
+        const sig =
+            cam.position.x.toFixed(2) + ',' +
+            cam.position.y.toFixed(2) + ',' +
+            cam.position.z.toFixed(2) + '|' +
+            offX.toFixed(2) + ',' + offZ.toFixed(2) + '|' +
+            zoom.toFixed(2);
+
+        if (this._screenDataSig === sig) return this._screenData;
+        this._screenDataSig = sig;
+        this._screenData = this._computeScreenData(cam, offX, offZ);
+        return this._screenData;
+    }
+
+    _computeScreenData(camera, offX, offZ) {
+        const pts = this.lineData.points;
+        if (!pts || pts.length < 2) return null;
+
+        const n = pts.length;
+        const points3D = new Array(n);
+        for (let i = 0; i < n; i++) {
+            points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
+        }
+
+        const segLengths = new Array(n - 1);
+        let totalLen = 0;
+        for (let i = 0; i < n - 1; i++) {
+            const d = points3D[i].distanceTo(points3D[i + 1]);
+            segLengths[i] = d;
+            totalLen += d;
+        }
+        if (totalLen < 1e-9) return null;
+
+        // Проекция равноотстоящих сэмплов, поиск наибольшего сплошного
+        // видимого интервала — как в Polyline._computeScreenData.
+        const samples = 40;
+        const v = new THREE.Vector3();
+        const pointAtT = (t) => {
+            let target = t * totalLen;
+            let acc = 0;
+            for (let i = 0; i < segLengths.length; i++) {
+                if (target <= acc + segLengths[i]) {
+                    const local = (target - acc) / segLengths[i];
+                    return v.lerpVectors(points3D[i], points3D[i + 1], local);
+                }
+                acc += segLengths[i];
+            }
+            return v.copy(points3D[n - 1]);
+        };
+
+        const visibleTs = [];
+        for (let i = 0; i < samples; i++) {
+            const t = i / (samples - 1);
+            pointAtT(t).project(camera);
+            if (v.z > 0 && v.z < 1 &&
+                v.x >= -1 && v.x <= 1 &&
+                v.y >= -1 && v.y <= 1) {
+                visibleTs.push(t);
+            }
+        }
+        if (visibleTs.length === 0) return null;
+
+        const eps = 1.1 / (samples - 1);
+        const segments = [];
+        let start = visibleTs[0];
+        let prev = start;
+        for (let i = 1; i < visibleTs.length; i++) {
+            if (visibleTs[i] - prev > eps) {
+                segments.push({ min: start, max: prev });
+                start = visibleTs[i];
+            }
+            prev = visibleTs[i];
+        }
+        segments.push({ min: start, max: prev });
+
+        let best = segments[0];
+        for (const s of segments) {
+            if (s.max - s.min > best.max - best.min) best = s;
+        }
+
+        return {
+            points3D,
+            segLengths,
+            totalLen,
+            visibleInterval: best,
+            camera,
+            map: this.map
+        };
+    }
+
+    getVisibleInterval() {
+        const data = this._getScreenData();
+        return data ? data.visibleInterval : null;
+    }
+
+    getScreenPositionAt(t) {
+        const data = this._getScreenData();
+        if (!data) return null;
+
+        const target = t * data.totalLen;
+        let acc = 0;
+        let pt3D = null;
+        for (let i = 0; i < data.segLengths.length; i++) {
+            if (target <= acc + data.segLengths[i]) {
+                const local = (target - acc) / data.segLengths[i];
+                pt3D = new THREE.Vector3().lerpVectors(
+                    data.points3D[i], data.points3D[i + 1], local);
+                break;
+            }
+            acc += data.segLengths[i];
+        }
+        if (!pt3D) pt3D = data.points3D[data.points3D.length - 1].clone();
+
+        const scr = pt3D.clone().project(data.camera);
+        if (scr.z <= 0 || scr.z >= 1) return null;
+
+        const canvas = this.map.renderer.domElement;
+        return {
+            x: (scr.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight
+        };
+    }
+
+    getScreenAngleAt(t) {
+        if (this.getPlacement() !== 'along') return 0;
+        const data = this._getScreenData();
+        if (!data) return 0;
+
+        let target = t * data.totalLen;
+        let acc = 0;
+        let segIdx = data.segLengths.length - 1;
+        for (let i = 0; i < data.segLengths.length; i++) {
+            if (target <= acc + data.segLengths[i] + 1e-9) { segIdx = i; break; }
+            acc += data.segLengths[i];
+        }
+
+        const p1 = data.points3D[segIdx];
+        const p2 = data.points3D[segIdx + 1];
+        if (!p1 || !p2) return 0;
+
+        const s1 = p1.clone().project(data.camera);
+        const s2 = p2.clone().project(data.camera);
+        if (s1.z <= 0 || s2.z <= 0) return 0;
+
+        const W = this.map.renderer.domElement.clientWidth;
+        const H = this.map.renderer.domElement.clientHeight;
+        const x1 = (s1.x * 0.5 + 0.5) * W;
+        const y1 = (-s1.y * 0.5 + 0.5) * H;
+        const x2 = (s2.x * 0.5 + 0.5) * W;
+        const y2 = (-s2.y * 0.5 + 0.5) * H;
+        let angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+        if (angle > 90) angle -= 180;
+        else if (angle < -90) angle += 180;
+        return angle;
+    }
+}
+
 /**
  * Порядок отрисовки элементов векторного тайла.
  * @type {{FILL:number, LINE:number, STROKE:number, POINT:number, BUILDING:number, EDGE:number}}
@@ -121,11 +325,6 @@ export const VECTOR_TILE_RENDER_ORDER = {
 
 // -----------------------------------------------------------------------------
 // Основной класс.
-//
-// Ключевые новые опции (помимо существующих):
-//  - `labelMaxCameraDistance` — жёсткий cull подписей по 3D-расстоянию до
-//    камеры. 0 = авто-режим: порог сужается с ростом pitch (при наклоне
-//    дальние подписи «кашей» висят на горизонте). Рекомендуется оставить 0.
 // -----------------------------------------------------------------------------
 export class VectorTileLayer {
     constructor(options = {}) {
@@ -149,14 +348,13 @@ export class VectorTileLayer {
         // Оптимизация подписей
         this.maxTextLabels = options.maxTextLabels ?? 500;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50;
+        this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 30;
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;
         /**
          * Максимальное 3D-расстояние от подписи до камеры.
-         * 0 = авто: порог = camTargetDist × max(2, 12 / (1 + sinPitch·4)).
-         * При pitch=0 — фактически «без отсечения»; при pitch≈85° — только
-         * то, что рядом с целью камеры.
+         * 0 = авто.
          * @type {number}
          */
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
@@ -165,8 +363,6 @@ export class VectorTileLayer {
 
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
-        // См. комментарий в исходной версии: три критичные строки для
-        // корректного z-order относительно растровых тайлов.
         this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
 
         this._map = null;
@@ -185,8 +381,6 @@ export class VectorTileLayer {
         this._lastUpdateTime = 0;
         this._throttle = 500;
 
-        // Поколение загрузок. Инвалидация кэша увеличивает счётчик,
-        // устаревшие ответы воркера утилизируются.
         this._generation = 0;
 
         this._tileDataCache = new Map();
@@ -201,14 +395,11 @@ export class VectorTileLayer {
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
 
-        // Материалы/геометрии, разделяемые между тайлами и диспозящиеся
-        // централизованно в removeFromMap. См. _disposeTile.
         this._managedMaterials = new WeakSet();
         this._managedGeometries = new WeakSet();
 
         this._pointGeometryCache = new Map();
 
-        // Exclusion areas
         this._exclusionAreas = [];
         this._exclusionLayers = new Set();
 
@@ -217,7 +408,6 @@ export class VectorTileLayer {
         this._lastMovementTime = 0;
         this._lastLabelUpdateTime = 0;
 
-        // Снимок состояния для skip-логики в _postUpdate.
         this._lastCheckCamPos = new THREE.Vector3();
         this._lastCheckZoom = -1;
         this._lastCheckInit = false;
@@ -255,12 +445,6 @@ export class VectorTileLayer {
         this._pendingWorkerRequests = new Map();
     }
 
-    /**
-     * Создаёт воркер. Код собирается один раз на пару (tpbUrl, earcutUrl)
-     * и кэшируется на уровне модуля.
-     * @private
-     * @returns {Promise<void>}
-     */
     async _initWorker() {
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
         try {
@@ -274,10 +458,6 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Обработка ответа воркера. Проверяет актуальность по generation.
-     * @private
-     */
     _onWorkerMessage(data) {
         if (!data || typeof data.id === 'undefined') return;
 
@@ -316,17 +496,9 @@ export class VectorTileLayer {
         pending.resolve(group);
     }
 
-    /**
-     * Строит Three.js-группу тайла из результата воркера.
-     * @private
-     * @param {THREE.Group} group
-     * @param {Object} result
-     */
     _buildGroupFromWorkerResult(group, result) {
         this._removeTextLabelsForGroup(group);
 
-        // КРИТИЧНО: см. исходный комментарий. Не удалять — иначе
-        // растр перекрывает линии из-за сброса groupOrder через Group.
         group.renderOrder = this._tileGroupRenderOrder;
 
         if (result.centerX !== undefined && result.centerZ !== undefined) {
@@ -413,22 +585,12 @@ export class VectorTileLayer {
         }
 
         group.userData.textPointsData = result.textPoints || [];
+        group.userData.textLinesData  = result.textLines  || [];
+        group.userData.lineLabelSources = null;
         group.userData.textLabels = [];
         group.userData.is3d = result.is3d;
     }
 
-    /**
-     * Пересобирает подписи для всех видимых тайлов с глобальной сортировкой
-     * и глобальным бюджетом. Подписи переиспользуются по stableId — без
-     * мерцания при массовой пересборке.
-     *
-     * Сортировка идёт по 3D-расстоянию до камеры (`camDistSq`): при наклоне
-     * это даёт правильный порядок «ближние к камере — первыми», в отличие
-     * от расстояния до controls.target, которое при высоком pitch ведёт себя
-     * иначе.
-     *
-     * @private
-     */
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
         const textManager = this._map.textManager;
@@ -453,27 +615,42 @@ export class VectorTileLayer {
 
         for (let i = 0; i < selected.length; i++) {
             const cand = selected[i];
-            const pt = cand.pt;
             const group = cand.group;
             const id = cand.id;
 
             activeIds.add(id);
 
-            const localWorldX = pt.x + group.position.x;
-            const localWorldZ = pt.z + group.position.z;
+            let source;
+            if (cand.type === 'line') {
+                // Кэш источников на группе: t, экранные данные и прочие
+                // метаданные сохраняются между кадрами.
+                if (!group.userData.lineLabelSources) {
+                    group.userData.lineLabelSources = [];
+                }
+                let cached = group.userData.lineLabelSources[cand.lnIndex];
+                if (!cached) {
+                    cached = new VectorLineLabelSource(this._map, cand.ln, group);
+                    group.userData.lineLabelSources[cand.lnIndex] = cached;
+                }
+                source = cached;
+            } else {
+                const pt = cand.pt;
+                const localWorldX = pt.x + group.position.x;
+                const localWorldZ = pt.z + group.position.z;
 
-            const source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
-                textColor: pt.textColor,
-                fontSize: pt.fontSize,
-                fontFamily: pt.fontFamily,
-                fontWeight: pt.fontWeight,
-                textShadow: pt.textShadow,
-                textOffset: pt.textOffset,
-                textAlign: pt.textAlign,
-                textVerticalAlign: pt.textVerticalAlign,
-                priority: pt.priority,
-                zoomBounds: pt.zoomBounds,
-            });
+                source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
+                    textColor: pt.textColor,
+                    fontSize: pt.fontSize,
+                    fontFamily: pt.fontFamily,
+                    fontWeight: pt.fontWeight,
+                    textShadow: pt.textShadow,
+                    textOffset: pt.textOffset,
+                    textAlign: pt.textAlign,
+                    textVerticalAlign: pt.textVerticalAlign,
+                    priority: pt.priority,
+                    zoomBounds: pt.zoomBounds,
+                });
+            }
 
             const label = textManager.addLabel(source, id);
 
@@ -493,22 +670,6 @@ export class VectorTileLayer {
         });
     }
 
-    /**
-     * Собирает кандидатов на подпись со всех видимых тайлов.
-     *
-     * Cull выполняется в два этапа:
-     *  1. Hard-cull по 3D-расстоянию от подписи (y=0) до камеры. Порог
-     *     в авто-режиме сужается при наклоне камеры — на горизонте подписи
-     *     перестают сливаться в «кашу».
-     *  2. Экранный cull по labelCullMargin — отсекает то, что за пределами
-     *     viewport'а (с запасом на prep).
-     *
-     * Каждый кандидат содержит `camDistSq` (квадрат 3D-расстояния до камеры)
-     * — используется для сортировки в _refreshTextLabelsForVisibleTiles.
-     *
-     * @private
-     * @returns {{candidates: Array<Object>, isClose: boolean}}
-     */
     _collectLabelCandidates() {
         const map = this._map;
         const camera = map.camera;
@@ -520,9 +681,6 @@ export class VectorTileLayer {
         const cullMargin = this.labelCullMargin ?? 250;
         const isClose = discreteZoom >= (this.labelDistanceSortZoom ?? 17);
 
-        // -------- Cull по расстоянию до камеры ------------------------------
-        // При высоком pitch горизонт заполняется дальними подписями. Порог
-        // масштабируется с camTargetDist и сужается по sinPitch.
         const cameraPos = camera.position;
         const camTargetDist = cameraPos.distanceTo(map.controls.target);
 
@@ -531,9 +689,6 @@ export class VectorTileLayer {
             const sinPitch = camTargetDist > 0
                 ? Math.max(0, Math.min(1, (cameraPos.y - map.controls.target.y) / camTargetDist))
                 : 0;
-            // pitch=0:   ~12 × camTargetDist (без отсечения)
-            // pitch=85°: ~2.4 × camTargetDist (только у цели)
-            // Нижний предел 2.0 — страховка от вырожденных случаев.
             maxLabelDist = camTargetDist * Math.max(2.0, 12 / (1 + sinPitch * 4));
         }
         const maxLabelDistSq = maxLabelDist * maxLabelDist;
@@ -541,73 +696,129 @@ export class VectorTileLayer {
         const camPosX = cameraPos.x;
         const camPosY = cameraPos.y;
         const camPosZ = cameraPos.z;
-        // ------------------------------------------------------------------
 
         const tempVec = this._tempVec3;
         const candidates = [];
         const rectW = rect.width;
         const rectH = rect.height;
 
-        this._tileCache.forEach(group => {
-            const data = group.userData.textPointsData;
-            if (!data || data.length === 0) return;
+        // Допуски по NDC для экранного cull'а линий (в долях полуширины/полувысоты).
+        const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
+        const screenMarginY = rectH > 0 ? cullMargin / rectH : 0;
 
+        this._tileCache.forEach(group => {
             const gx = group.position.x + worldOffset.x;
             const gz = group.position.z + worldOffset.z;
-            const groupIdPrefix = group.uuid + ':';
 
-            for (let i = 0; i < data.length; i++) {
-                const pt = data[i];
-                const zb = pt.zoomBounds || { min: 0, max: 24 };
-                if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
+            // -------- Точечные подписи --------------------------------------
+            const data = group.userData.textPointsData;
+            if (data && data.length > 0) {
+                const groupIdPrefix = group.uuid + ':';
 
-                const worldX = pt.x + gx;
-                const worldZ = pt.z + gz;
+                for (let i = 0; i < data.length; i++) {
+                    const pt = data[i];
+                    const zb = pt.zoomBounds || { min: 0, max: 24 };
+                    if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
-                // 3D-расстояние от подписи (лежит на y=0) до камеры.
-                const camDx = worldX - camPosX;
-                const camDy = -camPosY;
-                const camDz = worldZ - camPosZ;
-                const camDistSq = camDx * camDx + camDy * camDy + camDz * camDz;
+                    const worldX = pt.x + gx;
+                    const worldZ = pt.z + gz;
 
-                if (camDistSq > maxLabelDistSq) continue;
+                    const camDx = worldX - camPosX;
+                    const camDy = -camPosY;
+                    const camDz = worldZ - camPosZ;
+                    const camDistSq = camDx * camDx + camDy * camDy + camDz * camDz;
 
-                tempVec.set(worldX, 0, worldZ).project(camera);
-                if (tempVec.z > 1 || tempVec.z < -1) continue;
+                    if (camDistSq > maxLabelDistSq) continue;
 
-                const sx = (tempVec.x * 0.5 + 0.5) * rectW;
-                const sy = (-tempVec.y * 0.5 + 0.5) * rectH;
+                    tempVec.set(worldX, 0, worldZ).project(camera);
+                    if (tempVec.z > 1 || tempVec.z < -1) continue;
 
-                if (
-                    sx < -cullMargin ||
-                    sx > rectW + cullMargin ||
-                    sy < -cullMargin ||
-                    sy > rectH + cullMargin
-                ) {
-                    continue;
+                    const sx = (tempVec.x * 0.5 + 0.5) * rectW;
+                    const sy = (-tempVec.y * 0.5 + 0.5) * rectH;
+
+                    if (
+                        sx < -cullMargin ||
+                        sx > rectW + cullMargin ||
+                        sy < -cullMargin ||
+                        sy > rectH + cullMargin
+                    ) {
+                        continue;
+                    }
+
+                    candidates.push({
+                        type: 'point',
+                        pt,
+                        group,
+                        id: groupIdPrefix + i,
+                        camDistSq,
+                        priority: pt.priority || 0,
+                        sx,
+                        sy,
+                    });
                 }
+            }
 
-                candidates.push({
-                    pt,
-                    group,
-                    id: groupIdPrefix + i,
-                    camDistSq,
-                    priority: pt.priority || 0,
-                    sx,
-                    sy,
-                });
+            // -------- Линейные подписи --------------------------------------
+            const lineData = group.userData.textLinesData;
+            if (lineData && lineData.length > 0) {
+                const groupIdPrefixL = group.uuid + ':L';
+
+                for (let i = 0; i < lineData.length; i++) {
+                    const ln = lineData[i];
+                    const zb = ln.zoomBounds || { min: 0, max: 24 };
+                    if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
+
+                    const pts = ln.points;
+                    if (!pts || pts.length < 2) continue;
+
+                    // Сэмплируем не более ~7 точек: этого достаточно, чтобы
+                    // (а) найти минимальное 3D-расстояние до камеры, и
+                    // (б) проверить, есть ли хоть одна точка в viewport'е.
+                    const step = Math.max(1, Math.floor(pts.length / 6));
+                    let minDistSq = Infinity;
+                    let anyOnScreen = false;
+
+                    for (let k = 0; k < pts.length; k += step) {
+                        const worldX = pts[k].x + gx;
+                        const worldZ = pts[k].z + gz;
+
+                        const camDx = worldX - camPosX;
+                        const camDy = -camPosY;
+                        const camDz = worldZ - camPosZ;
+                        const d2 = camDx * camDx + camDy * camDy + camDz * camDz;
+                        if (d2 < minDistSq) minDistSq = d2;
+
+                        if (!anyOnScreen) {
+                            tempVec.set(worldX, 0, worldZ).project(camera);
+                            if (tempVec.z > -1 && tempVec.z < 1 &&
+                                tempVec.x >= -1 - screenMarginX &&
+                                tempVec.x <= 1 + screenMarginX &&
+                                tempVec.y >= -1 - screenMarginY &&
+                                tempVec.y <= 1 + screenMarginY) {
+                                anyOnScreen = true;
+                            }
+                        }
+                    }
+
+                    if (!anyOnScreen) continue;
+                    if (minDistSq > maxLabelDistSq) continue;
+
+                    candidates.push({
+                        type: 'line',
+                        ln,
+                        lnIndex: i,
+                        group,
+                        id: groupIdPrefixL + i,
+                        camDistSq: minDistSq,
+                        priority: ln.priority || 0,
+                    });
+                }
             }
         });
 
         return { candidates, isClose };
     }
 
-    /**
-     * Жёстко снимает DOM-подписи с конкретной группы (при её уничтожении
-     * или пересборке). В штатном цикле не вызывается — там работает pruneStaleLabels.
-     * @private
-     * @param {THREE.Group} group
-     */
     _removeTextLabelsForGroup(group) {
         if (group.userData.textLabels && this._map && this._map.textManager) {
             for (const label of group.userData.textLabels) {
@@ -617,14 +828,12 @@ export class VectorTileLayer {
         group.userData.textLabels = [];
     }
 
-    /** @private */
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
         return this._getFillMaterial(key);
     }
 
-    /** @private */
     _getLineMaterialFromData(layerName, color, width, dash) {
         const dashKey = dash ? dash.join(',') : 'none';
         const key = `line:${layerName}:${color.toString(16)}:${width}:${dashKey}`;
@@ -635,13 +844,6 @@ export class VectorTileLayer {
     // Публичные методы
     // -------------------------------------------------------------------------
 
-    /**
-     * Добавляет область исключения. Геометрия указанных слоёв внутри
-     * области не будет отображаться. Вызывать после addTo.
-     * @param {Object} collection - GeoJSON
-     * @param {Array<string>} layers
-     * @returns {VectorTileLayer}
-     */
     addExclusionArea(collection, layers) {
         if (!this._map) {
             throw new Error('VectorTileLayer.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
@@ -691,7 +893,6 @@ export class VectorTileLayer {
         return this;
     }
 
-    /** @private */
     _invalidateAllTiles() {
         this._clearAllTiles();
         this._clearGroupCache();
@@ -702,7 +903,6 @@ export class VectorTileLayer {
         this._lastCheckInit = false;
     }
 
-    /** @private */
     _mergeStyles(base, overrides) {
         const merged = JSON.parse(JSON.stringify(base));
         for (const [key, val] of Object.entries(overrides)) {
@@ -715,11 +915,6 @@ export class VectorTileLayer {
         return merged;
     }
 
-    /**
-     * Добавляет слой на карту.
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @returns {VectorTileLayer}
-     */
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
@@ -742,9 +937,6 @@ export class VectorTileLayer {
         return this;
     }
 
-    /**
-     * Удаляет слой с карты и освобождает все ресурсы.
-     */
     removeFromMap() {
         if (!this._map) return;
 
@@ -781,7 +973,6 @@ export class VectorTileLayer {
         this._lastCheckInit = false;
     }
 
-    /** @private */
     _clearAllTiles() {
         this._generation++;
         this._tileCache.forEach(group => this._disposeTile(group));
@@ -792,13 +983,11 @@ export class VectorTileLayer {
         this._labelsDirty = true;
     }
 
-    /** @private */
     _clearGroupCache() {
         this._groupCache.forEach(group => this._disposeTile(group));
         this._groupCache.clear();
     }
 
-    /** @private */
     _clearOldTilesNow() {
         if (this._oldTileCleanupTimer) {
             clearTimeout(this._oldTileCleanupTimer);
@@ -810,11 +999,6 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Освобождает ресурсы тайла. Управляемые материалы/геометрии не трогает.
-     * @private
-     * @param {THREE.Group} group
-     */
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
 
@@ -832,12 +1016,6 @@ export class VectorTileLayer {
         this._rootGroup.remove(group);
     }
 
-    /**
-     * Убирает тайл из активного кэша, готовую группу кладёт в LRU `_groupCache`.
-     * @private
-     * @param {string} key
-     * @param {THREE.Group} group
-     */
     _removeTile(key, group) {
         this._rootGroup.remove(group);
         this._tileCache.delete(key);
@@ -854,7 +1032,6 @@ export class VectorTileLayer {
         }
     }
 
-    /** @private */
     _scheduleOldTilesCleanup(delay = 1500) {
         if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
         this._oldTileCleanupTimer = setTimeout(() => {
@@ -866,11 +1043,6 @@ export class VectorTileLayer {
         }, delay);
     }
 
-    // -------------------------------------------------------------------------
-    // LRU-кэш сырых PBF-буферов
-    // -------------------------------------------------------------------------
-
-    /** @private */
     _setTileDataCache(key, buffer) {
         this._tileDataCache.delete(key);
         this._tileDataCache.set(key, buffer);
@@ -880,7 +1052,6 @@ export class VectorTileLayer {
         }
     }
 
-    /** @private */
     _getTileDataCache(key) {
         const val = this._tileDataCache.get(key);
         if (val === undefined) return undefined;
@@ -889,17 +1060,6 @@ export class VectorTileLayer {
         return val;
     }
 
-    /**
-     * Ежекадровый пост-апдейт слоя.
-     *
-     * Троттлится раз в `_throttle` мс. Между троттл-тиками выполняется
-     * дешёвая skip-проверка (камера/мир/зум не изменились и подписи не
-     * dirty) — в этом случае дорогие вычисления пропускаются, остаётся
-     * только `_processQueue()`.
-     *
-     * @private
-     * @param {import('./KrbMap.js').KrbMap} map
-     */
     _postUpdate(map) {
         if (!this._map) return;
 
@@ -916,8 +1076,6 @@ export class VectorTileLayer {
         }
         this._lastUpdateTime = now;
 
-        // Skip-логика: камера/мир/зум не менялись, подписи не dirty —
-        // не гоняем дорогие вычисления.
         const camPos = map.camera.position;
         const discreteZoom = map.currentDiscreteZoom;
 
@@ -999,7 +1157,6 @@ export class VectorTileLayer {
             }
         }
 
-        // Пересборка подписей: dirty / settle / periodic.
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
@@ -1041,7 +1198,6 @@ export class VectorTileLayer {
         this._processQueue();
     }
 
-    /** @private */
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) {
@@ -1059,11 +1215,6 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Загружает тайл: из groupCache (если is3d совпадает) либо
-     * fetch + sendToWorker.
-     * @private
-     */
     async _loadTile(z, xSlippy, ySlippy) {
         const key = `${z},${xSlippy},${ySlippy}`;
         if (this._pendingLoads.has(key) || this._tileCache.has(key)) return;
@@ -1146,11 +1297,6 @@ export class VectorTileLayer {
         }
     }
 
-    /**
-     * Отправляет буфер тайла в воркер.
-     * @private
-     * @returns {Promise<THREE.Group|null>}
-     */
     async _sendToWorker(buffer, z, x, y, is3d, existingGroup) {
         await this._workerReady;
         return new Promise((resolve, reject) => {
@@ -1175,7 +1321,9 @@ export class VectorTileLayer {
                 visibleLayers: this.visibleLayers,
                 buildingEdges: this.buildingEdges,
                 exclusionPolygons: this._exclusionAreas,
-                exclusionLayers: Array.from(this._exclusionLayers)
+                exclusionLayers: Array.from(this._exclusionLayers),
+                maxTextPointsPerTile: this.maxTextPointsPerTile,
+                maxTextLinesPerTile: this.maxTextLinesPerTile,
             };
 
             this._pendingWorkerRequests.set(id, {
@@ -1194,13 +1342,6 @@ export class VectorTileLayer {
         });
     }
 
-    /**
-     * Вычисляет множество видимых тайлов текущего вида.
-     * 5×5 raycast'ов по земле + fallback по FOV + margin.
-     * @private
-     * @param {number} z
-     * @returns {Set<string>}
-     */
     _getVisibleTileKeys(z) {
         const map = this._map;
         const camera = map.camera;
@@ -1284,11 +1425,6 @@ export class VectorTileLayer {
         return keys;
     }
 
-    // -------------------------------------------------------------------------
-    // Кеширование материалов
-    // -------------------------------------------------------------------------
-
-    /** @private */
     _getFillMaterial(styleKey) {
         if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1311,7 +1447,6 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /** @private */
     _getLineMaterial(styleKey, dash) {
         if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
         const parts = styleKey.split(':');
@@ -1340,7 +1475,6 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /** @private */
     _getPointGeometry(radius) {
         const key = `point_${radius}`;
         if (this._pointGeometryCache.has(key)) return this._pointGeometryCache.get(key);
@@ -1351,7 +1485,6 @@ export class VectorTileLayer {
         return geom;
     }
 
-    /** @private */
     _concatF32(arrays) {
         let total = 0;
         for (const a of arrays) total += a.length;
@@ -1361,7 +1494,6 @@ export class VectorTileLayer {
         return out;
     }
 
-    /** @private */
     _getBuildingMaterial(color) {
         const key = 'bld:' + color;
         if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
@@ -1381,7 +1513,6 @@ export class VectorTileLayer {
         return mat;
     }
 
-    /** @private */
     _getBuildingEdgeMaterial(color) {
         const key = 'bldEdge:' + color;
         if (this._lineMaterialCache.has(key)) return this._lineMaterialCache.get(key);

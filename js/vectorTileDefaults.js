@@ -9,39 +9,17 @@
  *   текстовые поля: textColor, fontSize, fontFamily, fontWeight, textShadow,
  *   textOffset, textAlign, textVerticalAlign, textPriority, textZoomMin, textZoomMax.
  *   Эти поля читаются только этими слоями.
+ * - Для линейных слоёв (`transportation`, `waterway`, `water_name`,
+ *   `transportation_name`) подписи генерируются только если в стиле задан
+ *   хотя бы один текстовый атрибут И у фичи есть `name`/`ref`. Дополнительно
+ *   используется `textPlacement` (по умолчанию 'along') для размещения вдоль
+ *   линии. См. processTile в vectorTileWorkerCode.js.
  * - Поле `stroke` имеет смысл только для полигональных слоёв (заливки/обводки
  *   контура). Для точечных слоёв оно игнорируется.
  */
 
 /**
  * Стили по умолчанию для различных типов объектов, сгруппированные по слоям.
- *
- * @property {Object} water - Стили водных объектов (озера, реки, пруды, бассейны, доки).
- * @property {Object} waterway - Стиль водных путей.
- * @property {Object} building - Стиль зданий.
- * @property {Object} landcover - Стили растительного покрова (лес, трава, парк и т.д.).
- * @property {Object} landuse - Стили землепользования (жилые, промышленные, коммерческие и т.д.).
- * @property {Object} park - Стили парков и охраняемых территорий.
- * @property {Object} leisure - Стили зон отдыха (спорт, детские площадки, стадионы).
- * @property {Object} transportation - Стили транспортной сети (дороги, железные дороги, паромы и т.д.).
- * @property {Object} transportation_name - Стили подписей транспортной сети.
- * @property {Object} aeroway - Стили аэропортовой инфраструктуры.
- * @property {Object} place - Стили населенных пунктов (город, поселок, деревня и т.д.).
- * @property {Object} poi - Стили точек интереса.
- * @property {Object} housenumber - Стили номеров домов.
- * @property {Object} mountain_peak - Стили горных вершин.
- * @property {Object} boundary - Стиль границ.
- * @property {Object} water_name - Стили подписей водных объектов.
- *
- * @example
- * const waterLakeStyle = DEFAULT_STYLES.water.lake;
- * const riverStyle = DEFAULT_STYLES.water.river;
- * const motorwayStyle = DEFAULT_STYLES.transportation.motorway;
- * const cityStyle = DEFAULT_STYLES.place.city;
- * console.log(waterLakeStyle.color, waterLakeStyle.opacity);
- * console.log(riverStyle.color, riverStyle.opacity);
- * console.log(motorwayStyle.color, motorwayStyle.width, motorwayStyle.dash);
- * console.log(cityStyle.radius, cityStyle.textColor, cityStyle.fontSize);
  */
 export const DEFAULT_STYLES = {
     water: {
@@ -52,7 +30,19 @@ export const DEFAULT_STYLES = {
         dock: { color: 0x8899aa, opacity: 0.8 },
         _default: { color: 0xaaccff, opacity: 0.9 }
     },
-    waterway: { color: 0x99bbee, width: 1.5 },
+    waterway: {
+        color: 0x99bbee,
+        width: 1.5,
+        // Подписи рек/каналов вдоль линии. Появляются при zoom ≥ 14,
+        // чтобы избежать «каши» из ручьёв и канав на обзорных уровнях.
+        textColor: '#1e4d6b',
+        fontSize: '11px',
+        textPlacement: 'along',
+        textShadow: '0 0 2px rgba(255,255,255,0.85)',
+        textZoomMin: 14,
+        textZoomMax: 21,
+        textPriority: 14
+    },
     building: { color: 0xf0f0f0, stroke: 0xaaaaaa },
     landcover: {
         wood: { color: 0xc8e6c9 },
@@ -108,9 +98,6 @@ export const DEFAULT_STYLES = {
         protected_area: { color: 0xb8d8a0 },
         _default: { color: 0xdcedc8 }
     },
-    // Зоны отдыха. Раньше LAYER_RENDER_ORDER ссылался на `leisure`,
-    // но соответствующего блока в DEFAULT_STYLES не было — все фичи
-    // слоя `leisure` отбрасывались в getFeatureStyle.
     leisure: {
         park: { color: 0xdcedc8 },
         garden: { color: 0xdcedc8 },
@@ -121,23 +108,103 @@ export const DEFAULT_STYLES = {
         golf_course: { color: 0xc8e6c9 },
         _default: { color: 0xdcedc8 }
     },
+
+    // Транспорт: линейные подписи вдоль дорог (кроме мелких/временных типов).
+    // Приоритеты убывают от магистралей к местным улицам.
+    // zoomMin намеренно растёт к мелким дорогам: обзорные уровни остаются
+    // чистыми, детали появляются только при приближении.
     transportation: {
-        motorway:          { color: 0xff9933, width: 2.5 },
-        trunk:             { color: 0xffcc66, width: 2.0 },
-        primary:           { color: 0xffd699, width: 1.8 },
-        secondary:         { color: 0xffe0b3, width: 1.5 },
-        tertiary:          { color: 0xffffff, width: 1.2 },
-        minor:             { color: 0xeeeeee, width: 1.0 },
-        residential:       { color: 0xeeeeee, width: 1.0 },
+        motorway: {
+            color: 0xff9933, width: 2.5,
+            textColor: '#5c3a00',
+            fontSize: '11px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 10, textZoomMax: 21,
+            textPriority: 40
+        },
+        trunk: {
+            color: 0xffcc66, width: 2.0,
+            textColor: '#5c4400',
+            fontSize: '11px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 11, textZoomMax: 21,
+            textPriority: 38
+        },
+        primary: {
+            color: 0xffd699, width: 1.8,
+            textColor: '#553a1a',
+            fontSize: '11px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 12, textZoomMax: 21,
+            textPriority: 34
+        },
+        secondary: {
+            color: 0xffe0b3, width: 1.5,
+            textColor: '#554a33',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 13, textZoomMax: 21,
+            textPriority: 30
+        },
+        tertiary: {
+            color: 0xffffff, width: 1.2,
+            textColor: '#444444',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 14, textZoomMax: 21,
+            textPriority: 26
+        },
+        minor: {
+            color: 0xeeeeee, width: 1.0,
+            textColor: '#555555',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 16, textZoomMax: 20,
+            textPriority: 22
+        },
+        residential: {
+            color: 0xeeeeee, width: 1.0,
+            textColor: '#555555',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 16, textZoomMax: 20,
+            textPriority: 22
+        },
+        service: {
+            color: 0xcccccc, width: 0.8,
+            textColor: '#666666',
+            fontSize: '9px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 18, textZoomMax: 21,
+            textPriority: 18
+        },
+        rail: {
+            color: 0x888888, width: 1.5, dash: [6, 2],
+            textColor: '#444444',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 15, textZoomMax: 20,
+            textPriority: 20
+        },
+        // Без текста: path, track, ferry, aerialway, bridge, pier, raceway,
+        // transit, *_construction — либо слишком мелкие, либо временные,
+        // либо не несут самостоятельного имени.
         path:              { color: 0xaaaaaa, width: 0.8 },
         track:             { color: 0xaaaaaa, width: 0.8 },
-        rail:              { color: 0x888888, width: 1.5, dash: [6, 2] },
         ferry:             { color: 0x6699cc, width: 1.2, dash: [4, 4] },
         aerialway:         { color: 0x666666, width: 1.0, dash: [2, 2] },
         bridge:            { color: 0xffaa00, width: 2.0 },
         pier:              { color: 0xcccccc, width: 1.0 },
         raceway:           { color: 0xff6666, width: 1.5 },
-        service:           { color: 0xcccccc, width: 0.8 },
         transit:           { color: 0xdddddd, width: 1.2 },
         motorway_construction: { color: 0xff9933, width: 2.5, dash: [8, 4] },
         trunk_construction:    { color: 0xffcc66, width: 2.0, dash: [8, 4] },
@@ -147,16 +214,39 @@ export const DEFAULT_STYLES = {
         minor_construction:    { color: 0xeeeeee, width: 1.0, dash: [8, 4] },
         service_construction:  { color: 0xcccccc, width: 0.8, dash: [8, 4] },
         path_construction:     { color: 0xaaaaaa, width: 0.8, dash: [6, 3] },
-        _default:             { color: 0xcccccc, width: 1.0 }
+        _default: {
+            color: 0xcccccc, width: 1.0,
+            textColor: '#555555',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 16, textZoomMax: 20,
+            textPriority: 18
+        }
     },
+
+    // Carrier-слой для дорожных названий в тайлах Mapbox-стиля: сама линия
+    // практически невидима, текст размещается вдоль неё. В тайлах, где
+    // `name` лежит прямо на `transportation`, этот слой не сработает —
+    // дубликаты не возникнут.
     transportation_name: {
-        _default: { color: 0xffffff, width: 0.2, opacity: 0.3 }
+        _default: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#555555',
+            fontSize: '10px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 14, textZoomMax: 21,
+            textPriority: 28
+        }
     },
+
     aeroway: {
         runway: { color: 0xcccccc, width: 2.0 },
         taxiway: { color: 0xdddddd, width: 1.0 },
         _default: { color: 0xcccccc, width: 1.0 }
     },
+
     place: {
         city: {
             color: 0xe8e8e8, opacity: 0.7, radius: 5,
@@ -201,56 +291,82 @@ export const DEFAULT_STYLES = {
     mountain_peak: {
         _default: { color: 0xffffff, radius: 3 }
     },
+
+    // Границы: подписи намеренно не добавлены — названия стран/регионов
+    // уже приходят через слой `place` (точки), и текст на самих линиях
+    // дублировал бы их.
     boundary: { color: 0x999999, width: 1.0, dash: [4, 2] },
+
+    // Carrier-слой для названий водоёмов (озёр, морей) и рек в тайлах
+    // Mapbox-стиля: тонкая невидимая линия для размещения текста вдоль неё.
     water_name: {
-        _default: { color: 0xaaccff, width: 0.2, opacity: 0.3 }
+        _default: {
+            color: 0xaaccff, width: 0.2, opacity: 0.3,
+            textColor: '#1e4d6b',
+            fontSize: '11px',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.85)',
+            textZoomMin: 12, textZoomMax: 21,
+            textPriority: 12
+        }
     }
 };
 
 /**
  * Порядок отрисовки слоёв. Чем больше число, тем выше слой.
  *
- * Значения уникальны, чтобы избежать конфликтов renderOrder между
- * семантически разными слоями (раньше waterway, place и boundary делили
- * одно значение 4, а park и leisure — 2).
+ * Числа уникальны и расставлены с шагом 10: это оставляет запас для
+ * вставки новых слоёв без переписывания всего блока.
  *
- * @property {number} landuse - Порядок отрисовки слоя землепользования.
- * @property {number} landcover - Порядок отрисовки слоя растительного покрова.
- * @property {number} park - Порядок отрисовки слоя парков.
- * @property {number} leisure - Порядок отрисовки слоя зон отдыха.
- * @property {number} water - Порядок отрисовки слоя водных объектов.
- * @property {number} waterway - Порядок отрисовки слоя водных путей.
- * @property {number} water_name - Порядок отрисовки подписей водных объектов.
- * @property {number} boundary - Порядок отрисовки слоя границ.
- * @property {number} place - Порядок отрисовки слоя населенных пунктов.
- * @property {number} building - Порядок отрисовки слоя зданий.
- * @property {number} aeroway - Порядок отрисовки слоя аэропортовой инфраструктуры.
- * @property {number} transportation - Порядок отрисовки слоя транспортной сети.
- * @property {number} transportation_name - Порядок отрисовки подписей транспортной сети.
- * @property {number} poi - Порядок отрисовки слоя точек интереса.
- * @property {number} mountain_peak - Порядок отрисовки слоя горных вершин.
- * @property {number} housenumber - Порядок отрисовки слоя номеров домов.
+ * Иерархия (снизу вверх):
+ *   1. Фоновые площадные объекты (landuse, landcover, park, leisure).
+ *   2. Гидрография (water, waterway).
+ *   3. Границы и аэродромная инфраструктура (boundary, aeroway).
+ *   4. Дорожная сеть (transportation).
+ *   5. Здания (building) — перекрывают дороги.
+ *   6. Подписи (water_name, transportation_name, poi, place, mountain_peak,
+ *      aerodrome_label, housenumber) — всегда выше геометрии.
  *
- * @example
- * const waterOrder = LAYER_RENDER_ORDER.water;
- * const buildingOrder = LAYER_RENDER_ORDER.building;
- * console.log(waterOrder, buildingOrder);
+ * Набор слоёв соответствует схеме OpenMapTiles (docs.maptiler.com/schema/
+ * omt-planet/): aerodrome_label, aeroway, boundary, building, housenumber,
+ * landcover, landuse, mountain_peak, park, place, poi, transportation,
+ * transportation_name, water, water_name, waterway. Слой `leisure` добавлен
+ * отдельно — в некоторых OSM-схемах он выносится из `landuse`.
+ *
+ * @property {number} landuse            — Землепользование (жилые, промышленные зоны).
+ * @property {number} landcover          — Растительный/почвенный покров (лес, трава, песок).
+ * @property {number} park               — Парки и охраняемые территории.
+ * @property {number} leisure            — Зоны отдыха (спортплощадки, стадионы).
+ * @property {number} water              — Водные полигоны (озёра, моря, реки-полигоны).
+ * @property {number} waterway           — Водные линии (реки, каналы, ручьи).
+ * @property {number} boundary           — Административные границы.
+ * @property {number} aeroway            — Аэродромная инфраструктура (ВПП, рулёжки).
+ * @property {number} transportation     — Дороги, железные дороги, паромы.
+ * @property {number} building           — Здания (в т.ч. 3D).
+ * @property {number} water_name         — Подписи водоёмов (carrier-линии).
+ * @property {number} transportation_name— Подписи дорог (carrier-линии).
+ * @property {number} poi                — Точки интереса (POI).
+ * @property {number} place              — Населённые пункты (города, деревни).
+ * @property {number} mountain_peak      — Горные вершины.
+ * @property {number} aerodrome_label    — Подписи аэродромов.
+ * @property {number} housenumber        — Номера домов.
  */
 export const LAYER_RENDER_ORDER = {
-    landuse:   0,
-    landcover: 1,
-    park:      2,
-    leisure:   2,
-    water:     3,
-    waterway:  4,
-    water_name: 5,
-    boundary:  6,
-    place:     8,
-    building:  10,
-    aeroway:   12,
-    transportation: 15,
-    transportation_name: 16,
-    poi: 20,
-    mountain_peak: 20,
-    housenumber: 21
+    landuse:             10,
+    landcover:           20,
+    park:                30,
+    leisure:             40,
+    water:               50,
+    waterway:            60,
+    boundary:            70,
+    aeroway:             80,
+    transportation:      90,
+    building:           100,
+    water_name:         110,
+    transportation_name:120,
+    poi:                130,
+    place:              140,
+    mountain_peak:      150,
+    aerodrome_label:    160,
+    housenumber:        170
 };

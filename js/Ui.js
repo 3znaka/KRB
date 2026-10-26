@@ -171,29 +171,42 @@ export function initUI(map) {
     const _plane = map.groundPlane || new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
     /**
-     * Возвращает расстояние в мировых единицах для указанного числа
-     * горизонтальных CSS-пикселей в центре экрана.
+     * Геодезическое расстояние между двумя точками WGS84 (в метрах)
+     * по формуле гаверсинуса.
      *
-     * @param {Object} mapRef - Экземпляр карты.
-     * @param {number} pixelLength - Количество CSS-пикселей.
-     * @returns {number} Расстояние в метрах.
+     * Работает независимо от проекции карты: на вход принимает уже
+     * готовые lon/lat, полученные через `map.unprojectToLonLat`
+     * (то есть корректно переведённые из world-координат текущей
+     * проекции — Mercator, UTM, Equal Earth, азимутальной и т.д.).
+     *
+     * Корректно обрабатывает переход через антимеридиан (Δlon
+     * сворачивается в (−180, 180]) и полюса.
+     *
+     * @param {number} lon1 - Долгота точки 1, градусы.
+     * @param {number} lat1 - Широта точки 1, градусы.
+     * @param {number} lon2 - Долгота точки 2, градусы.
+     * @param {number} lat2 - Широта точки 2, градусы.
+     * @param {number} R - Радиус сферы, метры.
+     * @returns {number} Расстояние по большому кругу, метры.
      */
-    function getGroundDistanceForPixels(mapRef, pixelLength) {
-        const rect = mapRef.renderer.domElement.getBoundingClientRect();
-        if (!rect.width || !rect.height) return 0;
+    function haversineDistance(lon1, lat1, lon2, lat2, R) {
+        const toRad = Math.PI / 180;
 
-        // Центр экрана
-        _ndc.set(0, 0);
-        _raycaster.setFromCamera(_ndc, mapRef.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return 0;
+        let dLon = lon2 - lon1;
+        if (dLon > 180) dLon -= 360;
+        else if (dLon < -180) dLon += 360;
 
-        // Точка на pixelLength правее центра экрана
-        const ndcOffsetX = (2 * pixelLength) / rect.width;
-        _ndc.set(ndcOffsetX, 0);
-        _raycaster.setFromCamera(_ndc, mapRef.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return 0;
+        const dLatRad = (lat2 - lat1) * toRad;
+        const dLonRad = dLon * toRad;
+        const lat1Rad = lat1 * toRad;
+        const lat2Rad = lat2 * toRad;
 
-        return _hit1.distanceTo(_hit2);
+        const a =
+            Math.sin(dLatRad / 2) * Math.sin(dLatRad / 2) +
+            Math.cos(lat1Rad) * Math.cos(lat2Rad) *
+            Math.sin(dLonRad / 2) * Math.sin(dLonRad / 2);
+
+        return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
     }
 
     /**
@@ -242,6 +255,20 @@ export function initUI(map) {
     /**
      * Обновляет масштабную линейку, координаты и подпись зума.
      * Вызывается в каждом кадре анимации.
+     *
+     * Масштаб вычисляется универсально — через две экранные точки:
+     *
+     *  1. Берём центр экрана и центр + barLengthPx вправо.
+     *  2. Обе точки пересекаем лучом с плоскостью земли (y = 0)
+     *     и получаем world-координаты в CRS карты.
+     *  3. Переводим обе world-точки в lon/lat через `map.unprojectToLonLat`
+     *     (это обратное преобразование именно текущей проекции).
+     *  4. Считаем геодезическое расстояние между двумя lon/lat по
+     *     гаверсинусу.
+     *
+     * Такой подход не делает никаких предположений о масштабном
+     * факторе проекции и потому корректен для Mercator (3857/3395),
+     * UTM, Equal Earth, азимутальных и любых других CRS.
      */
     function updateScaleBar() {
         const worldPos = map.worldGroup.position;
@@ -253,6 +280,13 @@ export function initUI(map) {
         // Мировые координаты центра → WGS84 через проекцию карты.
         // Работает для любой зарегистрированной проекции (3857, 3395, ...).
         const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
+
+        // Точка вне домена проекции (или «уехавшие» градусы) — UI
+        // не трогаем, оставляем последнее валидное значение.
+        if (!Number.isFinite(lon) || !Number.isFinite(lat) ||
+            Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
+            return;
+        }
 
         // Наклон камеры (pitch) — угол между направлением target→camera и осью Y.
         _dirVec.subVectors(map.camera.position, target);
@@ -267,13 +301,42 @@ export function initUI(map) {
         // Координаты и углы
         coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
 
+        // ---- Реальное расстояние для масштабной линейки ----
         const barLengthPx = 100;
-        const planeDistance = getGroundDistanceForPixels(map, barLengthPx);
-        // Переводим в реальное расстояние с учётом широты.
-        // Для Меркатора (и сферического 3857, и эллиптического 3395) масштаб
-        // в первом порядке пропорционален sec(φ), поэтому поправка cos(φ)
-        // даёт корректную оценку истинного расстояния.
-        const distance = planeDistance * Math.cos(lat * Math.PI / 180);
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        // Центр экрана → точка на земле
+        _ndc.set(0, 0);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return;
+
+        // Центр + barLengthPx вправо → точка на земле
+        const ndcOffsetX = (2 * barLengthPx) / rect.width;
+        _ndc.set(ndcOffsetX, 0);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return;
+
+        // world → lon/lat (вычитаем offset worldGroup, т.к. unprojectToLonLat
+        // ожидает координаты без учёта сдвига мира).
+        const [lon1, lat1] = map.unprojectToLonLat(
+            _hit1.x - worldPos.x, _hit1.z - worldPos.z
+        );
+        const [lon2, lat2] = map.unprojectToLonLat(
+            _hit2.x - worldPos.x, _hit2.z - worldPos.z
+        );
+
+        if (!Number.isFinite(lon1) || !Number.isFinite(lat1) ||
+            !Number.isFinite(lon2) || !Number.isFinite(lat2)) {
+            return;
+        }
+        if (Math.abs(lon1) > 180.0001 || Math.abs(lat1) > 90.0001) return;
+        if (Math.abs(lon2) > 180.0001 || Math.abs(lat2) > 90.0001) return;
+
+        // Радиус сферы: используем R карты, если он задан (для не-земных
+        // карт), иначе средний радиус Земли WGS84.
+        const R = (Number.isFinite(map.R) && map.R > 0) ? map.R : 6371008.8;
+        const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
 
         if (distance > 0) {
             const nice = niceDistance(distance);

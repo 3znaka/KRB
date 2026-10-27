@@ -404,6 +404,12 @@ export const VECTOR_TILE_RENDER_ORDER = {
     BUILDING: 50,
     EDGE:     51
 };
+const FLAT_Y_OFFSET = 0.5;
+const FLAT_Y_STEP   = 0.002;
+
+function _flatY(renderOrder) {
+    return FLAT_Y_OFFSET + (renderOrder || 0) * FLAT_Y_STEP;
+}
 
 // -----------------------------------------------------------------------------
 // Основной класс.
@@ -601,7 +607,9 @@ export class VectorTileLayer {
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
-            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
+            const ro = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
+            mesh.renderOrder = ro;
+            mesh.position.y = _flatY(ro);
             group.add(mesh);
         }
 
@@ -642,14 +650,14 @@ export class VectorTileLayer {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
             this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder);
         }
-
         for (const pt of result.points) {
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
-            mesh.position.set(pt.x, 0, pt.z);
-            mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
+            const ro = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
+            mesh.position.set(pt.x, _flatY(ro), pt.z);
+            mesh.renderOrder = ro;
             group.add(mesh);
         }
 
@@ -738,6 +746,7 @@ export class VectorTileLayer {
         }
 
         lineObj.renderOrder = renderOrder;
+        lineObj.position.y = _flatY(renderOrder);
         lineObj.frustumCulled = false;
         group.add(lineObj);
     }
@@ -1665,10 +1674,7 @@ export class VectorTileLayer {
             transparent: opacity < 1.0,
             opacity,
             depthTest: true,
-            depthWrite: false,
-            polygonOffset: true,
-            polygonOffsetFactor: 1,
-            polygonOffsetUnits: 1
+            depthWrite: false
         });
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);

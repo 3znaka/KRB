@@ -291,7 +291,7 @@ function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
     const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
- const DASH_MULTIPLIER = 10;
+ const DASH_MULTIPLIER = 6;
     return [
         dashPx[0] * worldPerPx * DASH_MULTIPLIER,
         dashPx[1] * worldPerPx * DASH_MULTIPLIER
@@ -987,21 +987,49 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 const fillKey = 'fill:' + name + ':' + color_out.toString(16) + ':' + opacity;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
-                const triData = [];
+
+                const validRings = [];
                 for (const ring of rings) {
-                    const outer = orientRing(ring, false);
-                    const cleanedOuter = dedupRing(outer, eps);
-                    if (cleanedOuter.length < 3) continue;
-                    const t = triangulatePolygon(cleanedOuter, [], eps);
-                    if (t) {
-                        const positions = new Float32Array(t.vertices.length / 2 * 3);
-                        for (let ii = 0, jj = 0; ii < t.vertices.length; ii += 2, jj += 3) {
-                            positions[jj] = t.vertices[ii];
-                            positions[jj + 1] = 0;
-                            positions[jj + 2] = t.vertices[ii + 1];
-                        }
-                        triData.push({ positions, indices: new Uint32Array(t.indices), sortKey });
+                    const cleaned = dedupRing(ring, eps);
+                    if (cleaned.length < 3) continue;
+                    const area = ringArea(cleaned);
+                    if (Math.abs(area) < eps * eps) continue;
+                    validRings.push({ ring: cleaned, area });
+                }
+                if (validRings.length === 0) continue;
+
+                let maxAbsArea = 0;
+                let outerSign = 1;
+                for (const r of validRings) {
+                    const a = Math.abs(r.area);
+                    if (a > maxAbsArea) { maxAbsArea = a; outerSign = Math.sign(r.area); }
+                }
+
+                const polygonGroups = [];
+                let currentPoly = null;
+                for (const r of validRings) {
+                    const isOuter = Math.sign(r.area) === outerSign;
+                    if (isOuter || currentPoly === null) {
+                        currentPoly = { outer: r.ring, holes: [] };
+                        polygonGroups.push(currentPoly);
+                    } else {
+                        currentPoly.holes.push(r.ring);
                     }
+                }
+
+                const triData = [];
+                for (const poly of polygonGroups) {
+                    const outer = orientRing(poly.outer, false);
+                    const holes = poly.holes.map(h => orientRing(h, true));
+                    const t = triangulatePolygon(outer, holes, eps);
+                    if (!t) continue;
+                    const positions = new Float32Array(t.vertices.length / 2 * 3);
+                    for (let ii = 0, jj = 0; ii < t.vertices.length; ii += 2, jj += 3) {
+                        positions[jj] = t.vertices[ii];
+                        positions[jj + 1] = 0;
+                        positions[jj + 2] = t.vertices[ii + 1];
+                    }
+                    triData.push({ positions, indices: new Uint32Array(t.indices), sortKey });
                 }
                 if (triData.length > 0) fillGroup.push(...triData);
 

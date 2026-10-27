@@ -108,14 +108,14 @@ const CARRIER_ONLY_LINE_LAYERS = new Set(['transportation_name', 'water_name']);
 // записями (highway-*-casing, bridge-*-casing, tunnel-*-casing);
 // здесь — упрощение: +4 px к толщине fill для дорог вне туннеля.
 const TRANSPORTATION_CASING = {
-    motorway:  { color: 0xe9ac77, extraWidth: 4 },
-    trunk:     { color: 0xe9ac77, extraWidth: 4 },
-    primary:   { color: 0xe9ac77, extraWidth: 4 },
-    secondary: { color: 0xe9ac77, extraWidth: 4 },
-    tertiary:  { color: 0xe9ac77, extraWidth: 4 },
-    minor:     { color: 0xcfcdca, extraWidth: 3.5 },
-    service:   { color: 0xcfcdca, extraWidth: 3.5 },
-    track:     { color: 0xcfcdca, extraWidth: 3.5 }
+    motorway:  { color: 0xe9ac77, extraWidth: 2 },
+    trunk:     { color: 0xe9ac77, extraWidth: 2 },
+    primary:   { color: 0xe9ac77, extraWidth: 2 },
+    secondary: { color: 0xe9ac77, extraWidth: 2 },
+    tertiary:  { color: 0xe9ac77, extraWidth: 2 },
+    minor:     { color: 0xcfcdca, extraWidth: 1.75 },
+    service:   { color: 0xcfcdca, extraWidth: 1.75 },
+    track:     { color: 0xcfcdca, extraWidth: 1.75 }
 };
 
 function collectTransferables(obj, list) {
@@ -291,9 +291,10 @@ function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
     const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
+    const DASH_MULTIPLIER = 3;
     return [
-        dashPx[0] * worldPerPx,
-        dashPx[1] * worldPerPx
+        dashPx[0] * worldPerPx * DASH_MULTIPLIER,
+        dashPx[1] * worldPerPx * DASH_MULTIPLIER
     ];
 }
 
@@ -1143,11 +1144,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
         const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
-        // Для transportation полигоны (highway-area, road_area_pier)
-        // в style.json идут ДО дорог-линий того же source-layer
-        // (индексы 43 vs 54+). Ставим -0.5, чтобы мосты-платформы
-        // всегда оказывались под пересекающимися дорогами.
-        const polyFillOffset = parts[1] === 'transportation' ? -0.5 : 0;
+const polyFillOffset = parts[1] === 'transportation' ? -5 : 0;
         result.fills.push({
             positions: merged.positions,
             indices: merged.indices,

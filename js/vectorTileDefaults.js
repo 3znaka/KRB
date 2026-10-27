@@ -7,74 +7,42 @@
  * СОГЛАШЕНИЯ
  * ═══════════════════════════════════════════════════════════════════════
  *
- * Значение любого свойства (color, width, opacity, dash, radius, height,
- * base, textColor, fontSize, fontWeight, ...) может быть:
- *   1. Примитивом (число, hex-цвет 0xRRGGBB, hex-строка '#RRGGBB', массив).
- *   2. Спекой одного из типов ниже; резолвится воркером через resolveValue.
+ * Значение любого свойства может быть примитивом или спекой:
  *
  *   { type: 'match', by: 'key' | ['k1','k2'], values: { v: <spec>, _default } }
- *       — выбирает values[feature.properties[by]] по первому найденному
- *         ключу. Не найдено → _default.
- *
- *   { type: 'zoom', stops: [[z, v], ...] }
- *       — линейная интерполяция по continuousZoom, clamp по краям.
- *
- *   { type: 'step', by: 'zoom', stops: [[z, v], ...], default: v0 }
- *       — ступенчатая.
- *
+ *   { type: 'zoom', stops: [[z, v], ...] }        — линейная интерполяция
+ *   { type: 'step', stops: [[z, v], ...], default: v0 }
  *   { type: 'field', keys: ['a','b'], fallback: <spec|primitive> }
- *       — первое непустое значение из feature.properties, иначе fallback.
- *
  *   { type: 'coalesce', of: [<spec>, ...] }
- *       — первая непустая спека.
- *
  *   { type: 'levels', multiplier: 3 }
- *       — parseInt(props['building:levels']) * multiplier, либо 0.
- *
- *   { type: 'geometryType', values: { 1: <spec>, 2: <spec>, 3: <spec> },
- *     _default: <spec> }
- *       — выбирает подспеку по feature.type (1=Point, 2=LineString,
- *         3=Polygon). Нужно, когда один source-layer в style.json даёт
- *         РАЗНЫЕ стили для линий и полигонов (например transportation:
- *         линии — цвета дорог, полигоны — highway-area/road_area_pier).
+ *   { type: 'geometryType', values: { 1, 2, 3 }, _default }
  *
  * ═══════════════════════════════════════════════════════════════════════
  * ВАЖНО ПРО ЕДИНИЦЫ
  * ═══════════════════════════════════════════════════════════════════════
  *
- *   - `dash` — задаётся в ПИКСЕЛЯХ экрана (как в MapLibre line-dasharray).
- *     Воркер конвертирует в world-units по continuousZoom и tileSize.
- *     Если в спеке 4+ значения (например [3,1,1,1] — «тире-точка»),
- *     LineMaterial всё равно возьмёт только первые два (штрих-пунктир
- *     превратится в штрих).
+ *  - `dash` — в «пикселях стиля» (как в MapLibre line-dasharray). Воркер
+ *    переводит в world-units и умножает на 3, чтобы компенсировать
+ *    отсутствие MapLibre-масштабирования на line-width. 4+ значения
+ *    (например [3,1,1,1] — «тире-точка») усекаются до первых двух:
+ *    LineMaterial умеет только 2.
+ *  - `width` — в CSS-пикселях экрана (совпадает с line-width MapLibre).
+ *  - `zoom`-спеки резолвятся по continuousZoom, а не по z тайла:
+ *    иначе при overzoom (maxSourceZoom=14, view на z18) все стили
+ *    «проваливаются» к значениям для z14.
  *
- *   - `width` — в пикселях экрана (совпадает с line-width MapLibre).
+ * ═══════════════════════════════════════════════════════════════════════
+ * ИЗМЕНЕНИЯ (по сравнению с предыдущей версией)
+ * ═══════════════════════════════════════════════════════════════════════
  *
- *   - `zoom`-спеки резолвятся по continuousZoom (плавному), а НЕ по
- *     z тайла. Это критично при overzoom: пользователь смотрит на z18,
- *     тайлы грузятся с z14 (maxSourceZoom), стиль должен соответствовать
- *     z18, а не z14.
- *
- * Фильтры (`filter` на уровне source-layer):
- *   { type: 'in', key, values: [...] }
- *   { type: 'eq', key, value }
- *   { type: 'exists', key }
- *   { type: 'gt'|'gte'|'lt'|'lte', key, value }
- *   { type: 'any'|'all', of: [<filter>, ...] }
- *   { type: 'not', of: <filter> }
- *   { type: 'geometry', in: [1,2,3] }
+ *  - Все стопы transportation.width уменьшены В 2 РАЗА: пользователь
+ *    просил, чтобы дороги и обводки были тоньше.
  */
-
-// ────────────────────────────────────────────────────────────────────────
-// Стили
-// ────────────────────────────────────────────────────────────────────────
 
 export const DEFAULT_STYLES = {
 
     // ─────────────────────────────────────────────────────────────────
     // LANDCOVER
-    // Покрывает: landcover-glacier, landcover-wood, landcover-grass,
-    //            landcover-ice-shelf, landcover-sand
     // ─────────────────────────────────────────────────────────────────
     landcover: {
         filter: { type: 'geometry', in: [3] },
@@ -105,7 +73,7 @@ export const DEFAULT_STYLES = {
     },
 
     // ─────────────────────────────────────────────────────────────────
-    // LANDUSE — по-прежнему match по class.
+    // LANDUSE
     // ─────────────────────────────────────────────────────────────────
     landuse: {
         filter: { type: 'geometry', in: [3] },
@@ -179,8 +147,6 @@ export const DEFAULT_STYLES = {
                 _default: { type: 'zoom', stops: [[13, 0.5], [20, 2]] }
             }
         },
-        // В style.json для туннеля [2,4], для intermittent [4,3].
-        // Разделяем: 4-элементных dash в текущем стиле нет.
         dash: {
             type: 'match',
             by: ['brunnel', 'intermittent'],
@@ -239,24 +205,14 @@ export const DEFAULT_STYLES = {
     // ─────────────────────────────────────────────────────────────────
     // TRANSPORTATION
     //
-    // Покрывает ДВА типа слоёв style.json:
-    //   A) Polygon — highway-area (класс любой, кроме pier) и road_area_pier.
-    //      Это «платформы» мостов и пешеходные зоны: fill #e3e3e3
-    //      (hsla(0,0%,89%,0.56)) при fill-opacity 0.9 → итог opacity ≈ 0.5,
-    //      или #f8f4f0 для pier. Линии касинга для Polygon не рисуются.
-    //   B) LineString — highway-*, bridge-*, tunnel-*, railway-*,
-    //      cablecar*, ferry. Цвет — match по ['brunnel','class'].
-    //      Casing (обводка) — см. processTile: воркер для дорог
-    //      (motorway/trunk/primary/secondary/tertiary/minor/service/track,
-    //      brunnel != tunnel) создаёт ДОПОЛНИТЕЛЬНУЮ Line2, шире на 4px,
-    //      цвет #e9ac77 (major) / #cfcdca (minor), renderOrder = fill - 0.5.
+    // Все стопы width уменьшены в 2 раза относительно style.json —
+    // пользователь просил тоньше (визуальное сравнение с MapLibre
+    // на DPR>1 давало ощущение «в 1.5-2 раза толще»).
     // ─────────────────────────────────────────────────────────────────
     transportation: {
-        // ── color ──────────────────────────────────────────────────
         color: {
             type: 'geometryType',
             values: {
-                // Polygon: highway-area / road_area_pier
                 3: {
                     type: 'match',
                     by: 'class',
@@ -265,7 +221,6 @@ export const DEFAULT_STYLES = {
                         _default: 0xe3e3e3
                     }
                 },
-                // LineString: обычный цвет дорог
                 2: {
                     type: 'match',
                     by: ['brunnel', 'class'],
@@ -293,30 +248,29 @@ export const DEFAULT_STYLES = {
             },
             _default: 0xcccccc
         },
-        // ── width (только для LineString) ───────────────────────────
+        // ВСЕ стопы /2 относительно style.json.
         width: {
             type: 'match',
             by: 'class',
             values: {
-                motorway:   { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
-                trunk:      { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
-                primary:    { type: 'zoom', stops: [[8.5, 0], [9, 0.5], [20, 18]] },
-                secondary:  { type: 'zoom', stops: [[6.5, 0], [8, 0.5], [20, 13]] },
-                tertiary:   { type: 'zoom', stops: [[6.5, 0], [8, 0.5], [20, 13]] },
-                minor:      { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
-                service:    { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
-                track:      { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
-                path:       { type: 'zoom', stops: [[15, 1.2], [20, 4]] },
-                steps:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
-                rail:       { type: 'zoom', stops: [[14, 0.4], [15, 0.75], [20, 2]] },
-                transit:    { type: 'zoom', stops: [[14, 0.4], [20, 1]] },
-                ferry:      1.1,
-                pier:       { type: 'zoom', stops: [[15, 1], [17, 4]] },
-                motorway_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
-                _default:   1
+                motorway:   { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
+                trunk:      { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
+                primary:    { type: 'zoom', stops: [[8.5, 0], [9, 0.25], [20, 9]] },
+                secondary:  { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
+                tertiary:   { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
+                minor:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                service:    { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                track:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                path:       { type: 'zoom', stops: [[15, 0.6], [20, 2]] },
+                steps:      { type: 'zoom', stops: [[13.5, 0], [14, 0.625], [20, 2.875]] },
+                rail:       { type: 'zoom', stops: [[14, 0.2], [15, 0.375], [20, 1]] },
+                transit:    { type: 'zoom', stops: [[14, 0.2], [20, 0.5]] },
+                ferry:      0.55,
+                pier:       { type: 'zoom', stops: [[15, 0.5], [17, 2]] },
+                motorway_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
+                _default:   0.5
             }
         },
-        // ── dash (в пикселях, конвертируется воркером) ──────────────
         dash: {
             type: 'match',
             by: 'class',
@@ -328,13 +282,10 @@ export const DEFAULT_STYLES = {
                 _default: undefined
             }
         },
-        // ── opacity ────────────────────────────────────────────────
         opacity: {
             type: 'geometryType',
             values: {
-                // highway-area: fill-opacity 0.9 * alpha(0.56) ≈ 0.5
                 3: 0.5,
-                // LineString: только construction получает fade-in
                 2: {
                     type: 'match',
                     by: 'class',
@@ -395,8 +346,6 @@ export const DEFAULT_STYLES = {
                 _default: { type: 'zoom', stops: [[4, 0.4], [5, 1], [12, 3]] }
             }
         },
-        // В style.json для admin_level 3–8 — [3,1,1,1] (штрих-пунктир).
-        // LineMaterial умеет только 2 значения — [3,1] даст просто штрих.
         dash: {
             type: 'match',
             by: ['maritime', 'admin_level'],
@@ -618,14 +567,6 @@ export const DEFAULT_STYLES = {
 // ────────────────────────────────────────────────────────────────────────
 // Порядок отрисовки слоёв
 // ────────────────────────────────────────────────────────────────────────
-/**
- * Порядок отрисовки по style.json. Значения — 10 * (индекс первого
- * вхождения source-layer в массив layers[]). Фон игнорируется.
- *
- * `transportation` встречается трижды (туннели / дороги / мосты).
- * Используем базовый якорь 270 и ±2 в воркере по brunnel (мосты выше,
- * туннели ниже). Casing рисуется с renderOrder - 0.5 (под fill).
- */
 export const LAYER_RENDER_ORDER = {
     landcover:            10,
     landuse:              20,

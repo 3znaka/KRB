@@ -9,6 +9,7 @@ import {
   Line2,
   LineMaterial,
   LineGeometry,
+  LineSegmentsGeometry,
 } from '../js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
@@ -172,11 +173,6 @@ class VectorLineLabelSource {
 
     // -- измерение текста -----------------------------------------------------
 
-    /**
-     * Ширина текста в пикселях с учётом text-transform и letter-spacing.
-     * Кэшируется — lineData неизменен на весь жизненный цикл источника.
-     * @private
-     */
     _getTextPixelWidth() {
         if (this._textPxWidth !== undefined) return this._textPxWidth;
 
@@ -295,8 +291,6 @@ class VectorLineLabelSource {
             if (s.max - s.min > best.max - best.min) best = s;
         }
 
-        // Пиксельная длина видимой части линии. Используется в fit-check
-        // в getVisibleInterval(): если текст шире — подпись не показываем.
         const W = this.map.renderer.domElement.clientWidth;
         const H = this.map.renderer.domElement.clientHeight;
         let visiblePixelLen = 0;
@@ -328,8 +322,6 @@ class VectorLineLabelSource {
         const data = this._getScreenData();
         if (!data) return null;
 
-        // Fit-check: текст не влезает в видимую часть линии — скрываем
-        // подпись. 5% запас — чтобы не отбрасывать пограничные случаи.
         const textPxWidth = this._getTextPixelWidth();
         if (textPxWidth > 0 && data.visiblePixelLen < textPxWidth * 1.05) {
             return null;
@@ -435,18 +427,12 @@ export class VectorTileLayer {
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
 
-        // Оптимизация подписей
         this.maxTextLabels = options.maxTextLabels ?? 500;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50;
         this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 30;
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;
-        /**
-         * Максимальное 3D-расстояние от подписи до камеры.
-         * 0 = авто.
-         * @type {number}
-         */
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
 
         this._debug = options.debug ?? false;
@@ -504,7 +490,6 @@ export class VectorTileLayer {
 
         this._labelsDirty = false;
 
-        // Временные объекты для hot-path
         this._raycaster = new THREE.Raycaster();
         this._raycastNDC = new THREE.Vector2();
         this._raycastPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -557,8 +542,6 @@ export class VectorTileLayer {
         if (data.error) { pending.reject(new Error(data.error)); return; }
         if (!data.result) { pending.reject(new Error('Worker returned no result')); return; }
 
-        // NEW: identify — это одноразовый диагностический запрос,
-        // результат не превращается в группу и не проверяется по generation.
         if (pending.isIdentify) {
             pending.resolve(data.result);
             return;
@@ -652,12 +635,12 @@ export class VectorTileLayer {
 
         for (const line of result.lines) {
             const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
-            this._addFatLinesFromPositions(group, line.positions, mat, line.renderOrder);
+            this._addFatLineFromPositions(group, line.positions, mat, line.renderOrder);
         }
 
         for (const stroke of result.strokes) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
-            this._addFatLinesFromPositions(group, stroke.positions, mat, stroke.renderOrder);
+            this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder);
         }
 
         for (const pt of result.points) {
@@ -678,49 +661,72 @@ export class VectorTileLayer {
     }
 
     /**
-     * Создаёт в `group` один или несколько Line2 на основе «сырого» массива
-     * позиций вида [x0,y0,z0, x1,y1,z1, ..., NaN,NaN,NaN, ...].
+     * Преобразует «сырой» массив позиций от воркера (с NaN-разделителями
+     * между несвязными кольцами) в массив пар-сегментов для
+     * LineSegmentsGeometry: [start0, end0, start1, end1, ...].
      *
-     * Воркер (`createLinePositions`) использует NaN-тройки как разделитель
-     * между несвязными кольцами — это конвенция THREE.Line (moveTo).
-     * LineGeometry/LineSegmentsGeometry (Line2) такой конвенции не знают:
-     * NaN попадает в instanced-атрибуты, и computeBoundingSphere() ругается
-     * предупреждением «Computed radius is NaN» (по одному на каждый
-     * разделитель). Поэтому режем массив по NaN на непрерывные куски и
-     * создаём отдельный Line2 на каждый.
+     * - Непрерывные точки одного кольца становятся сегментами (p[i], p[i+1]).
+     * - NaN-разделитель просто пропускается: между последней точкой одного
+     *   кольца и первой точкой следующего сегмент НЕ создаётся (нет «моста»).
+     * - Дубликаты координат не появляются, NaN в выход не попадает.
+     *
+     * @private
+     * @param {Float32Array} positions
+     * @returns {Float32Array|null}
+     */
+    _fatLineSegmentsFromPositions(positions) {
+        if (!positions || positions.length < 6) return null;
+
+        const out = [];
+        let havePrev = false;
+        let prevX = 0, prevY = 0, prevZ = 0;
+
+        for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i];
+            const y = positions[i + 1];
+            const z = positions[i + 2];
+
+            if (Number.isNaN(x)) {
+                havePrev = false;
+                continue;
+            }
+
+            if (havePrev) {
+                out.push(prevX, prevY, prevZ, x, y, z);
+            }
+            prevX = x; prevY = y; prevZ = z;
+            havePrev = true;
+        }
+
+        return out.length > 0 ? new Float32Array(out) : null;
+    }
+
+    /**
+     * Создаёт один Line2 на весь набор сегментов тайл-материала.
+     *
+     * Раньше на каждое кольцо создавался отдельный Line2 — это давало
+     * десятки тысяч draw calls на сцену и «чудесные» фризы (1–2 сек/кадр).
+     * Сейчас же мы собираем ВСЕ сегменты в одну LineSegmentsGeometry —
+     * ровно один draw call на материал, как и было изначально, только
+     * без NaN в instanced-атрибутах.
      *
      * @private
      * @param {THREE.Group} group
-     * @param {Float32Array} positions
+     * @param {Float32Array} positions  «сырой» массив из воркера
      * @param {LineMaterial} material
      * @param {number} renderOrder
      */
-    _addFatLinesFromPositions(group, positions, material, renderOrder) {
-        if (!positions || positions.length < 6) return;
+    _addFatLineFromPositions(group, positions, material, renderOrder) {
+        const segs = this._fatLineSegmentsFromPositions(positions);
+        if (!segs) return;
 
-        const N = positions.length;
-        let start = 0;
+        const lGeo = new LineSegmentsGeometry();
+        lGeo.setPositions(segs);
 
-        const flush = (end) => {
-            // Нужно минимум две точки — 6 координат.
-            if (end - start < 6) return;
-
-            const seg = positions.subarray(start, end);
-            const lGeo = new LineGeometry();
-            lGeo.setPositions(seg);
-            const lineObj = new Line2(lGeo, material);
-            lineObj.renderOrder = renderOrder;
-            lineObj.frustumCulled = false;
-            group.add(lineObj);
-        };
-
-        for (let i = 0; i < N; i += 3) {
-            if (Number.isNaN(positions[i])) {
-                flush(i);
-                start = i + 3;
-            }
-        }
-        flush(N);
+        const lineObj = new Line2(lGeo, material);
+        lineObj.renderOrder = renderOrder;
+        lineObj.frustumCulled = false;
+        group.add(lineObj);
     }
 
     _refreshTextLabelsForVisibleTiles() {
@@ -733,9 +739,6 @@ export class VectorTileLayer {
         if (candidates.length === 0) {
             selected = [];
         } else {
-            // Приоритет — главный критерий, на всех зумах. При равном
-            // приоритете линейные подписи важнее точечных (названия улиц
-            // важнее POI), затем — расстояние до камеры.
             candidates.sort((a, b) => {
                 if (a.priority !== b.priority) return b.priority - a.priority;
                 const aLine = a.type === 'line' ? 1 : 0;
@@ -759,8 +762,6 @@ export class VectorTileLayer {
 
             let source;
             if (cand.type === 'line') {
-                // Кэш источников на группе: t, экранные данные и прочие
-                // метаданные сохраняются между кадрами.
                 if (!group.userData.lineLabelSources) {
                     group.userData.lineLabelSources = [];
                 }
@@ -849,7 +850,6 @@ export class VectorTileLayer {
             const gx = group.position.x + worldOffset.x;
             const gz = group.position.z + worldOffset.z;
 
-            // -------- Точечные подписи --------------------------------------
             const data = group.userData.textPointsData;
             if (data && data.length > 0) {
                 const groupIdPrefix = group.uuid + ':';
@@ -897,7 +897,6 @@ export class VectorTileLayer {
                 }
             }
 
-            // -------- Линейные подписи --------------------------------------
             const lineData = group.userData.textLinesData;
             if (lineData && lineData.length > 0) {
                 const groupIdPrefixL = group.uuid + ':L';
@@ -910,9 +909,6 @@ export class VectorTileLayer {
                     const pts = ln.points;
                     if (!pts || pts.length < 2) continue;
 
-                    // Сэмплируем ~20 точек. Меньше — риск пропустить видимую
-                    // часть длинной линии, больше — лишние проекции. 20 —
-                    // компромисс, проверенный на практике.
                     const step = Math.max(1, Math.floor(pts.length / 20));
                     let minDistSq = Infinity;
                     let anyOnScreen = false;
@@ -1436,21 +1432,6 @@ export class VectorTileLayer {
         }
     }
 
-        /**
-     * Диагностический метод для shift-click. Находит XYZ тайла под точкой
-     * (сцены, Y=0, без worldGroup.position) и просит воркер вернуть все
-     * фичи в радиусе tolerance — с резолвнутыми стилями.
-     *
-     * Возвращает:
-     *   { tile: {z,x,y}, features: [{layer, type, distance, filterPass,
-     *     style, renderOrder, properties, featureIndex}] }
-     * или { error: string }.
-     *
-     * Ограничения:
-     *   - проверяется только содержащий тайл (клик по выступу соседнего
-     *     тайла может не найти фичу — увеличивай tolerance);
-     *   - X вне диапазона [0, numTiles) (антимеридиан) возвращает error.
-     */
     async identify(sceneX, sceneZ, opts = {}) {
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;

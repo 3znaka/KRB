@@ -723,14 +723,20 @@ export class VectorTileLayer {
         const lGeo = new LineSegmentsGeometry();
         lGeo.setPositions(segs);
 
-        // КРИТИЧНО: LineMaterial в dashed-режиме читает
-        // instanceDistanceStart/End. Без computeLineDistances() они = 0,
-        // и шейдер всегда попадает в «dash-фазу» → линия рисуется сплошной.
+        const lineObj = new Line2(lGeo, material);
         if (material.dashed) {
-            lGeo.computeLineDistances();
+            if (typeof lineObj.computeLineDistances === 'function') {
+                lineObj.computeLineDistances();
+            } else if (typeof lGeo.computeLineDistances === 'function') {
+                lGeo.computeLineDistances();
+            } else {
+                console.warn(
+                    '[VectorTileLayer] computeLineDistances() недоступен ни на Line2, ни на LineSegmentsGeometry. ' +
+                    'Пунктир не будет работать. Проверьте сборку tpb.js.'
+                );
+            }
         }
 
-        const lineObj = new Line2(lGeo, material);
         lineObj.renderOrder = renderOrder;
         lineObj.frustumCulled = false;
         group.add(lineObj);

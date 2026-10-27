@@ -65,4 +65,4 @@ marker.addTo(map);
 ## Resources
 
 - **Homepage**: [https://mapengine.ru/](https://mapengine.ru/)
-- **Documentation**: [https://mapengine.ru/docs/)
+- **Documentation**: [https://mapengine.ru/docs/](https://mapengine.ru/docs/)

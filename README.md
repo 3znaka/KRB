@@ -33,7 +33,7 @@ import * as KRB from 'https://cdn.mapengine.ru/KRB/js/KRB.js';
 
 // 1. Define the map view
 const view = new KRB.View({
-    center: [37.6173, 55.7558], // [longitude, latitude]
+    centerLonLat: [37.6173, 55.7558], // [longitude, latitude]
     zoom: 10,
     minZoom: 1,
     maxZoom: 18,

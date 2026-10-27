@@ -60,6 +60,19 @@ function onMessage(e) {
         workerStyles = msg.styles || DEFAULT_STYLES;
         return;
     }
+    if (msg.type === 'identify') {
+        const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ, tolerance } = msg;
+        try {
+            const tile = new VectorTile(new Protobuf(buffer));
+            const result = identifyAt(
+                tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance
+            );
+            self.postMessage({ id, result });
+        } catch (err) {
+            self.postMessage({ id, error: err.message });
+        }
+        return;
+    }
     if (msg.type === 'process') {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
@@ -635,6 +648,133 @@ function blendWithBackground(color, opacity) {
     const bg = Math.round(g * opacity + 255 * (1 - opacity));
     const bb = Math.round(b * opacity + 255 * (1 - opacity));
     return (br << 16) | (bg << 8) | bb;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// IDENTIFY (диагностика по shift-click)
+// ════════════════════════════════════════════════════════════════════════
+
+function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance) {
+    const zoom = z;
+    const tol = tolerance || tileSize * 0.005;
+    const tolSq = tol * tol;
+    const results = [];
+
+    for (const layerName in tile.layers) {
+        const layer = tile.layers[layerName];
+        const layerStyle = workerStyles[layerName];
+        for (let i = 0; i < layer.length; i++) {
+            const feature = layer.feature(i);
+            const props = feature.properties || {};
+            const geomType = feature.type;
+            const geom = feature.loadGeometry();
+
+            let hit = false;
+            let minDistSq = Infinity;
+
+            if (geomType === 1) {
+                const pt = geom[0] && geom[0][0];
+                if (pt) {
+                    const fx = (pt.x / 4095 - 0.5) * tileSize;
+                    const fz = (pt.y / 4095 - 0.5) * tileSize;
+                    const d2 = (fx - localX) * (fx - localX) + (fz - localZ) * (fz - localZ);
+                    if (d2 < tolSq) { hit = true; minDistSq = d2; }
+                }
+            } else if (geomType === 2) {
+                for (const ring of geom) {
+                    for (let k = 0; k < ring.length - 1; k++) {
+                        const ax = (ring[k].x     / 4095 - 0.5) * tileSize;
+                        const az = (ring[k].y     / 4095 - 0.5) * tileSize;
+                        const bx = (ring[k + 1].x / 4095 - 0.5) * tileSize;
+                        const bz = (ring[k + 1].y / 4095 - 0.5) * tileSize;
+                        const d2 = pointSegDistSq(localX, localZ, ax, az, bx, bz);
+                        if (d2 < tolSq && d2 < minDistSq) { hit = true; minDistSq = d2; }
+                    }
+                }
+            } else if (geomType === 3) {
+                const rings2d = geom.map(ring => ring.map(p => ({
+                    x: (p.x / 4095 - 0.5) * tileSize,
+                    z: (p.y / 4095 - 0.5) * tileSize
+                })));
+                if (pointInPolygonRings({ x: localX, z: localZ }, rings2d)) {
+                    hit = true;
+                    minDistSq = 0;
+                }
+            }
+
+            if (!hit) continue;
+
+            const filterPass = layerStyle && layerStyle.filter
+                ? resolveFilter(layerStyle.filter, feature)
+                : true;
+
+            results.push({
+                layer: layerName,
+                type: geomType === 1 ? 'Point' : geomType === 2 ? 'LineString' : 'Polygon',
+                featureIndex: i,
+                distance: Math.sqrt(minDistSq),
+                filterPass,
+                style: layerStyle ? snapshotStyle(layerStyle, props, zoom) : null,
+                renderOrder: LAYER_RENDER_ORDER[layerName] !== undefined
+                    ? LAYER_RENDER_ORDER[layerName]
+                    : null,
+                properties: props,
+            });
+        }
+    }
+
+    results.sort((a, b) => a.distance - b.distance);
+    return { tile: { z, x, y }, features: results };
+}
+
+function pointSegDistSq(px, pz, ax, az, bx, bz) {
+    const dx = bx - ax, dz = bz - az;
+    const lenSq = dx * dx + dz * dz;
+    if (lenSq < 1e-12) return (px - ax) * (px - ax) + (pz - az) * (pz - az);
+    let t = ((px - ax) * dx + (pz - az) * dz) / lenSq;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const qx = ax + t * dx, qz = az + t * dz;
+    return (px - qx) * (px - qx) + (pz - qz) * (pz - qz);
+}
+
+function pointInPolygonRings(pt, rings) {
+    // Чередование на каждом пересечении даёт правильный результат и для
+    // outer, и для holes — MVT-полигоны укладываются в это правило.
+    let inside = false;
+    for (const ring of rings) {
+        if (ring.length < 3) continue;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].x, zi = ring[i].z;
+            const xj = ring[j].x, zj = ring[j].z;
+            if (((zi > pt.z) !== (zj > pt.z)) &&
+                (pt.x < (xj - xi) * (pt.z - zi) / (zj - zi) + xi)) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+function snapshotStyle(layerStyle, props, zoom) {
+    if (!layerStyle) return null;
+    const keys = [
+        'color', 'opacity', 'stroke', 'width', 'dash', 'radius', 'height', 'base',
+        'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textShadow',
+        'textOffset', 'textAlign', 'textVerticalAlign', 'textPriority',
+        'textZoomMin', 'textZoomMax', 'textPlacement', 'textTransform',
+        'textFontStyle', 'textLetterSpacing', 'textMinSegmentLength'
+    ];
+    const out = {};
+    for (const k of keys) {
+        if (layerStyle[k] === undefined) continue;
+        const v = resolveValue(layerStyle[k], props, zoom);
+        if ((k === 'color' || k === 'stroke') && typeof v === 'number') {
+            out[k] = '#' + v.toString(16).padStart(6, '0');
+        } else {
+            out[k] = v;
+        }
+    }
+    return out;
 }
 
 // ════════════════════════════════════════════════════════════════════════

@@ -547,8 +547,7 @@ export class VectorTileLayer {
             console.error('Failed to initialize worker:', err);
         }
     }
-
-    _onWorkerMessage(data) {
+  _onWorkerMessage(data) {
         if (!data || typeof data.id === 'undefined') return;
 
         const pending = this._pendingWorkerRequests.get(data.id);
@@ -557,6 +556,13 @@ export class VectorTileLayer {
 
         if (data.error) { pending.reject(new Error(data.error)); return; }
         if (!data.result) { pending.reject(new Error('Worker returned no result')); return; }
+
+        // NEW: identify — это одноразовый диагностический запрос,
+        // результат не превращается в группу и не проверяется по generation.
+        if (pending.isIdentify) {
+            pending.resolve(data.result);
+            return;
+        }
 
         if (pending.generation !== this._generation) {
             if (pending.group) this._disposeTile(pending.group);
@@ -1392,6 +1398,99 @@ export class VectorTileLayer {
                 this._clearOldTilesNow();
             }
         }
+    }
+
+        /**
+     * Диагностический метод для shift-click. Находит XYZ тайла под точкой
+     * (сцены, Y=0, без worldGroup.position) и просит воркер вернуть все
+     * фичи в радиусе tolerance — с резолвнутыми стилями.
+     *
+     * Возвращает:
+     *   { tile: {z,x,y}, features: [{layer, type, distance, filterPass,
+     *     style, renderOrder, properties, featureIndex}] }
+     * или { error: string }.
+     *
+     * Ограничения:
+     *   - проверяется только содержащий тайл (клик по выступу соседнего
+     *     тайла может не найти фичу — увеличивай tolerance);
+     *   - X вне диапазона [0, numTiles) (антимеридиан) возвращает error.
+     */
+    async identify(sceneX, sceneZ, opts = {}) {
+        if (!this._map || !this._worker) return { error: 'layer not attached' };
+        const map = this._map;
+
+        const sourceZoom = Math.max(
+            this.minZoom,
+            Math.min(map.currentDiscreteZoom, this.maxSourceZoom)
+        );
+        const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
+        const numTiles = 1 << sourceZoom;
+
+        const localX = sceneX - map.worldGroup.position.x;
+        const localZ = sceneZ - map.worldGroup.position.z;
+
+        const tx = (localX + map.MAX_MERCATOR) / tileSize;
+        const tz = (localZ + map.MAX_MERCATOR) / tileSize;
+        const xSlippy = Math.floor(tx);
+        const ySlippy = Math.floor(tz);
+
+        if (xSlippy < 0 || xSlippy >= numTiles || ySlippy < 0 || ySlippy >= numTiles) {
+            return { error: `tile (${xSlippy},${ySlippy}) outside [0,${numTiles}) at z=${sourceZoom}` };
+        }
+
+        const dataCacheKey = `${sourceZoom}/${xSlippy}/${ySlippy}`;
+        let buffer = this._getTileDataCache(dataCacheKey);
+        if (buffer) {
+            buffer = buffer.slice(0);
+        } else {
+            const url = this.url
+                .replaceAll('{z}', sourceZoom)
+                .replaceAll('{x}', xSlippy)
+                .replaceAll('{y}', ySlippy);
+            try {
+                const resp = await fetch(url);
+                if (!resp.ok) return { error: `HTTP ${resp.status} for ${url}` };
+                buffer = await resp.arrayBuffer();
+                this._setTileDataCache(dataCacheKey, buffer.slice(0));
+            } catch (err) {
+                return { error: `fetch failed: ${err.message}` };
+            }
+        }
+
+        const centerX = xSlippy * tileSize - map.MAX_MERCATOR + tileSize / 2;
+        const centerZ = -map.MAX_MERCATOR + ySlippy * tileSize + tileSize / 2;
+        const clickLocalX = localX - centerX;
+        const clickLocalZ = localZ - centerZ;
+
+        return new Promise((resolve, reject) => {
+            const id = ++this._requestId;
+            this._pendingWorkerRequests.set(id, {
+                resolve,
+                reject,
+                group: null,
+                key: null,
+                generation: this._generation,
+                isIdentify: true,
+            });
+            try {
+                this._worker.postMessage({
+                    type: 'identify',
+                    id,
+                    buffer,
+                    z: sourceZoom,
+                    x: xSlippy,
+                    y: ySlippy,
+                    tileSize,
+                    maxMerc: map.MAX_MERCATOR,
+                    localX: clickLocalX,
+                    localZ: clickLocalZ,
+                    tolerance: opts.tolerance || tileSize * 0.005,
+                }, [buffer]);
+            } catch (err) {
+                this._pendingWorkerRequests.delete(id);
+                reject(err);
+            }
+        });
     }
 
     async _sendToWorker(buffer, z, x, y, is3d, existingGroup) {

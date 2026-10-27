@@ -1311,25 +1311,92 @@ this.controls.touches = {
         this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
 
+        // --- 1. Hit ground plane Y=0 (для identify векторных фич) ---
+        const groundPoint = new THREE.Vector3();
+        if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, groundPoint)) {
+            console.log('[shift-click] Ray did not hit ground plane (looking at horizon?)');
+            return;
+        }
+        const localX = groundPoint.x - this.worldGroup.position.x;
+        const localZ = groundPoint.z - this.worldGroup.position.z;
+        const [lon, lat] = this.unprojectToLonLat(localX, localZ);
+
+        // --- 2. Raster hit для высоты (если есть elevation) ---
+        let elevation = null;
         const meshes = [];
         for (const inst of this.tileManager.tiles.values()) {
             if (inst.mesh && inst.mesh.visible) meshes.push(inst.mesh);
         }
-
         const intersects = this._tempRaycaster.intersectObjects(meshes, false);
-        if (intersects.length === 0) return;
+        if (intersects.length > 0) elevation = intersects[0].point.y;
 
-        const point = intersects[0].point;
-        const localX = point.x - this.worldGroup.position.x;
-        const localZ = point.z - this.worldGroup.position.z;
-        const [lon, lat] = this.unprojectToLonLat(localX, localZ);
-
-        const height = this.hasElevation ? point.y : null;
-        if (height !== null) {
-            console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: ${height.toFixed(2)}`);
-        } else {
-            console.log(`Shift+Click: Lon: ${lon.toFixed(6)}, Lat: ${lat.toFixed(6)}, Height: N/A`);
+        // --- 3. Запрос во все векторные слои ---
+        const identLayers = this._dynamicLayers.filter(l => typeof l.identify === 'function');
+        if (identLayers.length === 0) {
+            console.log(
+                `[shift-click] Lon ${lon.toFixed(6)}, Lat ${lat.toFixed(6)}` +
+                (elevation !== null ? `, Height ${elevation.toFixed(2)}` : '') +
+                ` — no vector layers`
+            );
+            return;
         }
+
+        const promises = identLayers.map((l, idx) => {
+            const tag = (l.url || `layer${idx}`).split('/').slice(-3).join('/');
+            return Promise.resolve(l.identify(groundPoint.x, groundPoint.z))
+                .then(res => ({ tag, ...res }))
+                .catch(err => ({ tag, error: err.message }));
+        });
+
+        Promise.all(promises).then(allResults => {
+            const report = {
+                click: {
+                    lon: +lon.toFixed(6),
+                    lat: +lat.toFixed(6),
+                    worldX: +groundPoint.x.toFixed(2),
+                    worldZ: +groundPoint.z.toFixed(2),
+                    elevation: elevation !== null ? +elevation.toFixed(2) : null,
+                },
+                zoom: {
+                    continuous: +this.continuousZoom.toFixed(2),
+                    discrete: this.currentDiscreteZoom,
+                },
+                layers: allResults,
+            };
+
+            console.groupCollapsed(
+                `[shift-click] Lon ${lon.toFixed(6)}, Lat ${lat.toFixed(6)} ` +
+                `— z${this.currentDiscreteZoom} — ${allResults.length} layer(s)`
+            );
+            for (const lr of allResults) {
+                if (lr.error) {
+                    console.warn(`[${lr.tag}] error: ${lr.error}`);
+                    continue;
+                }
+                if (!lr.tile) { console.warn(`[${lr.tag}] no tile info`); continue; }
+                const head = `[${lr.tag}] tile ${lr.tile.z}/${lr.tile.x}/${lr.tile.y} — ${lr.features.length} feature(s)`;
+                if (lr.features.length === 0) {
+                    console.warn(head + ' (nothing nearby — try larger tolerance)');
+                    continue;
+                }
+                console.group(head);
+                for (const f of lr.features) {
+                    const pass = f.filterPass ? '✓' : '✗ FILTER';
+                    console.groupCollapsed(
+                        `${pass}  ${f.layer} (${f.type}) — dist ${f.distance.toFixed(1)} — order ${f.renderOrder}`
+                    );
+                    console.log('properties:', f.properties);
+                    console.log('resolvedStyle:', f.style);
+                    console.groupEnd();
+                }
+                console.groupEnd();
+            }
+            console.groupEnd();
+
+            console.log('[shift-click] JSON dump:');
+            console.log(JSON.stringify(report, null, 2));
+            window.__lastShiftClick = report;
+        });
     }
 
     /** @private */

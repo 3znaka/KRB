@@ -1490,7 +1490,7 @@ export class VectorTileLayer {
                 isIdentify: true,
             });
             try {
-                this._worker.postMessage({
+                 this._worker.postMessage({
                     type: 'identify',
                     id,
                     buffer,
@@ -1499,6 +1499,7 @@ export class VectorTileLayer {
                     y: ySlippy,
                     tileSize,
                     maxMerc: map.MAX_MERCATOR,
+                    continuousZoom: map.continuousZoom,   // <-- НОВОЕ
                     localX: clickLocalX,
                     localZ: clickLocalZ,
                     tolerance: opts.tolerance || tileSize * 0.005,
@@ -1523,7 +1524,7 @@ export class VectorTileLayer {
             const tileSize = map.WORLD_SIZE / (1 << z);
             const maxMerc = map.MAX_MERCATOR;
 
-            const msg = {
+                       const msg = {
                 type: 'process',
                 id,
                 buffer: buffer,
@@ -1531,6 +1532,7 @@ export class VectorTileLayer {
                 tileSize,
                 maxMerc,
                 is3d,
+                continuousZoom: map.continuousZoom,   // <-- НОВОЕ
                 visibleLayers: this.visibleLayers,
                 buildingEdges: this.buildingEdges,
                 exclusionPolygons: this._exclusionAreas,

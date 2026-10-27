@@ -3,20 +3,16 @@
  * Модуль генерации кода воркера векторных тайлов.
  * Использует стили и порядок отрисовки из vectorTileDefaults.js.
  *
- * Стили — декларативные объекты с полями-спеками:
- *   { type: 'match', by, values }, { type: 'zoom', stops },
- *   { type: 'step', stops, default }, { type: 'field', keys, fallback },
- *   { type: 'coalesce', of }, { type: 'levels', multiplier }.
- * Резолвятся хелперами resolveValue / resolveColor / resolveNumber /
- * resolveString / resolveArray / resolveHeight.
- *
- * Фильтры на уровне source-layer (`style.filter`) — DSL из
- * resolveFilter / evalFilter.
- *
- * Зум для резолва передаётся как целочисленный z тайла: continuousZoom
- * доступен только на main-thread, а геометрия тайла уже зафиксирована
- * под его z. Межзумовые перетекания (fade-in construction) будут
- * "прыгать" на дискретных зумах — это компромисс.
+ * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕЙ ВЕРСИИ:
+ *  - resolveX() принимают geomType (feature.type) для спек type='geometryType'.
+ *  - resolveZoom/resolveMatch и всё остальное резолвится по continuousZoom
+ *    (передаётся из main-thread), а не по z тайла. Это критично при
+ *    overzoom: maxSourceZoom=14, пользователь на z18 — ширина дорог, шрифты
+ *    и dash должны соответствовать z18, а не z14.
+ *  - scaleDash(): пиксели стиля → world-units LineMaterial с учётом overzoom.
+ *  - Casing для transportation: motorway/trunk/primary/secondary/tertiary/
+ *    minor/service/track при brunnel != tunnel получают дополнительную
+ *    обводку (+4 px, цвет #e9ac77 для major / #cfcdca для minor).
  */
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
@@ -34,7 +30,6 @@ export function stringToBase64(str) {
 /** Генерирует код модульного воркера с внедрёнными data: URL библиотек. */
 export function createWorkerCode(tpbDataURL, earcutDataURL) {
     return `
-// Динамический импорт библиотек из data: URL (не зависит от серверных MIME-типов)
 let VectorTile, Protobuf, earcut;
 
 async function init() {
@@ -61,11 +56,13 @@ function onMessage(e) {
         return;
     }
     if (msg.type === 'identify') {
-        const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ, tolerance } = msg;
+        const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ,
+                tolerance, continuousZoom } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = identifyAt(
-                tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance
+                tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
+                continuousZoom ?? z
             );
             self.postMessage({ id, result });
         } catch (err) {
@@ -77,6 +74,7 @@ function onMessage(e) {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
             visibleLayers, buildingEdges,
+            continuousZoom,
             exclusionPolygons = [], exclusionLayers = [],
             maxTextPointsPerTile = 300,
             maxTextLinesPerTile = 30
@@ -87,7 +85,8 @@ function onMessage(e) {
                 tile, z, x, y, tileSize, maxMerc, is3d,
                 visibleLayers, buildingEdges,
                 exclusionPolygons, exclusionLayers,
-                maxTextPointsPerTile, maxTextLinesPerTile
+                maxTextPointsPerTile, maxTextLinesPerTile,
+                continuousZoom ?? z
             );
             const transferList = [];
             const payload = { id, result };
@@ -103,9 +102,21 @@ const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLES)};
 const LAYER_RENDER_ORDER = ${JSON.stringify(LAYER_RENDER_ORDER)};
 let workerStyles = DEFAULT_STYLES;
 
-// source-layers, которые в style.json — только symbol-слои (не рисуют
-// геометрию). Для них LineString-фичи идут только в textLines.
 const CARRIER_ONLY_LINE_LAYERS = new Set(['transportation_name', 'water_name']);
+
+// Casing (обводка) дорог. В style.json casing-слои идут отдельными
+// записями (highway-*-casing, bridge-*-casing, tunnel-*-casing);
+// здесь — упрощение: +4 px к толщине fill для дорог вне туннеля.
+const TRANSPORTATION_CASING = {
+    motorway:  { color: 0xe9ac77, extraWidth: 4 },
+    trunk:     { color: 0xe9ac77, extraWidth: 4 },
+    primary:   { color: 0xe9ac77, extraWidth: 4 },
+    secondary: { color: 0xe9ac77, extraWidth: 4 },
+    tertiary:  { color: 0xe9ac77, extraWidth: 4 },
+    minor:     { color: 0xcfcdca, extraWidth: 3.5 },
+    service:   { color: 0xcfcdca, extraWidth: 3.5 },
+    track:     { color: 0xcfcdca, extraWidth: 3.5 }
+};
 
 function collectTransferables(obj, list) {
     if (obj instanceof ArrayBuffer) {
@@ -123,35 +134,38 @@ function collectTransferables(obj, list) {
 // РЕЗОЛВЕРЫ СПЕК
 // ════════════════════════════════════════════════════════════════════════
 
-function resolveValue(spec, props, zoom) {
+function resolveValue(spec, props, zoom, geomType) {
     if (spec === null || spec === undefined) return undefined;
     if (typeof spec !== 'object') return spec;
     if (Array.isArray(spec)) return spec;
     switch (spec.type) {
-        case 'match':    return resolveMatch(spec, props, zoom);
-        case 'zoom':     return resolveZoom(spec, zoom);
-        case 'step':     return resolveStep(spec, zoom);
-        case 'field':    return resolveField(spec, props, zoom);
-        case 'coalesce': return resolveCoalesce(spec, props, zoom);
-        case 'levels':   return resolveLevels(spec, props);
-        default:         return undefined;
+        case 'match':        return resolveMatch(spec, props, zoom, geomType);
+        case 'zoom':         return resolveZoom(spec, zoom);
+        case 'step':         return resolveStep(spec, zoom);
+        case 'field':        return resolveField(spec, props, zoom, geomType);
+        case 'coalesce':     return resolveCoalesce(spec, props, zoom, geomType);
+        case 'levels':       return resolveLevels(spec, props);
+        case 'geometryType': {
+            const sub = geomType !== undefined ? spec.values[geomType] : undefined;
+            const picked = sub !== undefined ? sub : spec._default;
+            return resolveValue(picked, props, zoom, geomType);
+        }
+        default:             return undefined;
     }
 }
 
-function resolveMatch(spec, props, zoom) {
+function resolveMatch(spec, props, zoom, geomType) {
     const keys = Array.isArray(spec.by) ? spec.by : [spec.by];
     for (const k of keys) {
         const v = props[k];
         if (v === undefined || v === null) continue;
         let found = spec.values[v];
-        if (found !== undefined) return resolveValue(found, props, zoom);
-        // Числовые/булевы ключи: JS приводит их к строке при доступе к
-        // объекту, но true → 'true', а не '1'. Явно проверяем частный случай.
+        if (found !== undefined) return resolveValue(found, props, zoom, geomType);
         const sv = String(v);
-        if (sv in spec.values) return resolveValue(spec.values[sv], props, zoom);
-        if (v === true && '1' in spec.values) return resolveValue(spec.values['1'], props, zoom);
+        if (sv in spec.values) return resolveValue(spec.values[sv], props, zoom, geomType);
+        if (v === true && '1' in spec.values) return resolveValue(spec.values['1'], props, zoom, geomType);
     }
-    return resolveValue(spec.values._default, props, zoom);
+    return resolveValue(spec.values._default, props, zoom, geomType);
 }
 
 function resolveZoom(spec, zoom) {
@@ -172,8 +186,6 @@ function resolveZoom(spec, zoom) {
 
 function lerpValue(a, b, t) {
     if (typeof a === 'number' && typeof b === 'number') {
-        // Эвристика: целые > 255 — вероятно упакованный 0xRRGGBB. Интерполяция
-        // покомпонентная (иначе упакованная сумма "перескакивает" через разряды).
         if (Number.isInteger(a) && Number.isInteger(b) && a > 255 && b > 255) {
             const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
             const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
@@ -184,7 +196,6 @@ function lerpValue(a, b, t) {
         }
         return a + (b - a) * t;
     }
-    // Строки/массивы — ступенчато (ближайший стоп).
     return t < 0.5 ? a : b;
 }
 
@@ -199,21 +210,20 @@ function resolveStep(spec, zoom) {
     return result;
 }
 
-function resolveField(spec, props, zoom) {
+function resolveField(spec, props, zoom, geomType) {
     for (const k of spec.keys) {
         const v = props[k];
         if (v === undefined || v === null || v === '') continue;
-        // Число как число (для height/base).
         const n = parseFloat(v);
         if (!isNaN(n) && String(n) === String(v).trim()) return n;
         return v;
     }
-    return spec.fallback !== undefined ? resolveValue(spec.fallback, props, zoom) : undefined;
+    return spec.fallback !== undefined ? resolveValue(spec.fallback, props, zoom, geomType) : undefined;
 }
 
-function resolveCoalesce(spec, props, zoom) {
+function resolveCoalesce(spec, props, zoom, geomType) {
     for (const sub of spec.of) {
-        const v = resolveValue(sub, props, zoom);
+        const v = resolveValue(sub, props, zoom, geomType);
         if (v !== undefined && v !== null) return v;
     }
     return undefined;
@@ -225,8 +235,8 @@ function resolveLevels(spec, props) {
     return 0;
 }
 
-function resolveColor(spec, props, zoom) {
-    const v = resolveValue(spec, props, zoom);
+function resolveColor(spec, props, zoom, geomType) {
+    const v = resolveValue(spec, props, zoom, geomType);
     if (v === undefined || v === null) return null;
     if (typeof v === 'number') return v;
     if (typeof v === 'string') {
@@ -236,29 +246,55 @@ function resolveColor(spec, props, zoom) {
     return null;
 }
 
-function resolveNumber(spec, props, zoom, fallback) {
-    const v = resolveValue(spec, props, zoom);
+function resolveNumber(spec, props, zoom, fallback, geomType) {
+    const v = resolveValue(spec, props, zoom, geomType);
     if (v === undefined || v === null) return fallback;
     const n = typeof v === 'number' ? v : parseFloat(v);
     return isNaN(n) ? fallback : n;
 }
 
-function resolveString(spec, props, zoom, fallback) {
-    const v = resolveValue(spec, props, zoom);
+function resolveString(spec, props, zoom, fallback, geomType) {
+    const v = resolveValue(spec, props, zoom, geomType);
     if (v === undefined || v === null) return fallback;
     return String(v);
 }
 
-function resolveArray(spec, props, zoom) {
-    const v = resolveValue(spec, props, zoom);
+function resolveArray(spec, props, zoom, geomType) {
+    const v = resolveValue(spec, props, zoom, geomType);
     return Array.isArray(v) ? v : undefined;
 }
 
-function resolveHeight(spec, props, zoom) {
-    const v = resolveValue(spec, props, zoom);
+function resolveHeight(spec, props, zoom, geomType) {
+    const v = resolveValue(spec, props, zoom, geomType);
     if (v === undefined || v === null) return 0;
     const n = typeof v === 'number' ? v : parseFloat(v);
     return isNaN(n) ? 0 : n;
+}
+
+/**
+ * Пересчитывает dash из «пикселей стиля» в world-units LineMaterial.
+ *
+ * LineMaterial.dashSize/gapSize измеряются в тех же координатах, что и
+ * позиции вершин (world). Стиль задаёт dash в пикселях экрана.
+ *
+ * worldPerPx(continuousZoom) = WORLD_SIZE / (512 * 2^continuousZoom),
+ * где 512 — «эталонная» ширина тайла на экране в OMT/MapTiler.
+ *
+ * При continuousZoom > z (overzoom) тайл растянут, и worldPerPx меньше —
+ * штрих занимает меньше world-units, но на экране остаётся тем же
+ * числом пикселей. Ровно то, что нужно для визуального соответствия.
+ *
+ * LineMaterial поддерживает только 2 значения (dashSize, gapSize).
+ * Если в стиле [3,1,1,1], берём [3,1] — штрих-пунктир упрощается до штриха.
+ */
+function scaleDash(dashPx, tileSize, z, continuousZoom) {
+    if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
+    const worldSize = tileSize * Math.pow(2, z);
+    const worldPerPx = worldSize / (512 * Math.pow(2, continuousZoom));
+    return [
+        dashPx[0] * worldPerPx,
+        dashPx[1] * worldPerPx
+    ];
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -270,7 +306,7 @@ function resolveFilter(spec, feature) {
     try {
         return evalFilter(spec, feature);
     } catch (e) {
-        return true; // fail-open
+        return true;
     }
 }
 
@@ -284,14 +320,10 @@ function evalFilter(spec, feature) {
             return props[spec.key] === spec.value;
         case 'exists':
             return props[spec.key] !== undefined && props[spec.key] !== null;
-        case 'gt':
-            return Number(props[spec.key]) > Number(spec.value);
-        case 'gte':
-            return Number(props[spec.key]) >= Number(spec.value);
-        case 'lt':
-            return Number(props[spec.key]) < Number(spec.value);
-        case 'lte':
-            return Number(props[spec.key]) <= Number(spec.value);
+        case 'gt':  return Number(props[spec.key]) > Number(spec.value);
+        case 'gte': return Number(props[spec.key]) >= Number(spec.value);
+        case 'lt':  return Number(props[spec.key]) < Number(spec.value);
+        case 'lte': return Number(props[spec.key]) <= Number(spec.value);
         case 'geometry':
             return Array.isArray(spec.in) && spec.in.includes(feature.type);
         case 'any':
@@ -337,9 +369,9 @@ function clipRingToTile(ring, size) {
     if (minX >= 0 && maxX <= size && minY >= 0 && maxY <= size) return ring;
 
     const edges = [
-        { axis: 'x', val: 0,   inside: p => p.x >= 0 },
+        { axis: 'x', val: 0, inside: p => p.x >= 0 },
         { axis: 'x', val: size, inside: p => p.x <= size },
-        { axis: 'y', val: 0,   inside: p => p.y >= 0 },
+        { axis: 'y', val: 0, inside: p => p.y >= 0 },
         { axis: 'y', val: size, inside: p => p.y <= size }
     ];
     let output = ring;
@@ -412,17 +444,14 @@ function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
     const onXMinus1 = Math.abs(x1 + halfTile)  < eps;
     const onZPlus1  = Math.abs(z1 - halfTile)  < eps;
     const onZMinus1 = Math.abs(z1 + halfTile)  < eps;
-
     const onXPlus2  = Math.abs(x2 - halfTile)  < eps;
     const onXMinus2 = Math.abs(x2 + halfTile)  < eps;
     const onZPlus2  = Math.abs(z2 - halfTile)  < eps;
     const onZMinus2 = Math.abs(z2 + halfTile)  < eps;
-
-    if (onXPlus1  && onXPlus2)  return true;
+    if (onXPlus1 && onXPlus2)   return true;
     if (onXMinus1 && onXMinus2) return true;
-    if (onZPlus1  && onZPlus2)  return true;
+    if (onZPlus1 && onZPlus2)   return true;
     if (onZMinus1 && onZMinus2) return true;
-
     return false;
 }
 
@@ -444,30 +473,23 @@ function triangulatePolygon(outer, holes, eps) {
 function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz) {
     const ux = bx - ax, uy = by - ay, uz = bz - az;
     const vx = cx - ax, vy = cy - ay, vz = cz - az;
-
     const crx = uy * vz - uz * vy;
     const cry = uz * vx - ux * vz;
     const crz = ux * vy - uy * vx;
-
     if (crx * nx + cry * ny + crz * nz < 0) {
         positions.push(ax, ay, az, cx, cy, cz, bx, by, bz);
     } else {
         positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
     }
-
-    for (let i = 0; i < 3; i++) {
-        normals.push(nx, ny, nz);
-    }
+    for (let i = 0; i < 3; i++) normals.push(nx, ny, nz);
 }
 
 function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true, halfTile = 0) {
     if (!rings || rings.length === 0 || height <= 0) return null;
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
     if (cleaned.length === 0) return null;
-
     const checkBoundary = halfTile > 0;
     const boundaryEps = Math.max(eps, halfTile * 1e-4);
-
     const validRings = [];
     for (const ring of cleaned) {
         const area = ringArea(ring);
@@ -475,32 +497,23 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
         validRings.push({ ring, area });
     }
     if (validRings.length === 0) return null;
-
     let posCount = 0, negCount = 0;
     for (const entry of validRings) {
         if (entry.area > 0) posCount++; else negCount++;
     }
     const outerSign = posCount >= negCount ? 1 : -1;
-
     const polygons = [];
     for (const entry of validRings) {
         const isOuter = Math.sign(entry.area) === outerSign;
-        if (isOuter) {
-            polygons.push({ outer: entry.ring, holes: [] });
-        } else if (polygons.length > 0) {
-            polygons[polygons.length - 1].holes.push(entry.ring);
-        } else {
-            polygons.push({ outer: entry.ring, holes: [] });
-        }
+        if (isOuter) polygons.push({ outer: entry.ring, holes: [] });
+        else if (polygons.length > 0) polygons[polygons.length - 1].holes.push(entry.ring);
+        else polygons.push({ outer: entry.ring, holes: [] });
     }
-
     if (polygons.length === 0) return null;
-
     const positions = [];
     const normals = [];
     const edges = [];
     const sharpCos = Math.cos(15 * Math.PI / 180);
-
     for (const poly of polygons) {
         const outer = orientRing(poly.outer, false);
         const holes = poly.holes.map(h => orientRing(h, true));
@@ -508,94 +521,63 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
         if (!triData) continue;
         const vertices = triData.vertices;
         const indices = triData.indices;
-
         for (let i = 0; i < indices.length; i += 3) {
             const a = indices[i], b = indices[i + 1], c = indices[i + 2];
             const ax = vertices[a * 2], az = vertices[a * 2 + 1];
             const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
             const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
-            pushTriangle(
-                positions, normals,
-                ax, height, az, bx, height, bz, cx, height, cz,
-                0, 1, 0
-            );
+            pushTriangle(positions, normals,
+                ax, height, az, bx, height, bz, cx, height, cz, 0, 1, 0);
         }
-
         if (minHeight > 0) {
             for (let i = 0; i < indices.length; i += 3) {
                 const a = indices[i], b = indices[i + 1], c = indices[i + 2];
                 const ax = vertices[a * 2], az = vertices[a * 2 + 1];
                 const bx = vertices[b * 2], bz = vertices[b * 2 + 1];
                 const cx = vertices[c * 2], cz = vertices[c * 2 + 1];
-                pushTriangle(
-                    positions, normals,
-                    ax, minHeight, az, bx, minHeight, bz, cx, minHeight, cz,
-                    0, -1, 0
-                );
+                pushTriangle(positions, normals,
+                    ax, minHeight, az, bx, minHeight, bz, cx, minHeight, cz, 0, -1, 0);
             }
         }
-
         for (const ring of [outer, ...holes]) {
             const n = ring.length;
-
             for (let i = 0; i < n; i++) {
                 const p0 = ring[i];
                 const p1 = ring[(i + 1) % n];
-
                 const dx = p1.x - p0.x;
                 const dz = p1.z - p0.z;
                 const len = Math.hypot(dx, dz);
                 if (len < eps) continue;
-
                 const nx = dz / len;
                 const nz = -dx / len;
-
                 const onBoundary = checkBoundary &&
                     isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
-
                 if (!onBoundary) {
-                    pushTriangle(
-                        positions, normals,
-                        p0.x, minHeight, p0.z,
-                        p1.x, minHeight, p1.z,
-                        p1.x, height, p1.z,
-                        nx, 0, nz
-                    );
-                    pushTriangle(
-                        positions, normals,
-                        p0.x, minHeight, p0.z,
-                        p1.x, height, p1.z,
-                        p0.x, height, p0.z,
-                        nx, 0, nz
-                    );
+                    pushTriangle(positions, normals,
+                        p0.x, minHeight, p0.z, p1.x, minHeight, p1.z,
+                        p1.x, height, p1.z, nx, 0, nz);
+                    pushTriangle(positions, normals,
+                        p0.x, minHeight, p0.z, p1.x, height, p1.z,
+                        p0.x, height, p0.z, nx, 0, nz);
                 }
-
                 if (includeEdges) {
                     if (!onBoundary) {
                         edges.push(p0.x, height, p0.z, p1.x, height, p1.z);
-                        if (minHeight > 0) {
-                            edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
-                        }
+                        if (minHeight > 0) edges.push(p0.x, minHeight, p0.z, p1.x, minHeight, p1.z);
                     }
-
                     const p2 = ring[(i + 2) % n];
                     const dx2 = p2.x - p1.x;
                     const dz2 = p2.z - p1.z;
                     const len2 = Math.hypot(dx2, dz2);
-
-                    if (len2 > eps &&
-                        (dx * dx2 + dz * dz2) / (len * len2) < sharpCos) {
+                    if (len2 > eps && (dx * dx2 + dz * dz2) / (len * len2) < sharpCos) {
                         const cornerOnBoundary = checkBoundary &&
                             isVertexOnTileBoundary(p1.x, p1.z, halfTile, boundaryEps);
-                        if (!cornerOnBoundary) {
-                            edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
-                        }
+                        if (!cornerOnBoundary) edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
                     }
                 }
             }
         }
     }
-
     if (positions.length === 0) return null;
     return {
         positions: new Float32Array(positions),
@@ -651,11 +633,11 @@ function blendWithBackground(color, opacity) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// IDENTIFY (диагностика по shift-click)
+// IDENTIFY
 // ════════════════════════════════════════════════════════════════════════
 
-function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance) {
-    const zoom = z;
+function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance, continuousZoom) {
+    const zoom = continuousZoom ?? z;
     const tol = tolerance || tileSize * 0.005;
     const tolSq = tol * tol;
     const results = [];
@@ -668,7 +650,6 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance)
             const props = feature.properties || {};
             const geomType = feature.type;
             const geom = feature.loadGeometry();
-
             let hit = false;
             let minDistSq = Infinity;
 
@@ -683,8 +664,8 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance)
             } else if (geomType === 2) {
                 for (const ring of geom) {
                     for (let k = 0; k < ring.length - 1; k++) {
-                        const ax = (ring[k].x     / 4095 - 0.5) * tileSize;
-                        const az = (ring[k].y     / 4095 - 0.5) * tileSize;
+                        const ax = (ring[k].x / 4095 - 0.5) * tileSize;
+                        const az = (ring[k].y / 4095 - 0.5) * tileSize;
                         const bx = (ring[k + 1].x / 4095 - 0.5) * tileSize;
                         const bz = (ring[k + 1].y / 4095 - 0.5) * tileSize;
                         const d2 = pointSegDistSq(localX, localZ, ax, az, bx, bz);
@@ -701,7 +682,6 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance)
                     minDistSq = 0;
                 }
             }
-
             if (!hit) continue;
 
             const filterPass = layerStyle && layerStyle.filter
@@ -714,15 +694,13 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance)
                 featureIndex: i,
                 distance: Math.sqrt(minDistSq),
                 filterPass,
-                style: layerStyle ? snapshotStyle(layerStyle, props, zoom) : null,
+                style: layerStyle ? snapshotStyle(layerStyle, props, zoom, geomType) : null,
                 renderOrder: LAYER_RENDER_ORDER[layerName] !== undefined
-                    ? LAYER_RENDER_ORDER[layerName]
-                    : null,
+                    ? LAYER_RENDER_ORDER[layerName] : null,
                 properties: props,
             });
         }
     }
-
     results.sort((a, b) => a.distance - b.distance);
     return { tile: { z, x, y }, features: results };
 }
@@ -738,8 +716,6 @@ function pointSegDistSq(px, pz, ax, az, bx, bz) {
 }
 
 function pointInPolygonRings(pt, rings) {
-    // Чередование на каждом пересечении даёт правильный результат и для
-    // outer, и для holes — MVT-полигоны укладываются в это правило.
     let inside = false;
     for (const ring of rings) {
         if (ring.length < 3) continue;
@@ -755,7 +731,7 @@ function pointInPolygonRings(pt, rings) {
     return inside;
 }
 
-function snapshotStyle(layerStyle, props, zoom) {
+function snapshotStyle(layerStyle, props, zoom, geomType) {
     if (!layerStyle) return null;
     const keys = [
         'color', 'opacity', 'stroke', 'width', 'dash', 'radius', 'height', 'base',
@@ -767,7 +743,7 @@ function snapshotStyle(layerStyle, props, zoom) {
     const out = {};
     for (const k of keys) {
         if (layerStyle[k] === undefined) continue;
-        const v = resolveValue(layerStyle[k], props, zoom);
+        const v = resolveValue(layerStyle[k], props, zoom, geomType);
         if ((k === 'color' || k === 'stroke') && typeof v === 'number') {
             out[k] = '#' + v.toString(16).padStart(6, '0');
         } else {
@@ -786,9 +762,10 @@ function pointInPolygon(pt, polygon) {
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
         const xi = polygon[i].x, zi = polygon[i].z;
         const xj = polygon[j].x, zj = polygon[j].z;
-        const intersect = ((zi > pt.z) !== (zj > pt.z)) &&
-            (pt.x < (xj - xi) * (pt.z - zi) / (zj - zi) + xi);
-        if (intersect) inside = !inside;
+        if (((zi > pt.z) !== (zj > pt.z)) &&
+            (pt.x < (xj - xi) * (pt.z - zi) / (zj - zi) + xi)) {
+            inside = !inside;
+        }
     }
     return inside;
 }
@@ -834,11 +811,9 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
         for (let i = 0; i < line.length - 1; i++) {
             const a = line[i];
             const b = line[i + 1];
-
             for (const exPoly of exclusionPolygons) {
                 if (pointInPolygon(a, exPoly) || pointInPolygon(b, exPoly)) return true;
             }
-
             for (const exPoly of exclusionPolygons) {
                 for (let j = 0; j < exPoly.length; j++) {
                     const c = exPoly[j];
@@ -857,11 +832,12 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges,
                      exclusionPolygons = [], exclusionLayers = [],
-                     maxTextPointsPerTile = 300, maxTextLinesPerTile = 30) {
+                     maxTextPointsPerTile = 300, maxTextLinesPerTile = 30,
+                     continuousZoom = z) {
     const eps = tileSize * 0.5 / 4096;
-    const pointScale = computePointScale(z);
+    const pointScale = computePointScale(continuousZoom);
     const halfTile = tileSize / 2;
-    const zoom = z;
+    const styleZoom = continuousZoom;
 
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
@@ -894,7 +870,6 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             const feature = layer.feature(i);
             const props = feature.properties || {};
 
-            // ---- layer-level filter (geometry type, классы, has name и т.п.)
             if (layerStyle.filter && !resolveFilter(layerStyle.filter, feature)) continue;
 
             const geomType = feature.type;
@@ -929,41 +904,34 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (!text) continue;
 
                     textPoints.push({
-                        x: worldX,
-                        z: worldZ,
-                        text,
-                        layerName: name,
-                        textColor: resolveString(layerStyle.textColor, props, zoom, '#333333'),
-                        fontSize: resolveNumber(layerStyle.fontSize, props, zoom, 12) + 'px',
-                        fontFamily: resolveString(layerStyle.fontFamily, props, zoom, 'sans-serif'),
-                        fontWeight: resolveString(layerStyle.fontWeight, props, zoom, 'normal'),
-                        textFontStyle: resolveString(layerStyle.textFontStyle, props, zoom, ''),
-                        textTransform: resolveString(layerStyle.textTransform, props, zoom, ''),
-                        textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, zoom, ''),
-                        textShadow: resolveString(layerStyle.textShadow, props, zoom, ''),
-                        textOffset: resolveArray(layerStyle.textOffset, props, zoom) || [0, 0],
-                        textAlign: resolveString(layerStyle.textAlign, props, zoom, 'center'),
-                        textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, zoom, 'center'),
-                        priority: resolveNumber(layerStyle.textPriority, props, zoom, layerBaseOrder) + sortKey * 0.001,
+                        x: worldX, z: worldZ, text, layerName: name,
+                        textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
+                        fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 12, geomType) + 'px',
+                        fontFamily: resolveString(layerStyle.fontFamily, props, styleZoom, 'sans-serif', geomType),
+                        fontWeight: resolveString(layerStyle.fontWeight, props, styleZoom, 'normal', geomType),
+                        textFontStyle: resolveString(layerStyle.textFontStyle, props, styleZoom, '', geomType),
+                        textTransform: resolveString(layerStyle.textTransform, props, styleZoom, '', geomType),
+                        textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, styleZoom, '', geomType),
+                        textShadow: resolveString(layerStyle.textShadow, props, styleZoom, '', geomType),
+                        textOffset: resolveArray(layerStyle.textOffset, props, styleZoom, geomType) || [0, 0],
+                        textAlign: resolveString(layerStyle.textAlign, props, styleZoom, 'center', geomType),
+                        textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, styleZoom, 'center', geomType),
+                        priority: resolveNumber(layerStyle.textPriority, props, styleZoom, layerBaseOrder, geomType) + sortKey * 0.001,
                         zoomBounds: {
-                            min: resolveNumber(layerStyle.textZoomMin, props, zoom, 0),
-                            max: resolveNumber(layerStyle.textZoomMax, props, zoom, 24)
+                            min: resolveNumber(layerStyle.textZoomMin, props, styleZoom, 0, geomType),
+                            max: resolveNumber(layerStyle.textZoomMax, props, styleZoom, 24, geomType)
                         }
                     });
                     continue;
                 }
 
-                const color = resolveColor(layerStyle.color, props, zoom);
+                const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                 if (color === null) continue;
-                const radius = resolveNumber(layerStyle.radius, props, zoom, 3) * pointScale;
-                const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
+                const radius = resolveNumber(layerStyle.radius, props, styleZoom, 3, geomType) * pointScale;
+                const opacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
 
                 points.push({
-                    x: worldX,
-                    z: worldZ,
-                    radius,
-                    color,
-                    opacity,
+                    x: worldX, z: worldZ, radius, color, opacity,
                     renderOrder: layerBaseOrder + Math.min(sortKey * 0.001, 0.4)
                 });
                 continue;
@@ -980,18 +948,16 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 // ---- building (fill-extrusion) ----
                 if (name === 'building') {
                     if (props.hide_3d === true) continue;
-
-                    const height = resolveHeight(layerStyle.height, props, zoom);
-                    const minHeight = resolveHeight(layerStyle.base, props, zoom);
-
+                    const height = resolveHeight(layerStyle.height, props, styleZoom, geomType);
+                    const minHeight = resolveHeight(layerStyle.base, props, styleZoom, geomType);
                     if (!isNaN(height) && height > 0 && height > minHeight) {
                         const isPart = props['building:part'] === 'yes';
                         const isSimpleBuilding = props['building:part'] === undefined;
                         if (is3d && (isPart || isSimpleBuilding)) {
                             const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
                             if (geo) {
-                                const bColor = resolveColor(layerStyle.color, props, zoom);
-                                const bStroke = resolveColor(layerStyle.stroke, props, zoom);
+                                const bColor = resolveColor(layerStyle.color, props, styleZoom, geomType);
+                                const bStroke = resolveColor(layerStyle.stroke, props, styleZoom, geomType);
                                 buildings.push({
                                     positions: geo.positions,
                                     normals: geo.normals,
@@ -1004,13 +970,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             }
                         }
                     }
-                    // fall through to 2D fill, если extruded не получилось
                 }
 
                 // ---- polygon fill ----
-                const color = resolveColor(layerStyle.color, props, zoom);
+                const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                 if (color === null) continue;
-                const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
+                const opacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
 
                 const fillKey = 'fill:' + name + ':' + color.toString(16) + ':' + opacity;
                 let fillGroup = fillsMap.get(fillKey);
@@ -1034,9 +999,9 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (triData.length > 0) fillGroup.push(...triData);
 
                 // ---- polygon stroke ----
-                const strokeColor = resolveColor(layerStyle.stroke, props, zoom);
+                const strokeColor = resolveColor(layerStyle.stroke, props, styleZoom, geomType);
                 if (strokeColor !== null) {
-                    const strokeWidth = resolveNumber(layerStyle.width, props, zoom, 1);
+                    const strokeWidth = resolveNumber(layerStyle.width, props, styleZoom, 1, geomType);
                     const strokeKey = 'stroke:' + name + ':' + strokeColor.toString(16) + ':' + strokeWidth;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
@@ -1049,16 +1014,17 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (lineIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
 
-                // ---- line geometry (кроме carrier-only слоёв) ----
+                // ---- line geometry ----
                 if (!isCarrierOnlyLine) {
-                    const color = resolveColor(layerStyle.color, props, zoom);
+                    const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                     if (color !== null) {
-                        const width = resolveNumber(layerStyle.width, props, zoom, 1);
-                        const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
-                        const dash = resolveArray(layerStyle.dash, props, zoom) || null;
+                        const width = resolveNumber(layerStyle.width, props, styleZoom, 1, geomType);
+                        const opacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
+                        const dashPx = resolveArray(layerStyle.dash, props, styleZoom, geomType);
+                        const dash = dashPx
+                            ? scaleDash(dashPx, tileSize, z, styleZoom)
+                            : null;
 
-                        // Line2 в VectorTileLayer не поддерживает opacity:
-                        // подмешиваем цвет к белому фону.
                         const finalColor = opacity < 1
                             ? blendWithBackground(color, opacity)
                             : color;
@@ -1072,20 +1038,39 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
                         }
 
-                        const dashKey = dash ? dash.join(',') : 'none';
+                        const dashKey = dash ? dash.map(v => v.toFixed(3)).join(',') : 'none';
                         const lineKey = 'line:' + name + ':' +
                             finalColor.toString(16) + ':' + width + ':' + dashKey;
                         let lineGroup = linesMap.get(lineKey);
                         if (!lineGroup) {
-                            lineGroup = {
-                                rings: [],
-                                renderOrder: dynamicOrder,
-                                dash
-                            };
+                            lineGroup = { rings: [], renderOrder: dynamicOrder, dash };
                             linesMap.set(lineKey, lineGroup);
                         }
                         for (const ring of rings) {
                             if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
+                        }
+
+                        // ---- Casing (обводка) для дорог ----
+                        const cls = props.class;
+                        const brunnel = props.brunnel || '';
+                        const casingInfo = TRANSPORTATION_CASING[cls];
+                        if (name === 'transportation' && casingInfo &&
+                            brunnel !== 'tunnel' && width > 0.5) {
+                            const casingWidth = width + casingInfo.extraWidth;
+                            const casingKey = 'line:' + name + ':' +
+                                casingInfo.color.toString(16) + ':' + casingWidth + ':none';
+                            let casingGroup = linesMap.get(casingKey);
+                            if (!casingGroup) {
+                                casingGroup = {
+                                    rings: [],
+                                    renderOrder: dynamicOrder - 0.5,
+                                    dash: null
+                                };
+                                linesMap.set(casingKey, casingGroup);
+                            }
+                            for (const ring of rings) {
+                                if (ring.length >= 2) casingGroup.rings.push({ ring, sortKey });
+                            }
                         }
                     }
                 }
@@ -1101,12 +1086,11 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (!featureName) continue;
 
                     const minSegmentFactor = resolveNumber(
-                        layerStyle.textMinSegmentLength, props, zoom, 0.15);
+                        layerStyle.textMinSegmentLength, props, styleZoom, 0.15, geomType);
                     const minLen = tileSize * minSegmentFactor;
 
                     for (const ring of rings) {
                         if (ring.length < 2) continue;
-
                         let len = 0;
                         for (let k = 0; k < ring.length - 1; k++) {
                             const dx = ring[k + 1].x - ring[k].x;
@@ -1117,24 +1101,23 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
 
                         textLines.push({
                             points: ring.map(p => ({ x: p.x, z: p.z })),
-                            text: featureName,
-                            layerName: name,
-                            textColor: resolveString(layerStyle.textColor, props, zoom, '#333333'),
-                            fontSize: resolveNumber(layerStyle.fontSize, props, zoom, 11) + 'px',
-                            fontFamily: resolveString(layerStyle.fontFamily, props, zoom, 'sans-serif'),
-                            fontWeight: resolveString(layerStyle.fontWeight, props, zoom, 'normal'),
-                            textFontStyle: resolveString(layerStyle.textFontStyle, props, zoom, ''),
-                            textTransform: resolveString(layerStyle.textTransform, props, zoom, ''),
-                            textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, zoom, ''),
-                            textShadow: resolveString(layerStyle.textShadow, props, zoom, ''),
-                            textOffset: resolveArray(layerStyle.textOffset, props, zoom) || [0, 0],
-                            textAlign: resolveString(layerStyle.textAlign, props, zoom, 'center'),
-                            textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, zoom, 'middle'),
-                            placement: resolveString(layerStyle.textPlacement, props, zoom, 'along'),
-                            priority: resolveNumber(layerStyle.textPriority, props, zoom, layerBaseOrder) + sortKey * 0.001,
+                            text: featureName, layerName: name,
+                            textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
+                            fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 11, geomType) + 'px',
+                            fontFamily: resolveString(layerStyle.fontFamily, props, styleZoom, 'sans-serif', geomType),
+                            fontWeight: resolveString(layerStyle.fontWeight, props, styleZoom, 'normal', geomType),
+                            textFontStyle: resolveString(layerStyle.textFontStyle, props, styleZoom, '', geomType),
+                            textTransform: resolveString(layerStyle.textTransform, props, styleZoom, '', geomType),
+                            textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, styleZoom, '', geomType),
+                            textShadow: resolveString(layerStyle.textShadow, props, styleZoom, '', geomType),
+                            textOffset: resolveArray(layerStyle.textOffset, props, styleZoom, geomType) || [0, 0],
+                            textAlign: resolveString(layerStyle.textAlign, props, styleZoom, 'center', geomType),
+                            textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, styleZoom, 'middle', geomType),
+                            placement: resolveString(layerStyle.textPlacement, props, styleZoom, 'along', geomType),
+                            priority: resolveNumber(layerStyle.textPriority, props, styleZoom, layerBaseOrder, geomType) + sortKey * 0.001,
                             zoomBounds: {
-                                min: resolveNumber(layerStyle.textZoomMin, props, zoom, 14),
-                                max: resolveNumber(layerStyle.textZoomMax, props, zoom, 24)
+                                min: resolveNumber(layerStyle.textZoomMin, props, styleZoom, 14, geomType),
+                                max: resolveNumber(layerStyle.textZoomMax, props, styleZoom, 24, geomType)
                             }
                         });
                     }
@@ -1143,27 +1126,16 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         }
     };
 
-    // Порядок обхода не важен: подписи сортируются по priority ниже,
-    // геометрия группируется по ключу и получает renderOrder из
-    // LAYER_RENDER_ORDER[<layer>].
     for (const name in tile.layers) processLayer(name);
 
     textPoints.sort((a, b) => b.priority - a.priority);
     textLines.sort((a, b) => b.priority - a.priority);
-
     if (textPoints.length > maxTextPointsPerTile) textPoints.length = maxTextPointsPerTile;
     if (textLines.length > maxTextLinesPerTile) textLines.length = maxTextLinesPerTile;
 
     const result = {
-        fills: [],
-        lines: [],
-        strokes: [],
-        buildings: [],
-        points,
-        textPoints,
-        textLines,
-        centerX,
-        centerZ
+        fills: [], lines: [], strokes: [], buildings: [],
+        points, textPoints, textLines, centerX, centerZ
     };
 
     for (const entry of fillsMap) {

@@ -2,6 +2,17 @@
 /**
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалов и подписей.
+ *
+ * ПЕРЕХОД LOD (sourceZoom):
+ *  - При смене sourceZoom старые группы уходят в `_oldTileGroups`, и им:
+ *    1) сдвигается `renderOrder` на -10000 — все старые тайлы рисуются
+ *       раньше любых новых (fallback-подложка);
+ *    2) материал зданий подменяется на клон с `depthWrite = false` —
+ *       чтобы не воевать с новыми домами за z-буфер.
+ *    Ровно та же схема, что у растровых тайлов (Tiles.js):
+ *    primary пишет глубину, fallback — только цвет.
+ *  - Префетч следующего sourceZoom делается по порогу continuousZoom
+ *    (см. `_prefetchNextZoom`), что сокращает окно fallback.
  */
 
 import {
@@ -49,9 +60,7 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 }
 
 // -----------------------------------------------------------------------------
-// Общий offscreen-канвас для измерения ширины текста. Используется
-// VectorLineLabelSource, чтобы решить, влезает ли подпись в видимую часть
-// линии. Ленивая инициализация — не создаём canvas до первого измерения.
+// Общий offscreen-канвас для измерения ширины текста.
 // -----------------------------------------------------------------------------
 let _sharedMeasureCanvas = null;
 
@@ -117,21 +126,6 @@ class VectorPointLabelSource {
 
 // -----------------------------------------------------------------------------
 // Источник подписи для линейных объектов векторных тайлов.
-//
-// Построен по образцу Polyline: LabelType='line', поддержка
-// getVisibleInterval/getScreenPositionAt/getScreenAngleAt/getLabelParameter.
-//
-// Экранные данные (points3D, segLengths, visibleInterval, visiblePixelLen)
-// пересчитываются лениво и кэшируются по сигнатуре (camera.position,
-// worldGroup.position + group.position, continuousZoom).
-//
-// Fit-check: если ширина текста в пикселях больше ширины видимой части линии
-// (с 5% запасом), getVisibleInterval() возвращает null, и TextManager
-// пропускает подпись. Это избавляет от «обрубков» на коротких сегментах улиц.
-//
-// `_labelT` живёт на объекте источника и сохраняется между кадрами.
-// Поэтому источник нельзя пересоздавать каждый кадр — кэшируется на
-// group.userData.lineLabelSources (см. _refreshTextLabelsForVisibleTiles).
 // -----------------------------------------------------------------------------
 class VectorLineLabelSource {
     constructor(map, lineData, group) {
@@ -411,6 +405,14 @@ function _flatY(renderOrder) {
     return FLAT_Y_OFFSET + (renderOrder || 0) * FLAT_Y_STEP;
 }
 
+/**
+ * Сдвиг renderOrder для старых тайлов. -10000 гарантированно ниже любого
+ * штатного renderOrder (LAYER_RENDER_ORDER макс ~1200 + динамические сдвиги
+ * за счёт sort_key). Всё, что в `_oldTileGroups`, рисуется раньше всего
+ * нового — как fallback у растровых тайлов.
+ */
+const FALLBACK_RENDER_ORDER_SHIFT = -10000;
+
 // -----------------------------------------------------------------------------
 // Основной класс.
 // -----------------------------------------------------------------------------
@@ -477,6 +479,15 @@ export class VectorTileLayer {
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
 
+        /**
+         * Кэш «клонов без записи глубины» для fallback-тайлов старого LOD.
+         * Ключ — оригинальный материал. Создаётся при первом попадании
+         * тайла в `_oldTileGroups`.
+         * @private
+         * @type {Map<THREE.Material, THREE.Material>}
+         */
+        this._fallbackMaterialCache = new Map();
+
         this._managedMaterials = new WeakSet();
         this._managedGeometries = new WeakSet();
 
@@ -495,6 +506,15 @@ export class VectorTileLayer {
         this._lastCheckInit = false;
 
         this._labelsDirty = false;
+
+        /**
+         * Префетч следующего sourceZoom: последний, для которого уже
+         * запускали прогрев. Сбрасывается на -1 при смене sourceZoom.
+         * @private
+         */
+        this._lastPrefetchZoom = -1;
+        /** @private @type {Set<string>} */
+        this._prefetchInFlight = new Set();
 
         this._raycaster = new THREE.Raycaster();
         this._raycastNDC = new THREE.Vector2();
@@ -538,7 +558,8 @@ export class VectorTileLayer {
             console.error('Failed to initialize worker:', err);
         }
     }
-  _onWorkerMessage(data) {
+
+    _onWorkerMessage(data) {
         if (!data || typeof data.id === 'undefined') return;
 
         const pending = this._pendingWorkerRequests.get(data.id);
@@ -668,20 +689,6 @@ export class VectorTileLayer {
         group.userData.is3d = result.is3d;
     }
 
-    /**
-     * Преобразует «сырой» массив позиций от воркера (с NaN-разделителями
-     * между несвязными кольцами) в массив пар-сегментов для
-     * LineSegmentsGeometry: [start0, end0, start1, end1, ...].
-     *
-     * - Непрерывные точки одного кольца становятся сегментами (p[i], p[i+1]).
-     * - NaN-разделитель просто пропускается: между последней точкой одного
-     *   кольца и первой точкой следующего сегмент НЕ создаётся (нет «моста»).
-     * - Дубликаты координат не появляются, NaN в выход не попадает.
-     *
-     * @private
-     * @param {Float32Array} positions
-     * @returns {Float32Array|null}
-     */
     _fatLineSegmentsFromPositions(positions) {
         if (!positions || positions.length < 6) return null;
 
@@ -709,21 +716,6 @@ export class VectorTileLayer {
         return out.length > 0 ? new Float32Array(out) : null;
     }
 
-    /**
-     * Создаёт один Line2 на весь набор сегментов тайл-материала.
-     *
-     * Раньше на каждое кольцо создавался отдельный Line2 — это давало
-     * десятки тысяч draw calls на сцену и «чудесные» фризы (1–2 сек/кадр).
-     * Сейчас же мы собираем ВСЕ сегменты в одну LineSegmentsGeometry —
-     * ровно один draw call на материал, как и было изначально, только
-     * без NaN в instanced-атрибутах.
-     *
-     * @private
-     * @param {THREE.Group} group
-     * @param {Float32Array} positions  «сырой» массив из воркера
-     * @param {LineMaterial} material
-     * @param {number} renderOrder
-     */
     _addFatLineFromPositions(group, positions, material, renderOrder) {
         const segs = this._fatLineSegmentsFromPositions(positions);
         if (!segs) return;
@@ -998,6 +990,115 @@ export class VectorTileLayer {
     }
 
     // -------------------------------------------------------------------------
+    // Fallback-материалы (для старого LOD при смене sourceZoom)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Возвращает клон материала с `depthWrite = false`. Кэшируется по
+     * оригиналу, чтобы не создавать десятки клонов на каждый переход.
+     *
+     * Нужен только для материалов, которые РАНЬШЕ писали глубину
+     * (сейчас это только MeshLambertMaterial зданий). Остальные
+     * (fill/line/edge) и так имеют depthWrite: false и не участвуют.
+     *
+     * @private
+     * @param {THREE.Material} original
+     * @returns {THREE.Material}
+     */
+    _getFallbackMaterial(original) {
+        if (!original) return original;
+        const cached = this._fallbackMaterialCache.get(original);
+        if (cached) return cached;
+
+        const clone = original.clone();
+        clone.depthWrite = false;
+        this._fallbackMaterialCache.set(original, clone);
+        this._managedMaterials.add(clone);
+        if (clone.isLineMaterial) this._lineMaterialsSet.add(clone);
+        return clone;
+    }
+
+    /**
+     * Меняет материалы у всех детей тайл-групп, которые пишут глубину,
+     * на fallback-клоны без depthWrite. Именно это убирает z-fighting
+     * между домами старого и нового LOD.
+     *
+     * @private
+     * @param {Iterable<THREE.Group>} tileGroups
+     */
+    _swapDepthWriteOff(tileGroups) {
+        tileGroups.forEach(group => {
+            group.traverse(child => {
+                if (child === group || !child.material) return;
+                const mat = child.material;
+                const list = Array.isArray(mat) ? mat : [mat];
+
+                let needsSwap = false;
+                for (const m of list) {
+                    if (m && m.depthWrite) { needsSwap = true; break; }
+                }
+                if (!needsSwap) return;
+
+                child.material = Array.isArray(mat)
+                    ? list.map(m => this._getFallbackMaterial(m))
+                    : this._getFallbackMaterial(mat);
+            });
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Префетч следующего sourceZoom
+    // -------------------------------------------------------------------------
+
+    /**
+     * Прогревает `_tileDataCache` сырыми байтами тайлов следующего
+     * sourceZoom. К моменту реальной смены LOD `_loadTile` найдёт эти
+     * буферы в кэше и не пойдёт в сеть — переход будет мгновенным.
+     *
+     * Геометрию и worker-обработку НЕ префетчим: это удвоило бы CPU,
+     * а выигрыш по времени был бы небольшим на фоне сетевых RTT.
+     *
+     * @private
+     * @param {number} z
+     */
+    _prefetchNextZoom(z) {
+        const map = this._map;
+        if (!map) return;
+        if (z < this.minZoom || z > this.maxSourceZoom) return;
+
+        const visibleTiles = this._getVisibleTileKeys(z);
+
+        for (const key of visibleTiles) {
+            // key: "z,x,y"
+            const c1 = key.indexOf(',');
+            const c2 = key.indexOf(',', c1 + 1);
+            const pz = +key.slice(0, c1);
+            const px = +key.slice(c1 + 1, c2);
+            const py = +key.slice(c2 + 1);
+
+            const dataKey = `${pz}/${px}/${py}`;
+            if (this._tileDataCache.has(dataKey)) continue;
+            if (this._prefetchInFlight.has(dataKey)) continue;
+
+            const url = this.url
+                .replaceAll('{z}', pz)
+                .replaceAll('{x}', px)
+                .replaceAll('{y}', py);
+
+            this._prefetchInFlight.add(dataKey);
+            fetch(url)
+                .then(resp => resp.ok ? resp.arrayBuffer() : null)
+                .then(buffer => {
+                    if (buffer && this._map) {
+                        this._setTileDataCache(dataKey, buffer);
+                    }
+                })
+                .catch(() => { /* тихий fail — префетч best-effort */ })
+                .finally(() => this._prefetchInFlight.delete(dataKey));
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Публичные методы
     // -------------------------------------------------------------------------
 
@@ -1117,9 +1218,16 @@ export class VectorTileLayer {
         this._lineMaterialsSet.clear();
         this._fillMaterialCache.clear();
         this._lineMaterialCache.clear();
+
+        // Fallback-клоны живут только пока слой жив; освобождаем.
+        this._fallbackMaterialCache.forEach(m => { try { m.dispose(); } catch (e) {} });
+        this._fallbackMaterialCache.clear();
+
         this._pointGeometryCache.forEach(g => g.dispose());
         this._pointGeometryCache.clear();
         this._tileDataCache.clear();
+        this._prefetchInFlight.clear();
+        this._lastPrefetchZoom = -1;
         this._clearGroupCache();
 
         if (this._worker) {
@@ -1275,23 +1383,51 @@ export class VectorTileLayer {
         if (sourceZoom !== this._lastSourceZoom) {
             this._generation++;
             this._clearOldTilesNow();
+
             if (this._tileCache.size > 0) {
                 this._oldTileGroups = new Map(this._tileCache);
+
+                // 1) Все старые тайлы — раньше любых новых.
+                //    Y-координаты не меняем: они уже «запечены» в position.y
+                //    при создании меша (через _flatY). renderOrder — это
+                //    только ключ сортировки отрисовки.
                 this._oldTileGroups.forEach(group => {
                     group.traverse(child => {
-                        if (child.isMesh || child.isLine2) {
-                            child.renderOrder = Math.max(0, (child.renderOrder || 0) - 2);
+                        if (child.isMesh || child.isLine) {
+                            child.renderOrder =
+                                (child.renderOrder || 0) + FALLBACK_RENDER_ORDER_SHIFT;
                         }
                     });
                 });
+
+                // 2) Материалы, которые писали глубину (дома), — на клоны
+                //    с depthWrite=false. Иначе дома старого и нового LOD
+                //    воюют за z-буфер. Растры делают ровно то же самое
+                //    через depthWrite:false у fallback-тайлов.
+                this._swapDepthWriteOff(this._oldTileGroups);
             }
+
             this._tileCache = new Map();
             this._pendingLoads.clear();
             this._sortedLoadQueue = [];
             this._lastSourceZoom = sourceZoom;
+            this._lastPrefetchZoom = -1;      // разрешаем префетч для нового LOD
             this._labelsDirty = true;
             this._scheduleOldTilesCleanup(1500);
         }
+
+        // ---- Префетч следующего sourceZoom ----
+        const continuousZoom = map.continuousZoom;
+        const nextSourceZoom = Math.min(discreteZoom + 1, this.maxSourceZoom);
+        if (
+            nextSourceZoom > sourceZoom &&
+            continuousZoom > discreteZoom + 0.3 &&
+            this._lastPrefetchZoom !== sourceZoom
+        ) {
+            this._lastPrefetchZoom = sourceZoom;
+            this._prefetchNextZoom(nextSourceZoom);
+        }
+        // ---------------------------------------
 
         const canvas = map.renderer.domElement;
         const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -1686,7 +1822,7 @@ export class VectorTileLayer {
         const parts = styleKey.split(':');
         const color = parseInt(parts[2], 16);
         const width = parseFloat(parts[3]) * this.lineWidthMultiplier;
-                const matOpts = {
+        const matOpts = {
             color,
             linewidth: width,
             // CSS-пиксели: LineMaterial делит linewidth на resolution.y

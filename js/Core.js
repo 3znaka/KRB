@@ -930,9 +930,22 @@ this.controls.touches = {
     resetBearing() { this.rotateToNorth(0.3); }
 
     /** @param {number} z @returns {number} */
-    getTargetDistanceForZoom(z) {
+getTargetDistanceForZoom(z) {
+    const canvas = this.renderer?.domElement;
+    const H = canvas ? canvas.clientHeight : 0;
+    const fov = this.camera?.fov ?? 45;
+
+    // Fallback до инициализации рендерера
+    if (H <= 0) {
         return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
     }
+
+    const tanHalfFov = Math.tan((fov * Math.PI) / 360);   // tan(fov/2)
+    // Расстояние, при котором тайл z-уровня (WORLD_SIZE/2^z метров)
+    // в центре экрана занимает ровно TILE_PIXELS CSS-пикселей.
+    return (this.WORLD_SIZE / Math.pow(2, z)) * H
+         / (2 * this.TILE_PIXELS * tanHalfFov);
+}
 
     /* ================================================================
        URL-хелперы
@@ -1450,13 +1463,10 @@ this.controls.touches = {
         }
     }
 
-    peekIdealZoom(continuousZoom) {
-        const prev = this.currentDiscreteZoom;
-        let idealZ = prev;
-        if (continuousZoom >= prev + 0.6) idealZ = prev + 1;
-        else if (continuousZoom <= prev - 0.6) idealZ = prev - 1;
-        return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, idealZ));
-    }
+peekIdealZoom(continuousZoom) {
+    return Math.max(this.MIN_ZOOM,
+                    Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
+}
 
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;

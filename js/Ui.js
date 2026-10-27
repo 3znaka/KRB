@@ -345,7 +345,8 @@ export function initUI(map) {
             scaleLabel.textContent = formatDistance(nice);
         }
 
-        zoomValueLabel.textContent = ` (${map.currentDiscreteZoom})`;
+       zoomValueLabel.textContent =
+    ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
     }
 
     let lastFpsUpdate = performance.now();

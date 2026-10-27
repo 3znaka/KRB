@@ -94,7 +94,8 @@ const KNOWN_STYLE_KEYS = [
     'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textShadow',
     'textOffset', 'textAlign', 'textVerticalAlign', 'textPriority',
     'textZoomMin', 'textZoomMax',
-    'textPlacement'
+    'textPlacement', 'textTransform', 'textFontStyle', 'textLetterSpacing',
+    'textMinSegmentLength'
 ];
 
 function getFeatureStyle(feature, layerName, styles) {
@@ -546,9 +547,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
 
     const textLayers = ['place', 'poi', 'housenumber'];
 
-    // Порядок обхода: сначала слои, дающие подписи (чтобы при срабатывании
-    // maxTextPointsPerTile / maxTextLinesPerTile важные подписи не обрезались),
-    // затем остальные — по визуальной иерархии.
+    // Порядок обхода: сначала слои, дающие подписи, затем остальные —
+    // по визуальной иерархии. Это не влияет на итоговый порядок подписей
+    // (он определяется сортировкой по priority ниже), но сохраняет
+    // предсказуемый порядок обхода для не-подписных слоёв.
     const layerOrder = [
         'place', 'poi', 'housenumber',
         'transportation', 'transportation_name',
@@ -609,6 +611,9 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         fontSize: style.fontSize || '12px',
                         fontFamily: style.fontFamily || 'sans-serif',
                         fontWeight: style.fontWeight || 'normal',
+                        textFontStyle: style.textFontStyle,
+                        textTransform: style.textTransform,
+                        textLetterSpacing: style.textLetterSpacing,
                         textShadow: style.textShadow || '',
                         textOffset: style.textOffset || [0, 0],
                         textAlign: style.textAlign || 'center',
@@ -739,16 +744,24 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
                 }
 
+                // ---- Линейные подписи ----
+                // Fit-check по ширине текста здесь не делаем: масштаб
+                // рендера (continuousZoom) и итоговая ширина видимой части
+                // линии в пикселях известны только на main-thread. Проверка
+                // живёт в VectorLineLabelSource.getVisibleInterval().
                 const featureName = props.name || props.ref;
                 const hasTextStyle =
                     style.textColor || style.fontSize ||
                     style.textZoomMin !== undefined ||
                     style.textPlacement !== undefined;
 
-                if (featureName && hasTextStyle && textLines.length < maxTextLinesPerTile) {
-                    const minLen = tileSize * 0.15;
+                if (featureName && hasTextStyle) {
+                    const minSegmentFactor = style.textMinSegmentLength ?? 0.15;
+                    const minLen = tileSize * minSegmentFactor;
+
                     for (const ring of rings) {
                         if (ring.length < 2) continue;
+
                         let len = 0;
                         for (let k = 0; k < ring.length - 1; k++) {
                             const dx = ring[k + 1].x - ring[k].x;
@@ -765,6 +778,9 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             fontSize: style.fontSize || '11px',
                             fontFamily: style.fontFamily || 'sans-serif',
                             fontWeight: style.fontWeight || 'normal',
+                            textFontStyle: style.textFontStyle,
+                            textTransform: style.textTransform,
+                            textLetterSpacing: style.textLetterSpacing,
                             textShadow: style.textShadow || '',
                             textOffset: style.textOffset || [0, 0],
                             textAlign: style.textAlign || 'center',
@@ -788,6 +804,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     for (const name in tile.layers) {
         if (!layerOrder.includes(name)) processLayer(name);
     }
+
+    // Сортировка по убыванию приоритета до обрезки: если упрёмся в лимит,
+    // первыми отбросятся наименее значимые подписи (POI, номера домов,
+    // мелкие сервисные дороги), а магистрали, города и реки останутся.
+    textPoints.sort((a, b) => b.priority - a.priority);
+    textLines.sort((a, b) => b.priority - a.priority);
 
     if (textPoints.length > maxTextPointsPerTile) {
         textPoints.length = maxTextPointsPerTile;

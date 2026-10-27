@@ -6,14 +6,15 @@
  * СОГЛАШЕНИЯ:
  * - Для слоёв, которые в воркере обрабатываются как точечные объекты и
  *   попадают в подписи (`place`, `poi`, `housenumber`), стиль может содержать
- *   текстовые поля: textColor, fontSize, fontFamily, fontWeight, textShadow,
- *   textOffset, textAlign, textVerticalAlign, textPriority, textZoomMin, textZoomMax.
- *   Эти поля читаются только этими слоями.
+ *   текстовые поля: textColor, fontSize, fontFamily, fontWeight, fontStyle,
+ *   textTransform, textLetterSpacing, textShadow, textOffset, textAlign,
+ *   textVerticalAlign, textPriority, textZoomMin, textZoomMax.
  * - Для линейных слоёв (`transportation`, `waterway`, `water_name`,
  *   `transportation_name`) подписи генерируются только если в стиле задан
  *   хотя бы один текстовый атрибут И у фичи есть `name`/`ref`. Дополнительно
- *   используется `textPlacement` (по умолчанию 'along') для размещения вдоль
- *   линии. См. processTile в vectorTileWorkerCode.js.
+ *   используются `textPlacement` (по умолчанию 'along') и
+ *   `textMinSegmentLength` (минимальная длина сегмента в долях tileSize,
+ *   по умолчанию 0.15) для размещения и фильтрации вдоль линии.
  * - Поле `stroke` имеет смысл только для полигональных слоёв (заливки/обводки
  *   контура). Для точечных слоёв оно игнорируется.
  */
@@ -38,10 +39,12 @@ export const DEFAULT_STYLES = {
         textColor: '#1e4d6b',
         fontSize: '11px',
         textPlacement: 'along',
+        textFontStyle: 'italic',
         textShadow: '0 0 2px rgba(255,255,255,0.85)',
         textZoomMin: 14,
         textZoomMax: 21,
-        textPriority: 14
+        textPriority: 50,
+        textMinSegmentLength: 0.1
     },
     building: { color: 0xf0f0f0, stroke: 0xaaaaaa },
     landcover: {
@@ -110,90 +113,110 @@ export const DEFAULT_STYLES = {
     },
 
     // Транспорт: линейные подписи вдоль дорог (кроме мелких/временных типов).
-    // Приоритеты убывают от магистралей к местным улицам.
-    // zoomMin намеренно растёт к мелким дорогам: обзорные уровни остаются
-    // чистыми, детали появляются только при приближении.
+    // Приоритеты убывают от магистралей к местным улицам, но остаются
+    // выше POI (60) и воды (50), чтобы названия улиц всегда читались первыми.
+    // textMinSegmentLength — минимальная длина сегмента в долях tileSize:
+    // короткие куски улиц не подписываются.
     transportation: {
         motorway: {
             color: 0xff9933, width: 2.5,
             textColor: '#5c3a00',
             fontSize: '11px',
+            fontWeight: 'bold',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 10, textZoomMax: 21,
-            textPriority: 40
+            textPriority: 100,
+            textMinSegmentLength: 0.03
         },
         trunk: {
             color: 0xffcc66, width: 2.0,
             textColor: '#5c4400',
             fontSize: '11px',
+            fontWeight: 'bold',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 11, textZoomMax: 21,
-            textPriority: 38
+            textPriority: 95,
+            textMinSegmentLength: 0.03
         },
         primary: {
             color: 0xffd699, width: 1.8,
             textColor: '#553a1a',
             fontSize: '11px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 12, textZoomMax: 21,
-            textPriority: 34
+            textPriority: 90,
+            textMinSegmentLength: 0.05
         },
         secondary: {
             color: 0xffe0b3, width: 1.5,
             textColor: '#554a33',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 13, textZoomMax: 21,
-            textPriority: 30
+            textPriority: 85,
+            textMinSegmentLength: 0.05
         },
         tertiary: {
             color: 0xffffff, width: 1.2,
             textColor: '#444444',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 14, textZoomMax: 21,
-            textPriority: 26
+            textPriority: 80,
+            textMinSegmentLength: 0.08
         },
         minor: {
             color: 0xeeeeee, width: 1.0,
             textColor: '#555555',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 16, textZoomMax: 20,
-            textPriority: 22
+            textPriority: 75,
+            textMinSegmentLength: 0.1
         },
         residential: {
             color: 0xeeeeee, width: 1.0,
             textColor: '#555555',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 16, textZoomMax: 20,
-            textPriority: 22
+            textPriority: 75,
+            textMinSegmentLength: 0.1
         },
         service: {
             color: 0xcccccc, width: 0.8,
             textColor: '#666666',
             fontSize: '9px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 18, textZoomMax: 21,
-            textPriority: 18
+            textPriority: 70,
+            textMinSegmentLength: 0.15
         },
         rail: {
             color: 0x888888, width: 1.5, dash: [6, 2],
             textColor: '#444444',
             fontSize: '10px',
+            fontWeight: 'normal',
+            textFontStyle: 'italic',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 15, textZoomMax: 20,
-            textPriority: 20
+            textPriority: 65,
+            textMinSegmentLength: 0.1
         },
         // Без текста: path, track, ferry, aerialway, bridge, pier, raceway,
         // transit, *_construction — либо слишком мелкие, либо временные,
@@ -218,26 +241,127 @@ export const DEFAULT_STYLES = {
             color: 0xcccccc, width: 1.0,
             textColor: '#555555',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 16, textZoomMax: 20,
-            textPriority: 18
+            textPriority: 70,
+            textMinSegmentLength: 0.12
         }
     },
 
-    // Carrier-слой для дорожных названий в тайлах Mapbox-стиля: сама линия
-    // практически невидима, текст размещается вдоль неё. В тайлах, где
-    // `name` лежит прямо на `transportation`, этот слой не сработает —
-    // дубликаты не возникнут.
+
     transportation_name: {
+        motorway: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#5c3a00',
+            fontSize: '11px',
+            fontWeight: 'bold',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 10, textZoomMax: 21,
+            textPriority: 100,
+            textMinSegmentLength: 0.03
+        },
+        trunk: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#5c4400',
+            fontSize: '11px',
+            fontWeight: 'bold',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 11, textZoomMax: 21,
+            textPriority: 95,
+            textMinSegmentLength: 0.03
+        },
+        primary: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#553a1a',
+            fontSize: '11px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 12, textZoomMax: 21,
+            textPriority: 90,
+            textMinSegmentLength: 0.05
+        },
+        secondary: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#554a33',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 13, textZoomMax: 21,
+            textPriority: 85,
+            textMinSegmentLength: 0.05
+        },
+        tertiary: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#444444',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 14, textZoomMax: 21,
+            textPriority: 80,
+            textMinSegmentLength: 0.08
+        },
+        minor: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#555555',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 16, textZoomMax: 20,
+            textPriority: 75,
+            textMinSegmentLength: 0.1
+        },
+        residential: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#555555',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 16, textZoomMax: 20,
+            textPriority: 75,
+            textMinSegmentLength: 0.1
+        },
+        service: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#666666',
+            fontSize: '9px',
+            fontWeight: 'normal',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 18, textZoomMax: 21,
+            textPriority: 70,
+            textMinSegmentLength: 0.15
+        },
+        rail: {
+            color: 0xffffff, width: 0.2, opacity: 0.3,
+            textColor: '#444444',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textFontStyle: 'italic',
+            textPlacement: 'along',
+            textShadow: '0 0 2px rgba(255,255,255,0.9)',
+            textZoomMin: 15, textZoomMax: 20,
+            textPriority: 65,
+            textMinSegmentLength: 0.1
+        },
         _default: {
             color: 0xffffff, width: 0.2, opacity: 0.3,
             textColor: '#555555',
             fontSize: '10px',
+            fontWeight: 'normal',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.9)',
             textZoomMin: 14, textZoomMax: 21,
-            textPriority: 28
+            textPriority: 70,
+            textMinSegmentLength: 0.1
         }
     },
 
@@ -247,49 +371,96 @@ export const DEFAULT_STYLES = {
         _default: { color: 0xcccccc, width: 1.0 }
     },
 
+    // Населённые пункты и районы.
+    // Города — жирные, крупные; районы (_default) — капителью с разрядкой,
+    // чтобы визуально отличаться от названий улиц.
     place: {
         city: {
             color: 0xe8e8e8, opacity: 0.7, radius: 5,
-            textColor: '#333333', fontSize: '14px', fontWeight: 'bold',
-            textOffset: [0, -10], textZoomMin: 0, textZoomMax: 24
+            textColor: '#333333',
+            fontSize: '14px',
+            fontWeight: 'bold',
+            textOffset: [0, -10],
+            textZoomMin: 0, textZoomMax: 24,
+            textPriority: 200
         },
         town: {
             color: 0xe8e8e8, opacity: 0.6, radius: 4,
-            textColor: '#333333', fontSize: '13px', fontWeight: 'bold',
-            textOffset: [0, -8], textZoomMin: 0, textZoomMax: 24
+            textColor: '#333333',
+            fontSize: '13px',
+            fontWeight: 'bold',
+            textOffset: [0, -8],
+            textZoomMin: 0, textZoomMax: 24,
+            textPriority: 180
         },
         village: {
             color: 0xe8e8e8, opacity: 0.5, radius: 3,
-            textColor: '#333333', fontSize: '12px', fontWeight: 'normal',
-            textOffset: [0, -6], textZoomMin: 0, textZoomMax: 24
+            textColor: '#333333',
+            fontSize: '12px',
+            fontWeight: 'normal',
+            textOffset: [0, -6],
+            textZoomMin: 0, textZoomMax: 24,
+            textPriority: 160
         },
         hamlet: {
             color: 0xe8e8e8, opacity: 0.4, radius: 2,
-            textColor: '#333333', fontSize: '11px', fontWeight: 'normal',
-            textOffset: [0, -4], textZoomMin: 0, textZoomMax: 24
+            textColor: '#333333',
+            fontSize: '11px',
+            fontWeight: 'normal',
+            textOffset: [0, -4],
+            textZoomMin: 0, textZoomMax: 24,
+            textPriority: 140
         },
         _default: {
             color: 0xe8e8e8, opacity: 0.5, radius: 3,
-            textColor: '#333333', fontSize: '12px',
-            textOffset: [0, -6], textZoomMin: 0, textZoomMax: 24
+            textColor: '#444444',
+            fontSize: '11px',
+            fontWeight: 'normal',
+            textTransform: 'uppercase',
+            textLetterSpacing: '0.08em',
+            textOffset: [0, -6],
+            textZoomMin: 10, textZoomMax: 24,
+            textPriority: 120
         }
     },
+
+    // POI: приоритет ниже названий улиц (75–100), но выше воды (50)
+    // и номеров домов (30). Так улицы всегда читаются первыми.
     poi: {
         _default: {
             color: 0xcccccc, radius: 4,
-            textColor: '#555555', fontSize: '11px', fontWeight: 'normal',
-            textOffset: [0, -8], textZoomMin: 13, textZoomMax: 24
+            textColor: '#555555',
+            fontSize: '11px',
+            fontWeight: 'normal',
+            textOffset: [0, -8],
+            textZoomMin: 13, textZoomMax: 24,
+            textPriority: 60
         }
     },
+
+    // Номера домов — самые низкоприоритетные, чтобы не забивать карту.
     housenumber: {
         _default: {
             color: 0xffffff, radius: 2,
-            textColor: '#333333', fontSize: '10px', fontWeight: 'normal',
-            textOffset: [0, -4], textZoomMin: 16, textZoomMax: 24
+            textColor: '#333333',
+            fontSize: '10px',
+            fontWeight: 'normal',
+            textOffset: [0, -4],
+            textZoomMin: 16, textZoomMax: 24,
+            textPriority: 30
         }
     },
+
     mountain_peak: {
-        _default: { color: 0xffffff, radius: 3 }
+        _default: {
+            color: 0xffffff, radius: 3,
+            textColor: '#333333',
+            fontSize: '11px',
+            fontWeight: 'bold',
+            textOffset: [0, -6],
+            textZoomMin: 12, textZoomMax: 24,
+            textPriority: 110
+        }
     },
 
     // Границы: подписи намеренно не добавлены — названия стран/регионов
@@ -298,16 +469,19 @@ export const DEFAULT_STYLES = {
     boundary: { color: 0x999999, width: 1.0, dash: [4, 2] },
 
     // Carrier-слой для названий водоёмов (озёр, морей) и рек в тайлах
-    // Mapbox-стиля: тонкая невидимая линия для размещения текста вдоль неё.
+    // Mapbox-стиля. Приоритет ниже дорог и POI, но выше номеров домов.
     water_name: {
         _default: {
             color: 0xaaccff, width: 0.2, opacity: 0.3,
             textColor: '#1e4d6b',
             fontSize: '11px',
+            fontWeight: 'normal',
+            textFontStyle: 'italic',
             textPlacement: 'along',
             textShadow: '0 0 2px rgba(255,255,255,0.85)',
             textZoomMin: 12, textZoomMax: 21,
-            textPriority: 12
+            textPriority: 45,
+            textMinSegmentLength: 0.1
         }
     }
 };

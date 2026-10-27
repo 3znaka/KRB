@@ -48,6 +48,26 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 }
 
 // -----------------------------------------------------------------------------
+// Общий offscreen-канвас для измерения ширины текста. Используется
+// VectorLineLabelSource, чтобы решить, влезает ли подпись в видимую часть
+// линии. Ленивая инициализация — не создаём canvas до первого измерения.
+// -----------------------------------------------------------------------------
+let _sharedMeasureCanvas = null;
+
+function _measureTextWidth(text, fontSize, fontFamily, fontWeight, fontStyle) {
+    if (!_sharedMeasureCanvas) {
+        _sharedMeasureCanvas = document.createElement('canvas');
+    }
+    const ctx = _sharedMeasureCanvas.getContext('2d');
+    ctx.font =
+        (fontStyle || 'normal') + ' ' +
+        (fontWeight || 'normal') + ' ' +
+        (fontSize || '11px') + ' ' +
+        (fontFamily || 'sans-serif');
+    return ctx.measureText(text).width;
+}
+
+// -----------------------------------------------------------------------------
 // Источник подписи для точечных объектов векторных тайлов.
 // -----------------------------------------------------------------------------
 class VectorPointLabelSource {
@@ -79,7 +99,10 @@ class VectorPointLabelSource {
             fontSize: this.options.fontSize || '12px',
             fontFamily: this.options.fontFamily || 'sans-serif',
             fontWeight: this.options.fontWeight || 'normal',
-            textShadow: this.options.textShadow || ''
+            textShadow: this.options.textShadow || '',
+            textTransform: this.options.textTransform || '',
+            fontStyle: this.options.textFontStyle || '',
+            letterSpacing: this.options.textLetterSpacing || ''
         };
     }
 
@@ -97,11 +120,13 @@ class VectorPointLabelSource {
 // Построен по образцу Polyline: LabelType='line', поддержка
 // getVisibleInterval/getScreenPositionAt/getScreenAngleAt/getLabelParameter.
 //
-// Экранные данные (points3D, segLengths, visibleInterval) пересчитываются
-// лениво и кэшируются по сигнатуре (camera.position, worldGroup.position +
-// group.position, continuousZoom). Это критично: TextManager в процессе
-// разрешения коллизий дёргает getScreenPositionAt/getScreenAngleAt
-// многократно за кадр на каждую линию. Без кэша это O(N_iters × samples).
+// Экранные данные (points3D, segLengths, visibleInterval, visiblePixelLen)
+// пересчитываются лениво и кэшируются по сигнатуре (camera.position,
+// worldGroup.position + group.position, continuousZoom).
+//
+// Fit-check: если ширина текста в пикселях больше ширины видимой части линии
+// (с 5% запасом), getVisibleInterval() возвращает null, и TextManager
+// пропускает подпись. Это избавляет от «обрубков» на коротких сегментах улиц.
 //
 // `_labelT` живёт на объекте источника и сохраняется между кадрами.
 // Поэтому источник нельзя пересоздавать каждый кадр — кэшируется на
@@ -115,6 +140,7 @@ class VectorLineLabelSource {
         this._labelT = 0.5;
         this._screenData = null;
         this._screenDataSig = null;
+        this._textPxWidth = undefined;
     }
 
     getText() { return this.lineData.text; }
@@ -137,8 +163,48 @@ class VectorLineLabelSource {
             fontSize: this.lineData.fontSize || '11px',
             fontFamily: this.lineData.fontFamily || 'sans-serif',
             fontWeight: this.lineData.fontWeight || 'normal',
-            textShadow: this.lineData.textShadow || ''
+            textShadow: this.lineData.textShadow || '',
+            textTransform: this.lineData.textTransform || '',
+            fontStyle: this.lineData.textFontStyle || '',
+            letterSpacing: this.lineData.textLetterSpacing || ''
         };
+    }
+
+    // -- измерение текста -----------------------------------------------------
+
+    /**
+     * Ширина текста в пикселях с учётом text-transform и letter-spacing.
+     * Кэшируется — lineData неизменен на весь жизненный цикл источника.
+     * @private
+     */
+    _getTextPixelWidth() {
+        if (this._textPxWidth !== undefined) return this._textPxWidth;
+
+        const text = this.lineData.text || '';
+        if (!text) { this._textPxWidth = 0; return 0; }
+
+        const fontSize = this.lineData.fontSize || '11px';
+        const fontFamily = this.lineData.fontFamily || 'sans-serif';
+        const fontWeight = this.lineData.fontWeight || 'normal';
+        const fontStyle = this.lineData.textFontStyle || 'normal';
+        const textTransform = this.lineData.textTransform;
+        const letterSpacing = this.lineData.textLetterSpacing;
+
+        let displayText = text;
+        if (textTransform === 'uppercase') displayText = text.toUpperCase();
+        else if (textTransform === 'lowercase') displayText = text.toLowerCase();
+
+        let width = _measureTextWidth(displayText, fontSize, fontFamily, fontWeight, fontStyle);
+
+        if (letterSpacing) {
+            const fontSizePx = parseFloat(fontSize) || 11;
+            const lsValue = parseFloat(letterSpacing) || 0;
+            const lsPx = letterSpacing.endsWith('em') ? lsValue * fontSizePx : lsValue;
+            width += Math.max(0, displayText.length - 1) * lsPx;
+        }
+
+        this._textPxWidth = width;
+        return width;
     }
 
     // -- экранные данные (ленивый кэш) ---------------------------------------
@@ -152,8 +218,6 @@ class VectorLineLabelSource {
         const offZ = wp.z + gp.z;
         const zoom = map.continuousZoom;
 
-        // Округление до 0.01 world-единицы — субмиллиметровое смещение
-        // визуально неразличимо, но пересчёт не триггерит.
         const sig =
             cam.position.x.toFixed(2) + ',' +
             cam.position.y.toFixed(2) + ',' +
@@ -186,8 +250,6 @@ class VectorLineLabelSource {
         }
         if (totalLen < 1e-9) return null;
 
-        // Проекция равноотстоящих сэмплов, поиск наибольшего сплошного
-        // видимого интервала — как в Polyline._computeScreenData.
         const samples = 40;
         const v = new THREE.Vector3();
         const pointAtT = (t) => {
@@ -233,11 +295,30 @@ class VectorLineLabelSource {
             if (s.max - s.min > best.max - best.min) best = s;
         }
 
+        // Пиксельная длина видимой части линии. Используется в fit-check
+        // в getVisibleInterval(): если текст шире — подпись не показываем.
+        const W = this.map.renderer.domElement.clientWidth;
+        const H = this.map.renderer.domElement.clientHeight;
+        let visiblePixelLen = 0;
+        let prevPx = null;
+        const N = 20;
+        for (let i = 0; i <= N; i++) {
+            const t = best.min + (best.max - best.min) * i / N;
+            pointAtT(t).project(camera);
+            const px = (v.x * 0.5 + 0.5) * W;
+            const py = (-v.y * 0.5 + 0.5) * H;
+            if (prevPx !== null) {
+                visiblePixelLen += Math.hypot(px - prevPx.x, py - prevPx.y);
+            }
+            prevPx = { x: px, y: py };
+        }
+
         return {
             points3D,
             segLengths,
             totalLen,
             visibleInterval: best,
+            visiblePixelLen,
             camera,
             map: this.map
         };
@@ -245,7 +326,16 @@ class VectorLineLabelSource {
 
     getVisibleInterval() {
         const data = this._getScreenData();
-        return data ? data.visibleInterval : null;
+        if (!data) return null;
+
+        // Fit-check: текст не влезает в видимую часть линии — скрываем
+        // подпись. 5% запас — чтобы не отбрасывать пограничные случаи.
+        const textPxWidth = this._getTextPixelWidth();
+        if (textPxWidth > 0 && data.visiblePixelLen < textPxWidth * 1.05) {
+            return null;
+        }
+
+        return data.visibleInterval;
     }
 
     getScreenPositionAt(t) {
@@ -595,17 +685,22 @@ export class VectorTileLayer {
         if (!this._map || !this._map.textManager) return;
         const textManager = this._map.textManager;
 
-        const { candidates, isClose } = this._collectLabelCandidates();
+        const { candidates } = this._collectLabelCandidates();
 
         let selected;
         if (candidates.length === 0) {
             selected = [];
         } else {
-            if (isClose) {
-                candidates.sort((a, b) => a.camDistSq - b.camDistSq || b.priority - a.priority);
-            } else {
-                candidates.sort((a, b) => b.priority - a.priority || a.camDistSq - b.camDistSq);
-            }
+            // Приоритет — главный критерий, на всех зумах. При равном
+            // приоритете линейные подписи важнее точечных (названия улиц
+            // важнее POI), затем — расстояние до камеры.
+            candidates.sort((a, b) => {
+                if (a.priority !== b.priority) return b.priority - a.priority;
+                const aLine = a.type === 'line' ? 1 : 0;
+                const bLine = b.type === 'line' ? 1 : 0;
+                if (aLine !== bLine) return bLine - aLine;
+                return a.camDistSq - b.camDistSq;
+            });
             const limit = Math.min(candidates.length, this.maxTextLabels);
             selected = candidates.slice(0, limit);
         }
@@ -644,6 +739,9 @@ export class VectorTileLayer {
                     fontFamily: pt.fontFamily,
                     fontWeight: pt.fontWeight,
                     textShadow: pt.textShadow,
+                    textTransform: pt.textTransform,
+                    textFontStyle: pt.textFontStyle,
+                    textLetterSpacing: pt.textLetterSpacing,
                     textOffset: pt.textOffset,
                     textAlign: pt.textAlign,
                     textVerticalAlign: pt.textVerticalAlign,
@@ -702,7 +800,6 @@ export class VectorTileLayer {
         const rectW = rect.width;
         const rectH = rect.height;
 
-        // Допуски по NDC для экранного cull'а линий (в долях полуширины/полувысоты).
         const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
         const screenMarginY = rectH > 0 ? cullMargin / rectH : 0;
 
@@ -771,10 +868,10 @@ export class VectorTileLayer {
                     const pts = ln.points;
                     if (!pts || pts.length < 2) continue;
 
-                    // Сэмплируем не более ~7 точек: этого достаточно, чтобы
-                    // (а) найти минимальное 3D-расстояние до камеры, и
-                    // (б) проверить, есть ли хоть одна точка в viewport'е.
-                    const step = Math.max(1, Math.floor(pts.length / 6));
+                    // Сэмплируем ~20 точек. Меньше — риск пропустить видимую
+                    // часть длинной линии, больше — лишние проекции. 20 —
+                    // компромисс, проверенный на практике.
+                    const step = Math.max(1, Math.floor(pts.length / 20));
                     let minDistSq = Infinity;
                     let anyOnScreen = false;
 

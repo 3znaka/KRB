@@ -3,13 +3,16 @@
  * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
  * Основная логика управления тайлами, материалов и подписей.
  *
- * СХЕМА LOD (аналогична Tiles.js):
- *  - При смене sourceZoom текущий _tileCache уезжает в _oldTileGroupsList
- *    с renderOrder -10000 (всё старое рисуется до всего нового) и с
- *    материалами без depthWrite (не воюет с новыми за z-буфер).
- *  - Список, а не одна Map: быстрый зум 14→15→16 сохраняет и 14-фолбэк.
- *  - Очистка только когда _canClearOldTiles() подтвердит, что ВСЕ
- *    видимые тайлы текущего sourceZoom уже в _tileCache.
+ * ПЕРЕХОД LOD (sourceZoom):
+ *  - При смене sourceZoom старые группы уходят в `_oldTileGroups`, и им:
+ *    1) сдвигается `renderOrder` на -10000 — все старые тайлы рисуются
+ *       раньше любых новых (fallback-подложка);
+ *    2) материал зданий подменяется на клон с `depthWrite = false` —
+ *       чтобы не воевать с новыми домами за z-буфер.
+ *    Ровно та же схема, что у растровых тайлов (Tiles.js):
+ *    primary пишет глубину, fallback — только цвет.
+ *  - Префетч следующего sourceZoom делается по порогу continuousZoom
+ *    (см. `_prefetchNextZoom`), что сокращает окно fallback.
  */
 
 import {
@@ -23,9 +26,9 @@ import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { Projections } from './Projections.js';
 
-// ────────────────────────────────────────────────────────────────────────────
-// Кэш Blob-URL для кода воркера (общий для всех инстансов слоя).
-// ────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Кэш Blob-URL для кода воркера (разделяется между всеми инстансами слоя).
+// -----------------------------------------------------------------------------
 const _workerBlobUrlCache = new Map();
 
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
@@ -35,12 +38,14 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 
     const promise = (async () => {
         const [tpbRes, earcutRes] = await Promise.all([
-            fetch(tpbUrl), fetch(earcutUrl),
+            fetch(tpbUrl),
+            fetch(earcutUrl),
         ]);
         if (!tpbRes.ok) throw new Error(`HTTP ${tpbRes.status} for ${tpbUrl}`);
         if (!earcutRes.ok) throw new Error(`HTTP ${earcutRes.status} for ${earcutUrl}`);
         const [tpbCode, earcutCode] = await Promise.all([
-            tpbRes.text(), earcutRes.text(),
+            tpbRes.text(),
+            earcutRes.text(),
         ]);
         const tpbDataURL = 'data:text/javascript;base64,' + stringToBase64(tpbCode);
         const earcutDataURL = 'data:text/javascript;base64,' + stringToBase64(earcutCode);
@@ -54,13 +59,15 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     return promise;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Измерение ширины текста
-// ────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Общий offscreen-канвас для измерения ширины текста.
+// -----------------------------------------------------------------------------
 let _sharedMeasureCanvas = null;
 
 function _measureTextWidth(text, fontSize, fontFamily, fontWeight, fontStyle) {
-    if (!_sharedMeasureCanvas) _sharedMeasureCanvas = document.createElement('canvas');
+    if (!_sharedMeasureCanvas) {
+        _sharedMeasureCanvas = document.createElement('canvas');
+    }
     const ctx = _sharedMeasureCanvas.getContext('2d');
     ctx.font =
         (fontStyle || 'normal') + ' ' +
@@ -70,9 +77,9 @@ function _measureTextWidth(text, fontSize, fontFamily, fontWeight, fontStyle) {
     return ctx.measureText(text).width;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Источник подписи для точечных объектов
-// ────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Источник подписи для точечных объектов векторных тайлов.
+// -----------------------------------------------------------------------------
 class VectorPointLabelSource {
     constructor(map, worldX, worldZ, text, options = {}) {
         this.map = map;
@@ -80,18 +87,22 @@ class VectorPointLabelSource {
         this.text = text;
         this.options = options;
     }
+
     getText() { return this.text; }
     getLabelType() { return 'point'; }
+
     getScreenPosition() {
         const v = this.map.getVec3()
-            .copy(this.worldPos).add(this.map.worldGroup.position);
+            .copy(this.worldPos)
+            .add(this.map.worldGroup.position);
         v.project(this.map.camera);
         const rect = this.map.renderer.domElement.getBoundingClientRect();
         return {
             x: (v.x * 0.5 + 0.5) * rect.width,
-            y: (-v.y * 0.5 + 0.5) * rect.height,
+            y: (-v.y * 0.5 + 0.5) * rect.height
         };
     }
+
     getTextStyle() {
         return {
             color: this.options.textColor || '#333333',
@@ -101,9 +112,10 @@ class VectorPointLabelSource {
             textShadow: this.options.textShadow || '',
             textTransform: this.options.textTransform || '',
             fontStyle: this.options.textFontStyle || '',
-            letterSpacing: this.options.textLetterSpacing || '',
+            letterSpacing: this.options.textLetterSpacing || ''
         };
     }
+
     getPriority() { return this.options.priority || 0; }
     getTitleAlign() { return this.options.textAlign || 'center'; }
     getTitleVerticalAlign() { return this.options.textVerticalAlign || 'center'; }
@@ -112,9 +124,9 @@ class VectorPointLabelSource {
     isVisible() { return this.options.visible !== false; }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Источник подписи для линейных объектов
-// ────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Источник подписи для линейных объектов векторных тайлов.
+// -----------------------------------------------------------------------------
 class VectorLineLabelSource {
     constructor(map, lineData, group) {
         this.map = map;
@@ -125,6 +137,7 @@ class VectorLineLabelSource {
         this._screenDataSig = null;
         this._textPxWidth = undefined;
     }
+
     getText() { return this.lineData.text; }
     getLabelType() { return 'line'; }
     isVisible() { return this.lineData.visible !== false; }
@@ -135,6 +148,7 @@ class VectorLineLabelSource {
     getTitleVerticalAlign() { return this.lineData.textVerticalAlign || 'middle'; }
     getTitleOffset() { return this.lineData.textOffset || [0, 0]; }
     getTextZoomBounds() { return this.lineData.zoomBounds || { min: 0, max: 24 }; }
+
     getLabelParameter() { return this._labelT; }
     setLabelParameter(t) { this._labelT = t; }
 
@@ -147,33 +161,43 @@ class VectorLineLabelSource {
             textShadow: this.lineData.textShadow || '',
             textTransform: this.lineData.textTransform || '',
             fontStyle: this.lineData.textFontStyle || '',
-            letterSpacing: this.lineData.textLetterSpacing || '',
+            letterSpacing: this.lineData.textLetterSpacing || ''
         };
     }
 
+    // -- измерение текста -----------------------------------------------------
+
     _getTextPixelWidth() {
         if (this._textPxWidth !== undefined) return this._textPxWidth;
+
         const text = this.lineData.text || '';
         if (!text) { this._textPxWidth = 0; return 0; }
+
         const fontSize = this.lineData.fontSize || '11px';
         const fontFamily = this.lineData.fontFamily || 'sans-serif';
         const fontWeight = this.lineData.fontWeight || 'normal';
         const fontStyle = this.lineData.textFontStyle || 'normal';
         const textTransform = this.lineData.textTransform;
         const letterSpacing = this.lineData.textLetterSpacing;
+
         let displayText = text;
         if (textTransform === 'uppercase') displayText = text.toUpperCase();
         else if (textTransform === 'lowercase') displayText = text.toLowerCase();
+
         let width = _measureTextWidth(displayText, fontSize, fontFamily, fontWeight, fontStyle);
+
         if (letterSpacing) {
             const fontSizePx = parseFloat(fontSize) || 11;
             const lsValue = parseFloat(letterSpacing) || 0;
             const lsPx = letterSpacing.endsWith('em') ? lsValue * fontSizePx : lsValue;
             width += Math.max(0, displayText.length - 1) * lsPx;
         }
+
         this._textPxWidth = width;
         return width;
     }
+
+    // -- экранные данные (ленивый кэш) ---------------------------------------
 
     _getScreenData() {
         const map = this.map;
@@ -183,12 +207,14 @@ class VectorLineLabelSource {
         const offX = wp.x + gp.x;
         const offZ = wp.z + gp.z;
         const zoom = map.continuousZoom;
+
         const sig =
             cam.position.x.toFixed(2) + ',' +
             cam.position.y.toFixed(2) + ',' +
             cam.position.z.toFixed(2) + '|' +
             offX.toFixed(2) + ',' + offZ.toFixed(2) + '|' +
             zoom.toFixed(2);
+
         if (this._screenDataSig === sig) return this._screenData;
         this._screenDataSig = sig;
         this._screenData = this._computeScreenData(cam, offX, offZ);
@@ -198,9 +224,13 @@ class VectorLineLabelSource {
     _computeScreenData(camera, offX, offZ) {
         const pts = this.lineData.points;
         if (!pts || pts.length < 2) return null;
+
         const n = pts.length;
         const points3D = new Array(n);
-        for (let i = 0; i < n; i++) points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
+        for (let i = 0; i < n; i++) {
+            points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
+        }
+
         const segLengths = new Array(n - 1);
         let totalLen = 0;
         for (let i = 0; i < n - 1; i++) {
@@ -224,15 +254,19 @@ class VectorLineLabelSource {
             }
             return v.copy(points3D[n - 1]);
         };
+
         const visibleTs = [];
         for (let i = 0; i < samples; i++) {
             const t = i / (samples - 1);
             pointAtT(t).project(camera);
-            if (v.z > 0 && v.z < 1 && v.x >= -1 && v.x <= 1 && v.y >= -1 && v.y <= 1) {
+            if (v.z > 0 && v.z < 1 &&
+                v.x >= -1 && v.x <= 1 &&
+                v.y >= -1 && v.y <= 1) {
                 visibleTs.push(t);
             }
         }
         if (visibleTs.length === 0) return null;
+
         const eps = 1.1 / (samples - 1);
         const segments = [];
         let start = visibleTs[0];
@@ -245,8 +279,12 @@ class VectorLineLabelSource {
             prev = visibleTs[i];
         }
         segments.push({ min: start, max: prev });
+
         let best = segments[0];
-        for (const s of segments) if (s.max - s.min > best.max - best.min) best = s;
+        for (const s of segments) {
+            if (s.max - s.min > best.max - best.min) best = s;
+        }
+
         const W = this.map.renderer.domElement.clientWidth;
         const H = this.map.renderer.domElement.clientHeight;
         let visiblePixelLen = 0;
@@ -257,45 +295,60 @@ class VectorLineLabelSource {
             pointAtT(t).project(camera);
             const px = (v.x * 0.5 + 0.5) * W;
             const py = (-v.y * 0.5 + 0.5) * H;
-            if (prevPx !== null) visiblePixelLen += Math.hypot(px - prevPx.x, py - prevPx.y);
+            if (prevPx !== null) {
+                visiblePixelLen += Math.hypot(px - prevPx.x, py - prevPx.y);
+            }
             prevPx = { x: px, y: py };
         }
+
         return {
-            points3D, segLengths, totalLen,
-            visibleInterval: best, visiblePixelLen,
-            camera, map: this.map,
+            points3D,
+            segLengths,
+            totalLen,
+            visibleInterval: best,
+            visiblePixelLen,
+            camera,
+            map: this.map
         };
     }
 
     getVisibleInterval() {
         const data = this._getScreenData();
         if (!data) return null;
+
         const textPxWidth = this._getTextPixelWidth();
-        if (textPxWidth > 0 && data.visiblePixelLen < textPxWidth * 1.05) return null;
+        if (textPxWidth > 0 && data.visiblePixelLen < textPxWidth * 1.05) {
+            return null;
+        }
+
         return data.visibleInterval;
     }
 
     getScreenPositionAt(t) {
         const data = this._getScreenData();
         if (!data) return null;
+
         const target = t * data.totalLen;
         let acc = 0;
         let pt3D = null;
         for (let i = 0; i < data.segLengths.length; i++) {
             if (target <= acc + data.segLengths[i]) {
                 const local = (target - acc) / data.segLengths[i];
-                pt3D = new THREE.Vector3().lerpVectors(data.points3D[i], data.points3D[i + 1], local);
+                pt3D = new THREE.Vector3().lerpVectors(
+                    data.points3D[i], data.points3D[i + 1], local);
                 break;
             }
             acc += data.segLengths[i];
         }
         if (!pt3D) pt3D = data.points3D[data.points3D.length - 1].clone();
+
         const scr = pt3D.clone().project(data.camera);
         if (scr.z <= 0 || scr.z >= 1) return null;
+
         const canvas = this.map.renderer.domElement;
         return {
             x: (scr.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight,
+            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight
         };
     }
 
@@ -303,6 +356,7 @@ class VectorLineLabelSource {
         if (this.getPlacement() !== 'along') return 0;
         const data = this._getScreenData();
         if (!data) return 0;
+
         let target = t * data.totalLen;
         let acc = 0;
         let segIdx = data.segLengths.length - 1;
@@ -310,12 +364,15 @@ class VectorLineLabelSource {
             if (target <= acc + data.segLengths[i] + 1e-9) { segIdx = i; break; }
             acc += data.segLengths[i];
         }
+
         const p1 = data.points3D[segIdx];
         const p2 = data.points3D[segIdx + 1];
         if (!p1 || !p2) return 0;
+
         const s1 = p1.clone().project(data.camera);
         const s2 = p2.clone().project(data.camera);
         if (s1.z <= 0 || s2.z <= 0) return 0;
+
         const W = this.map.renderer.domElement.clientWidth;
         const H = this.map.renderer.domElement.clientHeight;
         const x1 = (s1.x * 0.5 + 0.5) * W;
@@ -329,8 +386,17 @@ class VectorLineLabelSource {
     }
 }
 
+/**
+ * Порядок отрисовки элементов векторного тайла.
+ * @type {{FILL:number, LINE:number, STROKE:number, POINT:number, BUILDING:number, EDGE:number}}
+ */
 export const VECTOR_TILE_RENDER_ORDER = {
-    FILL: 10, LINE: 20, STROKE: 25, POINT: 30, BUILDING: 50, EDGE: 51,
+    FILL:     10,
+    LINE:     20,
+    STROKE:   25,
+    POINT:    30,
+    BUILDING: 50,
+    EDGE:     51
 };
 const FLAT_Y_OFFSET = 0.5;
 const FLAT_Y_STEP   = 0.002;
@@ -339,16 +405,17 @@ function _flatY(renderOrder) {
     return FLAT_Y_OFFSET + (renderOrder || 0) * FLAT_Y_STEP;
 }
 
-/** Сдвиг renderOrder для fallback-тайлов. */
+/**
+ * Сдвиг renderOrder для старых тайлов. -10000 гарантированно ниже любого
+ * штатного renderOrder (LAYER_RENDER_ORDER макс ~1200 + динамические сдвиги
+ * за счёт sort_key). Всё, что в `_oldTileGroups`, рисуется раньше всего
+ * нового — как fallback у растровых тайлов.
+ */
 const FALLBACK_RENDER_ORDER_SHIFT = -10000;
-/** Максимум уровней fallback, которые держим одновременно. */
-const MAX_OLD_LEVELS = 3;
-/** Принудительный сброс fallback по времени (мс) — страховка. */
-const OLD_TILES_MAX_AGE_MS = 10000;
 
-// ────────────────────────────────────────────────────────────────────────────
-// Основной класс
-// ────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Основной класс.
+// -----------------------------------------------------------------------------
 export class VectorTileLayer {
     constructor(options = {}) {
         this.url = options.url;
@@ -377,7 +444,9 @@ export class VectorTileLayer {
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
 
         this._debug = options.debug ?? false;
+
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
+
         this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
 
         this._map = null;
@@ -401,23 +470,27 @@ export class VectorTileLayer {
         this._tileDataCache = new Map();
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
 
-        /** Список fallback-уровней: [{ groups: Map, baseShift: number }, …]. */
-        this._oldTileGroupsList = [];
+        this._oldTileGroups = null;
         this._oldTileCleanupTimer = null;
-        /** @type {number} момент появления первого fallback-уровня (мс). */
-        this._oldTilesSince = 0;
-
         this._groupCache = new Map();
         this._groupCacheMaxSize = 100;
 
         this._fillMaterialCache = new Map();
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
-        /** Кэш «клонов без записи глубины» для fallback-тайлов. */
+
+        /**
+         * Кэш «клонов без записи глубины» для fallback-тайлов старого LOD.
+         * Ключ — оригинальный материал. Создаётся при первом попадании
+         * тайла в `_oldTileGroups`.
+         * @private
+         * @type {Map<THREE.Material, THREE.Material>}
+         */
         this._fallbackMaterialCache = new Map();
 
         this._managedMaterials = new WeakSet();
         this._managedGeometries = new WeakSet();
+
         this._pointGeometryCache = new Map();
 
         this._exclusionAreas = [];
@@ -434,7 +507,13 @@ export class VectorTileLayer {
 
         this._labelsDirty = false;
 
+        /**
+         * Префетч следующего sourceZoom: последний, для которого уже
+         * запускали прогрев. Сбрасывается на -1 при смене sourceZoom.
+         * @private
+         */
         this._lastPrefetchZoom = -1;
+        /** @private @type {Set<string>} */
         this._prefetchInFlight = new Set();
 
         this._raycaster = new THREE.Raycaster();
@@ -446,12 +525,16 @@ export class VectorTileLayer {
 
         const rawScripts = options.workerScripts || [
             'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
-            'https://cdn.mapengine.ru/KRB/js_TP/earcut.js',
+            'https://cdn.mapengine.ru/KRB/js_TP/earcut.js'
         ];
         this._workerScriptUrls = rawScripts.map(s => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
-            try { return new URL(s, window.location.href).href; }
-            catch (e) { console.error('Invalid worker script URL:', s, e); return s; }
+            try {
+                return new URL(s, window.location.href).href;
+            } catch (e) {
+                console.error('Invalid worker script URL:', s, e);
+                return s;
+            }
         });
         if (this._workerScriptUrls.length < 2) {
             console.warn('VectorTileLayer: workerScripts должен содержать два URL (tpb.js и earcut.js).');
@@ -486,7 +569,10 @@ export class VectorTileLayer {
         if (data.error) { pending.reject(new Error(data.error)); return; }
         if (!data.result) { pending.reject(new Error('Worker returned no result')); return; }
 
-        if (pending.isIdentify) { pending.resolve(data.result); return; }
+        if (pending.isIdentify) {
+            pending.resolve(data.result);
+            return;
+        }
 
         if (pending.generation !== this._generation) {
             if (pending.group) this._disposeTile(pending.group);
@@ -507,7 +593,6 @@ export class VectorTileLayer {
 
         if (!pending.group) {
             this._rootGroup.add(group);
-            group.updateMatrixWorld(true);
             const key = pending.key;
             const existing = this._tileCache.get(key);
             if (existing && existing !== group) this._disposeTile(existing);
@@ -519,6 +604,7 @@ export class VectorTileLayer {
 
     _buildGroupFromWorkerResult(group, result) {
         this._removeTextLabelsForGroup(group);
+
         group.renderOrder = this._tileGroupRenderOrder;
 
         if (result.centerX !== undefined && result.centerZ !== undefined) {
@@ -545,7 +631,6 @@ export class VectorTileLayer {
             const ro = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
             mesh.renderOrder = ro;
             mesh.position.y = _flatY(ro);
-            mesh.frustumCulled = false;   // маленькие тайлы — лучше не рисковать
             group.add(mesh);
         }
 
@@ -555,7 +640,8 @@ export class VectorTileLayer {
                 const key = b.color;
                 if (!byColor.has(key)) byColor.set(key, { color: b.color, stroke: b.stroke, pos: [], nrm: [], edg: [] });
                 const g = byColor.get(key);
-                g.pos.push(b.positions); g.nrm.push(b.normals);
+                g.pos.push(b.positions);
+                g.nrm.push(b.normals);
                 if (b.edgePositions) g.edg.push(b.edgePositions);
             }
             for (const g of byColor.values()) {
@@ -565,6 +651,7 @@ export class VectorTileLayer {
                 const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color));
                 mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
                 group.add(mesh);
+
                 if (this.buildingEdges && g.edg.length) {
                     const eGeom = new THREE.BufferGeometry();
                     eGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
@@ -579,6 +666,7 @@ export class VectorTileLayer {
             const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
             this._addFatLineFromPositions(group, line.positions, mat, line.renderOrder);
         }
+
         for (const stroke of result.strokes) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
             this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder);
@@ -591,7 +679,6 @@ export class VectorTileLayer {
             const ro = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             mesh.position.set(pt.x, _flatY(ro), pt.z);
             mesh.renderOrder = ro;
-            mesh.frustumCulled = false;
             group.add(mesh);
         }
 
@@ -604,18 +691,28 @@ export class VectorTileLayer {
 
     _fatLineSegmentsFromPositions(positions) {
         if (!positions || positions.length < 6) return null;
+
         const out = [];
         let havePrev = false;
         let prevX = 0, prevY = 0, prevZ = 0;
+
         for (let i = 0; i < positions.length; i += 3) {
             const x = positions[i];
             const y = positions[i + 1];
             const z = positions[i + 2];
-            if (Number.isNaN(x)) { havePrev = false; continue; }
-            if (havePrev) out.push(prevX, prevY, prevZ, x, y, z);
+
+            if (Number.isNaN(x)) {
+                havePrev = false;
+                continue;
+            }
+
+            if (havePrev) {
+                out.push(prevX, prevY, prevZ, x, y, z);
+            }
             prevX = x; prevY = y; prevZ = z;
             havePrev = true;
         }
+
         return out.length > 0 ? new Float32Array(out) : null;
     }
 
@@ -628,27 +725,34 @@ export class VectorTileLayer {
 
         const lineObj = new Line2(lGeo, material);
         if (material.dashed) {
-            if (typeof lineObj.computeLineDistances === 'function') lineObj.computeLineDistances();
-            else if (typeof lGeo.computeLineDistances === 'function') lGeo.computeLineDistances();
-            else console.warn('[VectorTileLayer] computeLineDistances() недоступен — пунктир не будет работать.');
+            if (typeof lineObj.computeLineDistances === 'function') {
+                lineObj.computeLineDistances();
+            } else if (typeof lGeo.computeLineDistances === 'function') {
+                lGeo.computeLineDistances();
+            } else {
+                console.warn(
+                    '[VectorTileLayer] computeLineDistances() недоступен ни на Line2, ни на LineSegmentsGeometry. ' +
+                    'Пунктир не будет работать. Проверьте сборку tpb.js.'
+                );
+            }
         }
+
         lineObj.renderOrder = renderOrder;
         lineObj.position.y = _flatY(renderOrder);
         lineObj.frustumCulled = false;
         group.add(lineObj);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Подписи
-    // ─────────────────────────────────────────────────────────────────────
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
         const textManager = this._map.textManager;
+
         const { candidates } = this._collectLabelCandidates();
 
         let selected;
-        if (candidates.length === 0) selected = [];
-        else {
+        if (candidates.length === 0) {
+            selected = [];
+        } else {
             candidates.sort((a, b) => {
                 if (a.priority !== b.priority) return b.priority - a.priority;
                 const aLine = a.type === 'line' ? 1 : 0;
@@ -656,18 +760,25 @@ export class VectorTileLayer {
                 if (aLine !== bLine) return bLine - aLine;
                 return a.camDistSq - b.camDistSq;
             });
-            selected = candidates.slice(0, Math.min(candidates.length, this.maxTextLabels));
+            const limit = Math.min(candidates.length, this.maxTextLabels);
+            selected = candidates.slice(0, limit);
         }
 
         const activeIds = new Set();
         const groupLabels = new Map();
 
-        for (const cand of selected) {
-            activeIds.add(cand.id);
+        for (let i = 0; i < selected.length; i++) {
+            const cand = selected[i];
             const group = cand.group;
+            const id = cand.id;
+
+            activeIds.add(id);
+
             let source;
             if (cand.type === 'line') {
-                if (!group.userData.lineLabelSources) group.userData.lineLabelSources = [];
+                if (!group.userData.lineLabelSources) {
+                    group.userData.lineLabelSources = [];
+                }
                 let cached = group.userData.lineLabelSources[cand.lnIndex];
                 if (!cached) {
                     cached = new VectorLineLabelSource(this._map, cand.ln, group);
@@ -676,31 +787,41 @@ export class VectorTileLayer {
                 source = cached;
             } else {
                 const pt = cand.pt;
-                source = new VectorPointLabelSource(
-                    this._map,
-                    pt.x + group.position.x,
-                    pt.z + group.position.z,
-                    pt.text,
-                    {
-                        textColor: pt.textColor, fontSize: pt.fontSize,
-                        fontFamily: pt.fontFamily, fontWeight: pt.fontWeight,
-                        textShadow: pt.textShadow, textTransform: pt.textTransform,
-                        textFontStyle: pt.textFontStyle, textLetterSpacing: pt.textLetterSpacing,
-                        textOffset: pt.textOffset, textAlign: pt.textAlign,
-                        textVerticalAlign: pt.textVerticalAlign,
-                        priority: pt.priority, zoomBounds: pt.zoomBounds,
-                    }
-                );
+                const localWorldX = pt.x + group.position.x;
+                const localWorldZ = pt.z + group.position.z;
+
+                source = new VectorPointLabelSource(this._map, localWorldX, localWorldZ, pt.text, {
+                    textColor: pt.textColor,
+                    fontSize: pt.fontSize,
+                    fontFamily: pt.fontFamily,
+                    fontWeight: pt.fontWeight,
+                    textShadow: pt.textShadow,
+                    textTransform: pt.textTransform,
+                    textFontStyle: pt.textFontStyle,
+                    textLetterSpacing: pt.textLetterSpacing,
+                    textOffset: pt.textOffset,
+                    textAlign: pt.textAlign,
+                    textVerticalAlign: pt.textVerticalAlign,
+                    priority: pt.priority,
+                    zoomBounds: pt.zoomBounds,
+                });
             }
-            const label = textManager.addLabel(source, cand.id);
+
+            const label = textManager.addLabel(source, id);
+
             let arr = groupLabels.get(group);
-            if (!arr) { arr = []; groupLabels.set(group, arr); }
+            if (!arr) {
+                arr = [];
+                groupLabels.set(group, arr);
+            }
             arr.push(label);
         }
 
         textManager.pruneStaleLabels(activeIds);
+
         this._tileCache.forEach(g => {
-            g.userData.textLabels = groupLabels.get(g) || [];
+            const arr = groupLabels.get(g);
+            g.userData.textLabels = arr || [];
         });
     }
 
@@ -727,10 +848,15 @@ export class VectorTileLayer {
         }
         const maxLabelDistSq = maxLabelDist * maxLabelDist;
 
-        const camPosX = cameraPos.x, camPosY = cameraPos.y, camPosZ = cameraPos.z;
+        const camPosX = cameraPos.x;
+        const camPosY = cameraPos.y;
+        const camPosZ = cameraPos.z;
+
         const tempVec = this._tempVec3;
         const candidates = [];
-        const rectW = rect.width, rectH = rect.height;
+        const rectW = rect.width;
+        const rectH = rect.height;
+
         const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
         const screenMarginY = rectH > 0 ? cullMargin / rectH : 0;
 
@@ -741,23 +867,46 @@ export class VectorTileLayer {
             const data = group.userData.textPointsData;
             if (data && data.length > 0) {
                 const groupIdPrefix = group.uuid + ':';
+
                 for (let i = 0; i < data.length; i++) {
                     const pt = data[i];
                     const zb = pt.zoomBounds || { min: 0, max: 24 };
                     if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
-                    const worldX = pt.x + gx, worldZ = pt.z + gz;
-                    const camDx = worldX - camPosX, camDy = -camPosY, camDz = worldZ - camPosZ;
+
+                    const worldX = pt.x + gx;
+                    const worldZ = pt.z + gz;
+
+                    const camDx = worldX - camPosX;
+                    const camDy = -camPosY;
+                    const camDz = worldZ - camPosZ;
                     const camDistSq = camDx * camDx + camDy * camDy + camDz * camDz;
+
                     if (camDistSq > maxLabelDistSq) continue;
+
                     tempVec.set(worldX, 0, worldZ).project(camera);
                     if (tempVec.z > 1 || tempVec.z < -1) continue;
+
                     const sx = (tempVec.x * 0.5 + 0.5) * rectW;
                     const sy = (-tempVec.y * 0.5 + 0.5) * rectH;
-                    if (sx < -cullMargin || sx > rectW + cullMargin ||
-                        sy < -cullMargin || sy > rectH + cullMargin) continue;
+
+                    if (
+                        sx < -cullMargin ||
+                        sx > rectW + cullMargin ||
+                        sy < -cullMargin ||
+                        sy > rectH + cullMargin
+                    ) {
+                        continue;
+                    }
+
                     candidates.push({
-                        type: 'point', pt, group, id: groupIdPrefix + i,
-                        camDistSq, priority: pt.priority || 0, sx, sy,
+                        type: 'point',
+                        pt,
+                        group,
+                        id: groupIdPrefix + i,
+                        camDistSq,
+                        priority: pt.priority || 0,
+                        sx,
+                        sy,
                     });
                 }
             }
@@ -765,38 +914,57 @@ export class VectorTileLayer {
             const lineData = group.userData.textLinesData;
             if (lineData && lineData.length > 0) {
                 const groupIdPrefixL = group.uuid + ':L';
+
                 for (let i = 0; i < lineData.length; i++) {
                     const ln = lineData[i];
                     const zb = ln.zoomBounds || { min: 0, max: 24 };
                     if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
+
                     const pts = ln.points;
                     if (!pts || pts.length < 2) continue;
+
                     const step = Math.max(1, Math.floor(pts.length / 20));
-                    let minDistSq = Infinity, anyOnScreen = false;
+                    let minDistSq = Infinity;
+                    let anyOnScreen = false;
+
                     for (let k = 0; k < pts.length; k += step) {
-                        const worldX = pts[k].x + gx, worldZ = pts[k].z + gz;
-                        const camDx = worldX - camPosX, camDy = -camPosY, camDz = worldZ - camPosZ;
+                        const worldX = pts[k].x + gx;
+                        const worldZ = pts[k].z + gz;
+
+                        const camDx = worldX - camPosX;
+                        const camDy = -camPosY;
+                        const camDz = worldZ - camPosZ;
                         const d2 = camDx * camDx + camDy * camDy + camDz * camDz;
                         if (d2 < minDistSq) minDistSq = d2;
+
                         if (!anyOnScreen) {
                             tempVec.set(worldX, 0, worldZ).project(camera);
                             if (tempVec.z > -1 && tempVec.z < 1 &&
-                                tempVec.x >= -1 - screenMarginX && tempVec.x <= 1 + screenMarginX &&
-                                tempVec.y >= -1 - screenMarginY && tempVec.y <= 1 + screenMarginY) {
+                                tempVec.x >= -1 - screenMarginX &&
+                                tempVec.x <= 1 + screenMarginX &&
+                                tempVec.y >= -1 - screenMarginY &&
+                                tempVec.y <= 1 + screenMarginY) {
                                 anyOnScreen = true;
                             }
                         }
                     }
+
                     if (!anyOnScreen) continue;
                     if (minDistSq > maxLabelDistSq) continue;
+
                     candidates.push({
-                        type: 'line', ln, lnIndex: i, group,
+                        type: 'line',
+                        ln,
+                        lnIndex: i,
+                        group,
                         id: groupIdPrefixL + i,
-                        camDistSq: minDistSq, priority: ln.priority || 0,
+                        camDistSq: minDistSq,
+                        priority: ln.priority || 0,
                     });
                 }
             }
         });
+
         return { candidates, isClose };
     }
 
@@ -809,27 +977,39 @@ export class VectorTileLayer {
         group.userData.textLabels = [];
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Материалы
-    // ─────────────────────────────────────────────────────────────────────
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
-        return this._getFillMaterial(`fill:${layerName}:${color.toString(16)}:${op}`);
+        const key = `fill:${layerName}:${color.toString(16)}:${op}`;
+        return this._getFillMaterial(key);
     }
 
     _getLineMaterialFromData(layerName, color, width, dash) {
         const dashKey = dash ? dash.join(',') : 'none';
-        return this._getLineMaterial(`line:${layerName}:${color.toString(16)}:${width}:${dashKey}`, dash);
+        const key = `line:${layerName}:${color.toString(16)}:${width}:${dashKey}`;
+        return this._getLineMaterial(key, dash);
     }
 
+    // -------------------------------------------------------------------------
+    // Fallback-материалы (для старого LOD при смене sourceZoom)
+    // -------------------------------------------------------------------------
+
     /**
-     * Клон материала без записи глубины — для fallback-тайлов старого LOD.
-     * Создаётся один раз на оригинал, живёт до removeFromMap.
+     * Возвращает клон материала с `depthWrite = false`. Кэшируется по
+     * оригиналу, чтобы не создавать десятки клонов на каждый переход.
+     *
+     * Нужен только для материалов, которые РАНЬШЕ писали глубину
+     * (сейчас это только MeshLambertMaterial зданий). Остальные
+     * (fill/line/edge) и так имеют depthWrite: false и не участвуют.
+     *
+     * @private
+     * @param {THREE.Material} original
+     * @returns {THREE.Material}
      */
     _getFallbackMaterial(original) {
         if (!original) return original;
         const cached = this._fallbackMaterialCache.get(original);
         if (cached) return cached;
+
         const clone = original.clone();
         clone.depthWrite = false;
         this._fallbackMaterialCache.set(original, clone);
@@ -839,200 +1019,48 @@ export class VectorTileLayer {
     }
 
     /**
-     * Меняет материалы у детей, у которых depthWrite=true (строения),
-     * на fallback-клоны. Устраняет z-fighting между домами разных LOD.
+     * Меняет материалы у всех детей тайл-групп, которые пишут глубину,
+     * на fallback-клоны без depthWrite. Именно это убирает z-fighting
+     * между домами старого и нового LOD.
+     *
+     * @private
+     * @param {Iterable<THREE.Group>} tileGroups
      */
     _swapDepthWriteOff(tileGroups) {
-        for (const group of tileGroups) {
+        tileGroups.forEach(group => {
             group.traverse(child => {
                 if (child === group || !child.material) return;
                 const mat = child.material;
                 const list = Array.isArray(mat) ? mat : [mat];
+
                 let needsSwap = false;
-                for (const m of list) if (m && m.depthWrite) { needsSwap = true; break; }
+                for (const m of list) {
+                    if (m && m.depthWrite) { needsSwap = true; break; }
+                }
                 if (!needsSwap) return;
+
                 child.material = Array.isArray(mat)
                     ? list.map(m => this._getFallbackMaterial(m))
                     : this._getFallbackMaterial(mat);
             });
-        }
-    }
-
-    _getFillMaterial(styleKey) {
-        if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const rawOpacity = parseFloat(parts[3]);
-        const opacity = (isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
-        const mat = new THREE.MeshBasicMaterial({
-            color, side: THREE.DoubleSide,
-            transparent: opacity < 1.0, opacity,
-            depthTest: true, depthWrite: false,
-        });
-        this._fillMaterialCache.set(styleKey, mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    }
-
-    _getLineMaterial(styleKey, dash) {
-        if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const width = parseFloat(parts[3]) * this.lineWidthMultiplier;
-        let resW = 1, resH = 1;
-        if (this._map && this._map.renderer && this._map.renderer.domElement) {
-            resW = this._map.renderer.domElement.clientWidth  || 1;
-            resH = this._map.renderer.domElement.clientHeight || 1;
-        }
-        const matOpts = {
-            color, linewidth: width,
-            resolution: new THREE.Vector2(resW, resH),
-            depthTest: true, depthWrite: false,
-        };
-        if (dash && Array.isArray(dash) && dash.length >= 2) {
-            matOpts.dashed = true;
-            matOpts.dashSize = dash[0];
-            matOpts.gapSize = dash[1];
-            matOpts.dashScale = 1;
-        }
-        const mat = new LineMaterial(matOpts);
-        this._lineMaterialCache.set(styleKey, mat);
-        this._lineMaterialsSet.add(mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    }
-
-    _getPointGeometry(radius) {
-        const key = `point_${radius}`;
-        if (this._pointGeometryCache.has(key)) return this._pointGeometryCache.get(key);
-        const geom = new THREE.CircleGeometry(radius, 8);
-        geom.rotateX(-Math.PI / 2);
-        this._pointGeometryCache.set(key, geom);
-        this._managedGeometries.add(geom);
-        return geom;
-    }
-
-    _concatF32(arrays) {
-        let total = 0;
-        for (const a of arrays) total += a.length;
-        const out = new Float32Array(total);
-        let off = 0;
-        for (const a of arrays) { out.set(a, off); off += a.length; }
-        return out;
-    }
-
-    _getBuildingMaterial(color) {
-        const key = 'bld:' + color;
-        if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
-        const mat = new THREE.MeshLambertMaterial({
-            color, side: THREE.FrontSide,
-            depthTest: true, depthWrite: true,
-            polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
-        });
-        this._fillMaterialCache.set(key, mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    }
-
-    _getBuildingEdgeMaterial(color) {
-        const key = 'bldEdge:' + color;
-        if (this._lineMaterialCache.has(key)) return this._lineMaterialCache.get(key);
-        const mat = new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false });
-        this._lineMaterialCache.set(key, mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Fallback-уровни: накопление / сдвиг / очистка
-    // ─────────────────────────────────────────────────────────────────────
-    _hasAnyOldTiles() {
-        return this._oldTileGroupsList.length > 0;
-    }
-
-    /**
-     * Разрешает очистку fallback только если ВСЕ видимые тайлы текущего
-     * sourceZoom уже в _tileCache (или очередь/активные пусты). Плюс
-     * страховочный таймаут OLD_TILES_MAX_AGE_MS.
-     */
-    _canClearOldTiles() {
-        if (this._oldTileGroupsList.length === 0) return true;
-        if (!this._map) return true;
-        if (performance.now() - this._oldTilesSince > OLD_TILES_MAX_AGE_MS) return true;
-        if (this._sortedLoadQueue.length > 0 || this._activeLoads > 0) return false;
-        const sourceZoom = this._lastSourceZoom;
-        if (sourceZoom < 0) return true;
-        const visibleKeys = this._getVisibleTileKeys(sourceZoom);
-        for (const key of visibleKeys) {
-            if (!this._tileCache.has(key)) return false;
-        }
-        return true;
-    }
-
-    _clearOldTilesNow() {
-        if (this._oldTileCleanupTimer) {
-            clearTimeout(this._oldTileCleanupTimer);
-            this._oldTileCleanupTimer = null;
-        }
-        for (const entry of this._oldTileGroupsList) {
-            entry.groups.forEach(group => this._disposeTile(group));
-        }
-        this._oldTileGroupsList = [];
-        this._oldTilesSince = 0;
-    }
-
-    _scheduleOldTilesCleanup(delay = 1500) {
-        if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
-        this._oldTileCleanupTimer = setTimeout(() => {
-            this._oldTileCleanupTimer = null;
-            if (this._canClearOldTiles()) {
-                this._clearOldTilesNow();
-            } else {
-                this._scheduleOldTilesCleanup(1000);
-            }
-        }, delay);
-    }
-
-    _shiftGroupRenderOrder(group, shift) {
-        group.traverse(child => {
-            if (child.isMesh || child.isLine) {
-                child.renderOrder = (child.renderOrder || 0) + shift;
-            }
         });
     }
 
-    /**
-     * Перемещает текущий _tileCache в список fallback-уровней.
-     * Кэп MAX_OLD_LEVELS, при переполнении уничтожается самый старый.
-     */
-    _pushOldTiles() {
-        if (this._tileCache.size === 0) return;
-
-        let shift = FALLBACK_RENDER_ORDER_SHIFT;
-        if (this._oldTileGroupsList.length > 0) {
-            const minBase = Math.min(...this._oldTileGroupsList.map(e => e.baseShift));
-            shift = minBase + FALLBACK_RENDER_ORDER_SHIFT;
-        }
-
-        this._tileCache.forEach(group => this._shiftGroupRenderOrder(group, shift));
-        this._swapDepthWriteOff(this._tileCache.values());
-
-        this._oldTileGroupsList.push({
-            groups: new Map(this._tileCache),
-            baseShift: shift,
-        });
-
-        if (this._oldTilesSince === 0) this._oldTilesSince = performance.now();
-
-        while (this._oldTileGroupsList.length > MAX_OLD_LEVELS) {
-            const oldest = this._oldTileGroupsList.shift();
-            oldest.groups.forEach(group => this._disposeTile(group));
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Префетч следующего sourceZoom
-    // ─────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+
+    /**
+     * Прогревает `_tileDataCache` сырыми байтами тайлов следующего
+     * sourceZoom. К моменту реальной смены LOD `_loadTile` найдёт эти
+     * буферы в кэше и не пойдёт в сеть — переход будет мгновенным.
+     *
+     * Геометрию и worker-обработку НЕ префетчим: это удвоило бы CPU,
+     * а выигрыш по времени был бы небольшим на фоне сетевых RTT.
+     *
+     * @private
+     * @param {number} z
+     */
     _prefetchNextZoom(z) {
         const map = this._map;
         if (!map) return;
@@ -1041,11 +1069,13 @@ export class VectorTileLayer {
         const visibleTiles = this._getVisibleTileKeys(z);
 
         for (const key of visibleTiles) {
+            // key: "z,x,y"
             const c1 = key.indexOf(',');
             const c2 = key.indexOf(',', c1 + 1);
             const pz = +key.slice(0, c1);
             const px = +key.slice(c1 + 1, c2);
             const py = +key.slice(c2 + 1);
+
             const dataKey = `${pz}/${px}/${py}`;
             if (this._tileDataCache.has(dataKey)) continue;
             if (this._prefetchInFlight.has(dataKey)) continue;
@@ -1057,25 +1087,29 @@ export class VectorTileLayer {
 
             this._prefetchInFlight.add(dataKey);
             fetch(url)
-                .then(r => r.ok ? r.arrayBuffer() : null)
+                .then(resp => resp.ok ? resp.arrayBuffer() : null)
                 .then(buffer => {
-                    if (buffer && this._map) this._setTileDataCache(dataKey, buffer);
+                    if (buffer && this._map) {
+                        this._setTileDataCache(dataKey, buffer);
+                    }
                 })
-                .catch(() => {})
+                .catch(() => { /* тихий fail — префетч best-effort */ })
                 .finally(() => this._prefetchInFlight.delete(dataKey));
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Публичные методы
-    // ─────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+
     addExclusionArea(collection, layers) {
         if (!this._map) {
             throw new Error('VectorTileLayer.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
         }
+
         const geometries = [];
         if (collection.type === 'FeatureCollection') {
-            for (const f of collection.features) geometries.push(f.geometry);
+            for (const feature of collection.features) geometries.push(feature.geometry);
         } else if (collection.type === 'Feature') {
             geometries.push(collection.geometry);
         } else if (collection.type) {
@@ -1083,23 +1117,36 @@ export class VectorTileLayer {
         } else {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
-        const crs = this._crsCode ? Projections.get(this._crsCode) : this._map.inputCRS;
+
+        const crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : this._map.inputCRS;
+
         const worldPolygons = [];
         for (const geom of geometries) {
             if (!geom) continue;
             let rings = [];
-            if (geom.type === 'Polygon') rings = [geom.coordinates[0]];
-            else if (geom.type === 'MultiPolygon') rings = geom.coordinates.map(p => p[0]);
-            else { console.warn('addExclusionArea: unsupported geometry type', geom.type); continue; }
+            if (geom.type === 'Polygon') {
+                rings = [geom.coordinates[0]];
+            } else if (geom.type === 'MultiPolygon') {
+                rings = geom.coordinates.map(poly => poly[0]);
+            } else {
+                console.warn('addExclusionArea: unsupported geometry type', geom.type);
+                continue;
+            }
+
             for (const ring of rings) {
-                worldPolygons.push(ring.map(pt => {
+                const worldRing = ring.map(pt => {
                     const [x, z] = this._map.project(pt, crs);
                     return { x, z };
-                }));
+                });
+                worldPolygons.push(worldRing);
             }
         }
+
         this._exclusionAreas = worldPolygons;
         this._exclusionLayers = new Set(layers);
+
         this._invalidateAllTiles();
         return this;
     }
@@ -1129,13 +1176,20 @@ export class VectorTileLayer {
     addTo(map) {
         if (this._map) this.removeFromMap();
         this._map = map;
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
         this._rootGroup.renderOrder = this._tileGroupRenderOrder;
+
         map.worldGroup.add(this._rootGroup);
         if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
+
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
         }
+
         this._labelsDirty = true;
         this._lastCheckInit = false;
         return this;
@@ -1165,6 +1219,7 @@ export class VectorTileLayer {
         this._fillMaterialCache.clear();
         this._lineMaterialCache.clear();
 
+        // Fallback-клоны живут только пока слой жив; освобождаем.
         this._fallbackMaterialCache.forEach(m => { try { m.dispose(); } catch (e) {} });
         this._fallbackMaterialCache.clear();
 
@@ -1173,10 +1228,13 @@ export class VectorTileLayer {
         this._tileDataCache.clear();
         this._prefetchInFlight.clear();
         this._lastPrefetchZoom = -1;
-        this._oldTilesSince = 0;
         this._clearGroupCache();
 
-        if (this._worker) { this._worker.terminate(); this._worker = null; }
+        if (this._worker) {
+            this._worker.terminate();
+            this._worker = null;
+        }
+
         this._lastCheckInit = false;
     }
 
@@ -1195,8 +1253,20 @@ export class VectorTileLayer {
         this._groupCache.clear();
     }
 
+    _clearOldTilesNow() {
+        if (this._oldTileCleanupTimer) {
+            clearTimeout(this._oldTileCleanupTimer);
+            this._oldTileCleanupTimer = null;
+        }
+        if (this._oldTileGroups) {
+            this._oldTileGroups.forEach(group => this._disposeTile(group));
+            this._oldTileGroups = null;
+        }
+    }
+
     _disposeTile(group) {
         this._removeTextLabelsForGroup(group);
+
         group.traverse(child => {
             if (child === group) return;
             const geom = child.geometry;
@@ -1204,7 +1274,10 @@ export class VectorTileLayer {
             const mat = child.material;
             if (mat && !this._managedMaterials.has(mat)) mat.dispose?.();
         });
-        while (group.children.length) group.remove(group.children[0]);
+
+        while (group.children.length) {
+            group.remove(group.children[0]);
+        }
         this._rootGroup.remove(group);
     }
 
@@ -1222,6 +1295,17 @@ export class VectorTileLayer {
         } else {
             this._disposeTile(group);
         }
+    }
+
+    _scheduleOldTilesCleanup(delay = 1500) {
+        if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
+        this._oldTileCleanupTimer = setTimeout(() => {
+            if (this._sortedLoadQueue.length > 0 || this._activeLoads > 0) {
+                this._oldTileCleanupTimer = setTimeout(() => this._clearOldTilesNow(), 1000);
+            } else {
+                this._clearOldTilesNow();
+            }
+        }, delay);
     }
 
     _setTileDataCache(key, buffer) {
@@ -1276,7 +1360,7 @@ export class VectorTileLayer {
         this._lastCheckZoom = discreteZoom;
 
         if (discreteZoom < this.minZoom || discreteZoom > this.maxZoom) {
-            if (this._tileCache.size > 0 || this._hasAnyOldTiles() || this._activeLoads > 0) {
+            if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
                 this._clearAllTiles();
             }
             this._lastSourceZoom = -1;
@@ -1286,8 +1370,10 @@ export class VectorTileLayer {
 
         if (this._lastDiscreteZoom !== -1 && discreteZoom !== this._lastDiscreteZoom) {
             const was3d = this._lastDiscreteZoom >= this.buildings3dMinZoom;
-            const is3d  = discreteZoom >= this.buildings3dMinZoom;
-            if (was3d !== is3d) this._lastSourceZoom = -1;
+            const is3d = discreteZoom >= this.buildings3dMinZoom;
+            if (was3d !== is3d) {
+                this._lastSourceZoom = -1;
+            }
             this._labelsDirty = true;
         }
         this._lastDiscreteZoom = discreteZoom;
@@ -1296,21 +1382,41 @@ export class VectorTileLayer {
 
         if (sourceZoom !== this._lastSourceZoom) {
             this._generation++;
+            this._clearOldTilesNow();
 
-            // Кладём текущий _tileCache в fallback-список, НЕ снося старые
-            // уровни (быстрый 14→15→16 не должен ронять 14, пока 15 не готов).
-            this._pushOldTiles();
+            if (this._tileCache.size > 0) {
+                this._oldTileGroups = new Map(this._tileCache);
+
+                // 1) Все старые тайлы — раньше любых новых.
+                //    Y-координаты не меняем: они уже «запечены» в position.y
+                //    при создании меша (через _flatY). renderOrder — это
+                //    только ключ сортировки отрисовки.
+                this._oldTileGroups.forEach(group => {
+                    group.traverse(child => {
+                        if (child.isMesh || child.isLine) {
+                            child.renderOrder =
+                                (child.renderOrder || 0) + FALLBACK_RENDER_ORDER_SHIFT;
+                        }
+                    });
+                });
+
+                // 2) Материалы, которые писали глубину (дома), — на клоны
+                //    с depthWrite=false. Иначе дома старого и нового LOD
+                //    воюют за z-буфер. Растры делают ровно то же самое
+                //    через depthWrite:false у fallback-тайлов.
+                this._swapDepthWriteOff(this._oldTileGroups);
+            }
 
             this._tileCache = new Map();
             this._pendingLoads.clear();
             this._sortedLoadQueue = [];
             this._lastSourceZoom = sourceZoom;
-            this._lastPrefetchZoom = -1;
+            this._lastPrefetchZoom = -1;      // разрешаем префетч для нового LOD
             this._labelsDirty = true;
-            this._scheduleOldTilesCleanup(2000);
+            this._scheduleOldTilesCleanup(1500);
         }
 
-        // ─── Префетч следующего sourceZoom ───
+        // ---- Префетч следующего sourceZoom ----
         const continuousZoom = map.continuousZoom;
         const nextSourceZoom = Math.min(discreteZoom + 1, this.maxSourceZoom);
         if (
@@ -1321,6 +1427,7 @@ export class VectorTileLayer {
             this._lastPrefetchZoom = sourceZoom;
             this._prefetchNextZoom(nextSourceZoom);
         }
+        // ---------------------------------------
 
         const canvas = map.renderer.domElement;
         const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -1358,9 +1465,9 @@ export class VectorTileLayer {
         const maxMerc = map.MAX_MERCATOR;
         const target = map.controls.target;
         const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
+
         const targetX = target.x;
         const targetZ = target.z;
-
         const unsortedNewKeys = [];
         visibleTiles.forEach(key => {
             if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
@@ -1376,35 +1483,18 @@ export class VectorTileLayer {
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
         const newKeys = unsortedNewKeys.map(o => o.key);
 
-        const queue = newKeys.concat(
+        this._sortedLoadQueue = newKeys.concat(
             this._sortedLoadQueue.filter(k =>
                 !this._tileCache.has(k) && !this._pendingLoads.has(k) && visibleTiles.has(k)
             )
         );
-
-        // ─── Кэш-хиты обрабатываем СИНХРОННО, минуя ограничение maxConcurrent ───
-        // Это ключ к отсутствию «моргания»: тайл, вернувшийся в кадр,
-        // должен встать на место до того, как Core.animate отрисует кадр.
-        const stillQueued = [];
-        for (const key of queue) {
-            if (this._groupCache.has(key)) {
-                const [z, x, y] = key.split(',').map(Number);
-                this._loadTile(z, x, y);   // sync-путь при совпадении is3d
-            } else {
-                stillQueued.push(key);
-            }
-        }
-        this._sortedLoadQueue = stillQueued;
-
         this._processQueue();
     }
 
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) {
-            if (this._hasAnyOldTiles() && this._activeLoads === 0) {
-                this._scheduleOldTilesCleanup(500);
-            }
+            if (this._oldTileGroups && this._activeLoads === 0) this._scheduleOldTilesCleanup(500);
             return;
         }
         const toLoad = this._sortedLoadQueue.splice(0, this._maxConcurrent - this._activeLoads);
@@ -1442,8 +1532,9 @@ export class VectorTileLayer {
                             this._tileCache.set(key, group);
                             this._labelsDirty = true;
                         }
-                    } catch (err) { /* ignore */ }
-                    finally {
+                    } catch (err) {
+                        // ignore
+                    } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
                         this._processQueue();
@@ -1477,6 +1568,7 @@ export class VectorTileLayer {
                 buffer = await response.arrayBuffer();
                 this._setTileDataCache(dataCacheKey, buffer.slice(0));
             }
+
             const is3dNow = this.buildings3d && (map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             if (group) {
@@ -1484,16 +1576,16 @@ export class VectorTileLayer {
                 this._tileCache.set(key, group);
                 this._labelsDirty = true;
             }
-        } catch (err) { /* ignore */ }
-        finally {
+        } catch (err) {
+            // ignore fetch/worker errors
+        } finally {
             this._pendingLoads.delete(key);
             this._activeLoads--;
             if (this._sortedLoadQueue.length > 0) {
                 clearTimeout(this._queueTimer);
                 this._queueTimer = setTimeout(() => this._processQueue(), this._queueInterval);
-            } else if (this._activeLoads === 0 && this._hasAnyOldTiles()) {
-                // НЕ очищаем сразу — доверяем таймеру и _canClearOldTiles.
-                this._scheduleOldTilesCleanup(500);
+            } else if (this._activeLoads === 0 && this._oldTileGroups) {
+                this._clearOldTilesNow();
             }
         }
     }
@@ -1501,25 +1593,31 @@ export class VectorTileLayer {
     async identify(sceneX, sceneZ, opts = {}) {
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;
+
         const sourceZoom = Math.max(
             this.minZoom,
             Math.min(map.currentDiscreteZoom, this.maxSourceZoom)
         );
         const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
+
         const localX = sceneX - map.worldGroup.position.x;
         const localZ = sceneZ - map.worldGroup.position.z;
+
         const tx = (localX + map.MAX_MERCATOR) / tileSize;
         const tz = (localZ + map.MAX_MERCATOR) / tileSize;
         const xSlippy = Math.floor(tx);
         const ySlippy = Math.floor(tz);
+
         if (xSlippy < 0 || xSlippy >= numTiles || ySlippy < 0 || ySlippy >= numTiles) {
             return { error: `tile (${xSlippy},${ySlippy}) outside [0,${numTiles}) at z=${sourceZoom}` };
         }
+
         const dataCacheKey = `${sourceZoom}/${xSlippy}/${ySlippy}`;
         let buffer = this._getTileDataCache(dataCacheKey);
-        if (buffer) buffer = buffer.slice(0);
-        else {
+        if (buffer) {
+            buffer = buffer.slice(0);
+        } else {
             const url = this.url
                 .replaceAll('{z}', sourceZoom)
                 .replaceAll('{x}', xSlippy)
@@ -1533,22 +1631,35 @@ export class VectorTileLayer {
                 return { error: `fetch failed: ${err.message}` };
             }
         }
+
         const centerX = xSlippy * tileSize - map.MAX_MERCATOR + tileSize / 2;
         const centerZ = -map.MAX_MERCATOR + ySlippy * tileSize + tileSize / 2;
         const clickLocalX = localX - centerX;
         const clickLocalZ = localZ - centerZ;
+
         return new Promise((resolve, reject) => {
             const id = ++this._requestId;
             this._pendingWorkerRequests.set(id, {
-                resolve, reject, group: null, key: null,
-                generation: this._generation, isIdentify: true,
+                resolve,
+                reject,
+                group: null,
+                key: null,
+                generation: this._generation,
+                isIdentify: true,
             });
             try {
                 this._worker.postMessage({
-                    type: 'identify', id, buffer, z: sourceZoom,
-                    x: xSlippy, y: ySlippy, tileSize, maxMerc: map.MAX_MERCATOR,
+                    type: 'identify',
+                    id,
+                    buffer,
+                    z: sourceZoom,
+                    x: xSlippy,
+                    y: ySlippy,
+                    tileSize,
+                    maxMerc: map.MAX_MERCATOR,
                     continuousZoom: map.continuousZoom,
-                    localX: clickLocalX, localZ: clickLocalZ,
+                    localX: clickLocalX,
+                    localZ: clickLocalZ,
                     tolerance: opts.tolerance || tileSize * 0.005,
                 }, [buffer]);
             } catch (err) {
@@ -1565,13 +1676,20 @@ export class VectorTileLayer {
                 reject(new Error('Layer removed'));
                 return;
             }
+
             const map = this._map;
             const id = ++this._requestId;
             const tileSize = map.WORLD_SIZE / (1 << z);
             const maxMerc = map.MAX_MERCATOR;
+
             const msg = {
-                type: 'process', id, buffer, z, x, y,
-                tileSize, maxMerc, is3d,
+                type: 'process',
+                id,
+                buffer: buffer,
+                z, x, y,
+                tileSize,
+                maxMerc,
+                is3d,
                 continuousZoom: map.continuousZoom,
                 visibleLayers: this.visibleLayers,
                 buildingEdges: this.buildingEdges,
@@ -1580,14 +1698,17 @@ export class VectorTileLayer {
                 maxTextPointsPerTile: this.maxTextPointsPerTile,
                 maxTextLinesPerTile: this.maxTextLinesPerTile,
             };
+
             this._pendingWorkerRequests.set(id, {
-                resolve, reject,
+                resolve,
+                reject,
                 group: existingGroup || null,
                 key: existingGroup ? null : `${z},${x},${y}`,
                 generation: this._generation,
             });
-            try { this._worker.postMessage(msg, [buffer]); }
-            catch (err) {
+            try {
+                this._worker.postMessage(msg, [buffer]);
+            } catch (err) {
                 this._pendingWorkerRequests.delete(id);
                 reject(err);
             }
@@ -1601,6 +1722,7 @@ export class VectorTileLayer {
         const off = map.worldGroup.position;
         const maxTile = (1 << z) - 1;
         const numTiles = 1 << z;
+
         const ray = this._raycaster;
         const ndc = this._raycastNDC;
         const plane = this._raycastPlane;
@@ -1614,6 +1736,7 @@ export class VectorTileLayer {
         const camTargetDist = camera.position.distanceTo(map.controls.target);
         const maxLoadDist = Math.max(camTargetDist * 6, tileSize * 48);
         const maxLoadDistSq = maxLoadDist * maxLoadDist;
+
         const MIN_RAY_Y = Math.sin(3 * Math.PI / 180);
         const GRID = 5;
         let hitsCount = 0;
@@ -1624,11 +1747,14 @@ export class VectorTileLayer {
                 const ny = (j / (GRID - 1)) * 2 - 1;
                 ndc.set(nx, ny);
                 ray.setFromCamera(ndc, camera);
+
                 if (Math.abs(ray.ray.direction.y) < MIN_RAY_Y) continue;
                 if (!ray.ray.intersectPlane(plane, hit)) continue;
+
                 const dxCam = hit.x - camera.position.x;
                 const dzCam = hit.z - camera.position.z;
                 if (dxCam * dxCam + dzCam * dzCam > maxLoadDistSq) continue;
+
                 hitsCount++;
                 const lx = hit.x - off.x;
                 const lz = hit.z - off.z;
@@ -1670,5 +1796,103 @@ export class VectorTileLayer {
             }
         }
         return keys;
+    }
+
+    _getFillMaterial(styleKey) {
+        if (this._fillMaterialCache.has(styleKey)) return this._fillMaterialCache.get(styleKey);
+        const parts = styleKey.split(':');
+        const color = parseInt(parts[2], 16);
+        const rawOpacity = parseFloat(parts[3]);
+        const opacity = (isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
+        const mat = new THREE.MeshBasicMaterial({
+            color,
+            side: THREE.DoubleSide,
+            transparent: opacity < 1.0,
+            opacity,
+            depthTest: true,
+            depthWrite: false
+        });
+        this._fillMaterialCache.set(styleKey, mat);
+        this._managedMaterials.add(mat);
+        return mat;
+    }
+
+    _getLineMaterial(styleKey, dash) {
+        if (this._lineMaterialCache.has(styleKey)) return this._lineMaterialCache.get(styleKey);
+        const parts = styleKey.split(':');
+        const color = parseInt(parts[2], 16);
+        const width = parseFloat(parts[3]) * this.lineWidthMultiplier;
+        const matOpts = {
+            color,
+            linewidth: width,
+            // CSS-пиксели: LineMaterial делит linewidth на resolution.y
+            // и переводит в NDC. Если resolution в device-пикселях — на
+            // DPR>1 линия в DPR раз тоньше, чем в MapLibre (где
+            // line-width задан в CSS-пикселях).
+            resolution: new THREE.Vector2(
+                this._map.renderer.domElement.clientWidth,
+                this._map.renderer.domElement.clientHeight
+            ),
+            depthTest: true,
+            depthWrite: false
+        };
+        if (dash && Array.isArray(dash) && dash.length >= 2) {
+            matOpts.dashed = true;
+            matOpts.dashSize = dash[0];
+            matOpts.gapSize = dash[1];
+            matOpts.dashScale = 1;
+        }
+        const mat = new LineMaterial(matOpts);
+        this._lineMaterialCache.set(styleKey, mat);
+        this._lineMaterialsSet.add(mat);
+        this._managedMaterials.add(mat);
+        return mat;
+    }
+
+    _getPointGeometry(radius) {
+        const key = `point_${radius}`;
+        if (this._pointGeometryCache.has(key)) return this._pointGeometryCache.get(key);
+        const geom = new THREE.CircleGeometry(radius, 8);
+        geom.rotateX(-Math.PI / 2);
+        this._pointGeometryCache.set(key, geom);
+        this._managedGeometries.add(geom);
+        return geom;
+    }
+
+    _concatF32(arrays) {
+        let total = 0;
+        for (const a of arrays) total += a.length;
+        const out = new Float32Array(total);
+        let off = 0;
+        for (const a of arrays) { out.set(a, off); off += a.length; }
+        return out;
+    }
+
+    _getBuildingMaterial(color) {
+        const key = 'bld:' + color;
+        if (this._fillMaterialCache.has(key)) return this._fillMaterialCache.get(key);
+
+        const mat = new THREE.MeshLambertMaterial({
+            color,
+            side: THREE.FrontSide,
+            depthTest: true,
+            depthWrite: true,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
+        });
+
+        this._fillMaterialCache.set(key, mat);
+        this._managedMaterials.add(mat);
+        return mat;
+    }
+
+    _getBuildingEdgeMaterial(color) {
+        const key = 'bldEdge:' + color;
+        if (this._lineMaterialCache.has(key)) return this._lineMaterialCache.get(key);
+        const mat = new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false });
+        this._lineMaterialCache.set(key, mat);
+        this._managedMaterials.add(mat);
+        return mat;
     }
 }

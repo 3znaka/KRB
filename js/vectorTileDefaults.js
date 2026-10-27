@@ -1,546 +1,686 @@
 // vectorTileDefaults.js
 /**
- * Модуль стилей и порядка отрисовки векторных тайлов по умолчанию.
- * Используется как в основном потоке (VectorTileLayer), так и внутри воркера.
+ * Стили и порядок отрисовки векторных тайлов по умолчанию.
+ * Сгенерированы по образцу MapTiler/OpenMapTiles v4 "Bright" (style-cdn.json).
  *
- * СОГЛАШЕНИЯ:
- * - Для слоёв, которые в воркере обрабатываются как точечные объекты и
- *   попадают в подписи (`place`, `poi`, `housenumber`), стиль может содержать
- *   текстовые поля: textColor, fontSize, fontFamily, fontWeight, fontStyle,
- *   textTransform, textLetterSpacing, textShadow, textOffset, textAlign,
- *   textVerticalAlign, textPriority, textZoomMin, textZoomMax.
- * - Для линейных слоёв (`transportation`, `waterway`, `water_name`,
- *   `transportation_name`) подписи генерируются только если в стиле задан
- *   хотя бы один текстовый атрибут И у фичи есть `name`/`ref`. Дополнительно
- *   используются `textPlacement` (по умолчанию 'along') и
- *   `textMinSegmentLength` (минимальная длина сегмента в долях tileSize,
- *   по умолчанию 0.15) для размещения и фильтрации вдоль линии.
- * - Поле `stroke` имеет смысл только для полигональных слоёв (заливки/обводки
- *   контура). Для точечных слоёв оно игнорируется.
+ * ═══════════════════════════════════════════════════════════════════════
+ * СОГЛАШЕНИЯ
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * Значение любого свойства (color, width, opacity, dash, radius, height,
+ * base, textColor, fontSize, fontWeight, ...) может быть:
+ *   1. Примитивом (число, hex-цвет 0xRRGGBB, hex-строка '#RRGGBB', массив).
+ *   2. Спекой одного из типов ниже; резолвится воркером через resolveValue.
+ *
+ *   { type: 'match', by: 'key' | ['k1','k2'], values: { v: <spec>, _default } }
+ *       — выбирает values[feature.properties[by]] по первому найденному
+ *         ключу (если by — массив). Не найдено → _default.
+ *
+ *   { type: 'zoom', stops: [[z, v], ...] }
+ *       — линейная интерполяция по continuousZoom, clamp по краям.
+ *         Для цветов (числа 0xRRGGBB) интерполяция покомпонентная (RGB).
+ *
+ *   { type: 'step', by: 'zoom', stops: [[z, v], ...], default: v0 }
+ *       — ступенчатая (без интерполяции).
+ *
+ *   { type: 'field', keys: ['a','b'], fallback: <spec|primitive> }
+ *       — первое непустое значение из feature.properties, иначе fallback.
+ *
+ *   { type: 'coalesce', of: [<spec>, <spec>, ...] }
+ *       — первая непустая спека.
+ *
+ *   { type: 'levels', multiplier: 3 }
+ *       — parseInt(props['building:levels']) * multiplier, либо 0.
+ *
+ * Фильтры (`filter` на уровне source-layer):
+ *   { type: 'in', key, values: [...] }   // ["in", "key", ...] / match по ключу
+ *   { type: 'eq', key, value }           // ["==", "key", v]
+ *   { type: 'exists', key }              // ["has", "key"]
+ *   { type: 'gt'|'gte'|'lt'|'lte', key, value }
+ *   { type: 'any'|'all', of: [<filter>, ...] }
+ *   { type: 'not', of: <filter> }
+ *   { type: 'geometry', in: [1,2,3] }    // 1=Point, 2=LineString, 3=Polygon
+ *
+ * Поля текста на точках/линиях (textColor, fontSize, textPlacement,
+ * textPriority, textZoomMin, textZoomMax, textOffset и т.д.) — те же, что
+ * были, но значения могут быть спеками.
+ *
+ * `stroke` имеет смысл только для полигонов/зданий; для линий и точек
+ * игнорируется. `base` — только для зданий (fill-extrusion).
  */
 
-/**
- * Стили по умолчанию для различных типов объектов, сгруппированные по слоям.
- */
+// ────────────────────────────────────────────────────────────────────────
+// Стили
+// ────────────────────────────────────────────────────────────────────────
+
 export const DEFAULT_STYLES = {
-    water: {
-        lake: { color: 0xaaccff, opacity: 0.9 },
-        river: { color: 0x99bbee, opacity: 0.9 },
-        pond: { color: 0xaaccff, opacity: 0.8 },
-        swimming_pool: { color: 0x88aadd, opacity: 0.8 },
-        dock: { color: 0x8899aa, opacity: 0.8 },
-        _default: { color: 0xaaccff, opacity: 0.9 }
+
+    // ─────────────────────────────────────────────────────────────────
+    // LANDCOVER
+    // Покрывает: landcover-glacier, landcover-wood, landcover-grass,
+    //            landcover-ice-shelf, landcover-sand
+    // filter (в style.json): подслой subclass=glacier/ice_shelf или
+    //                        class=wood/grass/sand
+    // Сведено к match по ['class','subclass'] (первый найденный ключ).
+    // ─────────────────────────────────────────────────────────────────
+    landcover: {
+        filter: { type: 'geometry', in: [3] },
+        color: {
+            type: 'match',
+            by: ['class', 'subclass'],
+            values: {
+                glacier:   0xffffff,
+                ice_shelf: 0xffffff,
+                wood:      0x66aa44,
+                grass:     0xd8e8c8,
+                sand:      0xf5eebc,
+                _default:  0xffffff
+            }
+        },
+        opacity: {
+            type: 'match',
+            by: ['class', 'subclass'],
+            values: {
+                glacier:   { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
+                ice_shelf: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
+                wood:      0.1,
+                grass:     1,
+                sand:      1,
+                _default:  0.3
+            }
+        }
     },
+
+    // ─────────────────────────────────────────────────────────────────
+    // LANDUSE
+    // Покрывает: landuse-residential, landuse-commercial,
+    //            landuse-industrial, landuse-cemetery, landuse-hospital,
+    //            landuse-school, landuse-railway
+    // filter: $type=Polygon (все landuse-слои) + class in [...]
+    // Классы для residential: residential, suburb, neighbourhood
+    // Классы для industrial: industrial, garages, dam
+    // Цвета hsla(...) разложены в hex + opacity.
+    // ─────────────────────────────────────────────────────────────────
+    landuse: {
+        filter: { type: 'geometry', in: [3] },
+        color: {
+            type: 'match',
+            by: 'class',
+            values: {
+                residential:   0xeee6dd,  // hsla(30,19%,90%,*)
+                suburb:        0xeee6dd,
+                neighbourhood: 0xeee6dd,
+                commercial:    0xf2cccc,  // hsla(0,60%,87%,*)
+                industrial:    0xffeeC2,  // hsla(49,100%,88%,*)
+                garages:       0xffeeC2,
+                dam:           0xffeeC2,
+                cemetery:      0xe0e4dd,
+                hospital:      0xffddee,  // #fde
+                school:        0xf0e8f8,
+                railway:       0xeee6dd,
+                _default:      undefined  // → не рисуем
+            }
+        },
+        opacity: {
+            type: 'match',
+            by: 'class',
+            values: {
+                residential:   { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
+                suburb:        { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
+                neighbourhood: { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
+                commercial:    0.23,
+                industrial:    0.34,
+                garages:       0.34,
+                dam:           0.34,
+                cemetery:      1,
+                hospital:      1,
+                school:        1,
+                railway:       0.4,
+                _default:      1
+            }
+        }
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // PARK
+    // Покрывает: landcover-grass-park (единственный слой)
+    // filter: class=public_park
+    // ─────────────────────────────────────────────────────────────────
+    park: {
+        filter: {
+            type: 'all',
+            of: [
+                { type: 'geometry', in: [3] },
+                { type: 'eq', key: 'class', value: 'public_park' }
+            ]
+        },
+        color: 0xd8e8c8,
+        opacity: 0.8
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // WATERWAY (линии)
+    // Покрывает: waterway_tunnel, waterway-other,
+    //            waterway-other-intermittent, waterway-stream-canal,
+    //            waterway-stream-canal-intermittent, waterway-river,
+    //            waterway-river-intermittent
+    // Все — линии цвета #a0c8f0. Разница: ширина (по class), пунктир
+    // (туннели и intermittent).
+    // ─────────────────────────────────────────────────────────────────
     waterway: {
-        color: 0x99bbee,
-        width: 1.5,
-        // Подписи рек/каналов вдоль линии. Появляются при zoom ≥ 14,
-        // чтобы избежать «каши» из ручьёв и канав на обзорных уровнях.
-        textColor: '#1e4d6b',
-        fontSize: '11px',
-        textPlacement: 'along',
+        filter: { type: 'geometry', in: [2] },
+        color: 0xa0c8f0,
+        width: {
+            type: 'match',
+            by: ['brunnel', 'class'],
+            values: {
+                // туннель — ширина как у stream/canal
+                tunnel: { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
+                river:  { type: 'zoom', stops: [[10, 0.8], [20, 6]] },
+                stream: { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
+                canal:  { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
+                _default: { type: 'zoom', stops: [[13, 0.5], [20, 2]] }
+            }
+        },
+        dash: {
+            type: 'match',
+            by: ['brunnel', 'intermittent'],
+            values: {
+                tunnel: [2, 4],
+                1:      [4, 3],
+                _default: undefined
+            }
+        },
+        // Подписи вдоль линии
+        textColor: '#74aee9',
+        fontSize: '14px',
         textFontStyle: 'italic',
-        textShadow: '0 0 2px rgba(255,255,255,0.85)',
-        textZoomMin: 14,
+        textPlacement: 'along',
+        textShadow: '0 0 2px rgba(255,255,255,0.7)',
+        textZoomMin: 10,
         textZoomMax: 21,
         textPriority: 50,
         textMinSegmentLength: 0.1
     },
-    building: { color: 0xf0f0f0, stroke: 0xaaaaaa },
-    landcover: {
-        wood: { color: 0xc8e6c9 },
-        forest: { color: 0xc8e6c9 },
-        grass: { color: 0xdcedc8 },
-        park: { color: 0xdcedc8 },
-        sand: { color: 0xf5f0c0 },
-        farmland: { color: 0xedf0c0 },
-        wetland: { color: 0xb8d4c8 }
-    },
-    landuse: {
-        residential: { color: 0xe0e0e0 },
-        industrial: { color: 0xd9d9d9 },
-        commercial: { color: 0xdddddd },
-        railway: { color: 0xd5d5d5 },
-        retail: { color: 0xdddddd },
-        hospital: { color: 0xd9c8c8 },
-        university: { color: 0xd5d5e0 },
-        college: { color: 0xd5d5e0 },
-        school: { color: 0xd5d5e0 },
-        education: { color: 0xd5d5e0 },
-        kindergarten: { color: 0xd5d5e0 },
-        library: { color: 0xd5d5e0 },
-        cemetery: { color: 0xbbddbb },
-        military: { color: 0xc8c8c8 },
-        allotments: { color: 0xdcedc8 },
-        quarry: { color: 0xbbaa99 },
-        construction: { color: 0xcccccc },
-        pitch: { color: 0xc8e6c9 },
-        stadium: { color: 0xc8e6c9 },
-        track: { color: 0xc8c8c8 },
-        grass: { color: 0xdcedc8 },
-        farmyard: { color: 0xedf0c0 },
-        zoo: { color: 0xc8e6c9 },
-        theme_park: { color: 0xc8e6c9 },
-        resort: { color: 0xdcedc8 },
-        recreation_ground: { color: 0xdcedc8 },
-        exhibition_centre: { color: 0xdddddd },
-        bus_station: { color: 0xdddddd },
-        dam: { color: 0xaaaaaa },
-        playground: { color: 0xdcedc8 },
-        neighbourhood: { color: 0xe8e8e8 },
-        suburb: { color: 0xe8e8e8 },
-        quarter: { color: 0xe8e8e8 },
-        garages: { color: 0xd0d0d0 },
-        healthcare: { color: 0xd9c8c8 },
-        _default: { color: 0xeeeeee }
-    },
-    park: {
-        park: { color: 0xdcedc8 },
-        national_park: { color: 0xb8d8a0 },
-        nature_reserve: { color: 0xb8d8a0 },
-        protected_area: { color: 0xb8d8a0 },
-        _default: { color: 0xdcedc8 }
-    },
-    leisure: {
-        park: { color: 0xdcedc8 },
-        garden: { color: 0xdcedc8 },
-        playground: { color: 0xdcedc8 },
-        pitch: { color: 0xc8e6c9 },
-        stadium: { color: 0xc8e6c9 },
-        sports_centre: { color: 0xc8e6c9 },
-        golf_course: { color: 0xc8e6c9 },
-        _default: { color: 0xdcedc8 }
+
+    // ─────────────────────────────────────────────────────────────────
+    // WATER (полигоны)
+    // Покрывает: water-offset, water, water-intermittent
+    // filter: $type=Polygon; intermittent=1 → 0.7 opacity
+    // Цвет hsl(210,67%,85%) → 0xb3d2f0.
+    // ─────────────────────────────────────────────────────────────────
+    water: {
+        filter: { type: 'geometry', in: [3] },
+        color: 0xb3d2f0,
+        opacity: {
+            type: 'match',
+            by: 'intermittent',
+            values: {
+                1: 0.7,
+                _default: 1
+            }
+        }
     },
 
-    // Транспорт: линейные подписи вдоль дорог (кроме мелких/временных типов).
-    // Приоритеты убывают от магистралей к местным улицам, но остаются
-    // выше POI (60) и воды (50), чтобы названия улиц всегда читались первыми.
-    // textMinSegmentLength — минимальная длина сегмента в долях tileSize:
-    // короткие куски улиц не подписываются.
+    // ─────────────────────────────────────────────────────────────────
+    // BUILDING
+    // Покрывает: building, building-top
+    // filter: $type=Polygon
+    // Цвет: fill-color — zoom [[15.5, #f2eae2], [16, #dfdbd7]]
+    // Высота: render_height/height или building:levels*3
+    // base: render_min_height/min_height
+    // ─────────────────────────────────────────────────────────────────
+    building: {
+        filter: { type: 'geometry', in: [3] },
+        color: { type: 'zoom', stops: [[15.5, 0xf2eae2], [16, 0xdfdbd7]] },
+        stroke: 0xaaaaaa,
+        height: {
+            type: 'field',
+            keys: ['render_height', 'height'],
+            fallback: { type: 'levels', multiplier: 3 }
+        },
+        base: {
+            type: 'field',
+            keys: ['render_min_height', 'min_height'],
+            fallback: 0
+        }
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // TRANSPORTATION (геометрия дорог, ЖД, паромов, мостов, туннелей)
+    // Покрывает: tunnel-*, ferry, highway-*, railway-*, bridge-*, cablecar*
+    // filter в style.json многообразен, но по сути:
+    //   - tunnel-*  : brunnel=tunnel (цвет светлый, ширина как у regular)
+    //   - bridge-*  : brunnel=bridge (цвет как у regular)
+    //   - highway-* : class=motorway/trunk/primary/secondary/tertiary/minor/
+    //                 service/track/path (плюс motorway_construction)
+    //   - railway-* : class=rail/transit
+    //   - ferry     : class=ferry
+    // Сведено к match по ['brunnel', 'class'] (brunnel — приоритет).
+    // Casing (обводка) не поддерживается: используется только fill-цвет.
+    // ─────────────────────────────────────────────────────────────────
     transportation: {
-        motorway: {
-            color: 0xff9933, width: 2.5,
-            textColor: '#5c3a00',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 10, textZoomMax: 21,
-            textPriority: 100,
-            textMinSegmentLength: 0.03
+        color: {
+            type: 'match',
+            by: ['brunnel', 'class'],
+            values: {
+                // tunnels — общий приглушённый оттенок
+                tunnel: 0xfff4c6,
+                // bridges — как у regular
+                bridge: 0xffeaaa,
+                // regular по классу
+                motorway:  0xffcc88,   // #fc8
+                trunk:     0xffeaaa,   // #fea
+                primary:   0xffeaaa,
+                secondary: 0xffeaaa,
+                tertiary:  0xffeaaa,
+                minor:     0xffffff,
+                service:   0xffffff,
+                track:     0xffffff,
+                path:      0xccbbaa,   // #cba
+                steps:     0xffffff,
+                rail:      0xbbbbbb,
+                transit:   0xbbbbbb,   // hsla(0,0%,73%,0.77)
+                ferry:     0x6c9fb6,   // rgba(108,159,182,1)
+                pier:      0xf8f4f0,
+                motorway_construction: 0xffffff,
+                _default:  0xcccccc
+            }
         },
-        trunk: {
-            color: 0xffcc66, width: 2.0,
-            textColor: '#5c4400',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 11, textZoomMax: 21,
-            textPriority: 95,
-            textMinSegmentLength: 0.03
+        // Ширина — по class (у туннелей и мостов та же, что у regular)
+        width: {
+            type: 'match',
+            by: 'class',
+            values: {
+                motorway:   { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
+                trunk:      { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
+                primary:    { type: 'zoom', stops: [[8.5, 0], [9, 0.5], [20, 18]] },
+                secondary:  { type: 'zoom', stops: [[6.5, 0], [8, 0.5], [20, 13]] },
+                tertiary:   { type: 'zoom', stops: [[6.5, 0], [8, 0.5], [20, 13]] },
+                minor:      { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
+                service:    { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
+                track:      { type: 'zoom', stops: [[13.5, 0], [14, 2.5], [20, 11.5]] },
+                path:       { type: 'zoom', stops: [[15, 1.2], [20, 4]] },
+                steps:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                rail:       { type: 'zoom', stops: [[14, 0.4], [15, 0.75], [20, 2]] },
+                transit:    { type: 'zoom', stops: [[14, 0.4], [20, 1]] },
+                ferry:      1.1,
+                pier:       { type: 'zoom', stops: [[15, 1], [17, 4]] },
+                motorway_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.5], [20, 18]] },
+                _default:   1
+            }
         },
-        primary: {
-            color: 0xffd699, width: 1.8,
-            textColor: '#553a1a',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 12, textZoomMax: 21,
-            textPriority: 90,
-            textMinSegmentLength: 0.05
+        // Пунктир: rail, path, steps, ferry
+        dash: {
+            type: 'match',
+            by: 'class',
+            values: {
+                rail:   [2, 2],
+                path:   [1.5, 0.75],
+                steps:  [0.5, 0.25],
+                ferry:  [2, 2],
+                _default: undefined
+            }
         },
-        secondary: {
-            color: 0xffe0b3, width: 1.5,
-            textColor: '#554a33',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 13, textZoomMax: 21,
-            textPriority: 85,
-            textMinSegmentLength: 0.05
-        },
-        tertiary: {
-            color: 0xffffff, width: 1.2,
-            textColor: '#444444',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 14, textZoomMax: 21,
-            textPriority: 80,
-            textMinSegmentLength: 0.08
-        },
-        minor: {
-            color: 0xeeeeee, width: 1.0,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 16, textZoomMax: 20,
-            textPriority: 75,
-            textMinSegmentLength: 0.1
-        },
-        residential: {
-            color: 0xeeeeee, width: 1.0,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 16, textZoomMax: 20,
-            textPriority: 75,
-            textMinSegmentLength: 0.1
-        },
-        service: {
-            color: 0xcccccc, width: 0.8,
-            textColor: '#666666',
-            fontSize: '9px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 18, textZoomMax: 21,
-            textPriority: 70,
-            textMinSegmentLength: 0.15
-        },
-        rail: {
-            color: 0x888888, width: 1.5, dash: [6, 2],
-            textColor: '#444444',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textFontStyle: 'italic',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 15, textZoomMax: 20,
-            textPriority: 65,
-            textMinSegmentLength: 0.1
-        },
-        // Без текста: path, track, ferry, aerialway, bridge, pier, raceway,
-        // transit, *_construction — либо слишком мелкие, либо временные,
-        // либо не несут самостоятельного имени.
-        path:              { color: 0xaaaaaa, width: 0.8 },
-        track:             { color: 0xaaaaaa, width: 0.8 },
-        ferry:             { color: 0x6699cc, width: 1.2, dash: [4, 4] },
-        aerialway:         { color: 0x666666, width: 1.0, dash: [2, 2] },
-        bridge:            { color: 0xffaa00, width: 2.0 },
-        pier:              { color: 0xcccccc, width: 1.0 },
-        raceway:           { color: 0xff6666, width: 1.5 },
-        transit:           { color: 0xdddddd, width: 1.2 },
-        motorway_construction: { color: 0xff9933, width: 2.5, dash: [8, 4] },
-        trunk_construction:    { color: 0xffcc66, width: 2.0, dash: [8, 4] },
-        primary_construction:  { color: 0xffd699, width: 1.8, dash: [8, 4] },
-        secondary_construction:{ color: 0xffe0b3, width: 1.5, dash: [8, 4] },
-        tertiary_construction: { color: 0xffffff, width: 1.2, dash: [8, 4] },
-        minor_construction:    { color: 0xeeeeee, width: 1.0, dash: [8, 4] },
-        service_construction:  { color: 0xcccccc, width: 0.8, dash: [8, 4] },
-        path_construction:     { color: 0xaaaaaa, width: 0.8, dash: [6, 3] },
-        _default: {
-            color: 0xcccccc, width: 1.0,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 16, textZoomMax: 20,
-            textPriority: 70,
-            textMinSegmentLength: 0.12
+        // Прозрачность: только construction (fade-in на низких зумах)
+        opacity: {
+            type: 'match',
+            by: 'class',
+            values: {
+                motorway_construction: { type: 'zoom', stops: [[5, 0], [14, 0.4]] },
+                _default: 1
+            }
         }
     },
 
-
-    transportation_name: {
-        motorway: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#5c3a00',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 10, textZoomMax: 21,
-            textPriority: 100,
-            textMinSegmentLength: 0.03
-        },
-        trunk: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#5c4400',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 11, textZoomMax: 21,
-            textPriority: 95,
-            textMinSegmentLength: 0.03
-        },
-        primary: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#553a1a',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 12, textZoomMax: 21,
-            textPriority: 90,
-            textMinSegmentLength: 0.05
-        },
-        secondary: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#554a33',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 13, textZoomMax: 21,
-            textPriority: 85,
-            textMinSegmentLength: 0.05
-        },
-        tertiary: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#444444',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 14, textZoomMax: 21,
-            textPriority: 80,
-            textMinSegmentLength: 0.08
-        },
-        minor: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 16, textZoomMax: 20,
-            textPriority: 75,
-            textMinSegmentLength: 0.1
-        },
-        residential: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 16, textZoomMax: 20,
-            textPriority: 75,
-            textMinSegmentLength: 0.1
-        },
-        service: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#666666',
-            fontSize: '9px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 18, textZoomMax: 21,
-            textPriority: 70,
-            textMinSegmentLength: 0.15
-        },
-        rail: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#444444',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textFontStyle: 'italic',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 15, textZoomMax: 20,
-            textPriority: 65,
-            textMinSegmentLength: 0.1
-        },
-        _default: {
-            color: 0xffffff, width: 0.2, opacity: 0.3,
-            textColor: '#555555',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.9)',
-            textZoomMin: 14, textZoomMax: 21,
-            textPriority: 70,
-            textMinSegmentLength: 0.1
-        }
-    },
-
+    // ─────────────────────────────────────────────────────────────────
+    // AEROWAY
+    // Покрывает: aeroway-taxiway-casing, aeroway-runway-casing,
+    //            aeroway-area, aeroway-taxiway, aeroway-runway
+    // Casing (grey) не поддерживается; для видимости на белом фоне
+    // взят серый fill вместо белого.
+    // ─────────────────────────────────────────────────────────────────
     aeroway: {
-        runway: { color: 0xcccccc, width: 2.0 },
-        taxiway: { color: 0xdddddd, width: 1.0 },
-        _default: { color: 0xcccccc, width: 1.0 }
-    },
-
-    // Населённые пункты и районы.
-    // Города — жирные, крупные; районы (_default) — капителью с разрядкой,
-    // чтобы визуально отличаться от названий улиц.
-    place: {
-        city: {
-            color: 0xe8e8e8, opacity: 0.7, radius: 5,
-            textColor: '#333333',
-            fontSize: '14px',
-            fontWeight: 'bold',
-            textOffset: [0, -10],
-            textZoomMin: 0, textZoomMax: 24,
-            textPriority: 200
+        color: {
+            type: 'match',
+            by: 'class',
+            values: {
+                runway:  0xcccccc,
+                taxiway: 0xdddddd,
+                _default: 0xcccccc
+            }
         },
-        town: {
-            color: 0xe8e8e8, opacity: 0.6, radius: 4,
-            textColor: '#333333',
-            fontSize: '13px',
-            fontWeight: 'bold',
-            textOffset: [0, -8],
-            textZoomMin: 0, textZoomMax: 24,
-            textPriority: 180
-        },
-        village: {
-            color: 0xe8e8e8, opacity: 0.5, radius: 3,
-            textColor: '#333333',
-            fontSize: '12px',
-            fontWeight: 'normal',
-            textOffset: [0, -6],
-            textZoomMin: 0, textZoomMax: 24,
-            textPriority: 160
-        },
-        hamlet: {
-            color: 0xe8e8e8, opacity: 0.4, radius: 2,
-            textColor: '#333333',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textOffset: [0, -4],
-            textZoomMin: 0, textZoomMax: 24,
-            textPriority: 140
-        },
-        _default: {
-            color: 0xe8e8e8, opacity: 0.5, radius: 3,
-            textColor: '#444444',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textTransform: 'uppercase',
-            textLetterSpacing: '0.08em',
-            textOffset: [0, -6],
-            textZoomMin: 10, textZoomMax: 24,
-            textPriority: 120
+        width: {
+            type: 'match',
+            by: 'class',
+            values: {
+                runway:  { type: 'zoom', stops: [[11, 4], [17, 50]] },
+                taxiway: { type: 'zoom', stops: [[11, 1], [17, 10]] },
+                _default: 1
+            }
         }
     },
 
-    // POI: приоритет ниже названий улиц (75–100), но выше воды (50)
-    // и номеров домов (30). Так улицы всегда читаются первыми.
-    poi: {
-        _default: {
-            color: 0xcccccc, radius: 4,
-            textColor: '#555555',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textOffset: [0, -8],
-            textZoomMin: 13, textZoomMax: 24,
-            textPriority: 60
+    // ─────────────────────────────────────────────────────────────────
+    // BOUNDARY (линии административных границ)
+    // Покрывает: boundary-land-level-4, boundary-land-level-2,
+    //            boundary-land-disputed, boundary-water
+    // filter: admin_level 3–8 (land-4), admin_level=2 (land-2),
+    //         maritime=1 (water)
+    // Сведено к match по ['maritime', 'admin_level'].
+    // ─────────────────────────────────────────────────────────────────
+    boundary: {
+        filter: { type: 'geometry', in: [2] },
+        color: {
+            type: 'match',
+            by: ['maritime', 'admin_level'],
+            values: {
+                1: 0x9abdd6,   // maritime (все admin_level с maritime=1)
+                2: 0xa4a2b2,   // hsl(248,7%,66%) — граница страны
+                _default: 0x9e9cab // #9e9cab — региональные границы
+            }
+        },
+        width: {
+            type: 'match',
+            by: ['maritime', 'admin_level'],
+            values: {
+                1: { type: 'zoom', stops: [[0, 0.6], [4, 1.4], [5, 2], [12, 8]] },
+                2: { type: 'zoom', stops: [[0, 0.6], [4, 1.4], [5, 2], [12, 8]] },
+                _default: { type: 'zoom', stops: [[4, 0.4], [5, 1], [12, 3]] }
+            }
+        },
+        dash: {
+            type: 'match',
+            by: ['maritime', 'admin_level'],
+            values: {
+                1: undefined,
+                2: undefined,
+                _default: [3, 1, 1, 1]
+            }
+        },
+        opacity: {
+            type: 'match',
+            by: 'maritime',
+            values: {
+                1: { type: 'zoom', stops: [[6, 0.6], [10, 1]] },
+                _default: 1
+            }
         }
     },
 
-    // Номера домов — самые низкоприоритетные, чтобы не забивать карту.
-    housenumber: {
-        _default: {
-            color: 0xffffff, radius: 2,
-            textColor: '#333333',
-            fontSize: '10px',
-            fontWeight: 'normal',
-            textOffset: [0, -4],
-            textZoomMin: 16, textZoomMax: 24,
-            textPriority: 30
-        }
-    },
-
-    mountain_peak: {
-        _default: {
-            color: 0xffffff, radius: 3,
-            textColor: '#333333',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            textOffset: [0, -6],
-            textZoomMin: 12, textZoomMax: 24,
-            textPriority: 110
-        }
-    },
-
-    // Границы: подписи намеренно не добавлены — названия стран/регионов
-    // уже приходят через слой `place` (точки), и текст на самих линиях
-    // дублировал бы их.
-    boundary: { color: 0x999999, width: 1.0, dash: [4, 2] },
-
-    // Carrier-слой для названий водоёмов (озёр, морей) и рек в тайлах
-    // Mapbox-стиля. Приоритет ниже дорог и POI, но выше номеров домов.
+    // ─────────────────────────────────────────────────────────────────
+    // WATER_NAME (подписи водоёмов)
+    // Покрывает: waterway-name (line, для рек),
+    //            water-name-lakeline (line), water-name-ocean (point),
+    //            water-name-other (point)
+    // LineString → textLines; Point → textPoints (класс ocean/прочее).
+    // ─────────────────────────────────────────────────────────────────
     water_name: {
-        _default: {
-            color: 0xaaccff, width: 0.2, opacity: 0.3,
-            textColor: '#1e4d6b',
-            fontSize: '11px',
-            fontWeight: 'normal',
-            textFontStyle: 'italic',
-            textPlacement: 'along',
-            textShadow: '0 0 2px rgba(255,255,255,0.85)',
-            textZoomMin: 12, textZoomMax: 21,
-            textPriority: 45,
-            textMinSegmentLength: 0.1
+        color: 0xa0c8f0,  // псевдо-color для carrier-линии (если рисуется)
+        opacity: 0.3,
+        width: 0.2,
+        textColor: '#74aee9',
+        fontSize: '14px',
+        textFontStyle: 'italic',
+        textPlacement: 'along',
+        textShadow: '0 0 2px rgba(255,255,255,0.7)',
+        textZoomMin: 10,
+        textZoomMax: 21,
+        textPriority: 45,
+        textMinSegmentLength: 0.1
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // POI
+    // Покрывает: poi-level-3, poi-level-2, poi-level-1, poi-railway
+    // filter: has name (+ rank-фильтр, но упрощён — используем minzoom)
+    // ─────────────────────────────────────────────────────────────────
+    poi: {
+        filter: {
+            type: 'all',
+            of: [
+                { type: 'geometry', in: [1] },
+                { type: 'exists', key: 'name' }
+            ]
+        },
+        color: 0xcccccc,
+        radius: 3,
+        textColor: '#666666',
+        fontSize: '12px',
+        fontWeight: 'normal',
+        textOffset: [0, -8],
+        textAlign: 'center',
+        textVerticalAlign: 'center',
+        textZoomMin: 13,
+        textZoomMax: 24,
+        textPriority: 60
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // TRANSPORTATION_NAME (подписи дорог)
+    // Покрывает: highway-name-path, highway-name-minor,
+    //            highway-name-major, highway-shield (пропущен — иконки)
+    // filter: $type=LineString + has name
+    // ─────────────────────────────────────────────────────────────────
+    transportation_name: {
+        filter: {
+            type: 'all',
+            of: [
+                { type: 'geometry', in: [2] },
+                { type: 'exists', key: 'name' }
+            ]
+        },
+        color: 0xffffff,
+        opacity: 0.3,
+        width: 0.2,
+        textColor: '#776655',  // #765
+        fontSize: { type: 'zoom', stops: [[13, 12], [14, 13]] },
+        fontWeight: 'normal',
+        textPlacement: 'along',
+        textShadow: '0 0 2px rgba(255,255,255,0.9)',
+        textZoomMin: 12,
+        textZoomMax: 21,
+        textPriority: {
+            type: 'match',
+            by: 'class',
+            values: {
+                motorway:  100,
+                trunk:      95,
+                primary:    90,
+                secondary:  85,
+                tertiary:   80,
+                minor:      75,
+                service:    70,
+                rail:       65,
+                path:       60,
+                _default:   65
+            }
+        },
+        textMinSegmentLength: 0.05
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // AERODROME_LABEL
+    // Покрывает: airport-label-major
+    // filter: has iata, $type=Point
+    // ─────────────────────────────────────────────────────────────────
+    aerodrome_label: {
+        filter: {
+            type: 'all',
+            of: [
+                { type: 'geometry', in: [1] },
+                { type: 'exists', key: 'iata' }
+            ]
+        },
+        color: 0xcccccc,
+        radius: 3,
+        textColor: '#666666',
+        fontSize: '12px',
+        fontWeight: 'normal',
+        textOffset: [0, -8],
+        textAlign: 'center',
+        textVerticalAlign: 'center',
+        textZoomMin: 10,
+        textZoomMax: 24,
+        textPriority: 110
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // PLACE (населённые пункты, регионы, страны)
+    // Покрывает: place-other, place-village, place-town, place-state,
+    //            place-city, place-city-capital, place-country-other,
+    //            place-country-3, place-country-2, place-country-1,
+    //            place-continent
+    // filter: $type=Point (упрощённо)
+    // ─────────────────────────────────────────────────────────────────
+    place: {
+        filter: { type: 'geometry', in: [1] },
+        color: 0xe8e8e8,
+        opacity: 0.7,
+        radius: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:      5,
+                town:      4,
+                village:   3,
+                hamlet:    2,
+                _default:  3
+            }
+        },
+        textColor: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:       '#333333',
+                town:       '#333333',
+                village:    '#333333',
+                hamlet:     '#333333',
+                state:      '#663333',
+                country:    '#333344',
+                continent:  '#333344',
+                _default:   '#663333'
+            }
+        },
+        fontSize: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:      { type: 'zoom', stops: [[7, 14], [11, 24]] },
+                town:      { type: 'zoom', stops: [[10, 14], [15, 24]] },
+                village:   { type: 'zoom', stops: [[10, 12], [15, 22]] },
+                hamlet:    { type: 'zoom', stops: [[10, 11], [15, 18]] },
+                state:     { type: 'zoom', stops: [[12, 10], [15, 14]] },
+                country:   { type: 'zoom', stops: [[3, 11], [7, 17]] },
+                continent: 14,
+                _default:  { type: 'zoom', stops: [[10, 10], [15, 14]] }
+            }
+        },
+        fontWeight: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:       'bold',
+                town:       'bold',
+                state:      'bold',
+                country:    'bold',
+                continent:  'bold',
+                _default:   'normal'
+            }
+        },
+        textTransform: {
+            type: 'match',
+            by: 'class',
+            values: {
+                state:      'uppercase',
+                country:    'uppercase',
+                continent:  'uppercase',
+                _default:   'none'
+            }
+        },
+        textLetterSpacing: {
+            type: 'match',
+            by: 'class',
+            values: {
+                state:      '0.1em',
+                country:    '0em',
+                continent:  '0em',
+                _default:   '0.08em'
+            }
+        },
+        textOffset: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:     [0, -10],
+                town:     [0, -8],
+                village:  [0, -6],
+                _default: [0, -6]
+            }
+        },
+        textAlign: 'center',
+        textVerticalAlign: 'center',
+        textZoomMin: 0,
+        textZoomMax: 24,
+        textPriority: {
+            type: 'match',
+            by: 'class',
+            values: {
+                city:       200,
+                town:       170,
+                village:    150,
+                hamlet:     130,
+                state:      120,
+                country:    110,
+                continent:  100,
+                _default:   130
+            }
         }
     }
 };
 
+// ────────────────────────────────────────────────────────────────────────
+// Порядок отрисовки слоёв
+// ────────────────────────────────────────────────────────────────────────
 /**
- * Порядок отрисовки слоёв. Чем больше число, тем выше слой.
+ * Порядок отрисовки по style.json. Чем больше число, тем выше слой.
  *
- * Числа уникальны и расставлены с шагом 10: это оставляет запас для
- * вставки новых слоёв без переписывания всего блока.
+ * Значения — 10 * (индекс первого вхождения source-layer в массив layers[]).
+ * Фоновый слой (id: "background") игнорируется.
  *
- * Иерархия (снизу вверх):
- *   1. Фоновые площадные объекты (landuse, landcover, park, leisure).
- *   2. Гидрография (water, waterway).
- *   3. Границы и аэродромная инфраструктура (boundary, aeroway).
- *   4. Дорожная сеть (transportation).
- *   5. Здания (building) — перекрывают дороги.
- *   6. Подписи (water_name, transportation_name, poi, place, mountain_peak,
- *      aerodrome_label, housenumber) — всегда выше геометрии.
+ * ВАЖНО про мультислойные source-layers:
+ *   - `transportation` встречается в style.json трижды: туннели (idx 27),
+ *     ferry (idx 46), обычные дороги/ЖД (idx 54–78), мосты (idx 79–95).
+ *     Воркер использует базовое значение как якорь и добавляет ±2 для
+ *     brunnel=tunnel/bridge (см. VectorTileLayer/worker dynamicOrder).
+ *     Из-за этого мосты (idx 79+) рисуются лишь чуть выше туннелей, но
+ *     НЕ выше `aeroway` (idx 47). В 3D-сцене это компенсируется depth-тестом
+ *     (мосты и так видны как объёмные по Y=0, здания и вода перекрывают).
+ *   - `waterway` встречается дважды: линии (idx 12) и подписи-носители
+ *     (idx 102). Подписи попадают в textLines и сортируются отдельно.
+ *   - `landcover` встречается 5 раз (idx 1–25); берётся первое вхождение.
  *
- * Набор слоёв соответствует схеме OpenMapTiles (docs.maptiler.com/schema/
- * omt-planet/): aerodrome_label, aeroway, boundary, building, housenumber,
- * landcover, landuse, mountain_peak, park, place, poi, transportation,
- * transportation_name, water, water_name, waterway. Слой `leisure` добавлен
- * отдельно — в некоторых OSM-схемах он выносится из `landuse`.
+ * Полный список source-layers style.json (в порядке первого появления):
+ *   landcover → landuse → park → waterway → water → building →
+ *   transportation → aeroway → boundary → water_name → poi →
+ *   transportation_name → aerodrome_label → place.
  *
- * @property {number} landuse            — Землепользование (жилые, промышленные зоны).
- * @property {number} landcover          — Растительный/почвенный покров (лес, трава, песок).
- * @property {number} park               — Парки и охраняемые территории.
- * @property {number} leisure            — Зоны отдыха (спортплощадки, стадионы).
- * @property {number} water              — Водные полигоны (озёра, моря, реки-полигоны).
- * @property {number} waterway           — Водные линии (реки, каналы, ручьи).
- * @property {number} boundary           — Административные границы.
- * @property {number} aeroway            — Аэродромная инфраструктура (ВПП, рулёжки).
- * @property {number} transportation     — Дороги, железные дороги, паромы.
- * @property {number} building           — Здания (в т.ч. 3D).
- * @property {number} water_name         — Подписи водоёмов (carrier-линии).
- * @property {number} transportation_name— Подписи дорог (carrier-линии).
- * @property {number} poi                — Точки интереса (POI).
- * @property {number} place              — Населённые пункты (города, деревни).
- * @property {number} mountain_peak      — Горные вершины.
- * @property {number} aerodrome_label    — Подписи аэродромов.
- * @property {number} housenumber        — Номера домов.
+ * Source-layers из старой версии, которых НЕТ в style.json:
+ *   leisure, mountain_peak, housenumber — удалены.
  */
 export const LAYER_RENDER_ORDER = {
-    landuse:             10,
-    landcover:           20,
-    park:                30,
-    leisure:             40,
-    water:               50,
-    waterway:            60,
-    boundary:            70,
-    aeroway:             80,
-    transportation:      90,
-    building:           100,
-    water_name:         110,
-    transportation_name:120,
-    poi:                130,
-    place:              140,
-    mountain_peak:      150,
-    aerodrome_label:    160,
-    housenumber:        170
+    landcover:            10,
+    landuse:              20,
+    park:                110,
+    waterway:            120,
+    water:               190,
+    building:            250,
+    transportation:      270,
+    aeroway:             470,
+    boundary:            980,
+    water_name:         1030,
+    poi:                1080,
+    transportation_name:1120,
+    aerodrome_label:    1180,
+    place:              1190
 };

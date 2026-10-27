@@ -2,6 +2,21 @@
 /**
  * Модуль генерации кода воркера векторных тайлов.
  * Использует стили и порядок отрисовки из vectorTileDefaults.js.
+ *
+ * Стили — декларативные объекты с полями-спеками:
+ *   { type: 'match', by, values }, { type: 'zoom', stops },
+ *   { type: 'step', stops, default }, { type: 'field', keys, fallback },
+ *   { type: 'coalesce', of }, { type: 'levels', multiplier }.
+ * Резолвятся хелперами resolveValue / resolveColor / resolveNumber /
+ * resolveString / resolveArray / resolveHeight.
+ *
+ * Фильтры на уровне source-layer (`style.filter`) — DSL из
+ * resolveFilter / evalFilter.
+ *
+ * Зум для резолва передаётся как целочисленный z тайла: continuousZoom
+ * доступен только на main-thread, а геометрия тайла уже зафиксирована
+ * под его z. Межзумовые перетекания (fade-in construction) будут
+ * "прыгать" на дискретных зумах — это компромисс.
  */
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
@@ -71,10 +86,13 @@ function onMessage(e) {
     }
 }
 
-// Вспомогательные функции
 const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLES)};
 const LAYER_RENDER_ORDER = ${JSON.stringify(LAYER_RENDER_ORDER)};
 let workerStyles = DEFAULT_STYLES;
+
+// source-layers, которые в style.json — только symbol-слои (не рисуют
+// геометрию). Для них LineString-фичи идут только в textLines.
+const CARRIER_ONLY_LINE_LAYERS = new Set(['transportation_name', 'water_name']);
 
 function collectTransferables(obj, list) {
     if (obj instanceof ArrayBuffer) {
@@ -88,39 +106,195 @@ function collectTransferables(obj, list) {
     }
 }
 
-const KNOWN_STYLE_KEYS = [
-    'color', 'opacity', 'stroke', 'width', 'dash',
-    'radius', 'height',
-    'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textShadow',
-    'textOffset', 'textAlign', 'textVerticalAlign', 'textPriority',
-    'textZoomMin', 'textZoomMax',
-    'textPlacement', 'textTransform', 'textFontStyle', 'textLetterSpacing',
-    'textMinSegmentLength'
-];
+// ════════════════════════════════════════════════════════════════════════
+// РЕЗОЛВЕРЫ СПЕК
+// ════════════════════════════════════════════════════════════════════════
 
-function getFeatureStyle(feature, layerName, styles) {
-    const p = feature.properties || {};
-    let styleConfig = styles[layerName];
-    if (!styleConfig) return null;
-
-    if (typeof styleConfig === 'object' &&
-        !styleConfig.hasOwnProperty('color') &&
-        !styleConfig.hasOwnProperty('stroke') &&
-        !styleConfig.hasOwnProperty('width')) {
-        const cls = p.class || p.subclass || '_default';
-        const classStyle = styleConfig[cls] || styleConfig['_default'];
-        if (!classStyle) return null;
-        styleConfig = classStyle;
+function resolveValue(spec, props, zoom) {
+    if (spec === null || spec === undefined) return undefined;
+    if (typeof spec !== 'object') return spec;
+    if (Array.isArray(spec)) return spec;
+    switch (spec.type) {
+        case 'match':    return resolveMatch(spec, props, zoom);
+        case 'zoom':     return resolveZoom(spec, zoom);
+        case 'step':     return resolveStep(spec, zoom);
+        case 'field':    return resolveField(spec, props, zoom);
+        case 'coalesce': return resolveCoalesce(spec, props, zoom);
+        case 'levels':   return resolveLevels(spec, props);
+        default:         return undefined;
     }
+}
 
-    const result = {};
-    for (const key of KNOWN_STYLE_KEYS) {
-        if (styleConfig[key] !== undefined) {
-            result[key] = styleConfig[key];
+function resolveMatch(spec, props, zoom) {
+    const keys = Array.isArray(spec.by) ? spec.by : [spec.by];
+    for (const k of keys) {
+        const v = props[k];
+        if (v === undefined || v === null) continue;
+        let found = spec.values[v];
+        if (found !== undefined) return resolveValue(found, props, zoom);
+        // Числовые/булевы ключи: JS приводит их к строке при доступе к
+        // объекту, но true → 'true', а не '1'. Явно проверяем частный случай.
+        const sv = String(v);
+        if (sv in spec.values) return resolveValue(spec.values[sv], props, zoom);
+        if (v === true && '1' in spec.values) return resolveValue(spec.values['1'], props, zoom);
+    }
+    return resolveValue(spec.values._default, props, zoom);
+}
+
+function resolveZoom(spec, zoom) {
+    const stops = spec.stops;
+    if (!stops || stops.length === 0) return undefined;
+    if (zoom <= stops[0][0]) return stops[0][1];
+    if (zoom >= stops[stops.length - 1][0]) return stops[stops.length - 1][1];
+    for (let i = 0; i < stops.length - 1; i++) {
+        const z0 = stops[i][0], v0 = stops[i][1];
+        const z1 = stops[i + 1][0], v1 = stops[i + 1][1];
+        if (zoom >= z0 && zoom <= z1) {
+            const t = (zoom - z0) / (z1 - z0);
+            return lerpValue(v0, v1, t);
         }
+    }
+    return stops[stops.length - 1][1];
+}
+
+function lerpValue(a, b, t) {
+    if (typeof a === 'number' && typeof b === 'number') {
+        // Эвристика: целые > 255 — вероятно упакованный 0xRRGGBB. Интерполяция
+        // покомпонентная (иначе упакованная сумма "перескакивает" через разряды).
+        if (Number.isInteger(a) && Number.isInteger(b) && a > 255 && b > 255) {
+            const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+            const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+            const r = Math.round(ar + (br - ar) * t);
+            const g = Math.round(ag + (bg - ag) * t);
+            const bl = Math.round(ab + (bb - ab) * t);
+            return (r << 16) | (g << 8) | bl;
+        }
+        return a + (b - a) * t;
+    }
+    // Строки/массивы — ступенчато (ближайший стоп).
+    return t < 0.5 ? a : b;
+}
+
+function resolveStep(spec, zoom) {
+    const stops = spec.stops;
+    if (!stops || stops.length === 0) return spec.default;
+    let result = spec.default;
+    for (const pair of stops) {
+        if (zoom >= pair[0]) result = pair[1];
+        else break;
     }
     return result;
 }
+
+function resolveField(spec, props, zoom) {
+    for (const k of spec.keys) {
+        const v = props[k];
+        if (v === undefined || v === null || v === '') continue;
+        // Число как число (для height/base).
+        const n = parseFloat(v);
+        if (!isNaN(n) && String(n) === String(v).trim()) return n;
+        return v;
+    }
+    return spec.fallback !== undefined ? resolveValue(spec.fallback, props, zoom) : undefined;
+}
+
+function resolveCoalesce(spec, props, zoom) {
+    for (const sub of spec.of) {
+        const v = resolveValue(sub, props, zoom);
+        if (v !== undefined && v !== null) return v;
+    }
+    return undefined;
+}
+
+function resolveLevels(spec, props) {
+    const lvl = parseInt(props['building:levels'], 10);
+    if (!isNaN(lvl) && lvl > 0) return lvl * (spec.multiplier || 3);
+    return 0;
+}
+
+function resolveColor(spec, props, zoom) {
+    const v = resolveValue(spec, props, zoom);
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') {
+        if (v.charAt(0) === '#') return parseInt(v.slice(1), 16);
+        if (v.startsWith('0x')) return parseInt(v.slice(2), 16);
+    }
+    return null;
+}
+
+function resolveNumber(spec, props, zoom, fallback) {
+    const v = resolveValue(spec, props, zoom);
+    if (v === undefined || v === null) return fallback;
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    return isNaN(n) ? fallback : n;
+}
+
+function resolveString(spec, props, zoom, fallback) {
+    const v = resolveValue(spec, props, zoom);
+    if (v === undefined || v === null) return fallback;
+    return String(v);
+}
+
+function resolveArray(spec, props, zoom) {
+    const v = resolveValue(spec, props, zoom);
+    return Array.isArray(v) ? v : undefined;
+}
+
+function resolveHeight(spec, props, zoom) {
+    const v = resolveValue(spec, props, zoom);
+    if (v === undefined || v === null) return 0;
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    return isNaN(n) ? 0 : n;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// РЕЗОЛВЕР ФИЛЬТРОВ
+// ════════════════════════════════════════════════════════════════════════
+
+function resolveFilter(spec, feature) {
+    if (!spec) return true;
+    try {
+        return evalFilter(spec, feature);
+    } catch (e) {
+        return true; // fail-open
+    }
+}
+
+function evalFilter(spec, feature) {
+    if (!spec || typeof spec !== 'object') return true;
+    const props = feature.properties || {};
+    switch (spec.type) {
+        case 'in':
+            return Array.isArray(spec.values) && spec.values.includes(props[spec.key]);
+        case 'eq':
+            return props[spec.key] === spec.value;
+        case 'exists':
+            return props[spec.key] !== undefined && props[spec.key] !== null;
+        case 'gt':
+            return Number(props[spec.key]) > Number(spec.value);
+        case 'gte':
+            return Number(props[spec.key]) >= Number(spec.value);
+        case 'lt':
+            return Number(props[spec.key]) < Number(spec.value);
+        case 'lte':
+            return Number(props[spec.key]) <= Number(spec.value);
+        case 'geometry':
+            return Array.isArray(spec.in) && spec.in.includes(feature.type);
+        case 'any':
+            return Array.isArray(spec.of) && spec.of.some(s => evalFilter(s, feature));
+        case 'all':
+            return Array.isArray(spec.of) && spec.of.every(s => evalFilter(s, feature));
+        case 'not':
+            return !evalFilter(spec.of, feature);
+        default:
+            return true;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ГЕОМЕТРИЧЕСКИЕ УТИЛИТЫ (без изменений)
+// ════════════════════════════════════════════════════════════════════════
 
 function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine = false) {
     const minLen = isLine ? 2 : 3;
@@ -290,20 +464,20 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
     if (validRings.length === 0) return null;
 
     let posCount = 0, negCount = 0;
-    for (const { area } of validRings) {
-        if (area > 0) posCount++; else negCount++;
+    for (const entry of validRings) {
+        if (entry.area > 0) posCount++; else negCount++;
     }
     const outerSign = posCount >= negCount ? 1 : -1;
 
     const polygons = [];
-    for (const { ring, area } of validRings) {
-        const isOuter = Math.sign(area) === outerSign;
+    for (const entry of validRings) {
+        const isOuter = Math.sign(entry.area) === outerSign;
         if (isOuter) {
-            polygons.push({ outer: ring, holes: [] });
+            polygons.push({ outer: entry.ring, holes: [] });
         } else if (polygons.length > 0) {
-            polygons[polygons.length - 1].holes.push(ring);
+            polygons[polygons.length - 1].holes.push(entry.ring);
         } else {
-            polygons.push({ outer: ring, holes: [] });
+            polygons.push({ outer: entry.ring, holes: [] });
         }
     }
 
@@ -319,7 +493,8 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
         const holes = poly.holes.map(h => orientRing(h, true));
         const triData = triangulatePolygon(outer, holes, eps);
         if (!triData) continue;
-        const { vertices, indices } = triData;
+        const vertices = triData.vertices;
+        const indices = triData.indices;
 
         for (let i = 0; i < indices.length; i += 3) {
             const a = indices[i], b = indices[i + 1], c = indices[i + 2];
@@ -433,7 +608,8 @@ function mergePolygonGeometries(geos) {
     const allIdx = [];
     let offset = 0;
     for (const geo of geos) {
-        const { positions, indices } = geo;
+        const positions = geo.positions;
+        const indices = geo.indices;
         for (let i = 0; i < positions.length; i++) allPos.push(positions[i]);
         for (let i = 0; i < indices.length; i++) allIdx.push(indices[i] + offset);
         offset += positions.length / 3;
@@ -449,7 +625,22 @@ function computePointScale(z) {
     return 1.0 + (z - 14) * 0.25;
 }
 
-// --- Проверки пересечений с exclusion areas ---
+function blendWithBackground(color, opacity) {
+    if (opacity >= 1) return color;
+    if (opacity <= 0) return 0xffffff;
+    const r = (color >> 16) & 0xff;
+    const g = (color >> 8) & 0xff;
+    const b = color & 0xff;
+    const br = Math.round(r * opacity + 255 * (1 - opacity));
+    const bg = Math.round(g * opacity + 255 * (1 - opacity));
+    const bb = Math.round(b * opacity + 255 * (1 - opacity));
+    return (br << 16) | (bg << 8) | bb;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// EXCLUSION AREAS
+// ════════════════════════════════════════════════════════════════════════
+
 function pointInPolygon(pt, polygon) {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -519,7 +710,10 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
     }
     return false;
 }
-// --- Конец функций для exclusion ---
+
+// ════════════════════════════════════════════════════════════════════════
+// ОБРАБОТКА ТАЙЛА
+// ════════════════════════════════════════════════════════════════════════
 
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges,
                      exclusionPolygons = [], exclusionLayers = [],
@@ -527,6 +721,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const eps = tileSize * 0.5 / 4096;
     const pointScale = computePointScale(z);
     const halfTile = tileSize / 2;
+    const zoom = z;
 
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
@@ -545,34 +740,27 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const textPoints = [];
     const textLines = [];
 
-    const textLayers = ['place', 'poi', 'housenumber'];
-
-    // Порядок обхода: сначала слои, дающие подписи, затем остальные —
-    // по визуальной иерархии. Это не влияет на итоговый порядок подписей
-    // (он определяется сортировкой по priority ниже), но сохраняет
-    // предсказуемый порядок обхода для не-подписных слоёв.
-    const layerOrder = [
-        'place', 'poi', 'housenumber',
-        'transportation', 'transportation_name',
-        'waterway', 'water_name',
-        'water', 'landcover', 'landuse',
-        'park', 'leisure', 'aeroway',
-        'boundary', 'building'
-    ];
-
     const processLayer = (name) => {
         if (visibleLayers && !visibleLayers.includes(name)) return;
         const layer = tile.layers[name];
         if (!layer) return;
+        const layerStyle = workerStyles[name];
+        if (!layerStyle) return;
+
+        const isCarrierOnlyLine = CARRIER_ONLY_LINE_LAYERS.has(name);
+        const layerBaseOrder = LAYER_RENDER_ORDER[name] ?? 20;
+
         for (let i = 0; i < layer.length; i++) {
             const feature = layer.feature(i);
             const props = feature.properties || {};
-            const style = getFeatureStyle(feature, name, workerStyles);
-            if (!style) continue;
+
+            // ---- layer-level filter (geometry type, классы, has name и т.п.)
+            if (layerStyle.filter && !resolveFilter(layerStyle.filter, feature)) continue;
 
             const geomType = feature.type;
             const sortKey = props.sort_key != null ? Number(props.sort_key) : 0;
 
+            // ═══════════════════════ POINT ═══════════════════════
             if (geomType === 1) {
                 const geom = feature.loadGeometry();
                 if (geom.length === 0) continue;
@@ -588,18 +776,16 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     const localPt = { x: worldX, z: worldZ };
                     let excluded = false;
                     for (const exPoly of localExclusionPolygons) {
-                        if (pointInPolygon(localPt, exPoly)) {
-                            excluded = true;
-                            break;
-                        }
+                        if (pointInPolygon(localPt, exPoly)) { excluded = true; break; }
                     }
                     if (excluded) continue;
                 }
 
-                if (textLayers.includes(name)) {
-                    const text = name === 'housenumber'
-                        ? (props.housenumber || '')
-                        : (props.name || '');
+                const hasText = layerStyle.textColor !== undefined ||
+                                layerStyle.fontSize !== undefined;
+
+                if (hasText) {
+                    const text = props.name || '';
                     if (!text) continue;
 
                     textPoints.push({
@@ -607,39 +793,43 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         z: worldZ,
                         text,
                         layerName: name,
-                        textColor: style.textColor || '#333333',
-                        fontSize: style.fontSize || '12px',
-                        fontFamily: style.fontFamily || 'sans-serif',
-                        fontWeight: style.fontWeight || 'normal',
-                        textFontStyle: style.textFontStyle,
-                        textTransform: style.textTransform,
-                        textLetterSpacing: style.textLetterSpacing,
-                        textShadow: style.textShadow || '',
-                        textOffset: style.textOffset || [0, 0],
-                        textAlign: style.textAlign || 'center',
-                        textVerticalAlign: style.textVerticalAlign || 'center',
-                        priority: (style.textPriority ?? (LAYER_RENDER_ORDER[name] ?? 20)) + sortKey * 0.001,
+                        textColor: resolveString(layerStyle.textColor, props, zoom, '#333333'),
+                        fontSize: resolveNumber(layerStyle.fontSize, props, zoom, 12) + 'px',
+                        fontFamily: resolveString(layerStyle.fontFamily, props, zoom, 'sans-serif'),
+                        fontWeight: resolveString(layerStyle.fontWeight, props, zoom, 'normal'),
+                        textFontStyle: resolveString(layerStyle.textFontStyle, props, zoom, ''),
+                        textTransform: resolveString(layerStyle.textTransform, props, zoom, ''),
+                        textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, zoom, ''),
+                        textShadow: resolveString(layerStyle.textShadow, props, zoom, ''),
+                        textOffset: resolveArray(layerStyle.textOffset, props, zoom) || [0, 0],
+                        textAlign: resolveString(layerStyle.textAlign, props, zoom, 'center'),
+                        textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, zoom, 'center'),
+                        priority: resolveNumber(layerStyle.textPriority, props, zoom, layerBaseOrder) + sortKey * 0.001,
                         zoomBounds: {
-                            min: style.textZoomMin ?? 0,
-                            max: style.textZoomMax ?? 24
+                            min: resolveNumber(layerStyle.textZoomMin, props, zoom, 0),
+                            max: resolveNumber(layerStyle.textZoomMax, props, zoom, 24)
                         }
                     });
-
                     continue;
                 }
 
-                const radius = (style.radius || 3) * pointScale;
+                const color = resolveColor(layerStyle.color, props, zoom);
+                if (color === null) continue;
+                const radius = resolveNumber(layerStyle.radius, props, zoom, 3) * pointScale;
+                const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
+
                 points.push({
                     x: worldX,
                     z: worldZ,
                     radius,
-                    color: style.color,
-                    opacity: style.opacity ?? 1,
-                    renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
+                    color,
+                    opacity,
+                    renderOrder: layerBaseOrder + Math.min(sortKey * 0.001, 0.4)
                 });
                 continue;
             }
 
+            // ═══════════════════ POLYGON / LINESTRING ═══════════════════
             const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
 
             if (geomType === 3) {
@@ -647,46 +837,42 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (polygonIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
 
+                // ---- building (fill-extrusion) ----
                 if (name === 'building') {
                     if (props.hide_3d === true) continue;
 
-                    let height = 0;
-                    if (props.render_height !== undefined && props.render_height !== null) {
-                        height = parseFloat(props.render_height);
-                    } else if (props['building:levels'] !== undefined) {
-                        const levels = parseInt(props['building:levels'], 10) || 0;
-                        height = levels * 3;
-                    }
-                    let minHeight = 0;
-                    const rawMin = props.render_min_height ?? props.min_height;
-                    if (rawMin !== undefined && rawMin !== null) {
-                        minHeight = parseFloat(rawMin);
-                    }
+                    const height = resolveHeight(layerStyle.height, props, zoom);
+                    const minHeight = resolveHeight(layerStyle.base, props, zoom);
 
-                    if (!isNaN(height) && height > 0) {
-                        minHeight = isNaN(minHeight) ? 0 : minHeight;
-                        if (height > minHeight) {
-                            const isPart = props['building:part'] === 'yes';
-                            const isSimpleBuilding = props['building:part'] === undefined;
-                            if (is3d && (isPart || isSimpleBuilding)) {
-                                const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
-                                if (geo) {
-                                    buildings.push({
-                                        positions: geo.positions,
-                                        normals: geo.normals,
-                                        edgePositions: geo.edgePositions,
-                                        color: style.color,
-                                        stroke: style.stroke || 0xb3b3b3,
-                                        renderOrder: (LAYER_RENDER_ORDER[name] ?? 20) + Math.min(sortKey * 0.001, 0.4)
-                                    });
-                                    continue;
-                                }
+                    if (!isNaN(height) && height > 0 && height > minHeight) {
+                        const isPart = props['building:part'] === 'yes';
+                        const isSimpleBuilding = props['building:part'] === undefined;
+                        if (is3d && (isPart || isSimpleBuilding)) {
+                            const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
+                            if (geo) {
+                                const bColor = resolveColor(layerStyle.color, props, zoom);
+                                const bStroke = resolveColor(layerStyle.stroke, props, zoom);
+                                buildings.push({
+                                    positions: geo.positions,
+                                    normals: geo.normals,
+                                    edgePositions: geo.edgePositions,
+                                    color: bColor !== null ? bColor : 0xf2eae2,
+                                    stroke: bStroke !== null ? bStroke : 0xb3b3b3,
+                                    renderOrder: layerBaseOrder + Math.min(sortKey * 0.001, 0.4)
+                                });
+                                continue;
                             }
                         }
                     }
+                    // fall through to 2D fill, если extruded не получилось
                 }
 
-                const fillKey = \`fill:\${name}:\${style.color.toString(16)}:\${(style.opacity ?? 1)}\`;
+                // ---- polygon fill ----
+                const color = resolveColor(layerStyle.color, props, zoom);
+                if (color === null) continue;
+                const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
+
+                const fillKey = 'fill:' + name + ':' + color.toString(16) + ':' + opacity;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
                 const triData = [];
@@ -697,20 +883,21 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     const t = triangulatePolygon(cleanedOuter, [], eps);
                     if (t) {
                         const positions = new Float32Array(t.vertices.length / 2 * 3);
-                        for (let i = 0, j = 0; i < t.vertices.length; i += 2, j += 3) {
-                            positions[j] = t.vertices[i];
-                            positions[j+1] = 0;
-                            positions[j+2] = t.vertices[i+1];
+                        for (let ii = 0, jj = 0; ii < t.vertices.length; ii += 2, jj += 3) {
+                            positions[jj] = t.vertices[ii];
+                            positions[jj + 1] = 0;
+                            positions[jj + 2] = t.vertices[ii + 1];
                         }
                         triData.push({ positions, indices: new Uint32Array(t.indices), sortKey });
                     }
                 }
-                if (triData.length > 0) {
-                    fillGroup.push(...triData);
-                }
+                if (triData.length > 0) fillGroup.push(...triData);
 
-                if (style.stroke) {
-                    const strokeKey = \`stroke:\${name}:\${style.stroke.toString(16)}:\${(style.width ?? 1)}\`;
+                // ---- polygon stroke ----
+                const strokeColor = resolveColor(layerStyle.stroke, props, zoom);
+                if (strokeColor !== null) {
+                    const strokeWidth = resolveNumber(layerStyle.width, props, zoom, 1);
+                    const strokeKey = 'stroke:' + name + ':' + strokeColor.toString(16) + ':' + strokeWidth;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
                     for (const ring of rings) {
@@ -722,41 +909,59 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     if (lineIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
 
-                let dynamicOrder = LAYER_RENDER_ORDER[name] ?? 10;
-                if (name === 'transportation' || name === 'transportation_name') {
-                    const bridge = props.bridge === 'yes' ? 2 : 0;
-                    const tunnel = props.tunnel === 'yes' ? -2 : 0;
-                    const layerVal = props.layer ? parseInt(props.layer, 10) : 0;
-                    dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
+                // ---- line geometry (кроме carrier-only слоёв) ----
+                if (!isCarrierOnlyLine) {
+                    const color = resolveColor(layerStyle.color, props, zoom);
+                    if (color !== null) {
+                        const width = resolveNumber(layerStyle.width, props, zoom, 1);
+                        const opacity = resolveNumber(layerStyle.opacity, props, zoom, 1);
+                        const dash = resolveArray(layerStyle.dash, props, zoom) || null;
+
+                        // Line2 в VectorTileLayer не поддерживает opacity:
+                        // подмешиваем цвет к белому фону.
+                        const finalColor = opacity < 1
+                            ? blendWithBackground(color, opacity)
+                            : color;
+
+                        let dynamicOrder = layerBaseOrder;
+                        if (name === 'transportation') {
+                            const brunnel = props.brunnel || '';
+                            const bridge = brunnel === 'bridge' ? 2 : 0;
+                            const tunnel = brunnel === 'tunnel' ? -2 : 0;
+                            const layerVal = props.layer ? parseInt(props.layer, 10) : 0;
+                            dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
+                        }
+
+                        const dashKey = dash ? dash.join(',') : 'none';
+                        const lineKey = 'line:' + name + ':' +
+                            finalColor.toString(16) + ':' + width + ':' + dashKey;
+                        let lineGroup = linesMap.get(lineKey);
+                        if (!lineGroup) {
+                            lineGroup = {
+                                rings: [],
+                                renderOrder: dynamicOrder,
+                                dash
+                            };
+                            linesMap.set(lineKey, lineGroup);
+                        }
+                        for (const ring of rings) {
+                            if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
+                        }
+                    }
                 }
 
-                const lineKey = \`line:\${name}:\${style.color.toString(16)}:\${style.width ?? 1}:\${style.dash ? style.dash.join(',') : 'none'}\`;
-                let lineGroup = linesMap.get(lineKey);
-                if (!lineGroup) {
-                    lineGroup = {
-                        rings: [],
-                        renderOrder: dynamicOrder,
-                        dash: style.dash || null
-                    };
-                    linesMap.set(lineKey, lineGroup);
-                }
-                for (const ring of rings) {
-                    if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
-                }
+                // ---- text on lines ----
+                const hasText = layerStyle.textColor !== undefined ||
+                                layerStyle.fontSize !== undefined ||
+                                layerStyle.textZoomMin !== undefined ||
+                                layerStyle.textPlacement !== undefined;
 
-                // ---- Линейные подписи ----
-                // Fit-check по ширине текста здесь не делаем: масштаб
-                // рендера (continuousZoom) и итоговая ширина видимой части
-                // линии в пикселях известны только на main-thread. Проверка
-                // живёт в VectorLineLabelSource.getVisibleInterval().
-                const featureName = props.name || props.ref;
-                const hasTextStyle =
-                    style.textColor || style.fontSize ||
-                    style.textZoomMin !== undefined ||
-                    style.textPlacement !== undefined;
+                if (hasText) {
+                    const featureName = props.name || props.ref || '';
+                    if (!featureName) continue;
 
-                if (featureName && hasTextStyle) {
-                    const minSegmentFactor = style.textMinSegmentLength ?? 0.15;
+                    const minSegmentFactor = resolveNumber(
+                        layerStyle.textMinSegmentLength, props, zoom, 0.15);
                     const minLen = tileSize * minSegmentFactor;
 
                     for (const ring of rings) {
@@ -774,24 +979,22 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             points: ring.map(p => ({ x: p.x, z: p.z })),
                             text: featureName,
                             layerName: name,
-                            textColor: style.textColor || '#333333',
-                            fontSize: style.fontSize || '11px',
-                            fontFamily: style.fontFamily || 'sans-serif',
-                            fontWeight: style.fontWeight || 'normal',
-                            textFontStyle: style.textFontStyle,
-                            textTransform: style.textTransform,
-                            textLetterSpacing: style.textLetterSpacing,
-                            textShadow: style.textShadow || '',
-                            textOffset: style.textOffset || [0, 0],
-                            textAlign: style.textAlign || 'center',
-                            textVerticalAlign: style.textVerticalAlign || 'middle',
-                            placement: style.textPlacement || 'along',
-                            priority:
-                                (style.textPriority ?? (LAYER_RENDER_ORDER[name] ?? 20)) +
-                                sortKey * 0.001,
+                            textColor: resolveString(layerStyle.textColor, props, zoom, '#333333'),
+                            fontSize: resolveNumber(layerStyle.fontSize, props, zoom, 11) + 'px',
+                            fontFamily: resolveString(layerStyle.fontFamily, props, zoom, 'sans-serif'),
+                            fontWeight: resolveString(layerStyle.fontWeight, props, zoom, 'normal'),
+                            textFontStyle: resolveString(layerStyle.textFontStyle, props, zoom, ''),
+                            textTransform: resolveString(layerStyle.textTransform, props, zoom, ''),
+                            textLetterSpacing: resolveString(layerStyle.textLetterSpacing, props, zoom, ''),
+                            textShadow: resolveString(layerStyle.textShadow, props, zoom, ''),
+                            textOffset: resolveArray(layerStyle.textOffset, props, zoom) || [0, 0],
+                            textAlign: resolveString(layerStyle.textAlign, props, zoom, 'center'),
+                            textVerticalAlign: resolveString(layerStyle.textVerticalAlign, props, zoom, 'middle'),
+                            placement: resolveString(layerStyle.textPlacement, props, zoom, 'along'),
+                            priority: resolveNumber(layerStyle.textPriority, props, zoom, layerBaseOrder) + sortKey * 0.001,
                             zoomBounds: {
-                                min: style.textZoomMin ?? 14,
-                                max: style.textZoomMax ?? 24
+                                min: resolveNumber(layerStyle.textZoomMin, props, zoom, 14),
+                                max: resolveNumber(layerStyle.textZoomMax, props, zoom, 24)
                             }
                         });
                     }
@@ -800,37 +1003,31 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         }
     };
 
-    layerOrder.forEach(processLayer);
-    for (const name in tile.layers) {
-        if (!layerOrder.includes(name)) processLayer(name);
-    }
+    // Порядок обхода не важен: подписи сортируются по priority ниже,
+    // геометрия группируется по ключу и получает renderOrder из
+    // LAYER_RENDER_ORDER[<layer>].
+    for (const name in tile.layers) processLayer(name);
 
-    // Сортировка по убыванию приоритета до обрезки: если упрёмся в лимит,
-    // первыми отбросятся наименее значимые подписи (POI, номера домов,
-    // мелкие сервисные дороги), а магистрали, города и реки останутся.
     textPoints.sort((a, b) => b.priority - a.priority);
     textLines.sort((a, b) => b.priority - a.priority);
 
-    if (textPoints.length > maxTextPointsPerTile) {
-        textPoints.length = maxTextPointsPerTile;
-    }
-    if (textLines.length > maxTextLinesPerTile) {
-        textLines.length = maxTextLinesPerTile;
-    }
+    if (textPoints.length > maxTextPointsPerTile) textPoints.length = maxTextPointsPerTile;
+    if (textLines.length > maxTextLinesPerTile) textLines.length = maxTextLinesPerTile;
 
     const result = {
         fills: [],
         lines: [],
         strokes: [],
         buildings: [],
-        points: points,
-        textPoints: textPoints,
-        textLines: textLines,
-        centerX: centerX,
-        centerZ: centerZ
+        points,
+        textPoints,
+        textLines,
+        centerX,
+        centerZ
     };
 
-    for (const [key, triGroup] of fillsMap) {
+    for (const entry of fillsMap) {
+        const key = entry[0], triGroup = entry[1];
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
         const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
@@ -844,7 +1041,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         });
     }
 
-    for (const [key, lineGroup] of linesMap) {
+    for (const entry of linesMap) {
+        const key = entry[0], lineGroup = entry[1];
         const positions = createLinePositions(lineGroup.rings.map(r => r.ring));
         if (!positions) continue;
         const parts = key.split(':');
@@ -859,7 +1057,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         });
     }
 
-    for (const [key, strokeGroup] of strokesMap) {
+    for (const entry of strokesMap) {
+        const key = entry[0], strokeGroup = entry[1];
         const positions = createLinePositions(strokeGroup.map(s => s.ring));
         if (!positions) continue;
         const parts = key.split(':');

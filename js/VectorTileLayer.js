@@ -830,7 +830,7 @@ export class VectorTileLayer {
     _collectLabelCandidates() {
         const map = this._map;
         const camera = map.camera;
-        const continuousZoom = map.continuousZoom;
+        const continuousZoom = map.continuousZoom + this.zoomOffset; 
         const discreteZoom = map.currentDiscreteZoom;
         const worldOffset = map.worldGroup.position;
         const rect = map.renderer.domElement.getBoundingClientRect();
@@ -1659,7 +1659,7 @@ const sourceZoom = Math.max(
                     y: ySlippy,
                     tileSize,
                     maxMerc: map.MAX_MERCATOR,
-                    continuousZoom: map.continuousZoom,
+                    continuousZoom: map.continuousZoom + this.zoomOffset,
                     localX: clickLocalX,
                     localZ: clickLocalZ,
                     tolerance: opts.tolerance || tileSize * 0.005,
@@ -1692,7 +1692,7 @@ const sourceZoom = Math.max(
                 tileSize,
                 maxMerc,
                 is3d,
-                continuousZoom: map.continuousZoom,
+                continuousZoom: map.continuousZoom + this.zoomOffset,
                 visibleLayers: this.visibleLayers,
                 buildingEdges: this.buildingEdges,
                 exclusionPolygons: this._exclusionAreas,

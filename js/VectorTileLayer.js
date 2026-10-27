@@ -652,22 +652,12 @@ export class VectorTileLayer {
 
         for (const line of result.lines) {
             const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
-            const lGeo = new LineGeometry();
-            lGeo.setPositions(line.positions);
-            const lineObj = new Line2(lGeo, mat);
-            lineObj.renderOrder = line.renderOrder;
-            lineObj.frustumCulled = false;
-            group.add(lineObj);
+            this._addFatLinesFromPositions(group, line.positions, mat, line.renderOrder);
         }
 
         for (const stroke of result.strokes) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
-            const lGeo = new LineGeometry();
-            lGeo.setPositions(stroke.positions);
-            const lineObj = new Line2(lGeo, mat);
-            lineObj.renderOrder = stroke.renderOrder;
-            lineObj.frustumCulled = false;
-            group.add(lineObj);
+            this._addFatLinesFromPositions(group, stroke.positions, mat, stroke.renderOrder);
         }
 
         for (const pt of result.points) {
@@ -685,6 +675,52 @@ export class VectorTileLayer {
         group.userData.lineLabelSources = null;
         group.userData.textLabels = [];
         group.userData.is3d = result.is3d;
+    }
+
+    /**
+     * Создаёт в `group` один или несколько Line2 на основе «сырого» массива
+     * позиций вида [x0,y0,z0, x1,y1,z1, ..., NaN,NaN,NaN, ...].
+     *
+     * Воркер (`createLinePositions`) использует NaN-тройки как разделитель
+     * между несвязными кольцами — это конвенция THREE.Line (moveTo).
+     * LineGeometry/LineSegmentsGeometry (Line2) такой конвенции не знают:
+     * NaN попадает в instanced-атрибуты, и computeBoundingSphere() ругается
+     * предупреждением «Computed radius is NaN» (по одному на каждый
+     * разделитель). Поэтому режем массив по NaN на непрерывные куски и
+     * создаём отдельный Line2 на каждый.
+     *
+     * @private
+     * @param {THREE.Group} group
+     * @param {Float32Array} positions
+     * @param {LineMaterial} material
+     * @param {number} renderOrder
+     */
+    _addFatLinesFromPositions(group, positions, material, renderOrder) {
+        if (!positions || positions.length < 6) return;
+
+        const N = positions.length;
+        let start = 0;
+
+        const flush = (end) => {
+            // Нужно минимум две точки — 6 координат.
+            if (end - start < 6) return;
+
+            const seg = positions.subarray(start, end);
+            const lGeo = new LineGeometry();
+            lGeo.setPositions(seg);
+            const lineObj = new Line2(lGeo, material);
+            lineObj.renderOrder = renderOrder;
+            lineObj.frustumCulled = false;
+            group.add(lineObj);
+        };
+
+        for (let i = 0; i < N; i += 3) {
+            if (Number.isNaN(positions[i])) {
+                flush(i);
+                start = i + 3;
+            }
+        }
+        flush(N);
     }
 
     _refreshTextLabelsForVisibleTiles() {

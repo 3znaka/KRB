@@ -723,6 +723,13 @@ export class VectorTileLayer {
         const lGeo = new LineSegmentsGeometry();
         lGeo.setPositions(segs);
 
+        // КРИТИЧНО: LineMaterial в dashed-режиме читает
+        // instanceDistanceStart/End. Без computeLineDistances() они = 0,
+        // и шейдер всегда попадает в «dash-фазу» → линия рисуется сплошной.
+        if (material.dashed) {
+            lGeo.computeLineDistances();
+        }
+
         const lineObj = new Line2(lGeo, material);
         lineObj.renderOrder = renderOrder;
         lineObj.frustumCulled = false;
@@ -1272,7 +1279,7 @@ export class VectorTileLayer {
         }
 
         const canvas = map.renderer.domElement;
-        const w = canvas.width, h = canvas.height;
+        const w = canvas.clientWidth, h = canvas.clientHeight;
         if (this._lineMaterialsSet.size > 0 &&
             (this._lastCanvasSize.width !== w || this._lastCanvasSize.height !== h)) {
             this._lastCanvasSize.width = w;
@@ -1490,7 +1497,7 @@ export class VectorTileLayer {
                 isIdentify: true,
             });
             try {
-                 this._worker.postMessage({
+                this._worker.postMessage({
                     type: 'identify',
                     id,
                     buffer,
@@ -1499,7 +1506,7 @@ export class VectorTileLayer {
                     y: ySlippy,
                     tileSize,
                     maxMerc: map.MAX_MERCATOR,
-                    continuousZoom: map.continuousZoom,   // <-- НОВОЕ
+                    continuousZoom: map.continuousZoom,
                     localX: clickLocalX,
                     localZ: clickLocalZ,
                     tolerance: opts.tolerance || tileSize * 0.005,
@@ -1524,7 +1531,7 @@ export class VectorTileLayer {
             const tileSize = map.WORLD_SIZE / (1 << z);
             const maxMerc = map.MAX_MERCATOR;
 
-                       const msg = {
+            const msg = {
                 type: 'process',
                 id,
                 buffer: buffer,
@@ -1532,7 +1539,7 @@ export class VectorTileLayer {
                 tileSize,
                 maxMerc,
                 is3d,
-                continuousZoom: map.continuousZoom,   // <-- НОВОЕ
+                continuousZoom: map.continuousZoom,
                 visibleLayers: this.visibleLayers,
                 buildingEdges: this.buildingEdges,
                 exclusionPolygons: this._exclusionAreas,
@@ -1667,12 +1674,16 @@ export class VectorTileLayer {
         const parts = styleKey.split(':');
         const color = parseInt(parts[2], 16);
         const width = parseFloat(parts[3]) * this.lineWidthMultiplier;
-        const matOpts = {
+                const matOpts = {
             color,
             linewidth: width,
+            // CSS-пиксели: LineMaterial делит linewidth на resolution.y
+            // и переводит в NDC. Если resolution в device-пикселях — на
+            // DPR>1 линия в DPR раз тоньше, чем в MapLibre (где
+            // line-width задан в CSS-пикселях).
             resolution: new THREE.Vector2(
-                this._map.renderer.domElement.width,
-                this._map.renderer.domElement.height
+                this._map.renderer.domElement.clientWidth,
+                this._map.renderer.domElement.clientHeight
             ),
             depthTest: true,
             depthWrite: false

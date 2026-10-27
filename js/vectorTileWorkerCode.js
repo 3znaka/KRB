@@ -290,7 +290,7 @@ function resolveHeight(spec, props, zoom, geomType) {
 function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
-    const worldPerPx = worldSize / (512 * Math.pow(2, continuousZoom));
+    const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
     return [
         dashPx[0] * worldPerPx,
         dashPx[1] * worldPerPx
@@ -1143,13 +1143,18 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
         const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
+        // Для transportation полигоны (highway-area, road_area_pier)
+        // в style.json идут ДО дорог-линий того же source-layer
+        // (индексы 43 vs 54+). Ставим -0.5, чтобы мосты-платформы
+        // всегда оказывались под пересекающимися дорогами.
+        const polyFillOffset = parts[1] === 'transportation' ? -0.5 : 0;
         result.fills.push({
             positions: merged.positions,
             indices: merged.indices,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
             opacity: parseFloat(parts[3]),
-            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + Math.min(avgSortKey * 0.001, 0.4)
+            renderOrder: (LAYER_RENDER_ORDER[parts[1]] ?? 1) + polyFillOffset + Math.min(avgSortKey * 0.001, 0.4)
         });
     }
 

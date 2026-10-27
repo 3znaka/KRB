@@ -291,7 +291,7 @@ function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
     const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
-    const DASH_MULTIPLIER = 3;
+ const DASH_MULTIPLIER = 10;
     return [
         dashPx[0] * worldPerPx * DASH_MULTIPLIER,
         dashPx[1] * worldPerPx * DASH_MULTIPLIER
@@ -864,6 +864,8 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         const layerStyle = workerStyles[name];
         if (!layerStyle) return;
 
+        if (layerStyle.maxZoom !== undefined && styleZoom >= layerStyle.maxZoom) return;
+
         const isCarrierOnlyLine = CARRIER_ONLY_LINE_LAYERS.has(name);
         const layerBaseOrder = LAYER_RENDER_ORDER[name] ?? 20;
 
@@ -974,11 +976,15 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 }
 
                 // ---- polygon fill ----
-                const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
+ const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                 if (color === null) continue;
-                const opacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
+                const rawOpacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
+                const color_out = rawOpacity < 1
+                    ? blendWithBackground(color, rawOpacity)
+                    : color;
+                const opacity = 1;
 
-                const fillKey = 'fill:' + name + ':' + color.toString(16) + ':' + opacity;
+                const fillKey = 'fill:' + name + ':' + color_out.toString(16) + ':' + opacity;
                 let fillGroup = fillsMap.get(fillKey);
                 if (!fillGroup) { fillGroup = []; fillsMap.set(fillKey, fillGroup); }
                 const triData = [];
@@ -1144,7 +1150,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
         const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
-const polyFillOffset = parts[1] === 'transportation' ? -5 : 0;
+ const polyFillOffset = parts[1] === 'transportation' ? -0.5 : 0;
         result.fills.push({
             positions: merged.positions,
             indices: merged.indices,

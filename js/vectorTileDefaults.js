@@ -326,7 +326,8 @@ export const DEFAULT_STYLES = {
     // ─────────────────────────────────────────────────────────────────
     // BOUNDARY
     // ─────────────────────────────────────────────────────────────────
-    boundary: {
+  boundary: {
+        maxZoom: 14,
         filter: { type: 'geometry', in: [2] },
         color: {
             type: 'match',

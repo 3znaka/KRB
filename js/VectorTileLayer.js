@@ -431,6 +431,8 @@ export class VectorTileLayer {
         this.depthTest = options.depthTest ?? false;
         this.visibleLayers = options.visibleLayers || null;
 
+        this.zoomOffset = options.zoomOffset ?? 0;
+
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
@@ -1378,7 +1380,8 @@ export class VectorTileLayer {
         }
         this._lastDiscreteZoom = discreteZoom;
 
-        const sourceZoom = Math.max(this.minZoom, Math.min(discreteZoom, this.maxSourceZoom));
+        const effectiveZoom = discreteZoom + this.zoomOffset;                              
+const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSourceZoom)); 
 
         if (sourceZoom !== this._lastSourceZoom) {
             this._generation++;
@@ -1416,17 +1419,16 @@ export class VectorTileLayer {
             this._scheduleOldTilesCleanup(1500);
         }
 
-        // ---- Префетч следующего sourceZoom ----
-        const continuousZoom = map.continuousZoom;
-        const nextSourceZoom = Math.min(discreteZoom + 1, this.maxSourceZoom);
-        if (
-            nextSourceZoom > sourceZoom &&
-            continuousZoom > discreteZoom + 0.3 &&
-            this._lastPrefetchZoom !== sourceZoom
-        ) {
-            this._lastPrefetchZoom = sourceZoom;
-            this._prefetchNextZoom(nextSourceZoom);
-        }
+const continuousZoom = map.continuousZoom;
+const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);   // ← было discreteZoom + 1
+if (
+    nextSourceZoom > sourceZoom &&
+    continuousZoom > discreteZoom + 0.3 &&
+    this._lastPrefetchZoom !== sourceZoom
+) {
+    this._lastPrefetchZoom = sourceZoom;
+    this._prefetchNextZoom(nextSourceZoom);
+}
         // ---------------------------------------
 
         const canvas = map.renderer.domElement;
@@ -1594,10 +1596,10 @@ export class VectorTileLayer {
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;
 
-        const sourceZoom = Math.max(
-            this.minZoom,
-            Math.min(map.currentDiscreteZoom, this.maxSourceZoom)
-        );
+const sourceZoom = Math.max(
+    this.minZoom,
+    Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom)  // ← + offset
+);
         const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
 

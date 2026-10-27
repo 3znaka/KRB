@@ -132,6 +132,7 @@ this.inputCRS = options.inputCRS
  * @type {Projection}
  */
 const firstTileLayer = this.layers.find(l => l.texture || l.elevation);
+this.zoomOffset = options.zoomOffset ?? firstTileLayer?.zoomOffset ?? 0;
 const tileCrsCode = firstTileLayer?.crs ?? firstTileLayer?.projection ?? 'EPSG:3857';
 this.tileCRS = Projections.get(tileCrsCode);
 
@@ -1016,9 +1017,9 @@ getTargetDistanceForZoom(z) {
         }
     }
 
-    getSurfaceMaxHeight(worldX, worldZ) {
-        if (!this.hasElevation) return 0;
-        const z = this.currentDiscreteZoom;
+getSurfaceMaxHeight(worldX, worldZ) {
+    if (!this.hasElevation) return 0;
+    const z = this.tileZoom;
         const maxTile = (1 << z) - 1;
 
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
@@ -1045,9 +1046,9 @@ getTargetDistanceForZoom(z) {
         return maxY;
     }
 
-    getSurfaceHeightAt(worldX, worldZ) {
-        if (!this.hasElevation) return 0;
-        const zMax = this.currentDiscreteZoom;
+getSurfaceHeightAt(worldX, worldZ) {
+    if (!this.hasElevation) return 0;
+    const zMax = this.tileZoom;
         const zMin = Math.max(0, this.MIN_RELIEF_Z);
         for (let zz = zMax; zz >= zMin; zz--) {
             const h = this._sampleHeightAtZoom(worldX, worldZ, zz);
@@ -1092,7 +1093,7 @@ getTargetDistanceForZoom(z) {
     }
 
     ensureTileForPoint(worldX, worldZ) {
-        const z = this.currentDiscreteZoom;
+        const z = this.tileZoom;  
         const maxTile = (1 << z) - 1;
 
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
@@ -1453,19 +1454,26 @@ getTargetDistanceForZoom(z) {
         this.camera.lookAt(target);
     }
 
-    applyZoomDelta(delta) {
-        this.targetContinuousZoom += delta;
-        this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
-        if (this.targetContinuousZoom > this.MAX_RELIEF_Z) {
-            const futureCenter = this._tempVec3a.copy(this.controls.target);
-            const neededParentZ = Math.min(Math.floor(this.targetContinuousZoom) - 1, this.MAX_RELIEF_Z);
-            this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
-        }
+applyZoomDelta(delta) {
+    this.targetContinuousZoom += delta;
+    this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
+
+    const futureTileZ = this.targetContinuousZoom + this.zoomOffset;   // ← new
+    if (futureTileZ > this.MAX_RELIEF_Z) {                             // ← было this.targetContinuousZoom
+        const futureCenter = this._tempVec3a.copy(this.controls.target);
+        const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, this.MAX_RELIEF_Z); // ← futureTileZ
+        this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
     }
+}
 
 peekIdealZoom(continuousZoom) {
     return Math.max(this.MIN_ZOOM,
                     Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
+}
+
+get tileZoom() {
+    const z = this.currentDiscreteZoom + this.zoomOffset;
+    return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, z));
 }
 
     maybeUpdateVisibleTiles(force = false) {

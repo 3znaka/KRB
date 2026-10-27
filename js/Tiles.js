@@ -239,7 +239,7 @@ export class TileManager {
      */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
         this.frame++;
-        const idealZ = this.engine.currentDiscreteZoom;
+       const idealZ = this.engine.tileZoom; 
 
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
@@ -390,18 +390,15 @@ if (this.engine.deformedTiles) {
         }
 
         this.gc(renderSet);
-
-        // Пре-фетч следующего уровня зума — сокращает окно fallback при
-        // приближении. Порог 0.3 согласован с Core.peekIdealZoom (там
-        // переключение при 0.6).
-        if (
-            continuousZoom > idealZ + 0.3 &&
-            idealZ < this.engine.MAX_ZOOM &&
-            this._lastPrefetchZoom < idealZ
-        ) {
-            this._lastPrefetchZoom = idealZ;
-            this.prefetchNextZoomLevel(controlsTarget, idealZ + 1, worldGroupPos);
-        }
+const viewZ = this.engine.currentDiscreteZoom;
+if (
+    continuousZoom > viewZ + 0.3 &&                  
+    idealZ < this.engine.MAX_ZOOM &&
+    this._lastPrefetchZoom < idealZ
+) {
+    this._lastPrefetchZoom = idealZ;
+    this.prefetchNextZoomLevel(controlsTarget, idealZ + 1, worldGroupPos);
+}
 
         return idealZ;
     }

@@ -149,8 +149,10 @@ export class VectorLineLabelSource {
 
         const ts = this._getStableCandidateTs();
         const totalPx = data.totalLenPx;
-        const tMid = data.tMidVisible;
         const camToCenter = this.map.camera.position.distanceTo(this.map.controls.target);
+        
+        const centerX = data.canvasW / 2;
+        const centerY = data.canvasH / 2;
 
         const result = [];
         for (let i = 0; i < ts.length; i++) {
@@ -176,12 +178,17 @@ export class VectorLineLabelSource {
             
             if (!this._isBBoxOnScreen(bbox, data)) continue;
 
+            // Сортируем по расстоянию до ЦЕНТРА ЭКРАНА.
+            // Так как подписи появляются только когда камера замерла,
+            // они не будут "прыгать", но всегда будут стремиться в центр.
+            const score = (bbox.cx - centerX) ** 2 + (bbox.cy - centerY) ** 2;
+
             result.push({
                 t,
                 isFlipped,
                 charLayout,
                 bbox,
-                score: Math.abs(t - tMid)
+                score
             });
         }
 
@@ -333,10 +340,11 @@ export class VectorLineLabelSource {
             if (!p) { flags.push(false); continue; }
             const w = this._sampleW(probe, px);
             if (!(w > 1e-6)) { flags.push(false); continue; }
+            // Ужесточили проверку: только реально видимые пиксели
             flags.push(
                 p.z >= -1 && p.z <= 1 &&
-                p.x >= -W * 0.5 && p.x <= W * 1.5 &&
-                p.y >= -H * 0.5 && p.y <= H * 1.5
+                p.x >= 0 && p.x <= W &&
+                p.y >= 0 && p.y <= H
             );
         }
         const firstVisible = flags.indexOf(true);

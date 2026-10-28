@@ -186,8 +186,8 @@ export class VectorTileLayer {
         this.buildingEdges = options.buildingEdges ?? true;
 
         this.maxTextLabels = options.maxTextLabels ?? 500;
-        this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 50;
-        this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 30;
+        this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;
+        this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 500;
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;

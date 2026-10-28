@@ -196,8 +196,8 @@ export class TextManager {
             _bbox: null,
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
-            _chosenCand: null,  // Сохраняем выбранного кандидата
-            _currentCand: null  // Обновляем каждый кадр для рендера
+            _chosenCand: null,
+            _currentCand: null
         };
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
@@ -284,7 +284,6 @@ export class TextManager {
     }
 
     _wrapPointText(text, fontSize) {
-        // ... (без изменений) ...
         if (!text || text.indexOf(' ') === -1) return text;
         const words = text.split(/\s+/).filter(w => w.length > 0);
         if (words.length <= 1) return text;
@@ -334,7 +333,6 @@ export class TextManager {
     }
 
     _flushMeasurements() {
-        // ... (без изменений) ...
         if (!this._measureScheduled) return;
         this._measureScheduled = false;
         const queue = this._measureQueue;
@@ -398,7 +396,6 @@ export class TextManager {
     }
 
     _setLabelVisible(label, visible) {
-        // ... (без изменений) ...
         const el = label.element;
         if (visible) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
@@ -422,7 +419,6 @@ export class TextManager {
     }
 
     _computeAnchor(label, rotationDeg) {
-        // ... (без изменений) ...
         const src = label.source;
         if (label._needsMeasure) this._flushMeasurements();
         const w = label.width;
@@ -447,7 +443,6 @@ export class TextManager {
     }
 
     _getLabelCorners(label, tOverride = null) {
-        // ... (без изменений) ...
         const src = label.source;
         const isLine = src.getLabelType() === 'line';
         let scrX, scrY, rotation = 0;
@@ -484,7 +479,6 @@ export class TextManager {
     }
 
     _getBBox(corners) {
-        // ... (без изменений) ...
         let minX = Infinity, minY = Infinity;
         let maxX = -Infinity, maxY = -Infinity;
         for (const c of corners) {
@@ -500,6 +494,34 @@ export class TextManager {
         return !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY);
     }
 
+    _projectPolygon(axis, poly) {
+        let min = axis.x * poly[0].x + axis.y * poly[0].y;
+        let max = min;
+        for (let i = 1; i < poly.length; i++) {
+            const proj = axis.x * poly[i].x + axis.y * poly[i].y;
+            if (proj < min) min = proj;
+            if (proj > max) max = proj;
+        }
+        return { min, max };
+    }
+
+    _rectsIntersect(rectA, rectB) {
+        if (!rectA || !rectB) return false;
+        const polys = [rectA, rectB];
+        for (const poly of polys) {
+            for (let i = 0; i < poly.length; i++) {
+                const p1 = poly[i];
+                const p2 = poly[(i + 1) % poly.length];
+                const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
+                const axis = { x: -edge.y, y: edge.x };
+                const projA = this._projectPolygon(axis, rectA);
+                const projB = this._projectPolygon(axis, rectB);
+                if (projA.max < projB.min || projB.max < projA.min) return false;
+            }
+        }
+        return true;
+    }
+
     _collidesWithGrid(bbox) {
         const others = this._gridIndex.query(bbox);
         for (let i = 0; i < others.length; i++) {
@@ -511,7 +533,6 @@ export class TextManager {
     }
 
     _renderLineChars(label, charLayout) {
-        // ... (без изменений) ...
         const el = label.element;
         const need = charLayout.length;
         while (el.children.length < need) {
@@ -548,11 +569,9 @@ export class TextManager {
         const now = performance.now();
 
         // Определяем, нужно ли делать тяжёлый Layout (поиск позиций и коллизии)
-        // Только если изменился зум, состав, или прошло достаточно времени.
         const needLayout = this._dirty || this._lastZoom !== zoom || (now - this._lastLayoutTime > this._layoutInterval);
 
         // Если Layout не нужен, но камера движется, мы просто обновляем трансформации
-        // на основе уже выбранных (_chosenCand) позиций.
         if (!needLayout) {
             const wp = map.worldGroup.position;
             const cam = map.camera.position;
@@ -569,7 +588,7 @@ export class TextManager {
         this._lastLayoutTime = now;
         this._lastZoom = zoom;
         this._dirty = false;
-        this._lastFrameSig = null; // Сброс, чтобы в следующий раз применились трансформации
+        this._lastFrameSig = null;
 
         const idSet = new Set();
         for (const l of this.labels) {
@@ -580,7 +599,6 @@ export class TextManager {
             }
         }
         
-        // Сбор видимых подписей
         const visibleLabels = [];
         for (const label of this.labels) {
             const src = label.source;
@@ -623,7 +641,6 @@ export class TextManager {
             }
         }
 
-        // Сортировка
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aKind = a.source.getLabelType() === 'point' ? 0 : 1;
@@ -666,7 +683,6 @@ export class TextManager {
                 continue;
             }
 
-            // point / legacy line
             lbl.rect = this._getLabelCorners(lbl);
             if (!lbl.rect) { lbl.hiddenByPriority = true; continue; }
             const bbox = this._getBBox(lbl.rect);
@@ -687,21 +703,15 @@ export class TextManager {
             }
         }
 
-        // Применяем видимость
         const visibleSet = new Set(visibleLabels);
         for (const label of this.labels) {
             const shouldBeVisible = visibleSet.has(label) && !label.hiddenByPriority;
             this._setLabelVisible(label, shouldBeVisible);
         }
 
-        // Применяем трансформации
         this._applyTransforms();
     }
 
-    /**
-     * Лёгкий метод, обновляющий только DOM.
-     * Ищет того же кандидата (по смещению) и применяет к нему новые экранные координаты.
-     */
     _applyTransforms() {
         for (const label of this.labels) {
             if (label.hiddenByPriority) continue;
@@ -711,12 +721,9 @@ export class TextManager {
             if (type === 'line-curved') {
                 if (!label._chosenCand) continue;
                 
-                // Получаем свежие координаты кандидатов
                 const candidates = src.getCandidates();
                 if (!candidates || candidates.length === 0) continue;
 
-                // Ищем кандидата, который ближе всего к сохранённому _chosenCand
-                // Это предотвращает "прыжки" при движении камеры.
                 let bestCand = candidates[0];
                 let minDist = Infinity;
                 const targetX = label._chosenCand.charLayout[0].x;

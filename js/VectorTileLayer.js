@@ -4,15 +4,31 @@
  * Основная логика управления тайлами, материалов и подписей.
  *
  * ПЕРЕХОД LOD (sourceZoom):
- *  - При смене sourceZoom старые группы уходят в `_oldTileGroups`, и им:
- *    1) сдвигается `renderOrder` на -10000 — все старые тайлы рисуются
- *       раньше любых новых (fallback-подложка);
- *    2) материал зданий подменяется на клон с `depthWrite = false` —
- *       чтобы не воевать с новыми домами за z-буфер.
- *    Ровно та же схема, что у растровых тайлов (Tiles.js):
- *    primary пишет глубину, fallback — только цвет.
- *  - Префетч следующего sourceZoom делается по порогу continuousZoom
- *    (см. `_prefetchNextZoom`), что сокращает окно fallback.
+ *  — Новые тайлы добавляются в сцену скрытыми.
+ *  — Старый тайл скрывается только тогда, когда готовы ВСЕ нужные новые
+ *    тайлы на его площади.
+ *  — Новый тайл показывается только тогда, когда скрыты все старые,
+ *    которые он перекрывает.
+ *  Таким образом в каждой точке экрана всегда ровно один LOD; подмена
+ *  атомарна в пределах одного старого тайла. Нет двойных дорог, дыр и
+ *  мигания подписей при переключении.
+ *
+ * ВЫБОР LOD:
+ *  — `_pickSourceZoom` целится в `targetContinuousZoom` (куда едет камера),
+ *    а не в дискретный зум карты. Гистерезис ±0.65 отсекает дребезг при
+ *    остановке зума около x.5.
+ *
+ * ЖИВАЯ ШИРИНА ЛИНИЙ:
+ *  — Воркер отдаёт ширину как кривую (число или {stops}), главный поток
+ *    каждый кадр пересчитывает linewidth/dashScale по continuousZoom.
+ *    Соседние тайлы одного уровня и оба LOD всегда имеют одинаковую
+ *    толщину — при переходе ничего не прыгает.
+ *
+ * ГЛУБИНА:
+ *  — Плоские слои упорядочены renderOrder'ом (алгоритм художника) и
+ *    используют `depthTest: this.depthTest` (по умолчанию false).
+ *  — Здания рисуются ПОСЛЕ всей плоской графики (renderOrder 5000/5001)
+ *    со своей depth-записью — их больше не закрашивают парки и вода.
  */
 
 import {
@@ -388,6 +404,8 @@ class VectorLineLabelSource {
 
 /**
  * Порядок отрисовки элементов векторного тайла.
+ * Здания (BUILDING/EDGE) вынесены в конец, чтобы они рисовались ПОСЛЕ
+ * всей плоской графики (парков, воды, дорог) со своей глубиной.
  * @type {{FILL:number, LINE:number, STROKE:number, POINT:number, BUILDING:number, EDGE:number}}
  */
 export const VECTOR_TILE_RENDER_ORDER = {
@@ -395,8 +413,8 @@ export const VECTOR_TILE_RENDER_ORDER = {
     LINE:     20,
     STROKE:   25,
     POINT:    30,
-    BUILDING: 50,
-    EDGE:     51
+    BUILDING: 5000,
+    EDGE:     5001
 };
 const FLAT_Y_OFFSET = 0.5;
 const FLAT_Y_STEP   = 0.002;
@@ -404,14 +422,6 @@ const FLAT_Y_STEP   = 0.002;
 function _flatY(renderOrder) {
     return FLAT_Y_OFFSET + (renderOrder || 0) * FLAT_Y_STEP;
 }
-
-/**
- * Сдвиг renderOrder для старых тайлов. -10000 гарантированно ниже любого
- * штатного renderOrder (LAYER_RENDER_ORDER макс ~1200 + динамические сдвиги
- * за счёт sort_key). Всё, что в `_oldTileGroups`, рисуется раньше всего
- * нового — как fallback у растровых тайлов.
- */
-const FALLBACK_RENDER_ORDER_SHIFT = -10000;
 
 // -----------------------------------------------------------------------------
 // Основной класс.
@@ -473,22 +483,12 @@ export class VectorTileLayer {
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
 
         this._oldTileGroups = null;
-        this._oldTileCleanupTimer = null;
         this._groupCache = new Map();
         this._groupCacheMaxSize = 100;
 
         this._fillMaterialCache = new Map();
         this._lineMaterialCache = new Map();
         this._lineMaterialsSet = new Set();
-
-        /**
-         * Кэш «клонов без записи глубины» для fallback-тайлов старого LOD.
-         * Ключ — оригинальный материал. Создаётся при первом попадании
-         * тайла в `_oldTileGroups`.
-         * @private
-         * @type {Map<THREE.Material, THREE.Material>}
-         */
-        this._fallbackMaterialCache = new Map();
 
         this._managedMaterials = new WeakSet();
         this._managedGeometries = new WeakSet();
@@ -509,14 +509,23 @@ export class VectorTileLayer {
 
         this._labelsDirty = false;
 
-        /**
-         * Префетч следующего sourceZoom: последний, для которого уже
-         * запускали прогрев. Сбрасывается на -1 при смене sourceZoom.
-         * @private
-         */
+        // ── Переход LOD ───────────────────────────────────────────────
+        /** @type {Set<string>} ключи текущего LOD, завершившиеся ошибкой. */
+        this._settledKeys = new Set();
+        /** @type {Set<string>} видимые ключи текущего LOD. */
+        this._requiredKeys = new Set();
+        /** @type {boolean} */
+        this._coverageDirty = false;
+        /** @type {boolean|undefined} */
+        this._lastIs3d = undefined;
+        /** @type {number} последний зум, для которого считали живые стили. */
+        this._lastStyleZoom = NaN;
+
+        // ── Префетч следующего sourceZoom ─────────────────────────────
+        /** @type {number} */
         this._lastPrefetchZoom = -1;
-        /** @private @type {Set<string>} */
-        this._prefetchInFlight = new Set();
+        /** @type {Map<string, Promise<ArrayBuffer|null>>} */
+        this._prefetchInFlight = new Map();
 
         this._raycaster = new THREE.Raycaster();
         this._raycastNDC = new THREE.Vector2();
@@ -594,11 +603,10 @@ export class VectorTileLayer {
         }
 
         if (!pending.group) {
-            this._rootGroup.add(group);
             const key = pending.key;
             const existing = this._tileCache.get(key);
             if (existing && existing !== group) this._disposeTile(existing);
-            this._tileCache.set(key, group);
+            this._adoptTile(key, group);
         }
         this._labelsDirty = true;
         pending.resolve(group);
@@ -665,7 +673,7 @@ export class VectorTileLayer {
         }
 
         for (const line of result.lines) {
-            const mat = this._getLineMaterialFromData(line.layerName, line.color, line.width, line.dash);
+            const mat = this._getDynamicLineMaterial(line);
             this._addFatLineFromPositions(group, line.positions, mat, line.renderOrder);
         }
 
@@ -673,6 +681,7 @@ export class VectorTileLayer {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width);
             this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder);
         }
+
         for (const pt of result.points) {
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;
             const mat = this._getFillMaterial(fillKey);
@@ -744,6 +753,150 @@ export class VectorTileLayer {
         lineObj.frustumCulled = false;
         group.add(lineObj);
     }
+
+    // -------------------------------------------------------------------------
+    // Покрытие / переход LOD
+    // -------------------------------------------------------------------------
+
+    _is3dNow() {
+        return this.buildings3d && (this._map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
+    }
+
+    /** LOD с гистерезисом: целимся в зум, к которому камера едет, без промежуточных уровней. */
+    _pickSourceZoom(map) {
+        const clamp = z => Math.max(this.minZoom, Math.min(z, this.maxSourceZoom));
+        const target = (map._cameraAnimation?.endZoom ?? map.targetContinuousZoom) + this.zoomOffset;
+        const cur = this._lastSourceZoom;
+        if (cur >= 0 && Math.abs(target - cur) < 0.65) return cur;
+        return clamp(Math.round(target));
+    }
+
+    _adoptTile(key, group, visible = false) {
+        group.visible = visible;
+        if (group.parent !== this._rootGroup) this._rootGroup.add(group);
+        this._tileCache.set(key, group);
+        this._coverageDirty = true;
+        this._labelsDirty = true;
+    }
+
+    _stashGroup(key, group) {
+        this._rootGroup.remove(group);
+        group.visible = true;
+        this._removeTextLabelsForGroup(group);
+        const prev = this._groupCache.get(key);
+        if (prev && prev !== group) this._disposeTile(prev);
+        this._groupCache.delete(key);
+        this._groupCache.set(key, group);
+        while (this._groupCache.size > this._groupCacheMaxSize) {
+            const k0 = this._groupCache.keys().next().value;
+            this._disposeTile(this._groupCache.get(k0));
+            this._groupCache.delete(k0);
+        }
+    }
+
+    _beginTransition(newZ) {
+        this._generation++;
+        // Подложкой становится то, что реально видно сейчас (даже если это смесь уровней).
+        const fallback = new Map();
+        const take = (g, k) => {
+            if (g.visible && g.parent) fallback.set(k, g);
+            else this._stashGroup(k, g);
+        };
+        this._oldTileGroups?.forEach(take);
+        this._tileCache.forEach(take);
+
+        this._oldTileGroups = fallback.size ? fallback : null;
+        this._tileCache = new Map();
+        this._pendingLoads.clear();
+        this._sortedLoadQueue = [];
+        this._settledKeys.clear();
+        this._requiredKeys = new Set();
+        this._lastSourceZoom = newZ;
+        this._lastPrefetchZoom = -1;
+        this._labelsDirty = true;
+        this._coverageDirty = true;
+    }
+
+    _resolveCoverage() {
+        this._coverageDirty = false;
+        const old = this._oldTileGroups;
+        let changed = false;
+        const setVis = (g, v) => { if (g.visible !== v) { g.visible = v; changed = true; } };
+
+        if (!old) {
+            this._tileCache.forEach(g => setVis(g, true));
+            if (changed) this._refreshTextLabelsForVisibleTiles();
+            return;
+        }
+        const required = this._requiredKeys;
+        if (required.size === 0) return; // видимость нового LOD ещё не посчитана
+
+        const zn = this._lastSourceZoom;
+        const parse = k => k.split(',').map(Number);
+        const isDone = k => this._tileCache.has(k) || this._settledKeys.has(k);
+
+        const newKeys = new Set(required);
+        this._tileCache.forEach((_, k) => newKeys.add(k));
+
+        const oldLinks = new Map(), newLinks = new Map();
+        const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
+        const link = (ok, nk) => { push(oldLinks, ok, nk); push(newLinks, nk, ok); };
+
+        const ancIndex = new Map(); // zo -> Map(предок на zo -> [новые ключи])
+        const ancestorsAt = zo => {
+            let m = ancIndex.get(zo);
+            if (m) return m;
+            m = new Map();
+            const s = zn - zo;
+            for (const nk of newKeys) {
+                const [, x, y] = parse(nk);
+                push(m, `${zo},${x >> s},${y >> s}`, nk);
+            }
+            ancIndex.set(zo, m);
+            return m;
+        };
+
+        old.forEach((g, ok) => {
+            const [zo, xo, yo] = parse(ok);
+            if (zo >= zn) {
+                const s = zo - zn;
+                const nk = `${zn},${xo >> s},${yo >> s}`;
+                if (newKeys.has(nk)) link(ok, nk);
+            } else {
+                for (const nk of ancestorsAt(zo).get(ok) ?? []) link(ok, nk);
+            }
+        });
+
+        // Старый живёт, пока хоть один нужный новый на его площади не готов.
+        let anyOldVisible = false;
+        old.forEach((g, ok) => {
+            const links = oldLinks.get(ok);
+            const keep = !!links && links.some(nk => required.has(nk) && !isDone(nk));
+            setVis(g, keep);
+            if (keep) anyOldVisible = true;
+        });
+        // Новый показываем, только когда все перекрытые им старые скрыты.
+        this._tileCache.forEach((g, nk) => {
+            const links = newLinks.get(nk);
+            setVis(g, !links || links.every(ok => !old.get(ok).visible));
+        });
+
+        if (!anyOldVisible) {
+            old.forEach((g, ok) => this._stashGroup(ok, g)); // пригодятся при обратном зуме
+            this._oldTileGroups = null;
+        }
+        // Подписи меняем в тот же кадр, что и геометрию.
+        if (changed) this._refreshTextLabelsForVisibleTiles();
+    }
+
+    _forEachShownGroup(cb) {
+        this._tileCache.forEach(g => { if (g.visible) cb(g); });
+        this._oldTileGroups?.forEach(g => { if (g.visible) cb(g); });
+    }
+
+    // -------------------------------------------------------------------------
+    // Подписи
+    // -------------------------------------------------------------------------
 
     _refreshTextLabelsForVisibleTiles() {
         if (!this._map || !this._map.textManager) return;
@@ -822,15 +975,17 @@ export class VectorTileLayer {
         textManager.pruneStaleLabels(activeIds);
 
         this._tileCache.forEach(g => {
-            const arr = groupLabels.get(g);
-            g.userData.textLabels = arr || [];
+            g.userData.textLabels = groupLabels.get(g) || [];
+        });
+        this._oldTileGroups?.forEach(g => {
+            g.userData.textLabels = groupLabels.get(g) || [];
         });
     }
 
     _collectLabelCandidates() {
         const map = this._map;
         const camera = map.camera;
-        const continuousZoom = map.continuousZoom + this.zoomOffset; 
+        const continuousZoom = map.continuousZoom + this.zoomOffset;
         const discreteZoom = map.currentDiscreteZoom;
         const worldOffset = map.worldGroup.position;
         const rect = map.renderer.domElement.getBoundingClientRect();
@@ -862,7 +1017,7 @@ export class VectorTileLayer {
         const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
         const screenMarginY = rectH > 0 ? cullMargin / rectH : 0;
 
-        this._tileCache.forEach(group => {
+        this._forEachShownGroup(group => {
             const gx = group.position.x + worldOffset.x;
             const gz = group.position.z + worldOffset.z;
 
@@ -979,6 +1134,10 @@ export class VectorTileLayer {
         group.userData.textLabels = [];
     }
 
+    // -------------------------------------------------------------------------
+    // Материалы
+    // -------------------------------------------------------------------------
+
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
@@ -991,61 +1150,72 @@ export class VectorTileLayer {
         return this._getLineMaterial(key, dash);
     }
 
-    // -------------------------------------------------------------------------
-    // Fallback-материалы (для старого LOD при смене sourceZoom)
-    // -------------------------------------------------------------------------
+    _getDynamicLineMaterial(line) {
+        if (!this._map) return null;
+        const wKey = typeof line.width === 'number'
+            ? String(line.width)
+            : JSON.stringify((line.width && line.width.stops) || line.width);
+        const add = line.widthAdd || 0;
+        const dashKey = line.dash ? line.dash.join(',') : 'none';
+        const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}`;
+        let mat = this._lineMaterialCache.get(key);
+        if (mat) return mat;
 
-    /**
-     * Возвращает клон материала с `depthWrite = false`. Кэшируется по
-     * оригиналу, чтобы не создавать десятки клонов на каждый переход.
-     *
-     * Нужен только для материалов, которые РАНЬШЕ писали глубину
-     * (сейчас это только MeshLambertMaterial зданий). Остальные
-     * (fill/line/edge) и так имеют depthWrite: false и не участвуют.
-     *
-     * @private
-     * @param {THREE.Material} original
-     * @returns {THREE.Material}
-     */
-    _getFallbackMaterial(original) {
-        if (!original) return original;
-        const cached = this._fallbackMaterialCache.get(original);
-        if (cached) return cached;
-
-        const clone = original.clone();
-        clone.depthWrite = false;
-        this._fallbackMaterialCache.set(original, clone);
-        this._managedMaterials.add(clone);
-        if (clone.isLineMaterial) this._lineMaterialsSet.add(clone);
-        return clone;
+        const canvas = this._map.renderer.domElement;
+        const opts = {
+            color: line.color,
+            linewidth: 1,
+            resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
+            depthTest: this.depthTest,
+            depthWrite: false,
+        };
+        if (line.dash) {
+            opts.dashed = true;
+            opts.dashSize = line.dash[0];
+            opts.gapSize = line.dash[1];
+            opts.dashScale = 1;
+        }
+        mat = new LineMaterial(opts);
+        mat.userData.dyn = {
+            width: line.width,
+            add: line.widthAdd || 0,
+            hideBelow: line.hideBelow ?? null,
+            dashZ: line.dashZ ?? null,
+        };
+        this._lineMaterialCache.set(key, mat);
+        this._lineMaterialsSet.add(mat);
+        this._managedMaterials.add(mat);
+        this._lastStyleZoom = NaN; // форсируем пересчёт в следующем кадре
+        return mat;
     }
 
-    /**
-     * Меняет материалы у всех детей тайл-групп, которые пишут глубину,
-     * на fallback-клоны без depthWrite. Именно это убирает z-fighting
-     * между домами старого и нового LOD.
-     *
-     * @private
-     * @param {Iterable<THREE.Group>} tileGroups
-     */
-    _swapDepthWriteOff(tileGroups) {
-        tileGroups.forEach(group => {
-            group.traverse(child => {
-                if (child === group || !child.material) return;
-                const mat = child.material;
-                const list = Array.isArray(mat) ? mat : [mat];
+    _evalCurve(c, z) {
+        if (typeof c === 'number') return c;
+        if (!c || !c.stops || c.stops.length === 0) return 0;
+        const s = c.stops;
+        if (z <= s[0][0]) return s[0][1];
+        for (let i = 1; i < s.length; i++) {
+            if (z <= s[i][0]) {
+                const t = (z - s[i - 1][0]) / (s[i][0] - s[i - 1][0]);
+                return s[i - 1][1] + (s[i][1] - s[i - 1][1]) * t;
+            }
+        }
+        return s[s.length - 1][1];
+    }
 
-                let needsSwap = false;
-                for (const m of list) {
-                    if (m && m.depthWrite) { needsSwap = true; break; }
-                }
-                if (!needsSwap) return;
-
-                child.material = Array.isArray(mat)
-                    ? list.map(m => this._getFallbackMaterial(m))
-                    : this._getFallbackMaterial(mat);
-            });
-        });
+    _updateDynamicLineMaterials(zoom) {
+        if (Math.abs(zoom - this._lastStyleZoom) < 0.005) return;
+        this._lastStyleZoom = zoom;
+        for (const mat of this._lineMaterialsSet) {
+            const d = mat.userData.dyn;
+            if (!d) continue;
+            const base = this._evalCurve(d.width, zoom);
+            mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
+            mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
+            if (mat.dashed && d.dashZ != null) {
+                mat.dashScale = Math.pow(2, zoom - d.dashZ);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1055,10 +1225,8 @@ export class VectorTileLayer {
     /**
      * Прогревает `_tileDataCache` сырыми байтами тайлов следующего
      * sourceZoom. К моменту реальной смены LOD `_loadTile` найдёт эти
-     * буферы в кэше и не пойдёт в сеть — переход будет мгновенным.
-     *
-     * Геометрию и worker-обработку НЕ префетчим: это удвоило бы CPU,
-     * а выигрыш по времени был бы небольшим на фоне сетевых RTT.
+     * буферы в кэше (или дождётся in-flight промиса) и не пойдёт в сеть
+     * второй раз.
      *
      * @private
      * @param {number} z
@@ -1071,7 +1239,6 @@ export class VectorTileLayer {
         const visibleTiles = this._getVisibleTileKeys(z);
 
         for (const key of visibleTiles) {
-            // key: "z,x,y"
             const c1 = key.indexOf(',');
             const c2 = key.indexOf(',', c1 + 1);
             const pz = +key.slice(0, c1);
@@ -1087,16 +1254,15 @@ export class VectorTileLayer {
                 .replaceAll('{x}', px)
                 .replaceAll('{y}', py);
 
-            this._prefetchInFlight.add(dataKey);
-            fetch(url)
+            const promise = fetch(url)
                 .then(resp => resp.ok ? resp.arrayBuffer() : null)
                 .then(buffer => {
-                    if (buffer && this._map) {
-                        this._setTileDataCache(dataKey, buffer);
-                    }
+                    if (buffer && this._map) this._setTileDataCache(dataKey, buffer);
+                    return buffer;
                 })
-                .catch(() => { /* тихий fail — префетч best-effort */ })
+                .catch(() => null)
                 .finally(() => this._prefetchInFlight.delete(dataKey));
+            this._prefetchInFlight.set(dataKey, promise);
         }
     }
 
@@ -1201,7 +1367,6 @@ export class VectorTileLayer {
         if (!this._map) return;
 
         if (this._queueTimer) { clearTimeout(this._queueTimer); this._queueTimer = null; }
-        if (this._oldTileCleanupTimer) { clearTimeout(this._oldTileCleanupTimer); this._oldTileCleanupTimer = null; }
 
         for (const pending of this._pendingWorkerRequests.values()) {
             try { pending.reject(new Error('Layer removed')); } catch (e) {}
@@ -1220,10 +1385,6 @@ export class VectorTileLayer {
         this._lineMaterialsSet.clear();
         this._fillMaterialCache.clear();
         this._lineMaterialCache.clear();
-
-        // Fallback-клоны живут только пока слой жив; освобождаем.
-        this._fallbackMaterialCache.forEach(m => { try { m.dispose(); } catch (e) {} });
-        this._fallbackMaterialCache.clear();
 
         this._pointGeometryCache.forEach(g => g.dispose());
         this._pointGeometryCache.clear();
@@ -1247,6 +1408,8 @@ export class VectorTileLayer {
         this._pendingLoads.clear();
         this._sortedLoadQueue = [];
         this._clearOldTilesNow();
+        this._settledKeys.clear();
+        this._requiredKeys = new Set();
         this._labelsDirty = true;
     }
 
@@ -1256,10 +1419,6 @@ export class VectorTileLayer {
     }
 
     _clearOldTilesNow() {
-        if (this._oldTileCleanupTimer) {
-            clearTimeout(this._oldTileCleanupTimer);
-            this._oldTileCleanupTimer = null;
-        }
         if (this._oldTileGroups) {
             this._oldTileGroups.forEach(group => this._disposeTile(group));
             this._oldTileGroups = null;
@@ -1283,33 +1442,6 @@ export class VectorTileLayer {
         this._rootGroup.remove(group);
     }
 
-    _removeTile(key, group) {
-        this._rootGroup.remove(group);
-        this._tileCache.delete(key);
-        if (!this._groupCache.has(key)) {
-            this._removeTextLabelsForGroup(group);
-            this._groupCache.set(key, group);
-            if (this._groupCache.size > this._groupCacheMaxSize) {
-                const oldestKey = this._groupCache.keys().next().value;
-                this._disposeTile(this._groupCache.get(oldestKey));
-                this._groupCache.delete(oldestKey);
-            }
-        } else {
-            this._disposeTile(group);
-        }
-    }
-
-    _scheduleOldTilesCleanup(delay = 1500) {
-        if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
-        this._oldTileCleanupTimer = setTimeout(() => {
-            if (this._sortedLoadQueue.length > 0 || this._activeLoads > 0) {
-                this._oldTileCleanupTimer = setTimeout(() => this._clearOldTilesNow(), 1000);
-            } else {
-                this._clearOldTilesNow();
-            }
-        }, delay);
-    }
-
     _setTileDataCache(key, buffer) {
         this._tileDataCache.delete(key);
         this._tileDataCache.set(key, buffer);
@@ -1327,6 +1459,10 @@ export class VectorTileLayer {
         return val;
     }
 
+    // -------------------------------------------------------------------------
+    // Главный апдейт
+    // -------------------------------------------------------------------------
+
     _postUpdate(map) {
         if (!this._map) return;
 
@@ -1336,6 +1472,22 @@ export class VectorTileLayer {
             this._lastMovementTime = performance.now();
         }
 
+        // Каждый кадр, без 500-мс троттлинга: живая ширина линий.
+        this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
+
+        const discreteZoom = map.currentDiscreteZoom;
+        const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
+        if (inRange) {
+            const is3d = this._is3dNow();
+            const sz = this._pickSourceZoom(map);
+            if (sz !== this._lastSourceZoom || is3d !== this._lastIs3d) {
+                this._lastIs3d = is3d;
+                this._beginTransition(sz);
+                this._lastUpdateTime = 0; // видимые тайлы пересчитать в этом же кадре
+            }
+        }
+        if (this._coverageDirty) this._resolveCoverage();
+
         const now = performance.now();
         if (now - this._lastUpdateTime < this._throttle) {
             this._processQueue();
@@ -1344,8 +1496,6 @@ export class VectorTileLayer {
         this._lastUpdateTime = now;
 
         const camPos = map.camera.position;
-        const discreteZoom = map.currentDiscreteZoom;
-
         const camChanged =
             !this._lastCheckInit ||
             this._lastCheckCamPos.distanceToSquared(camPos) > 0.01 ||
@@ -1361,7 +1511,7 @@ export class VectorTileLayer {
         this._lastCheckCamPos.copy(camPos);
         this._lastCheckZoom = discreteZoom;
 
-        if (discreteZoom < this.minZoom || discreteZoom > this.maxZoom) {
+        if (!inRange) {
             if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
                 this._clearAllTiles();
             }
@@ -1370,66 +1520,20 @@ export class VectorTileLayer {
             return;
         }
 
-        if (this._lastDiscreteZoom !== -1 && discreteZoom !== this._lastDiscreteZoom) {
-            const was3d = this._lastDiscreteZoom >= this.buildings3dMinZoom;
-            const is3d = discreteZoom >= this.buildings3dMinZoom;
-            if (was3d !== is3d) {
-                this._lastSourceZoom = -1;
-            }
-            this._labelsDirty = true;
-        }
+        if (discreteZoom !== this._lastDiscreteZoom) this._labelsDirty = true;
         this._lastDiscreteZoom = discreteZoom;
 
-        const effectiveZoom = discreteZoom + this.zoomOffset;                              
-const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSourceZoom)); 
-
-        if (sourceZoom !== this._lastSourceZoom) {
-            this._generation++;
-            this._clearOldTilesNow();
-
-            if (this._tileCache.size > 0) {
-                this._oldTileGroups = new Map(this._tileCache);
-
-                // 1) Все старые тайлы — раньше любых новых.
-                //    Y-координаты не меняем: они уже «запечены» в position.y
-                //    при создании меша (через _flatY). renderOrder — это
-                //    только ключ сортировки отрисовки.
-                this._oldTileGroups.forEach(group => {
-                    group.traverse(child => {
-                        if (child.isMesh || child.isLine) {
-                            child.renderOrder =
-                                (child.renderOrder || 0) + FALLBACK_RENDER_ORDER_SHIFT;
-                        }
-                    });
-                });
-
-                // 2) Материалы, которые писали глубину (дома), — на клоны
-                //    с depthWrite=false. Иначе дома старого и нового LOD
-                //    воюют за z-буфер. Растры делают ровно то же самое
-                //    через depthWrite:false у fallback-тайлов.
-                this._swapDepthWriteOff(this._oldTileGroups);
-            }
-
-            this._tileCache = new Map();
-            this._pendingLoads.clear();
-            this._sortedLoadQueue = [];
-            this._lastSourceZoom = sourceZoom;
-            this._lastPrefetchZoom = -1;      // разрешаем префетч для нового LOD
-            this._labelsDirty = true;
-            this._scheduleOldTilesCleanup(1500);
+        const sourceZoom = this._lastSourceZoom;
+        const continuousZoom = map.continuousZoom;
+        const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);
+        if (
+            nextSourceZoom > sourceZoom &&
+            continuousZoom > discreteZoom + 0.3 &&
+            this._lastPrefetchZoom !== sourceZoom
+        ) {
+            this._lastPrefetchZoom = sourceZoom;
+            this._prefetchNextZoom(nextSourceZoom);
         }
-
-const continuousZoom = map.continuousZoom;
-const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);   // ← было discreteZoom + 1
-if (
-    nextSourceZoom > sourceZoom &&
-    continuousZoom > discreteZoom + 0.3 &&
-    this._lastPrefetchZoom !== sourceZoom
-) {
-    this._lastPrefetchZoom = sourceZoom;
-    this._prefetchNextZoom(nextSourceZoom);
-}
-        // ---------------------------------------
 
         const canvas = map.renderer.domElement;
         const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -1442,11 +1546,14 @@ if (
         }
 
         const visibleTiles = this._getVisibleTileKeys(sourceZoom);
+        this._requiredKeys = visibleTiles;
+        this._coverageDirty = true;
 
         for (const key of this._tileCache.keys()) {
             if (!visibleTiles.has(key)) {
                 const group = this._tileCache.get(key);
-                this._removeTile(key, group);
+                this._stashGroup(key, group);
+                this._tileCache.delete(key);
                 this._pendingLoads.delete(key);
                 this._labelsDirty = true;
             }
@@ -1458,7 +1565,8 @@ if (
         const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000);
         const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
 
-        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
+        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) &&
+            (this._tileCache.size > 0 || this._oldTileGroups)) {
             this._labelsDirty = false;
             this._lastLabelUpdateTime = labelNow;
             this._refreshTextLabelsForVisibleTiles();
@@ -1495,10 +1603,7 @@ if (
 
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;
-        if (this._sortedLoadQueue.length === 0) {
-            if (this._oldTileGroups && this._activeLoads === 0) this._scheduleOldTilesCleanup(500);
-            return;
-        }
+        if (this._sortedLoadQueue.length === 0) return;
         const toLoad = this._sortedLoadQueue.splice(0, this._maxConcurrent - this._activeLoads);
         toLoad.forEach(key => {
             const [z, x, y] = key.split(',').map(Number);
@@ -1517,10 +1622,18 @@ if (
         const map = this._map;
         if (!map) return;
 
+        // Переиспользуем готовый тайл из подложки (быстрый зум туда-обратно).
+        const fb = this._oldTileGroups?.get(key);
+        if (fb && fb.userData.is3d === this._is3dNow()) {
+            this._oldTileGroups.delete(key);
+            this._adoptTile(key, fb, fb.visible);
+            return;
+        }
+
         if (this._groupCache.has(key)) {
             const group = this._groupCache.get(key);
             this._groupCache.delete(key);
-            const is3dNow = this.buildings3d && (map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
+            const is3dNow = this._is3dNow();
             if (group.userData.is3d !== is3dNow) {
                 const dataCacheKey = `${z}/${xSlippy}/${ySlippy}`;
                 const cached = this._getTileDataCache(dataCacheKey);
@@ -1528,14 +1641,14 @@ if (
                     this._pendingLoads.add(key);
                     this._activeLoads++;
                     try {
-                        const result = await this._sendToWorker(cached.slice(0), z, xSlippy, ySlippy, is3dNow, group);
-                        if (result) {
-                            this._rootGroup.add(group);
-                            this._tileCache.set(key, group);
-                            this._labelsDirty = true;
-                        }
+                        const result = await this._sendToWorker(
+                            cached.slice(0), z, xSlippy, ySlippy, is3dNow, group);
+                        if (result) this._adoptTile(key, group);
                     } catch (err) {
-                        // ignore
+                        if (z === this._lastSourceZoom) {
+                            this._settledKeys.add(key);
+                            this._coverageDirty = true;
+                        }
                     } finally {
                         this._pendingLoads.delete(key);
                         this._activeLoads--;
@@ -1545,9 +1658,7 @@ if (
                 }
                 this._disposeTile(group);
             } else {
-                this._rootGroup.add(group);
-                this._tileCache.set(key, group);
-                this._labelsDirty = true;
+                this._adoptTile(key, group);
                 return;
             }
         }
@@ -1565,30 +1676,32 @@ if (
                     .replaceAll('{z}', z)
                     .replaceAll('{x}', xSlippy)
                     .replaceAll('{y}', ySlippy);
-                const response = await fetch(url);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                buffer = await response.arrayBuffer();
-                this._setTileDataCache(dataCacheKey, buffer.slice(0));
+                const prefetchPromise = this._prefetchInFlight.get(dataCacheKey);
+                if (prefetchPromise) {
+                    buffer = await prefetchPromise;
+                    if (buffer) buffer = buffer.slice(0);
+                }
+                if (!buffer) {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    buffer = await response.arrayBuffer();
+                    this._setTileDataCache(dataCacheKey, buffer.slice(0));
+                }
             }
 
-            const is3dNow = this.buildings3d && (map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
+            const is3dNow = this._is3dNow();
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
-            if (group) {
-                this._rootGroup.add(group);
-                this._tileCache.set(key, group);
-                this._labelsDirty = true;
-            }
+            if (group) this._adoptTile(key, group);
         } catch (err) {
-            // ignore fetch/worker errors
+            // Тайл не загрузился — помечаем settled, чтобы переход не ждал его вечно.
+            if (z === this._lastSourceZoom) {
+                this._settledKeys.add(key);
+                this._coverageDirty = true;
+            }
         } finally {
             this._pendingLoads.delete(key);
             this._activeLoads--;
-            if (this._sortedLoadQueue.length > 0) {
-                clearTimeout(this._queueTimer);
-                this._queueTimer = setTimeout(() => this._processQueue(), this._queueInterval);
-            } else if (this._activeLoads === 0 && this._oldTileGroups) {
-                this._clearOldTilesNow();
-            }
+            this._processQueue();
         }
     }
 
@@ -1596,10 +1709,13 @@ if (
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;
 
-const sourceZoom = Math.max(
-    this.minZoom,
-    Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom)  // ← + offset
-);
+        // LOD слоя может отличаться от дискретного зума карты — используем
+        // фактически загруженный sourceZoom.
+        const sourceZoom = this._lastSourceZoom >= 0
+            ? this._lastSourceZoom
+            : Math.max(this.minZoom,
+                       Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom));
+
         const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
 
@@ -1650,20 +1766,21 @@ const sourceZoom = Math.max(
                 isIdentify: true,
             });
             try {
-                this._worker.postMessage({
-                    type: 'identify',
-                    id,
-                    buffer,
-                    z: sourceZoom,
-                    x: xSlippy,
-                    y: ySlippy,
-                    tileSize,
-                    maxMerc: map.MAX_MERCATOR,
-                    continuousZoom: map.continuousZoom + this.zoomOffset,
-                    localX: clickLocalX,
-                    localZ: clickLocalZ,
-                    tolerance: opts.tolerance || tileSize * 0.005,
-                }, [buffer]);
+this._worker.postMessage({
+    type: 'identify',
+    id,
+    buffer,
+    z: sourceZoom,
+    x: xSlippy,
+    y: ySlippy,
+    tileSize,
+    maxMerc: map.MAX_MERCATOR,
+    continuousZoom: map.continuousZoom + this.zoomOffset,
+    styleZoom: (map.currentDiscreteZoom ?? sourceZoom) + this.zoomOffset,   // ← добавить
+    localX: clickLocalX,
+    localZ: clickLocalZ,
+    tolerance: opts.tolerance || tileSize * 0.005,
+}, [buffer]);
             } catch (err) {
                 this._pendingWorkerRequests.delete(id);
                 reject(err);
@@ -1684,22 +1801,23 @@ const sourceZoom = Math.max(
             const tileSize = map.WORLD_SIZE / (1 << z);
             const maxMerc = map.MAX_MERCATOR;
 
-            const msg = {
-                type: 'process',
-                id,
-                buffer: buffer,
-                z, x, y,
-                tileSize,
-                maxMerc,
-                is3d,
-                continuousZoom: map.continuousZoom + this.zoomOffset,
-                visibleLayers: this.visibleLayers,
-                buildingEdges: this.buildingEdges,
-                exclusionPolygons: this._exclusionAreas,
-                exclusionLayers: Array.from(this._exclusionLayers),
-                maxTextPointsPerTile: this.maxTextPointsPerTile,
-                maxTextLinesPerTile: this.maxTextLinesPerTile,
-            };
+const msg = {
+    type: 'process',
+    id,
+    buffer: buffer,
+    z, x, y,
+    tileSize,
+    maxMerc,
+    is3d,
+    continuousZoom: map.continuousZoom + this.zoomOffset,
+    styleZoom: (map.currentDiscreteZoom ?? z) + this.zoomOffset,   // ← добавить
+    visibleLayers: this.visibleLayers,
+    buildingEdges: this.buildingEdges,
+    exclusionPolygons: this._exclusionAreas,
+    exclusionLayers: Array.from(this._exclusionLayers),
+    maxTextPointsPerTile: this.maxTextPointsPerTile,
+    maxTextLinesPerTile: this.maxTextLinesPerTile,
+};
 
             this._pendingWorkerRequests.set(id, {
                 resolve,
@@ -1811,7 +1929,7 @@ const sourceZoom = Math.max(
             side: THREE.DoubleSide,
             transparent: opacity < 1.0,
             opacity,
-            depthTest: true,
+            depthTest: this.depthTest,
             depthWrite: false
         });
         this._fillMaterialCache.set(styleKey, mat);
@@ -1827,15 +1945,11 @@ const sourceZoom = Math.max(
         const matOpts = {
             color,
             linewidth: width,
-            // CSS-пиксели: LineMaterial делит linewidth на resolution.y
-            // и переводит в NDC. Если resolution в device-пикселях — на
-            // DPR>1 линия в DPR раз тоньше, чем в MapLibre (где
-            // line-width задан в CSS-пикселях).
             resolution: new THREE.Vector2(
                 this._map.renderer.domElement.clientWidth,
                 this._map.renderer.domElement.clientHeight
             ),
-            depthTest: true,
+            depthTest: this.depthTest,
             depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {

@@ -4,15 +4,19 @@
  * Основная логика управления тайлами, материалов и подписей.
  *
  * ПЕРЕХОД LOD (sourceZoom):
- *  - При смене sourceZoom старые группы уходят в `_oldTileGroups`, и им:
- *    1) сдвигается `renderOrder` на -10000 — все старые тайлы рисуются
- *       раньше любых новых (fallback-подложка);
- *    2) материал зданий подменяется на клон с `depthWrite = false` —
- *       чтобы не воевать с новыми домами за z-буфер.
- *    Ровно та же схема, что у растровых тайлов (Tiles.js):
- *    primary пишет глубину, fallback — только цвет.
- *  - Префетч следующего sourceZoom делается по порогу continuousZoom
- *    (см. `_prefetchNextZoom`), что сокращает окно fallback.
+ *  - При смене sourceZoom текущие группы уходят в `_oldTileGroups` (fallback),
+ *    им:
+ *    1) `renderOrder` сдвигается на -10000 (level 1) или -20000 (level 2);
+ *    2) материалы домов (у них polygonOffset === true) заменяются на клоны
+ *       с увеличенным polygonOffset (factor/units + 2*level). `depthWrite`
+ *       НЕ выключается: старые стены продолжают писаться в буфер, поэтому
+ *       новый fill корректно тестируется о них, а новый дом — перекрывает
+ *       их, потому что его offset меньше. Это убирает «мигание» зданий.
+ *  - Если предыдущий LOD ещё грузится (быстрый зум), его fallback не
+ *    выбрасывается, а стекáется на уровень 2 (глубже). Глубже двух
+ *    уровней не пускаем — иначе память растёт неограниченно.
+ *  - Очистка fallback — по завершению загрузок (`_maybeClearOldTilesIfReady`),
+ *    плюс страховочный таймаут (`_scheduleOldTilesCleanup`).
  */
 
 import {
@@ -406,12 +410,10 @@ function _flatY(renderOrder) {
 }
 
 /**
- * Сдвиг renderOrder для старых тайлов. -10000 гарантированно ниже любого
- * штатного renderOrder (LAYER_RENDER_ORDER макс ~1200 + динамические сдвиги
- * за счёт sort_key). Всё, что в `_oldTileGroups`, рисуется раньше всего
- * нового — как fallback у растровых тайлов.
+ * Сдвиг renderOrder для старых тайлов. -10000 на каждый уровень fallback.
  */
 const FALLBACK_RENDER_ORDER_SHIFT = -10000;
+const FALLBACK_MAX_LEVEL = 2;
 
 // -----------------------------------------------------------------------------
 // Основной класс.
@@ -473,6 +475,8 @@ export class VectorTileLayer {
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
 
         this._oldTileGroups = null;
+        /** Уровень fallback: 0 = нет, 1 = самый свежий, 2 = глубже. */
+        this._oldTileGroupsLevel = 0;
         this._oldTileCleanupTimer = null;
         this._groupCache = new Map();
         this._groupCacheMaxSize = 100;
@@ -482,11 +486,12 @@ export class VectorTileLayer {
         this._lineMaterialsSet = new Set();
 
         /**
-         * Кэш «клонов без записи глубины» для fallback-тайлов старого LOD.
-         * Ключ — оригинальный материал. Создаётся при первом попадании
-         * тайла в `_oldTileGroups`.
+         * Кэш fallback-клонов материалов (для старого LOD).
+         * Ключ — оригинальный материал; значение — Map<level, clone>.
+         * Клон помечен `_fallbackOf` (оригинал) и `_fallbackLevel`,
+         * чтобы повторное применение не «уплывало» по offset.
          * @private
-         * @type {Map<THREE.Material, THREE.Material>}
+         * @type {Map<THREE.Material, Map<number, THREE.Material>>}
          */
         this._fallbackMaterialCache = new Map();
 
@@ -830,7 +835,7 @@ export class VectorTileLayer {
     _collectLabelCandidates() {
         const map = this._map;
         const camera = map.camera;
-        const continuousZoom = map.continuousZoom + this.zoomOffset; 
+        const continuousZoom = map.continuousZoom + this.zoomOffset;
         const discreteZoom = map.currentDiscreteZoom;
         const worldOffset = map.worldGroup.position;
         const rect = map.renderer.domElement.getBoundingClientRect();
@@ -996,39 +1001,65 @@ export class VectorTileLayer {
     // -------------------------------------------------------------------------
 
     /**
-     * Возвращает клон материала с `depthWrite = false`. Кэшируется по
-     * оригиналу, чтобы не создавать десятки клонов на каждый переход.
+     * Возвращает fallback-клон материала с увеличенным polygonOffset.
+     * `depthWrite` НЕ выключается — старые стены должны продолжать писаться
+     * в depth-буфер, чтобы новый fill не закрашивал их. Разница глубин
+     * обеспечивается именно offset'ом: старый дом отодвинут назад, поэтому
+     * новый дом (с меньшим offset'ом) корректно проходит LessDepth и
+     * перекрывает его, а fill (offset 0) тестируется о старую стену и
+     * падает (fill дальше от камеры, чем стена).
      *
-     * Нужен только для материалов, которые РАНЬШЕ писали глубину
-     * (сейчас это только MeshLambertMaterial зданий). Остальные
-     * (fill/line/edge) и так имеют depthWrite: false и не участвуют.
+     * Кэш — двухуровневый: Map<original, Map<level, clone>>. Клон помечен
+     * `_fallbackOf` и `_fallbackLevel`, чтобы повторное применение не
+     * «уплывало» по offset при быстром зуме.
+     *
+     * Применяется ТОЛЬКО к материалам с `polygonOffset === true` — то есть
+     * только к домам. Fills/lines/edges уже имеют `depthWrite: false` и
+     * в этой логике не нуждаются.
      *
      * @private
-     * @param {THREE.Material} original
+     * @param {THREE.Material} mat
+     * @param {number} [level=1]
      * @returns {THREE.Material}
      */
-    _getFallbackMaterial(original) {
-        if (!original) return original;
-        const cached = this._fallbackMaterialCache.get(original);
-        if (cached) return cached;
+    _getFallbackMaterial(mat, level = 1) {
+        if (!mat) return mat;
+        const original = mat._fallbackOf || mat;
+
+        let levelMap = this._fallbackMaterialCache.get(original);
+        if (!levelMap) {
+            levelMap = new Map();
+            this._fallbackMaterialCache.set(original, levelMap);
+        }
+        if (levelMap.has(level)) return levelMap.get(level);
 
         const clone = original.clone();
-        clone.depthWrite = false;
-        this._fallbackMaterialCache.set(original, clone);
+        clone._fallbackOf = original;
+        clone._fallbackLevel = level;
+
+        // depthWrite НЕ трогаем — оставляем как у оригинала.
+        if (original.polygonOffset) {
+            clone.polygonOffset = true;
+            clone.polygonOffsetFactor = (original.polygonOffsetFactor ?? 0) + 2 * level;
+            clone.polygonOffsetUnits  = (original.polygonOffsetUnits  ?? 0) + 2 * level;
+        }
+
+        levelMap.set(level, clone);
         this._managedMaterials.add(clone);
         if (clone.isLineMaterial) this._lineMaterialsSet.add(clone);
         return clone;
     }
 
     /**
-     * Меняет материалы у всех детей тайл-групп, которые пишут глубину,
-     * на fallback-клоны без depthWrite. Именно это убирает z-fighting
-     * между домами старого и нового LOD.
+     * Применяет fallback-материалы к меш-объектам тайл-групп. Пропускает
+     * материалы без polygonOffset (fills/lines/edges). Идемпотентна: если
+     * группа уже на нужном уровне — повторный вызов ничего не изменит.
      *
      * @private
      * @param {Iterable<THREE.Group>} tileGroups
+     * @param {number} level — 1 или 2 (см. FALLBACK_MAX_LEVEL).
      */
-    _swapDepthWriteOff(tileGroups) {
+    _applyFallbackMaterials(tileGroups, level) {
         tileGroups.forEach(group => {
             group.traverse(child => {
                 if (child === group || !child.material) return;
@@ -1037,13 +1068,15 @@ export class VectorTileLayer {
 
                 let needsSwap = false;
                 for (const m of list) {
-                    if (m && m.depthWrite) { needsSwap = true; break; }
+                    if (!m) continue;
+                    const original = m._fallbackOf || m;
+                    if (original.polygonOffset === true) { needsSwap = true; break; }
                 }
                 if (!needsSwap) return;
 
                 child.material = Array.isArray(mat)
-                    ? list.map(m => this._getFallbackMaterial(m))
-                    : this._getFallbackMaterial(mat);
+                    ? list.map(m => this._getFallbackMaterial(m, level))
+                    : this._getFallbackMaterial(mat, level);
             });
         });
     }
@@ -1071,7 +1104,6 @@ export class VectorTileLayer {
         const visibleTiles = this._getVisibleTileKeys(z);
 
         for (const key of visibleTiles) {
-            // key: "z,x,y"
             const c1 = key.indexOf(',');
             const c2 = key.indexOf(',', c1 + 1);
             const pz = +key.slice(0, c1);
@@ -1222,7 +1254,10 @@ export class VectorTileLayer {
         this._lineMaterialCache.clear();
 
         // Fallback-клоны живут только пока слой жив; освобождаем.
-        this._fallbackMaterialCache.forEach(m => { try { m.dispose(); } catch (e) {} });
+        // Структура: Map<original, Map<level, clone>>.
+        this._fallbackMaterialCache.forEach(levelMap => {
+            levelMap.forEach(clone => { try { clone.dispose(); } catch (e) {} });
+        });
         this._fallbackMaterialCache.clear();
 
         this._pointGeometryCache.forEach(g => g.dispose());
@@ -1264,6 +1299,7 @@ export class VectorTileLayer {
             this._oldTileGroups.forEach(group => this._disposeTile(group));
             this._oldTileGroups = null;
         }
+        this._oldTileGroupsLevel = 0;
     }
 
     _disposeTile(group) {
@@ -1299,13 +1335,27 @@ export class VectorTileLayer {
         }
     }
 
+    /**
+     * Очищает fallback, если все тайлы текущего LOD загружены. Возвращает
+     * true, если fallback был очищен (или его не было).
+     * @private
+     * @returns {boolean}
+     */
+    _maybeClearOldTilesIfReady() {
+        if (!this._oldTileGroups) return true;
+        if (this._activeLoads > 0) return false;
+        if (this._sortedLoadQueue.length > 0) return false;
+        if (this._pendingLoads.size > 0) return false;
+        this._clearOldTilesNow();
+        return true;
+    }
+
     _scheduleOldTilesCleanup(delay = 1500) {
         if (this._oldTileCleanupTimer) clearTimeout(this._oldTileCleanupTimer);
         this._oldTileCleanupTimer = setTimeout(() => {
-            if (this._sortedLoadQueue.length > 0 || this._activeLoads > 0) {
+            if (!this._maybeClearOldTilesIfReady()) {
+                // Ещё грузится — продлеваем, но не бесконечно (страховка).
                 this._oldTileCleanupTimer = setTimeout(() => this._clearOldTilesNow(), 1000);
-            } else {
-                this._clearOldTilesNow();
             }
         }, delay);
     }
@@ -1380,20 +1430,22 @@ export class VectorTileLayer {
         }
         this._lastDiscreteZoom = discreteZoom;
 
-        const effectiveZoom = discreteZoom + this.zoomOffset;                              
-const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSourceZoom)); 
+        const effectiveZoom = discreteZoom + this.zoomOffset;
+        const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSourceZoom));
 
         if (sourceZoom !== this._lastSourceZoom) {
             this._generation++;
-            this._clearOldTilesNow();
 
-            if (this._tileCache.size > 0) {
-                this._oldTileGroups = new Map(this._tileCache);
+            // ─── Переход LOD ──────────────────────────────────────────────
+            // Старый fallback не выбрасываем, если предыдущий LOD ещё
+            // грузится (быстрый зум z14 → z15 → z16): «утопим» его на
+            // уровень 2. Максимум — 2 уровня, чтобы память не росла.
+            const prevStillLoading =
+                this._activeLoads > 0 || this._sortedLoadQueue.length > 0;
 
-                // 1) Все старые тайлы — раньше любых новых.
-                //    Y-координаты не меняем: они уже «запечены» в position.y
-                //    при создании меша (через _flatY). renderOrder — это
-                //    только ключ сортировки отрисовки.
+            if (this._oldTileGroups && prevStillLoading &&
+                this._oldTileGroupsLevel < FALLBACK_MAX_LEVEL) {
+                const newLevel = this._oldTileGroupsLevel + 1;
                 this._oldTileGroups.forEach(group => {
                     group.traverse(child => {
                         if (child.isMesh || child.isLine) {
@@ -1402,12 +1454,39 @@ const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSource
                         }
                     });
                 });
+                this._applyFallbackMaterials(this._oldTileGroups, newLevel);
+                this._oldTileGroupsLevel = newLevel;
+            } else if (this._oldTileGroups && !prevStillLoading) {
+                // Предыдущий LOD догрузился — старый fallback больше не нужен.
+                this._clearOldTilesNow();
+            } else if (this._oldTileGroups && this._oldTileGroupsLevel >= FALLBACK_MAX_LEVEL) {
+                // Стек переполнен — сбрасываем самый глубокий.
+                this._clearOldTilesNow();
+            }
 
-                // 2) Материалы, которые писали глубину (дома), — на клоны
-                //    с depthWrite=false. Иначе дома старого и нового LOD
-                //    воюют за z-буфер. Растры делают ровно то же самое
-                //    через depthWrite:false у fallback-тайлов.
-                this._swapDepthWriteOff(this._oldTileGroups);
+            // Текущий LOD становится fallback'ом уровня 1.
+            if (this._tileCache.size > 0) {
+                const newFallback = new Map(this._tileCache);
+                newFallback.forEach(group => {
+                    group.traverse(child => {
+                        if (child.isMesh || child.isLine) {
+                            child.renderOrder =
+                                (child.renderOrder || 0) + FALLBACK_RENDER_ORDER_SHIFT;
+                        }
+                    });
+                });
+                this._applyFallbackMaterials(newFallback, 1);
+
+                if (this._oldTileGroups) {
+                    // Глубокий (старый) + более свежий (новый) — мержим.
+                    this._oldTileGroups = new Map([
+                        ...this._oldTileGroups,
+                        ...newFallback,
+                    ]);
+                } else {
+                    this._oldTileGroups = newFallback;
+                    this._oldTileGroupsLevel = 1;
+                }
             }
 
             this._tileCache = new Map();
@@ -1419,17 +1498,16 @@ const sourceZoom = Math.max(this.minZoom, Math.min(effectiveZoom, this.maxSource
             this._scheduleOldTilesCleanup(1500);
         }
 
-const continuousZoom = map.continuousZoom;
-const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);   // ← было discreteZoom + 1
-if (
-    nextSourceZoom > sourceZoom &&
-    continuousZoom > discreteZoom + 0.3 &&
-    this._lastPrefetchZoom !== sourceZoom
-) {
-    this._lastPrefetchZoom = sourceZoom;
-    this._prefetchNextZoom(nextSourceZoom);
-}
-        // ---------------------------------------
+        const continuousZoom = map.continuousZoom;
+        const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);
+        if (
+            nextSourceZoom > sourceZoom &&
+            continuousZoom > discreteZoom + 0.3 &&
+            this._lastPrefetchZoom !== sourceZoom
+        ) {
+            this._lastPrefetchZoom = sourceZoom;
+            this._prefetchNextZoom(nextSourceZoom);
+        }
 
         const canvas = map.renderer.domElement;
         const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -1452,13 +1530,19 @@ if (
             }
         }
 
+        // ─── Подписи: debounce по завершению загрузок ────────────────────
+        // Пока в очереди есть загрузки — обновляем метки не чаще раза в
+        // 500 мс. Иначе — сразу, как только очередь опустела.
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
         const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000);
         const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
+        const loadsIdle = this._activeLoads === 0 && this._sortedLoadQueue.length === 0;
+        const labelsCanUpdate = loadsIdle || (labelNow - this._lastLabelUpdateTime > 500);
 
-        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) && this._tileCache.size > 0) {
+        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue)
+            && this._tileCache.size > 0 && labelsCanUpdate) {
             this._labelsDirty = false;
             this._lastLabelUpdateTime = labelNow;
             this._refreshTextLabelsForVisibleTiles();
@@ -1496,7 +1580,12 @@ if (
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) {
-            if (this._oldTileGroups && this._activeLoads === 0) this._scheduleOldTilesCleanup(500);
+            // Очередь пуста — если fallback ещё жив и всё загружено, снимаем.
+            if (this._oldTileGroups && this._activeLoads === 0) {
+                if (!this._maybeClearOldTilesIfReady()) {
+                    this._scheduleOldTilesCleanup(500);
+                }
+            }
             return;
         }
         const toLoad = this._sortedLoadQueue.splice(0, this._maxConcurrent - this._activeLoads);
@@ -1587,7 +1676,10 @@ if (
                 clearTimeout(this._queueTimer);
                 this._queueTimer = setTimeout(() => this._processQueue(), this._queueInterval);
             } else if (this._activeLoads === 0 && this._oldTileGroups) {
-                this._clearOldTilesNow();
+                // Все загрузки текущего LOD завершились — снимаем fallback.
+                if (!this._maybeClearOldTilesIfReady()) {
+                    this._scheduleOldTilesCleanup(500);
+                }
             }
         }
     }
@@ -1596,10 +1688,10 @@ if (
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;
 
-const sourceZoom = Math.max(
-    this.minZoom,
-    Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom)  // ← + offset
-);
+        const sourceZoom = Math.max(
+            this.minZoom,
+            Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom)
+        );
         const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
 

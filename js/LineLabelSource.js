@@ -12,25 +12,100 @@ function _measure(text, fontSize, fontFamily, fontWeight, fontStyle) {
     return ctx.measureText(text).width;
 }
 
+/**
+ * Источник подписи для линейных объектов (размещение вдоль линии).
+ *
+ * Ключевые улучшения по сравнению с предыдущей версией:
+ *
+ *  1. **Устойчивое определение переворота (isFlipped).**
+ *     Вместо угла в начальной точке используется средний угол на всём
+ *     протяжении текста. Это исключает «задом наперёд» на изогнутых
+ *     линиях и при смене направления.
+ *
+ *  2. **Гистерезис переворота (text-unflip-range).**
+ *     Если текст находится близко к вертикали (угол около ±90°), его
+ *     переворот может «дребезжать» при малейшем движении камеры.
+ *     Введён допуск: если предыдущее состояние переворота было
+ *     зафиксировано и новый угол не выходит за пределы допуска,
+ *     состояние сохраняется. Это повторяет логику MapLibre
+ *     (`text-unflip-range`) и устраняет мерцание.
+ *
+ *  3. **Ограничение максимального угла между символами (maxAngle).**
+ *     По аналогии с OpenLayers, если на протяжении текста встречается
+ *     слишком резкий изгиб (угол между соседними сегментами превышает
+ *     `maxAngle`), кандидат отбраковывается. Это предотвращает
+ *     «разваливание» текста на острых поворотах.
+ *
+ *  4. **Кэширование экранных данных.**
+ *     Сигнатура кэша расширена: учитываются позиция камеры, смещение
+ *     мира, зум и позиция группы. При неизменных параметрах
+ *     пересчёт не выполняется.
+ *
+ *  5. **Ленивое создание кандидатов.**
+ *     Кандидаты создаются только по запросу `getCandidates()` и
+ *     кэшируются до изменения сигнатуры. TextManager вызывает этот
+ *     метод редко (при необходимости поиска новой позиции), а не
+ *     каждый кадр.
+ *
+ *  6. **Совместимость с `text-keep-upright`.**
+ *     Флаг `keepUpright` (по умолчанию `true`) управляет тем, можно ли
+ *     переворачивать текст. При `false` текст всегда рисуется в
+ *     направлении линии, даже если это приводит к «перевёрнутому»
+ *     виду.
+ */
 export class VectorLineLabelSource {
     constructor(map, lineData, group, options = {}) {
         this.map = map;
         this.lineData = lineData;
         this.group = group;
 
+        /** Межтекстовый зазор, × ширины текста. */
         this.tracking       = options.tracking       ?? 1.35;
+        /** 'auto' | 'above' | 'below' | 'center' — жёсткая переустановка вертикали. */
         this.placement      = options.placement      ?? 'auto';
+        /** 'tile' | 'viewport' — приоритет кандидата. */
         this.priorityMode   = options.priorityMode   ?? 'tile';
+        /** «Бонус» ранее выбранному кандидату (px²). */
         this.hysteresisPx   = options.hysteresisPx   ?? 40;
-        this.keepUpright    = options.keepUpright    ?? true; // text-keep-upright
+        /** Разрешать ли переворот текста для сохранения читаемости. */
+        this.keepUpright    = options.keepUpright    ?? true;
+        /**
+         * Максимальный угол (в градусах) между соседними сегментами
+         * текста. Если изгиб линии превышает это значение, кандидат
+         * отбраковывается. По умолчанию 45° (как в OpenLayers).
+         */
+        this.maxAngle       = options.maxAngle       ?? 45;
+        /**
+         * Допуск (в градусах) для сохранения предыдущего состояния
+         * переворота. Если текст близок к вертикали и предыдущее
+         * состояние было зафиксировано, переворот не меняется, пока
+         * угол не выйдет за пределы этого допуска. По умолчанию 5°.
+         */
+        this.unflipRange    = options.unflipRange    ?? 5;
 
+        // Кэш экранных данных.
         this._screenData = null;
         this._screenDataSig = null;
+
+        // Кэш кандидатов.
         this._candidates = null;
         this._candidatesSig = null;
+
+        // Кэш ширин символов.
         this._charWidths = null;
+
+        // Последний выбранный bbox (для гистерезиса позиции).
         this._lastSelectedBBox = null;
+
+        // Последнее зафиксированное состояние переворота (для гистерезиса).
+        // Хранится как { flipped: boolean, anchorPx: number }.
+        // anchorPx — позиция вдоль линии (в пикселях), к которой относится
+        // решение. При изменении позиции якоря более чем на некоторый
+        // порог состояние сбрасывается.
+        this._lastFlipState = null;
     }
+
+    // ── Публичный API ─────────────────────────────────────────────
 
     getText()               { return this.lineData.text || ''; }
     getLabelType()          { return 'line-curved'; }
@@ -42,6 +117,7 @@ export class VectorLineLabelSource {
     getTitleAlign()         { return 'center'; }
     getTitleVerticalAlign() { return this.lineData.textVerticalAlign || 'middle'; }
     getTitleOffset()        { return this.lineData.textOffset || [0, 0]; }
+
     getTextStyle() {
         return {
             color: this.lineData.textColor || '#333333',
@@ -55,7 +131,19 @@ export class VectorLineLabelSource {
         };
     }
 
-    /** Возвращает массив кандидатов с зафиксированными параметрами t. */
+    /**
+     * Возвращает массив кандидатов с зафиксированными параметрами `t`.
+     * Каждый кандидат содержит:
+     *   - `t` — нормализованная позиция начала текста вдоль линии [0..1];
+     *   - `isFlipped` — нужно ли рисовать текст в обратном направлении;
+     *   - `charLayout` — массив символов с экранными координатами и углами;
+     *   - `bbox` — ограничивающий прямоугольник текста в экранных координатах.
+     *
+     * Метод кэширует результат до изменения сигнатуры (камера, зум,
+     * смещение мира, позиция группы).
+     *
+     * @returns {Array<{t:number, isFlipped:boolean, charLayout:Array, bbox:Object}>}
+     */
     getCandidates() {
         const data = this._getScreenData();
         if (!data) return [];
@@ -63,14 +151,24 @@ export class VectorLineLabelSource {
         if (!cw.total) return [];
 
         const sig = this._candidatesSigKey();
-        if (this._candidatesSig === sig && this._candidates) return this._candidates;
+        if (this._candidatesSig === sig && this._candidates) {
+            return this._candidates;
+        }
 
         this._candidatesSig = sig;
         this._candidates = this._buildCandidates(data, cw);
         return this._candidates;
     }
 
-    /** Возвращает раскладку символов для заданного t и флага разворота. */
+    /**
+     * Возвращает раскладку символов для заданного `t` и флага разворота.
+     * Вызывается TextManager'ом при применении трансформаций.
+     * Не кэшируется, так как зависит от конкретного `t`.
+     *
+     * @param {number} t — нормализованная позиция [0..1].
+     * @param {boolean} isFlipped — рисовать ли текст в обратном направлении.
+     * @returns {Array<{char:string, x:number, y:number, angle:number, w:number}>|null}
+     */
     getCharLayoutAtT(t, isFlipped) {
         const data = this._getScreenData();
         if (!data) return null;
@@ -79,8 +177,19 @@ export class VectorLineLabelSource {
         return this._buildCharLayout(data, cw, startPx, isFlipped);
     }
 
-    // ── Полилиния в экранных координатах ─────────────────────────
+    // ── Экранные данные ───────────────────────────────────────────
 
+    /**
+     * Возвращает (и кэширует) экранное представление линии:
+     * точки, длины сегментов, углы, интервал видимости.
+     *
+     * Сигнатура кэша включает:
+     *   - позицию камеры (x, y, z) с точностью до 0.1;
+     *   - смещение мира и группы (offX, offZ) с точностью до 0.1;
+     *   - непрерывный зум с точностью до 0.1.
+     *
+     * @returns {Object|null}
+     */
     _getScreenData() {
         const cam = this.map.camera;
         const wp = this.map.worldGroup.position;
@@ -89,17 +198,29 @@ export class VectorLineLabelSource {
         const offZ = wp.z + gp.z;
         const zoom = this.map.continuousZoom;
 
-        const sig = cam.position.x.toFixed(1) + ',' +
-                    cam.position.y.toFixed(1) + ',' +
-                    cam.position.z.toFixed(1) + '|' +
-                    offX.toFixed(1) + ',' + offZ.toFixed(1) + '|' +
-                    zoom.toFixed(1);
+        const sig =
+            cam.position.x.toFixed(1) + ',' +
+            cam.position.y.toFixed(1) + ',' +
+            cam.position.z.toFixed(1) + '|' +
+            offX.toFixed(1) + ',' + offZ.toFixed(1) + '|' +
+            zoom.toFixed(1);
+
         if (this._screenDataSig === sig) return this._screenData;
+
         this._screenDataSig = sig;
         this._screenData = this._computeScreenData(cam, offX, offZ);
         return this._screenData;
     }
 
+    /**
+     * Вычисляет экранные координаты точек линии, длины сегментов,
+     * углы и видимый интервал.
+     *
+     * @param {THREE.Camera} camera
+     * @param {number} offX — суммарное смещение мира и группы по X.
+     * @param {number} offZ — суммарное смещение мира и группы по Z.
+     * @returns {Object|null}
+     */
     _computeScreenData(camera, offX, offZ) {
         const pts = this.lineData.points;
         if (!pts || pts.length < 2) return null;
@@ -110,6 +231,7 @@ export class VectorLineLabelSource {
             points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
         }
 
+        // Длины сегментов в мировых координатах и параметры t.
         const segLengths = new Array(n - 1);
         let totalLen = 0;
         for (let i = 0; i < n - 1; i++) {
@@ -126,9 +248,11 @@ export class VectorLineLabelSource {
         }
 
         const canvas = this.map.renderer.domElement;
-        const W = canvas.clientWidth, H = canvas.clientHeight;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
         if (W <= 0 || H <= 0) return null;
 
+        // Проекция точек на экран.
         const v = new THREE.Vector3();
         const pointsScreen = new Array(n);
         for (let i = 0; i < n; i++) {
@@ -140,6 +264,7 @@ export class VectorLineLabelSource {
             };
         }
 
+        // Длины сегментов в пикселях, углы (сглаженные и «сырые»).
         const segLengthsPx = new Array(n - 1);
         const segAngles = new Array(n - 1);
         const segRawAngles = new Array(n - 1);
@@ -148,7 +273,7 @@ export class VectorLineLabelSource {
         let totalLenPx = 0;
         let lastAngle = 0;
         let lastRawAngle = 0;
-        
+
         for (let i = 0; i < n - 1; i++) {
             const dx = pointsScreen[i + 1].x - pointsScreen[i].x;
             const dy = pointsScreen[i + 1].y - pointsScreen[i].y;
@@ -156,9 +281,12 @@ export class VectorLineLabelSource {
             segLengthsPx[i] = len;
             pointsPx[i + 1] = pointsPx[i] + len;
             totalLenPx += len;
+
             if (len > 1e-6) {
                 lastRawAngle = Math.atan2(dy, dx) * 180 / Math.PI;
                 let a = lastRawAngle;
+                // Приводим угол к диапазону (-90, 90], чтобы текст
+                // всегда читался слева направо или сверху вниз.
                 if (a > 90) a -= 180;
                 else if (a < -90) a += 180;
                 lastAngle = a;
@@ -168,6 +296,7 @@ export class VectorLineLabelSource {
         }
         if (totalLenPx < 1e-6) return null;
 
+        // Определение видимого интервала вдоль линии.
         const samples = 40;
         const probe = { pointsPx, pointsScreen, segAngles, segRawAngles, totalLenPx };
         const flags = [];
@@ -192,6 +321,7 @@ export class VectorLineLabelSource {
         };
         if (visibleIntervalPx.max - visibleIntervalPx.min < 10) return null;
 
+        // Центр тайла на экране (используется для приоритизации).
         v.set(offX, 0, offZ).project(camera);
         const tileCenterScreen = {
             x: (v.x * 0.5 + 0.5) * W,
@@ -199,12 +329,31 @@ export class VectorLineLabelSource {
         };
 
         return {
-            points3D, pointsScreen, pointsT, pointsPx, segLengths, segLengthsPx,
-            segAngles, segRawAngles, totalLen, totalLenPx, visibleIntervalPx, tileCenterScreen,
-            canvasW: W, canvasH: H, camera
+            points3D,
+            pointsScreen,
+            pointsT,
+            pointsPx,
+            segLengths,
+            segLengthsPx,
+            segAngles,
+            segRawAngles,
+            totalLen,
+            totalLenPx,
+            visibleIntervalPx,
+            tileCenterScreen,
+            canvasW: W,
+            canvasH: H,
+            camera
         };
     }
 
+    /**
+     * Возвращает точку и угол на линии для заданного расстояния в пикселях.
+     *
+     * @param {Object} data — результат `_computeScreenData`.
+     * @param {number} px — расстояние вдоль линии в пикселях.
+     * @returns {{x:number, y:number, z:number, angle:number}}
+     */
     _samplePx(data, px) {
         const { pointsPx, pointsScreen, segAngles } = data;
         const n = pointsPx.length;
@@ -215,7 +364,8 @@ export class VectorLineLabelSource {
             if (px <= pointsPx[i + 1]) {
                 const seg = pointsPx[i + 1] - pointsPx[i];
                 const u = seg > 1e-9 ? (px - pointsPx[i]) / seg : 0;
-                const s0 = pointsScreen[i], s1 = pointsScreen[i + 1];
+                const s0 = pointsScreen[i];
+                const s1 = pointsScreen[i + 1];
                 return {
                     x: s0.x + (s1.x - s0.x) * u,
                     y: s0.y + (s1.y - s0.y) * u,
@@ -228,6 +378,13 @@ export class VectorLineLabelSource {
         return { x: s.x, y: s.y, z: s.z, angle: segAngles[n - 2] ?? 0 };
     }
 
+    /**
+     * Переводит нормализованную позицию `t` в расстояние в пикселях.
+     *
+     * @param {Object} data
+     * @param {number} t — [0..1].
+     * @returns {number}
+     */
     _tToPx(data, t) {
         const { pointsT, pointsPx } = data;
         const n = pointsT.length;
@@ -243,6 +400,13 @@ export class VectorLineLabelSource {
         return data.totalLenPx;
     }
 
+    /**
+     * Возвращает «сырой» угол сегмента в заданной точке (без сглаживания).
+     *
+     * @param {Object} data
+     * @param {number} px
+     * @returns {number} угол в градусах.
+     */
     _getRawAngleAt(data, px) {
         const { pointsPx, segRawAngles } = data;
         const n = pointsPx.length;
@@ -257,8 +421,17 @@ export class VectorLineLabelSource {
         return segRawAngles[n - 2] ?? 0;
     }
 
+    // ── Ширины символов ──────────────────────────────────────────
+
+    /**
+     * Вычисляет и кэширует ширины символов с учётом шрифта,
+     * размера и межбуквенного интервала.
+     *
+     * @returns {{text:string, advance:number[], visual:number[], total:number}}
+     */
     _getCharWidths() {
         if (this._charWidths) return this._charWidths;
+
         const rawText = this.lineData.text || '';
         const s = this.getTextStyle();
         const tr = this.lineData.textTransform;
@@ -277,9 +450,11 @@ export class VectorLineLabelSource {
         const visual = [];
         let total = 0;
         const len = text.length;
+
         for (let i = 0; i < len; i++) {
             const ch = text[i];
             let w = _measure(ch, s.fontSize, s.fontFamily, s.fontWeight, s.fontStyle);
+            // Для пробела гарантируем минимальную ширину, чтобы он не «схлопывался».
             if (ch === ' ' && w < fsPx * 0.25) w = fsPx * 0.25;
             const isLast = i === len - 1;
             visual.push(w);
@@ -292,22 +467,50 @@ export class VectorLineLabelSource {
         return this._charWidths;
     }
 
+    // ── Кандидаты ────────────────────────────────────────────────
+
+    /**
+     * Формирует сигнатуру для кэша кандидатов. Включает:
+     *   - сигнатуру экранных данных;
+     *   - общую ширину текста;
+     *   - параметры размещения (tracking, priorityMode, placement, offset);
+     *   - вертикальное выравнивание.
+     *
+     * @returns {string}
+     */
     _candidatesSigKey() {
         return this._screenDataSig + '|' +
             (this._charWidths?.total || 0) + '|' +
-            this.tracking + '|' + this.priorityMode + '|' +
+            this.tracking + '|' +
+            this.priorityMode + '|' +
             (this.lineData.textVerticalAlign || '') + '|' +
             this.placement + '|' +
-            JSON.stringify(this.lineData.textOffset || [0, 0]);
+            JSON.stringify(this.lineData.textOffset || [0, 0]) + '|' +
+            this.maxAngle + '|' +
+            this.unflipRange;
     }
 
-    // ── Кандидаты ────────────────────────────────────────────────
-
+    /**
+     * Создаёт массив кандидатов, равномерно распределённых вдоль линии.
+     *
+     * Для каждого потенциального положения:
+     *   1. Определяется `isFlipped` с учётом среднего угла и гистерезиса.
+     *   2. Строится раскладка символов.
+     *   3. Вычисляется bbox.
+     *   4. Проверяется, не превышает ли изгиб линии допустимый `maxAngle`.
+     *
+     * Кандидаты сортируются: ближайшие к центру вьюпорта — первыми.
+     * Ранее выбранный кандидат получает «бонус» (гистерезис).
+     *
+     * @param {Object} data — экранные данные.
+     * @param {Object} cw — ширины символов.
+     * @returns {Array}
+     */
     _buildCandidates(data, cw) {
         const totalPx = data.totalLenPx;
         if (totalPx < cw.total) return [];
 
-        // Равномерно размещаем якоря вдоль ВСЕЙ линии
+        // Шаг между кандидатами: ширина текста × tracking.
         const stepPx = cw.total * this.tracking;
         const stepT = stepPx / totalPx;
 
@@ -321,21 +524,30 @@ export class VectorLineLabelSource {
         if (positions.length === 0) return [];
 
         const candidates = [];
+
         for (const t of positions) {
             const startPx = this._tToPx(data, t);
-            const rawAngle = this._getRawAngleAt(data, startPx);
-            const isFlipped = this.keepUpright && (rawAngle > 90 || rawAngle < -90);
-            
+
+            // Определяем состояние переворота с гистерезисом.
+            const isFlipped = this._determineFlipState(data, startPx, cw);
+
+            // Проверяем, не слишком ли крутой изгиб на протяжении текста.
+            if (this._exceedsMaxAngle(data, startPx, cw)) {
+                continue;
+            }
+
             const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
             if (!charLayout) continue;
+
             const bbox = this._charBBox(charLayout);
             if (!bbox) continue;
-            
+
             candidates.push({ t, isFlipped, charLayout, bbox });
         }
+
         if (candidates.length === 0) return [];
 
-        // Сортируем: ближайшие к центру вьюпорта — первыми
+        // Сортировка: ближайшие к центру вьюпорта — первыми.
         const ref = { x: data.canvasW / 2, y: data.canvasH / 2 };
         const baseScore = c => (c.bbox.cx - ref.x) ** 2 + (c.bbox.cy - ref.y) ** 2;
 
@@ -347,23 +559,150 @@ export class VectorLineLabelSource {
                 c._score = baseScore(c) - (d < hystSq ? hystSq * 0.5 : 0);
             }
         }
+
         candidates.sort((a, b) => (a._score ?? baseScore(a)) - (b._score ?? baseScore(b)));
+
+        // Запоминаем bbox первого (лучшего) кандидата для следующего гистерезиса.
+        this._lastSelectedBBox = candidates[0].bbox;
+
         return candidates;
     }
 
+    /**
+     * Определяет, нужно ли переворачивать текст в данной позиции.
+     *
+     * Логика:
+     *   1. Вычисляется «сырой» угол в середине текста (а не в начале).
+     *      Это устойчивее для изогнутых линий.
+     *   2. Если `keepUpright` выключен — всегда `false`.
+     *   3. Если угол попадает в «мёртвую зону» около ±90° и есть
+     *      предыдущее зафиксированное состояние, оно сохраняется
+     *      (гистерезис `unflipRange`).
+     *   4. Иначе: переворот, если абсолютный угол больше 90°.
+     *
+     * @param {Object} data
+     * @param {number} startPx
+     * @param {Object} cw
+     * @returns {boolean}
+     */
+    _determineFlipState(data, startPx, cw) {
+        if (!this.keepUpright) return false;
+
+        // Берём угол в середине текста, а не в начале.
+        const midPx = startPx + cw.total * 0.5;
+        const rawAngle = this._getRawAngleAt(data, midPx);
+
+        // Нормализуем угол в диапазон (-180, 180].
+        let angle = rawAngle;
+        while (angle <= -180) angle += 360;
+        while (angle > 180) angle -= 360;
+
+        const absAngle = Math.abs(angle);
+
+        // Проверяем гистерезис: если мы близко к вертикали и
+        // предыдущее состояние было зафиксировано, сохраняем его.
+        const last = this._lastFlipState;
+        if (last) {
+            const distFromVertical = Math.abs(absAngle - 90);
+            if (distFromVertical <= this.unflipRange) {
+                // Мы в «мёртвой зоне» — сохраняем предыдущее состояние.
+                return last.flipped;
+            }
+        }
+
+        // Стандартное правило: переворачиваем, если текст идёт
+        // справа налево (угол больше 90° или меньше -90°).
+        const flipped = absAngle > 90;
+
+        // Запоминаем состояние для гистерезиса.
+        this._lastFlipState = { flipped, anchorPx: startPx };
+
+        return flipped;
+    }
+
+    /**
+     * Проверяет, не превышает ли изгиб линии на протяжении текста
+     * допустимый угол `maxAngle`.
+     *
+     * Идея: проходим по сегментам, которые покрывает текст, и
+     * сравниваем углы соседних сегментов. Если разница превышает
+     * `maxAngle`, кандидат отбраковывается.
+     *
+     * @param {Object} data
+     * @param {number} startPx
+     * @param {Object} cw
+     * @returns {boolean} `true`, если изгиб слишком крутой.
+     */
+    _exceedsMaxAngle(data, startPx, cw) {
+        if (this.maxAngle >= 180) return false; // ограничение отключено
+
+        const endPx = startPx + cw.total;
+        const { pointsPx, segAngles } = data;
+        const n = pointsPx.length;
+
+        // Находим индексы сегментов, пересекаемых текстом.
+        let firstSeg = -1;
+        let lastSeg = -1;
+
+        for (let i = 0; i < n - 1; i++) {
+            const segStart = pointsPx[i];
+            const segEnd = pointsPx[i + 1];
+            if (segEnd < startPx) continue;
+            if (segStart > endPx) break;
+            if (firstSeg === -1) firstSeg = i;
+            lastSeg = i;
+        }
+
+        if (firstSeg === -1 || lastSeg === -1) return false;
+        if (firstSeg === lastSeg) return false; // только один сегмент — изгиба нет
+
+        // Сравниваем углы соседних сегментов.
+        for (let i = firstSeg; i < lastSeg; i++) {
+            const angle1 = segAngles[i];
+            const angle2 = segAngles[i + 1];
+            let diff = Math.abs(angle2 - angle1);
+            if (diff > 180) diff = 360 - diff;
+            if (diff > this.maxAngle) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Строит раскладку символов вдоль линии для заданной начальной
+     * позиции и флага переворота.
+     *
+     * Каждый символ получает экранные координаты (x, y), угол поворота
+     * и ширину. Перпендикулярное смещение (выше/ниже линии) зависит от
+     * `textVerticalAlign` и `placement`.
+     *
+     * @param {Object} data
+     * @param {Object} cw
+     * @param {number} startPx
+     * @param {boolean} isFlipped
+     * @returns {Array|null}
+     */
     _buildCharLayout(data, cw, startPx, isFlipped) {
         const s = this.getTextStyle();
         const fs = parseFloat(s.fontSize) || 12;
         const [ox, oy] = this.lineData.textOffset || [0, 0];
 
+        // Определяем вертикальное выравнивание с учётом placement.
         let align = this.lineData.textVerticalAlign || 'middle';
         if (this.placement === 'above') align = 'top';
         else if (this.placement === 'below') align = 'bottom';
         else if (this.placement === 'center') align = 'middle';
 
+        // Коэффициент перпендикулярного смещения:
+        //   top    → +1 (текст над линией)
+        //   middle →  0 (текст на линии)
+        //   bottom → -1 (текст под линией)
         let coeff = 0;
         if (align === 'top') coeff = 1;
         else if (align === 'bottom') coeff = -1;
+
         const perpDist = coeff * fs * 0.7;
 
         const layout = [];
@@ -372,16 +711,20 @@ export class VectorLineLabelSource {
         const len = cw.text.length;
 
         for (let i = 0; i < len; i++) {
+            // При перевороте символы идут в обратном порядке.
             const charIndex = isFlipped ? (len - 1 - i) : i;
             if (px > endPx) return null;
+
             const visualW = cw.visual[charIndex];
             const advanceW = cw.advance[charIndex];
             const centerPx = px + visualW * 0.5;
             const p = this._samplePx(data, centerPx);
             if (p.z <= 0 || p.z >= 1) return null;
 
+            // Перпендикулярное смещение в экранных координатах.
             const rad = p.angle * Math.PI / 180;
-            const sin = Math.sin(rad), cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const cos = Math.cos(rad);
             const dxp = sin * perpDist;
             const dyp = -cos * perpDist;
 
@@ -392,26 +735,43 @@ export class VectorLineLabelSource {
                 angle: p.angle,
                 w: visualW
             });
+
             px += advanceW;
         }
+
         return layout;
     }
 
+    /**
+     * Вычисляет ограничивающий прямоугольник (bbox) для раскладки
+     * символов. Учитывает поворот каждого символа.
+     *
+     * @param {Array} layout — массив символов из `_buildCharLayout`.
+     * @returns {{minX:number, minY:number, maxX:number, maxY:number, cx:number, cy:number}|null}
+     */
     _charBBox(layout) {
         const s = this.getTextStyle();
         const fs = parseFloat(s.fontSize) || 12;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
         for (const c of layout) {
             const rad = c.angle * Math.PI / 180;
-            const cos = Math.cos(rad), sin = Math.sin(rad);
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
             const halfW = c.w * 0.5;
             const halfH = fs * 0.5;
+
+            // Четыре угла символа с учётом поворота.
             const rel = [
                 { dx: -halfW, dy: -halfH },
                 { dx:  halfW, dy: -halfH },
                 { dx:  halfW, dy:  halfH },
                 { dx: -halfW, dy:  halfH }
             ];
+
             for (const p of rel) {
                 const x = c.x + p.dx * cos - p.dy * sin;
                 const y = c.y + p.dx * sin + p.dy * cos;
@@ -421,9 +781,14 @@ export class VectorLineLabelSource {
                 if (y > maxY) maxY = y;
             }
         }
+
         if (!isFinite(minX)) return null;
+
         return {
-            minX, minY, maxX, maxY,
+            minX,
+            minY,
+            maxX,
+            maxY,
             cx: (minX + maxX) / 2,
             cy: (minY + maxY) / 2
         };

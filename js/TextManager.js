@@ -73,8 +73,21 @@ export class TextManager {
         this._lastFrameSig = null;
         this._dirty = true;
 
-        this._lastLayoutTime = 0;
-        this._layoutInterval = 150;
+        // ── Два независимых интервала обновления ─────────────────────
+        // Частое обновление видимости (коллизии, показ/скрытие).
+        this._lastVisibilityUpdateTime = 0;
+        this._visibilityInterval = 150;
+        // Редкий поиск новых позиций для линейных подписей.
+        this._lastPlacementTime = 0;
+        this._placementInterval = 500;
+        // Признак того, что нужно принудительно найти новые позиции
+        // (например, после добавления/удаления подписей или смены зума).
+        this._forcePlacement = true;
+
+        // ── Кэш для отслеживания движения камеры ────────────────────
+        this._lastCamPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+        this._lastWorldPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+        this._lastCamSig = '';
 
         this._initPane();
     }
@@ -133,6 +146,7 @@ export class TextManager {
         this._lastZoom = null;
         this._lastFrameSig = null;
         this._dirty = true;
+        this._forcePlacement = true;
         this._gridIndex.clear();
     }
 
@@ -142,6 +156,7 @@ export class TextManager {
             if (existing) {
                 this._updateLabelSource(existing, source);
                 this._dirty = true;
+                this._forcePlacement = true;
                 return existing;
             }
         }
@@ -196,7 +211,11 @@ export class TextManager {
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
             _chosenT: null,
-            _chosenIsFlipped: false
+            _chosenIsFlipped: false,
+            // ── Поля для кэширования позиции линейной подписи ──────
+            _placed: false,          // была ли позиция уже найдена
+            _lastPlacementZoom: NaN, // зум, при котором позиция была найдена
+            _lastPlacementTime: 0    // время последнего размещения
         };
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
@@ -205,6 +224,7 @@ export class TextManager {
 
         this._lastVisibleIds = null;
         this._dirty = true;
+        this._forcePlacement = true;
         return label;
     }
 
@@ -222,6 +242,8 @@ export class TextManager {
         label.source = newSource;
         label._chosenT = null;
         label._chosenIsFlipped = false;
+        label._placed = false;
+        label._lastPlacementZoom = NaN;
 
         Object.assign(el.style, newStyle);
 
@@ -267,6 +289,7 @@ export class TextManager {
         label._queuedForMeasure = false;
         this._lastVisibleIds = null;
         this._dirty = true;
+        this._forcePlacement = true;
     }
 
     pruneStaleLabels(activeIds) {
@@ -557,6 +580,20 @@ export class TextManager {
         el.style.transform = 'translate3d(0,0,0)';
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Главный метод обновления
+    //
+    // Разделяет работу на два уровня:
+    //   1. Частое обновление видимости (коллизии, показ/скрытие).
+    //      Выполняется не чаще, чем раз в `_visibilityInterval` мс.
+    //   2. Редкий поиск новых позиций для линейных подписей.
+    //      Выполняется не чаще, чем раз в `_placementInterval` мс,
+    //      или принудительно (при изменении зума, добавлении/удалении
+    //      подписей).
+    //
+    // Такое разделение устраняет «дёрганье» и мерцание подписей
+    // при панорамировании и лёгком изменении зума.
+    // ═══════════════════════════════════════════════════════════════
     update() {
         if (this._measureQueue.length > 0) {
             if (!this._measureScheduled) this._measureScheduled = true;
@@ -567,13 +604,30 @@ export class TextManager {
         const zoom = map.continuousZoom;
         const now = performance.now();
 
-        const needLayout = this._dirty || this._lastZoom !== zoom || (now - this._lastLayoutTime > this._layoutInterval);
+        // ── Проверка движения камеры ────────────────────────────────
+        const cam = map.camera.position;
+        const wp = map.worldGroup.position;
+        const camMoved =
+            this._lastCamPos.distanceToSquared(cam) > 0.01 ||
+            this._lastWorldPos.distanceToSquared(wp) > 1 ||
+            this._lastZoom !== zoom;
 
-        if (!needLayout) {
-            const wp = map.worldGroup.position;
-            const cam = map.camera.position;
-            const sig = zoom + '|' + wp.x.toFixed(1) + ',' + wp.z.toFixed(1) + '|' + cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ',' + cam.z.toFixed(1);
-            
+        if (camMoved) {
+            this._lastCamPos.copy(cam);
+            this._lastWorldPos.copy(wp);
+            this._lastZoom = zoom;
+            this._lastCamSig = '';
+        }
+
+        // ── Решение о необходимости обновления видимости ────────────
+        const needVisibilityUpdate =
+            this._dirty ||
+            camMoved ||
+            (now - this._lastVisibilityUpdateTime > this._visibilityInterval);
+
+        if (!needVisibilityUpdate) {
+            // Только обновляем трансформации, если камера сдвинулась.
+            const sig = this._camSig(zoom, wp, cam);
             if (this._lastFrameSig !== sig) {
                 this._lastFrameSig = sig;
                 this._applyTransforms();
@@ -581,12 +635,47 @@ export class TextManager {
             return;
         }
 
-        // --- Тяжёлый Layout ---
-        this._lastLayoutTime = now;
-        this._lastZoom = zoom;
-        this._dirty = false;
+        // ── Обновление видимости (лёгкая операция) ──────────────────
+        this._lastVisibilityUpdateTime = now;
         this._lastFrameSig = null;
 
+        // Определяем, нужно ли искать новые позиции для линейных подписей.
+        const needPlacement =
+            this._forcePlacement ||
+            (now - this._lastPlacementTime > this._placementInterval) ||
+            Math.abs(zoom - (this._lastPlacementZoom ?? zoom)) > 1.0;
+
+        if (needPlacement) {
+            this._lastPlacementTime = now;
+            this._lastPlacementZoom = zoom;
+            this._forcePlacement = false;
+        }
+
+        this._updateVisibility(zoom, needPlacement);
+        this._applyTransforms();
+    }
+
+    /**
+     * Возвращает сигнатуру камеры для проверки необходимости
+     * обновления трансформаций.
+     * @private
+     */
+    _camSig(zoom, wp, cam) {
+        return zoom.toFixed(2) + '|' +
+            wp.x.toFixed(1) + ',' + wp.z.toFixed(1) + '|' +
+            cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ',' + cam.z.toFixed(1);
+    }
+
+    /**
+     * Обновляет видимость подписей и, при необходимости, ищет
+     * новые позиции для линейных подписей.
+     *
+     * @param {number} zoom — текущий непрерывный зум.
+     * @param {boolean} needPlacement — нужно ли искать новые позиции
+     *   для линейных подписей.
+     * @private
+     */
+    _updateVisibility(zoom, needPlacement) {
         const idSet = new Set();
         for (const l of this.labels) {
             const src = l.source;
@@ -595,7 +684,7 @@ export class TextManager {
                 idSet.add(src);
             }
         }
-        
+
         const visibleLabels = [];
         for (const label of this.labels) {
             const src = label.source;
@@ -652,12 +741,31 @@ export class TextManager {
             const type = lbl.source.getLabelType();
 
             if (type === 'line-curved') {
+                // ── Линейная подпись ────────────────────────────────
+                // Если позиция уже найдена и не требуется новый поиск,
+                // просто проверяем коллизию с текущей позицией.
+                if (lbl._placed && lbl._chosenT != null && !needPlacement) {
+                    const bbox = lbl._bbox;
+                    if (bbox && !this._collidesWithGrid(bbox)) {
+                        this._gridIndex.insert(bbox, lbl);
+                        lbl.hiddenByPriority = false;
+                        continue;
+                    }
+                    // Текущая позиция конфликтует — помечаем, что
+                    // нужно найти новую при следующем поиске.
+                    lbl.hiddenByPriority = true;
+                    continue;
+                }
+
+                // Ищем новую позицию среди кандидатов.
                 const candidates = lbl.source.getCandidates();
                 if (!candidates || candidates.length === 0) {
                     lbl.hiddenByPriority = true;
                     lbl._chosenT = null;
+                    lbl._placed = false;
                     continue;
                 }
+
                 let chosen = null;
                 for (let i = 0; i < candidates.length; i++) {
                     const cand = candidates[i];
@@ -666,19 +774,23 @@ export class TextManager {
                         break;
                     }
                 }
+
                 if (chosen) {
                     lbl._bbox = chosen.bbox;
                     this._gridIndex.insert(chosen.bbox, lbl);
                     lbl._chosenT = chosen.t;
                     lbl._chosenIsFlipped = chosen.isFlipped;
                     lbl.hiddenByPriority = false;
+                    lbl._placed = true;
                 } else {
                     lbl._chosenT = null;
                     lbl.hiddenByPriority = true;
+                    lbl._placed = false;
                 }
                 continue;
             }
 
+            // ── Точечная / простая линейная подпись ─────────────────
             lbl.rect = this._getLabelCorners(lbl);
             if (!lbl.rect) { lbl.hiddenByPriority = true; continue; }
             const bbox = this._getBBox(lbl.rect);
@@ -704,8 +816,6 @@ export class TextManager {
             const shouldBeVisible = visibleSet.has(label) && !label.hiddenByPriority;
             this._setLabelVisible(label, shouldBeVisible);
         }
-
-        this._applyTransforms();
     }
 
     _applyTransforms() {
@@ -716,6 +826,11 @@ export class TextManager {
 
             if (type === 'line-curved') {
                 if (label._chosenT == null) continue;
+                // Пересчитываем раскладку символов только если позиция
+                // изменилась или камера существенно сдвинулась.
+                // В остальное время можно использовать кэшированный
+                // результат, но для простоты пересчитываем при каждом
+                // вызове — это не самая тяжёлая операция.
                 const charLayout = src.getCharLayoutAtT(label._chosenT, label._chosenIsFlipped);
                 if (charLayout) {
                     this._renderLineChars(label, charLayout);

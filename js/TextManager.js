@@ -77,18 +77,23 @@ export class TextManager {
         this._measureScheduled = false;
         this._dirty = true;
 
-        // ── Стабильность камеры ─────────────────────────────────
         this._stableFrameCount = 0;
         this._wasStable = false;
 
-        // Опорное состояние камеры, к которому меряем «сдвиг».
-        // Обновляется при каждом обнаружении движения.
         this._stableRefPos = null;
         this._stableRefQ = null;
         this._stableRefWp = null;
         this._stableRefZoom = null;
 
         this._initPane();
+
+        // ── Дебаг по Ctrl+Shift+L ──────────────────────────────────
+        this._onKeyDown = (e) => {
+            if (e.ctrlKey && e.shiftKey && e.code === 'KeyL') {
+                this.debugLabels();
+            }
+        };
+        window.addEventListener('keydown', this._onKeyDown);
     }
 
     setMaxLabels(max) {
@@ -131,6 +136,7 @@ export class TextManager {
     }
 
     dispose() {
+        window.removeEventListener('keydown', this._onKeyDown);
         for (const label of this.labels) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
             if (label.element && label.element.parentNode) {
@@ -431,7 +437,6 @@ export class TextManager {
         }
     }
 
-
     _hideAllLineLabels() {
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
@@ -446,7 +451,9 @@ export class TextManager {
                 el.style.transition = 'opacity 0.08s linear';
             }
             label.hiddenByPriority = true;
-            label._chosenT = null; 
+            // Сбрасываем позицию, чтобы при следующей стабилизации
+            // подпись выбрала новое место (ближе к центру экрана).
+            label._chosenT = null;
         }
     }
 
@@ -612,6 +619,62 @@ export class TextManager {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Дебаг
+    // ═══════════════════════════════════════════════════════════════
+
+    debugLabels() {
+        console.log("%c=== LINE LABELS DEBUG ===", "color: #00ff00; font-weight: bold; font-size: 14px");
+        const zoom = this.map.continuousZoom;
+        let visibleCount = 0;
+        let hiddenCount = 0;
+
+        for (const label of this.labels) {
+            const src = label.source;
+            if (src.getLabelType() !== 'line-curved') continue;
+
+            const text = src.getText();
+            const zb = src.getTextZoomBounds();
+
+            let status = "UNKNOWN";
+            let reason = "";
+
+            if (zoom < zb.min || zoom > zb.max) {
+                status = "HIDDEN";
+                reason = `Zoom ${zoom.toFixed(2)} out of bounds [${zb.min}, ${zb.max}]`;
+            } else if (!src.isVisible()) {
+                status = "HIDDEN";
+                reason = "Source isVisible() false";
+            } else if (label.hiddenByPriority) {
+                status = "HIDDEN";
+                reason = label._chosenT == null ? "No valid candidate found (collision or filters)" : "Collision with other label";
+            } else {
+                status = "VISIBLE";
+            }
+
+            if (status === "VISIBLE") visibleCount++;
+            else hiddenCount++;
+
+            const color = status === "VISIBLE" ? "color: #00ff00" : "color: #ffaa00";
+            console.group(`%c[${status}] "${text}" — ${reason}`, color);
+
+            const data = src._getScreenData();
+            if (data) {
+                console.log(`tMidVisible: ${data.tMidVisible.toFixed(2)}`);
+                console.log(`Diagnose tMidVisible:`, src.diagnose(data.tMidVisible));
+                if (label._chosenT != null) {
+                    console.log(`Diagnose chosenT (${label._chosenT.toFixed(2)}):`, src.diagnose(label._chosenT));
+                }
+            } else {
+                console.log("getScreenData() returned null (line invisible or fully behind camera)");
+            }
+            console.groupEnd();
+        }
+
+        console.log(`%cSummary: ${visibleCount} visible, ${hiddenCount} hidden.`, "font-weight: bold;");
+        console.log("If a line is missing entirely from this list, it was rejected by VectorTileLayer._collectLabelCandidates.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Главный цикл
     // ═══════════════════════════════════════════════════════════════
 
@@ -627,7 +690,6 @@ export class TextManager {
         const q = map.camera.quaternion;
         const wp = map.worldGroup.position;
 
-        // ── Инициализация опорного состояния ───────────────────────
         if (!this._stableRefPos) {
             this._stableRefPos = new THREE.Vector3().copy(cam);
             this._stableRefQ = new THREE.Quaternion().copy(q);
@@ -635,7 +697,6 @@ export class TextManager {
             this._stableRefZoom = zoom;
         }
 
-        // ── Обнаружение движения ───────────────────────────────────
         const dPos = this._stableRefPos.distanceToSquared(cam);
         const dWp = this._stableRefWp.distanceToSquared(wp);
         const dZoom = Math.abs(this._stableRefZoom - zoom);
@@ -665,7 +726,6 @@ export class TextManager {
         const isStable = this._stableFrameCount >= STABLE_FRAMES;
         this._wasStable = isStable;
 
-        // ── Полный проход размещения (один раз при стабилизации) ───
         if (isStable && (this._dirty || !wasStable)) {
             this._dirty = false;
             this._updateVisibility(zoom, true);
@@ -679,12 +739,7 @@ export class TextManager {
         return 2 * (1 - Math.abs(dot));
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Размещение
-    // ═══════════════════════════════════════════════════════════════
-
     _updateVisibility(zoom, placeLines) {
-        // 1. Собрать «не-линейные» (точечные + простые линии).
         const visibleLabels = [];
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
@@ -723,7 +778,6 @@ export class TextManager {
             visibleLabels.push(label);
         }
 
-        // 2. Сортировать (по приоритету; точки раньше линий).
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aKind = a.source.getLabelType() === 'point' ? 0 : 1;
@@ -732,7 +786,6 @@ export class TextManager {
             return a.source.getText().localeCompare(b.source.getText());
         });
 
-        // 3. Построить grid по «не-линейным» подписям.
         this._gridIndex.clear();
         for (let i = 0; i < sorted.length; i++) {
             const lbl = sorted[i];
@@ -754,12 +807,10 @@ export class TextManager {
             }
         }
 
-        // 4. Линейные подписи — если разрешено.
         if (placeLines) {
             this._placeLineLabels(zoom);
         }
 
-        // 5. Применить видимость.
         const visibleSet = new Set(sorted);
         if (placeLines) {
             for (let i = 0; i < this.labels.length; i++) {
@@ -796,7 +847,6 @@ export class TextManager {
             const lbl = lineLabels[i];
             const src = lbl.source;
 
-            // Попробуем сохранить предыдущую позицию (если ещё валидна).
             let chosen = null;
             if (lbl._chosenT != null) {
                 const keep = src.getCandidateAtT(lbl._chosenT);
@@ -805,7 +855,6 @@ export class TextManager {
                 }
             }
 
-            // Иначе — первый свободный кандидат из предпочтительного порядка.
             if (!chosen) {
                 const candidates = src.getCandidates();
                 for (let j = 0; j < candidates.length; j++) {
@@ -827,10 +876,6 @@ export class TextManager {
             }
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Трансформации
-    // ═══════════════════════════════════════════════════════════════
 
     _applyTransforms() {
         for (let i = 0; i < this.labels.length; i++) {

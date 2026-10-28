@@ -836,7 +836,9 @@ export class VectorTileLayer {
 
                     const step = Math.max(1, Math.floor(pts.length / 20));
                     let minDistSq = Infinity;
-                    let anyOnScreen = false;
+                    let minTx = Infinity, maxTx = -Infinity;
+                    let minTy = Infinity, maxTy = -Infinity;
+                    let hasValidPoints = false;
 
                     for (let k = 0; k < pts.length; k += step) {
                         const worldX = pts[k].x + gx;
@@ -848,17 +850,22 @@ export class VectorTileLayer {
                         const d2 = camDx * camDx + camDy * camDy + camDz * camDz;
                         if (d2 < minDistSq) minDistSq = d2;
 
-                        if (!anyOnScreen) {
-                            tempVec.set(worldX, 0, worldZ).project(camera);
-                            if (tempVec.z > -1 && tempVec.z < 1 &&
-                                tempVec.x >= -1 - screenMarginX &&
-                                tempVec.x <= 1 + screenMarginX &&
-                                tempVec.y >= -1 - screenMarginY &&
-                                tempVec.y <= 1 + screenMarginY) {
-                                anyOnScreen = true;
-                            }
+                        tempVec.set(worldX, 0, worldZ).project(camera);
+                        if (tempVec.z > -1 && tempVec.z < 1) {
+                            hasValidPoints = true;
+                            if (tempVec.x < minTx) minTx = tempVec.x;
+                            if (tempVec.x > maxTx) maxTx = tempVec.x;
+                            if (tempVec.y < minTy) minTy = tempVec.y;
+                            if (tempVec.y > maxTy) maxTy = tempVec.y;
                         }
                     }
+
+                    if (!hasValidPoints) continue;
+
+                    // Проверяем пересечение общего AABB линии с экраном
+                    const anyOnScreen =
+                        maxTx >= -1 - screenMarginX && minTx <= 1 + screenMarginX &&
+                        maxTy >= -1 - screenMarginY && minTy <= 1 + screenMarginY;
 
                     if (!anyOnScreen) continue;
                     if (minDistSq > maxLabelDistSq) continue;

@@ -12,18 +12,6 @@ function _measure(text, fontSize, fontFamily, fontWeight, fontStyle) {
     return ctx.measureText(text).width;
 }
 
-/**
- * Источник подписи для линейных объектов.
- *
- * Упрощённая схема:
- *   - `t` выбирается один раз за «стабильный» кадр (см. TextManager);
- *   - раскладка глифов пересчитывается по текущей камере каждый кадр;
- *   - точки за камерой отсекаются (`w <= 0` → позиция невозможна);
- *   - `maxAngle` проверяется по tile-углам (не зависит от pitch);
- *   - flip — детерминированный критерий по экранным позициям первого
- *     и последнего глифа; гистерезис включается только в «живом»
- *     режиме и только в мёртвой зоне около вертикали.
- */
 export class VectorLineLabelSource {
     constructor(map, lineData, group, options = {}) {
         this.map = map;
@@ -42,8 +30,6 @@ export class VectorLineLabelSource {
         this._stableTs = null;
         this._lastFlipState = null;
     }
-
-    // ── Публичный API ─────────────────────────────────────────────
 
     getText()               { return this.lineData.text || ''; }
     getLabelType()          { return 'line-curved'; }
@@ -69,14 +55,46 @@ export class VectorLineLabelSource {
         };
     }
 
+    // ── Дебаг-диагностика ────────────────────────────────────────
+    diagnose(t) {
+        const data = this._getScreenData();
+        if (!data) return { error: "getScreenData() returned null (visible interval < 10px or behind camera)" };
+        const cw = this._getCharWidths();
+        if (!cw.total) return { error: "charWidths total is 0" };
+
+        const startPx = this._tToPx(data, t);
+        if (startPx < 0 || startPx + cw.total > data.totalLenPx + 0.01) {
+            return {
+                error: "Text does not fit on line",
+                startPx: startPx.toFixed(1),
+                totalLenPx: data.totalLenPx.toFixed(1),
+                textW: cw.total.toFixed(1)
+            };
+        }
+
+        const angleOk = !this._exceedsMaxAngle(data, startPx, cw);
+        const w = this._sampleW(data, startPx);
+        const camToCenter = this.map.camera.position.distanceTo(this.map.controls.target);
+        const perspRatio = w > 1e-6 ? 0.5 + 0.5 * camToCenter / w : 0;
+
+        const isFlipped = this._determineFlipState(data, startPx, cw, false, false);
+        const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
+        const bbox = charLayout ? this._charBBox(charLayout) : null;
+
+        return {
+            t: t.toFixed(2),
+            startPx: startPx.toFixed(1),
+            totalLenPx: data.totalLenPx.toFixed(1),
+            angleOk,
+            perspRatio: perspRatio.toFixed(2),
+            charLayoutOk: !!charLayout,
+            bbox: bbox ? `[${bbox.minX.toFixed(0)}, ${bbox.minY.toFixed(0)}, ${bbox.maxX.toFixed(0)}, ${bbox.maxY.toFixed(0)}]` : null,
+            error: !charLayout ? "buildCharLayout returned null (w<=0 or out of bounds)" : (!angleOk ? "angle too sharp" : (perspRatio < 0.6 ? "perspRatio < 0.6" : null))
+        };
+    }
+
     // ── Кандидаты ────────────────────────────────────────────────
 
-    /**
-     * Раскладка для конкретного t. Используется в _applyTransforms
-     * каждый кадр для уже закреплённой позиции (плавное движение
-     * глифов по линии при сдвиге камеры). Не проверяет «помещается
-     * ли на линии» — это проверял placement.
-     */
     getCharLayoutAtT(t, isFlipped) {
         const data = this._getScreenData();
         if (!data) return null;
@@ -86,11 +104,6 @@ export class VectorLineLabelSource {
         return this._buildCharLayout(data, cw, startPx, isFlipped);
     }
 
-    /**
-     * Полноценный кандидат для конкретного t: проверяет «помещается
-     * ли», вычисляет flip с гистерезисом (для «прилипания» к
-     * предыдущему решению), возвращает bbox с perChar.
-     */
     getCandidateAtT(t) {
         const data = this._getScreenData();
         if (!data) return null;
@@ -110,14 +123,6 @@ export class VectorLineLabelSource {
         return { t, isFlipped, charLayout, bbox };
     }
 
-    /**
-     * Возвращает массив кандидатов, отсортированных по
-     * предпочтительности. Используется однократно при «стабилизации».
-     *
-     * Сортировка — по |t − tMidVisible| (ближе к середине видимой
-     * части линии). Не зависит от экранных координат, поэтому при
-     * лёгких пан-движениях порядок меняется непрерывно.
-     */
     getCandidates() {
         const data = this._getScreenData();
         if (!data) return [];
@@ -444,8 +449,6 @@ export class VectorLineLabelSource {
         return segRawAngles[n - 2] ?? 0;
     }
 
-    // ── Ширины символов ──────────────────────────────────────────
-
     _getCharWidths() {
         if (this._charWidths) return this._charWidths;
 
@@ -483,8 +486,6 @@ export class VectorLineLabelSource {
         return this._charWidths;
     }
 
-    // ── Стабильная сетка t ───────────────────────────────────────
-
     _getStableCandidateTs() {
         if (this._stableTs) return this._stableTs;
         const stepT = 0.05;
@@ -494,8 +495,6 @@ export class VectorLineLabelSource {
         this._stableTs = ts;
         return ts;
     }
-
-    // ── Flip ─────────────────────────────────────────────────────
 
     _determineFlipState(data, startPx, cw, useHysteresis, updateState) {
         if (!this.keepUpright) return false;
@@ -531,11 +530,12 @@ export class VectorLineLabelSource {
         }
         return flipped;
     }
+
     _exceedsMaxAngle(data, startPx, cw) {
         if (this.maxAngle >= 180) return false;
 
         const endPx = startPx + cw.total;
-        const { pointsPx, segTileAngles, segLengthsPx } = data; // Добавили segLengthsPx
+        const { pointsPx, segTileAngles, segLengthsPx } = data;
         const n = pointsPx.length;
 
         let firstSeg = -1;
@@ -550,7 +550,6 @@ export class VectorLineLabelSource {
         if (firstSeg === lastSeg) return false;
 
         for (let i = firstSeg; i < lastSeg; i++) {
-            // Пропускаем микро-сегменты, чтобы избежать шума atan2
             if (segLengthsPx[i] < 1.0 || segLengthsPx[i + 1] < 1.0) continue;
 
             let diff = Math.abs(segTileAngles[i + 1] - segTileAngles[i]);
@@ -559,8 +558,6 @@ export class VectorLineLabelSource {
         }
         return false;
     }
-
-    // ── Раскладка символов ──────────────────────────────────────
 
     _buildCharLayout(data, cw, startPx, isFlipped) {
         const s = this.getTextStyle();

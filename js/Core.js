@@ -948,6 +948,34 @@ getTargetDistanceForZoom(z) {
          / (2 * this.TILE_PIXELS * tanHalfFov);
 }
 
+/**
+ * Обратная операция к {@link KrbMap#getTargetDistanceForZoom}:
+ * по желаемой дистанции камеры возвращает зум.
+ *
+ * При H <= 0 (рендерер ещё не готов) откатывается к легаси-формуле.
+ *
+ * @param {number} d — расстояние от target до камеры, world-метры.
+ * @returns {number}
+ */
+getZoomForDistance(d) {
+    if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
+
+    const canvas = this.renderer?.domElement;
+    const H = canvas ? canvas.clientHeight : 0;
+    const fov = this.camera?.fov ?? 45;
+
+    if (H <= 0) {
+        // Легаси-фолбэк: старое соотношение d = BASE_DISTANCE * 2^(BASE_ZOOM-z)
+        return this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / d);
+    }
+
+    const tanHalfFov = Math.tan((fov * Math.PI) / 360);
+    const K = H / (2 * this.TILE_PIXELS * tanHalfFov);
+
+    // d = (WORLD_SIZE / 2^z) * K   ⇒   z = log2(WORLD_SIZE * K / d)
+    return Math.log2((this.WORLD_SIZE * K) / d);
+}
+
     /* ================================================================
        URL-хелперы
        ================================================================ */
@@ -1789,12 +1817,12 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
             return;
         }
 
-        const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
-        let z = this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / D);
-        if (!isFinite(z)) z = this.continuousZoom;
-        z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
+const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
+let z = this.getZoomForDistance(D);       // ← было: BASE_ZOOM + log2(BASE_DISTANCE / D)
+if (!isFinite(z)) z = this.continuousZoom;
+z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
 
-        this.moveCameraToSlow(targetLon, targetLat, duration, z);
+this.moveCameraToSlow(targetLon, targetLat, duration, z);
     }
 
     fitTo(objectOrArray, options = {}) {

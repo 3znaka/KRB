@@ -431,10 +431,7 @@ export class TextManager {
         }
     }
 
-    /**
-     * Мгновенно скрывает все линейные подписи (без fade-out).
-     * Вызывается при обнаружении движения камеры.
-     */
+
     _hideAllLineLabels() {
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
@@ -449,6 +446,7 @@ export class TextManager {
                 el.style.transition = 'opacity 0.08s linear';
             }
             label.hiddenByPriority = true;
+            label._chosenT = null; 
         }
     }
 

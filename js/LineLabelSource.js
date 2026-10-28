@@ -531,14 +531,11 @@ export class VectorLineLabelSource {
         }
         return flipped;
     }
-
-    // ── maxAngle (по tile-углам) ─────────────────────────────────
-
     _exceedsMaxAngle(data, startPx, cw) {
         if (this.maxAngle >= 180) return false;
 
         const endPx = startPx + cw.total;
-        const { pointsPx, segTileAngles } = data;
+        const { pointsPx, segTileAngles, segLengthsPx } = data; // Добавили segLengthsPx
         const n = pointsPx.length;
 
         let firstSeg = -1;
@@ -553,6 +550,9 @@ export class VectorLineLabelSource {
         if (firstSeg === lastSeg) return false;
 
         for (let i = firstSeg; i < lastSeg; i++) {
+            // Пропускаем микро-сегменты, чтобы избежать шума atan2
+            if (segLengthsPx[i] < 1.0 || segLengthsPx[i + 1] < 1.0) continue;
+
             let diff = Math.abs(segTileAngles[i + 1] - segTileAngles[i]);
             if (diff > 180) diff = 360 - diff;
             if (diff > this.maxAngle) return true;

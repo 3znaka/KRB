@@ -29,6 +29,23 @@
  *    используют `depthTest: this.depthTest` (по умолчанию false).
  *  — Здания рисуются ПОСЛЕ всей плоской графики (renderOrder 5000/5001)
  *    со своей depth-записью — их больше не закрашивают парки и вода.
+ *
+ * ПОДПИСИ ЛИНЕЙНЫХ ОБЪЕКТОВ:
+ *  — Используется `VectorLineLabelSource` из `./LineLabelSource.js`.
+ *    Для каждой линии предвычисляется набор «кандидатов» (положение
+ *    первого символа по полилинии); TextManager выбирает один, чей bbox
+ *    не пересекается с более приоритетными подписями. Каждый символ
+ *    рендерится отдельным span'ом с индивидуальным rotate — подпись
+ *    «огибает» изгибы.
+ *  — Поведение настраивается опциями:
+ *      • `lineLabelTracking`      — межтекстовый зазор (× ширины текста),
+ *      • `lineLabelPriorityMode`  — 'tile' | 'viewport' — приоритет
+ *                                   кандидата по удалённости от центра
+ *                                   тайла или от центра экрана,
+ *      • `lineLabelHysteresisPx`  — «бонус» ранее выбранному кандидату
+ *                                   (меньше дрожания при движении),
+ *      • `lineLabelPlacement`     — 'auto' | 'above' | 'below' | 'center',
+ *                                   жёстко перекрывает textVerticalAlign.
  */
 
 import {
@@ -41,6 +58,7 @@ import {
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { Projections } from './Projections.js';
+import { VectorLineLabelSource } from './LineLabelSource.js';
 
 // -----------------------------------------------------------------------------
 // Кэш Blob-URL для кода воркера (разделяется между всеми инстансами слоя).
@@ -73,24 +91,6 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     _workerBlobUrlCache.set(key, promise);
     promise.catch(() => _workerBlobUrlCache.delete(key));
     return promise;
-}
-
-// -----------------------------------------------------------------------------
-// Общий offscreen-канвас для измерения ширины текста.
-// -----------------------------------------------------------------------------
-let _sharedMeasureCanvas = null;
-
-function _measureTextWidth(text, fontSize, fontFamily, fontWeight, fontStyle) {
-    if (!_sharedMeasureCanvas) {
-        _sharedMeasureCanvas = document.createElement('canvas');
-    }
-    const ctx = _sharedMeasureCanvas.getContext('2d');
-    ctx.font =
-        (fontStyle || 'normal') + ' ' +
-        (fontWeight || 'normal') + ' ' +
-        (fontSize || '11px') + ' ' +
-        (fontFamily || 'sans-serif');
-    return ctx.measureText(text).width;
 }
 
 // -----------------------------------------------------------------------------
@@ -138,268 +138,6 @@ class VectorPointLabelSource {
     getTitleOffset() { return this.options.textOffset || [0, 0]; }
     getTextZoomBounds() { return this.options.zoomBounds || { min: 0, max: 24 }; }
     isVisible() { return this.options.visible !== false; }
-}
-
-// -----------------------------------------------------------------------------
-// Источник подписи для линейных объектов векторных тайлов.
-// -----------------------------------------------------------------------------
-class VectorLineLabelSource {
-    constructor(map, lineData, group) {
-        this.map = map;
-        this.lineData = lineData;
-        this.group = group;
-        this._labelT = 0.5;
-        this._screenData = null;
-        this._screenDataSig = null;
-        this._textPxWidth = undefined;
-    }
-
-    getText() { return this.lineData.text; }
-    getLabelType() { return 'line'; }
-    isVisible() { return this.lineData.visible !== false; }
-    getAllowOverflow() { return false; }
-    getPriority() { return this.lineData.priority || 0; }
-    getPlacement() { return this.lineData.placement || 'along'; }
-    getTitleAlign() { return this.lineData.textAlign || 'center'; }
-    getTitleVerticalAlign() { return this.lineData.textVerticalAlign || 'middle'; }
-    getTitleOffset() { return this.lineData.textOffset || [0, 0]; }
-    getTextZoomBounds() { return this.lineData.zoomBounds || { min: 0, max: 24 }; }
-
-    getLabelParameter() { return this._labelT; }
-    setLabelParameter(t) { this._labelT = t; }
-
-    getTextStyle() {
-        return {
-            color: this.lineData.textColor || '#333333',
-            fontSize: this.lineData.fontSize || '11px',
-            fontFamily: this.lineData.fontFamily || 'sans-serif',
-            fontWeight: this.lineData.fontWeight || 'normal',
-            textShadow: this.lineData.textShadow || '',
-            textTransform: this.lineData.textTransform || '',
-            fontStyle: this.lineData.textFontStyle || '',
-            letterSpacing: this.lineData.textLetterSpacing || ''
-        };
-    }
-
-    // -- измерение текста -----------------------------------------------------
-
-    _getTextPixelWidth() {
-        if (this._textPxWidth !== undefined) return this._textPxWidth;
-
-        const text = this.lineData.text || '';
-        if (!text) { this._textPxWidth = 0; return 0; }
-
-        const fontSize = this.lineData.fontSize || '11px';
-        const fontFamily = this.lineData.fontFamily || 'sans-serif';
-        const fontWeight = this.lineData.fontWeight || 'normal';
-        const fontStyle = this.lineData.textFontStyle || 'normal';
-        const textTransform = this.lineData.textTransform;
-        const letterSpacing = this.lineData.textLetterSpacing;
-
-        let displayText = text;
-        if (textTransform === 'uppercase') displayText = text.toUpperCase();
-        else if (textTransform === 'lowercase') displayText = text.toLowerCase();
-
-        let width = _measureTextWidth(displayText, fontSize, fontFamily, fontWeight, fontStyle);
-
-        if (letterSpacing) {
-            const fontSizePx = parseFloat(fontSize) || 11;
-            const lsValue = parseFloat(letterSpacing) || 0;
-            const lsPx = letterSpacing.endsWith('em') ? lsValue * fontSizePx : lsValue;
-            width += Math.max(0, displayText.length - 1) * lsPx;
-        }
-
-        this._textPxWidth = width;
-        return width;
-    }
-
-    // -- экранные данные (ленивый кэш) ---------------------------------------
-
-    _getScreenData() {
-        const map = this.map;
-        const cam = map.camera;
-        const wp = map.worldGroup.position;
-        const gp = this.group.position;
-        const offX = wp.x + gp.x;
-        const offZ = wp.z + gp.z;
-        const zoom = map.continuousZoom;
-
-        const sig =
-            cam.position.x.toFixed(2) + ',' +
-            cam.position.y.toFixed(2) + ',' +
-            cam.position.z.toFixed(2) + '|' +
-            offX.toFixed(2) + ',' + offZ.toFixed(2) + '|' +
-            zoom.toFixed(2);
-
-        if (this._screenDataSig === sig) return this._screenData;
-        this._screenDataSig = sig;
-        this._screenData = this._computeScreenData(cam, offX, offZ);
-        return this._screenData;
-    }
-
-    _computeScreenData(camera, offX, offZ) {
-        const pts = this.lineData.points;
-        if (!pts || pts.length < 2) return null;
-
-        const n = pts.length;
-        const points3D = new Array(n);
-        for (let i = 0; i < n; i++) {
-            points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
-        }
-
-        const segLengths = new Array(n - 1);
-        let totalLen = 0;
-        for (let i = 0; i < n - 1; i++) {
-            const d = points3D[i].distanceTo(points3D[i + 1]);
-            segLengths[i] = d;
-            totalLen += d;
-        }
-        if (totalLen < 1e-9) return null;
-
-        const samples = 40;
-        const v = new THREE.Vector3();
-        const pointAtT = (t) => {
-            let target = t * totalLen;
-            let acc = 0;
-            for (let i = 0; i < segLengths.length; i++) {
-                if (target <= acc + segLengths[i]) {
-                    const local = (target - acc) / segLengths[i];
-                    return v.lerpVectors(points3D[i], points3D[i + 1], local);
-                }
-                acc += segLengths[i];
-            }
-            return v.copy(points3D[n - 1]);
-        };
-
-        const visibleTs = [];
-        for (let i = 0; i < samples; i++) {
-            const t = i / (samples - 1);
-            pointAtT(t).project(camera);
-            if (v.z > 0 && v.z < 1 &&
-                v.x >= -1 && v.x <= 1 &&
-                v.y >= -1 && v.y <= 1) {
-                visibleTs.push(t);
-            }
-        }
-        if (visibleTs.length === 0) return null;
-
-        const eps = 1.1 / (samples - 1);
-        const segments = [];
-        let start = visibleTs[0];
-        let prev = start;
-        for (let i = 1; i < visibleTs.length; i++) {
-            if (visibleTs[i] - prev > eps) {
-                segments.push({ min: start, max: prev });
-                start = visibleTs[i];
-            }
-            prev = visibleTs[i];
-        }
-        segments.push({ min: start, max: prev });
-
-        let best = segments[0];
-        for (const s of segments) {
-            if (s.max - s.min > best.max - best.min) best = s;
-        }
-
-        const W = this.map.renderer.domElement.clientWidth;
-        const H = this.map.renderer.domElement.clientHeight;
-        let visiblePixelLen = 0;
-        let prevPx = null;
-        const N = 20;
-        for (let i = 0; i <= N; i++) {
-            const t = best.min + (best.max - best.min) * i / N;
-            pointAtT(t).project(camera);
-            const px = (v.x * 0.5 + 0.5) * W;
-            const py = (-v.y * 0.5 + 0.5) * H;
-            if (prevPx !== null) {
-                visiblePixelLen += Math.hypot(px - prevPx.x, py - prevPx.y);
-            }
-            prevPx = { x: px, y: py };
-        }
-
-        return {
-            points3D,
-            segLengths,
-            totalLen,
-            visibleInterval: best,
-            visiblePixelLen,
-            camera,
-            map: this.map
-        };
-    }
-
-    getVisibleInterval() {
-        const data = this._getScreenData();
-        if (!data) return null;
-
-        const textPxWidth = this._getTextPixelWidth();
-        if (textPxWidth > 0 && data.visiblePixelLen < textPxWidth * 1.05) {
-            return null;
-        }
-
-        return data.visibleInterval;
-    }
-
-    getScreenPositionAt(t) {
-        const data = this._getScreenData();
-        if (!data) return null;
-
-        const target = t * data.totalLen;
-        let acc = 0;
-        let pt3D = null;
-        for (let i = 0; i < data.segLengths.length; i++) {
-            if (target <= acc + data.segLengths[i]) {
-                const local = (target - acc) / data.segLengths[i];
-                pt3D = new THREE.Vector3().lerpVectors(
-                    data.points3D[i], data.points3D[i + 1], local);
-                break;
-            }
-            acc += data.segLengths[i];
-        }
-        if (!pt3D) pt3D = data.points3D[data.points3D.length - 1].clone();
-
-        const scr = pt3D.clone().project(data.camera);
-        if (scr.z <= 0 || scr.z >= 1) return null;
-
-        const canvas = this.map.renderer.domElement;
-        return {
-            x: (scr.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight
-        };
-    }
-
-    getScreenAngleAt(t) {
-        if (this.getPlacement() !== 'along') return 0;
-        const data = this._getScreenData();
-        if (!data) return 0;
-
-        let target = t * data.totalLen;
-        let acc = 0;
-        let segIdx = data.segLengths.length - 1;
-        for (let i = 0; i < data.segLengths.length; i++) {
-            if (target <= acc + data.segLengths[i] + 1e-9) { segIdx = i; break; }
-            acc += data.segLengths[i];
-        }
-
-        const p1 = data.points3D[segIdx];
-        const p2 = data.points3D[segIdx + 1];
-        if (!p1 || !p2) return 0;
-
-        const s1 = p1.clone().project(data.camera);
-        const s2 = p2.clone().project(data.camera);
-        if (s1.z <= 0 || s2.z <= 0) return 0;
-
-        const W = this.map.renderer.domElement.clientWidth;
-        const H = this.map.renderer.domElement.clientHeight;
-        const x1 = (s1.x * 0.5 + 0.5) * W;
-        const y1 = (-s1.y * 0.5 + 0.5) * H;
-        const x2 = (s2.x * 0.5 + 0.5) * W;
-        const y2 = (-s2.y * 0.5 + 0.5) * H;
-        let angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-        if (angle > 90) angle -= 180;
-        else if (angle < -90) angle += 180;
-        return angle;
-    }
 }
 
 /**
@@ -454,6 +192,17 @@ export class VectorTileLayer {
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
+
+        // ── Подписи линейных объектов ────────────────────────────────
+        // Прокидываются в VectorLineLabelSource при создании источника.
+        /** Межтекстовый зазор, × ширины текста (1.0 = вплотную, 2.0 = разнесено). */
+        this.lineLabelTracking     = options.lineLabelTracking     ?? 1.35;
+        /** 'tile' — кандидат ближе к центру тайла приоритетнее; 'viewport' — к центру экрана. */
+        this.lineLabelPriorityMode = options.lineLabelPriorityMode ?? 'tile';
+        /** «Бонус» ранее выбранному кандидату (px²), уменьшает дрожание при движении. */
+        this.lineLabelHysteresisPx = options.lineLabelHysteresisPx ?? 40;
+        /** 'auto' | 'above' | 'below' | 'center' — жёсткая переустановка вертикали. */
+        this.lineLabelPlacement    = options.lineLabelPlacement    ?? 'auto';
 
         this._debug = options.debug ?? false;
 
@@ -936,7 +685,12 @@ export class VectorTileLayer {
                 }
                 let cached = group.userData.lineLabelSources[cand.lnIndex];
                 if (!cached) {
-                    cached = new VectorLineLabelSource(this._map, cand.ln, group);
+                    cached = new VectorLineLabelSource(this._map, cand.ln, group, {
+                        tracking:     this.lineLabelTracking,
+                        priorityMode: this.lineLabelPriorityMode,
+                        hysteresisPx: this.lineLabelHysteresisPx,
+                        placement:    this.lineLabelPlacement,
+                    });
                     group.userData.lineLabelSources[cand.lnIndex] = cached;
                 }
                 source = cached;
@@ -1166,7 +920,7 @@ export class VectorTileLayer {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-            depthTest: true, 
+            depthTest: true,
             depthWrite: false,
         };
         if (line.dash) {
@@ -1222,15 +976,6 @@ export class VectorTileLayer {
     // Префетч следующего sourceZoom
     // -------------------------------------------------------------------------
 
-    /**
-     * Прогревает `_tileDataCache` сырыми байтами тайлов следующего
-     * sourceZoom. К моменту реальной смены LOD `_loadTile` найдёт эти
-     * буферы в кэше (или дождётся in-flight промиса) и не пойдёт в сеть
-     * второй раз.
-     *
-     * @private
-     * @param {number} z
-     */
     _prefetchNextZoom(z) {
         const map = this._map;
         if (!map) return;
@@ -1776,7 +1521,7 @@ this._worker.postMessage({
     tileSize,
     maxMerc: map.MAX_MERCATOR,
     continuousZoom: map.continuousZoom + this.zoomOffset,
-    styleZoom: (map.currentDiscreteZoom ?? sourceZoom) + this.zoomOffset,   // ← добавить
+    styleZoom: (map.currentDiscreteZoom ?? sourceZoom) + this.zoomOffset,
     localX: clickLocalX,
     localZ: clickLocalZ,
     tolerance: opts.tolerance || tileSize * 0.005,
@@ -1810,7 +1555,7 @@ const msg = {
     maxMerc,
     is3d,
     continuousZoom: map.continuousZoom + this.zoomOffset,
-    styleZoom: (map.currentDiscreteZoom ?? z) + this.zoomOffset,   // ← добавить
+    styleZoom: (map.currentDiscreteZoom ?? z) + this.zoomOffset,
     visibleLayers: this.visibleLayers,
     buildingEdges: this.buildingEdges,
     exclusionPolygons: this._exclusionAreas,
@@ -1929,7 +1674,7 @@ const msg = {
             side: THREE.DoubleSide,
             transparent: opacity < 1.0,
             opacity,
-            depthTest: true, 
+            depthTest: true,
             depthWrite: false
         });
         this._fillMaterialCache.set(styleKey, mat);
@@ -1949,7 +1694,7 @@ const msg = {
                 this._map.renderer.domElement.clientWidth,
                 this._map.renderer.domElement.clientHeight
             ),
-            depthTest: true, 
+            depthTest: true,
             depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {

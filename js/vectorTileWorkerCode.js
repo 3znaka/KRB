@@ -2,17 +2,6 @@
 /**
  * Модуль генерации кода воркера векторных тайлов.
  * Использует стили и порядок отрисовки из vectorTileDefaults.js.
- *
- * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕЙ ВЕРСИИ:
- *  - resolveX() принимают geomType (feature.type) для спек type='geometryType'.
- *  - resolveZoom/resolveMatch и всё остальное резолвится по continuousZoom
- *    (передаётся из main-thread), а не по z тайла. Это критично при
- *    overzoom: maxSourceZoom=14, пользователь на z18 — ширина дорог, шрифты
- *    и dash должны соответствовать z18, а не z14.
- *  - scaleDash(): пиксели стиля → world-units LineMaterial с учётом overzoom.
- *  - Casing для transportation: motorway/trunk/primary/secondary/tertiary/
- *    minor/service/track при brunnel != tunnel получают дополнительную
- *    обводку (+4 px, цвет #e9ac77 для major / #cfcdca для minor).
  */
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
@@ -273,25 +262,12 @@ function resolveHeight(spec, props, zoom, geomType) {
 
 /**
  * Пересчитывает dash из «пикселей стиля» в world-units LineMaterial.
- *
- * LineMaterial.dashSize/gapSize измеряются в тех же координатах, что и
- * позиции вершин (world). Стиль задаёт dash в пикселях экрана.
- *
- * worldPerPx(continuousZoom) = WORLD_SIZE / (512 * 2^continuousZoom),
- * где 512 — «эталонная» ширина тайла на экране в OMT/MapTiler.
- *
- * При continuousZoom > z (overzoom) тайл растянут, и worldPerPx меньше —
- * штрих занимает меньше world-units, но на экране остаётся тем же
- * числом пикселей. Ровно то, что нужно для визуального соответствия.
- *
- * LineMaterial поддерживает только 2 значения (dashSize, gapSize).
- * Если в стиле [3,1,1,1], берём [3,1] — штрих-пунктир упрощается до штриха.
  */
 function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
     const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
- const DASH_MULTIPLIER = 2;
+    const DASH_MULTIPLIER = 2;
     return [
         dashPx[0] * worldPerPx * DASH_MULTIPLIER,
         dashPx[1] * worldPerPx * DASH_MULTIPLIER
@@ -339,7 +315,7 @@ function evalFilter(spec, feature) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ГЕОМЕТРИЧЕСКИЕ УТИЛИТЫ (без изменений)
+// ГЕОМЕТРИЧЕСКИЕ УТИЛИТЫ
 // ════════════════════════════════════════════════════════════════════════
 
 function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine = false) {
@@ -349,15 +325,95 @@ function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine =
     const centerX = originX + tileSize / 2;
     const centerZ = originZ + tileSize / 2;
     const geom = feature.loadGeometry();
-    return geom
-        .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
-        .filter(ring => ring.length >= minLen)
-        .map(ring => ring.map(p => ({
-            x: originX + (p.x / 4095) * tileSize - centerX,
-            z: originZ + (p.y / 4095) * tileSize - centerZ
-        })));
+    
+    if (isLine) {
+        const resultRings = [];
+        for (const line of geom) {
+            const clippedSegments = clipLineToTile(line.map(p => ({ x: p.x, y: p.y })), 4095);
+            for (const seg of clippedSegments) {
+                if (seg.length >= minLen) {
+                    resultRings.push(seg.map(p => ({
+                        x: originX + (p.x / 4095) * tileSize - centerX,
+                        z: originZ + (p.y / 4095) * tileSize - centerZ
+                    })));
+                }
+            }
+        }
+        return resultRings;
+    } else {
+        return geom
+            .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
+            .filter(ring => ring.length >= minLen)
+            .map(ring => ring.map(p => ({
+                x: originX + (p.x / 4095) * tileSize - centerX,
+                z: originZ + (p.y / 4095) * tileSize - centerZ
+            })));
+    }
 }
 
+// Отсечение линий по границам тайла (Лянга-Барски).
+// Возвращает массив кусков линии. Разрывы обрабатываются как отдельные куски.
+function clipLineToTile(line, size) {
+    if (!line || line.length < 2) return [];
+    const result = [];
+    let currentSegment = [];
+
+    for (let i = 0; i < line.length - 1; i++) {
+        const p1 = line[i];
+        const p2 = line[i + 1];
+        
+        const clipped = clipSegment(p1, p2, 0, size, 0, size);
+        if (clipped) {
+            const [cp1, cp2] = clipped;
+            if (currentSegment.length > 0) {
+                const last = currentSegment[currentSegment.length - 1];
+                if (Math.abs(last.x - cp1.x) < 1e-5 && Math.abs(last.y - cp1.y) < 1e-5) {
+                    currentSegment.push(cp2);
+                } else {
+                    if (currentSegment.length >= 2) result.push(currentSegment);
+                    currentSegment = [cp1, cp2];
+                }
+            } else {
+                currentSegment = [cp1, cp2];
+            }
+        } else {
+            if (currentSegment.length >= 2) result.push(currentSegment);
+            currentSegment = [];
+        }
+    }
+    if (currentSegment.length >= 2) result.push(currentSegment);
+    return result;
+}
+
+function clipSegment(p1, p2, xmin, xmax, ymin, ymax) {
+    let t0 = 0, t1 = 1;
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+
+    const p = [-dx, dx, -dy, dy];
+    const q = [p1.x - xmin, xmax - p1.x, p1.y - ymin, ymax - p1.y];
+
+    for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) {
+            if (q[i] < 0) return null;
+        } else {
+            const r = q[i] / p[i];
+            if (p[i] < 0) {
+                if (r > t1) return null;
+                if (r > t0) t0 = r;
+            } else {
+                if (r < t0) return null;
+                if (r < t1) t1 = r;
+            }
+        }
+    }
+    return [
+        { x: p1.x + t0 * dx, y: p1.y + t0 * dy },
+        { x: p1.x + t1 * dx, y: p1.y + t1 * dy }
+    ];
+}
+
+// Отсечение полигонов (Сазерленда-Ходжмана) - только для geomType === 3.
 function clipRingToTile(ring, size) {
     if (!ring || ring.length === 0) return [];
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -976,7 +1032,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 }
 
                 // ---- polygon fill ----
- const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
+                const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                 if (color === null) continue;
                 const rawOpacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
                 const color_out = rawOpacity < 1
@@ -1178,7 +1234,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
         const merged = mergePolygonGeometries(triGroup);
         const parts = key.split(':');
         const avgSortKey = triGroup.reduce((sum, g) => sum + (g.sortKey || 0), 0) / triGroup.length;
- const polyFillOffset = parts[1] === 'transportation' ? -0.5 : 0;
+        const polyFillOffset = parts[1] === 'transportation' ? -0.5 : 0;
         result.fills.push({
             positions: merged.positions,
             indices: merged.indices,

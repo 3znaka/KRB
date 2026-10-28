@@ -1154,7 +1154,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                             if (!casingGroup) {
                                 casingGroup = {
                                     rings: [],
-                                    renderOrder: dynamicOrder - 0.6,
+                                    renderOrder: dynamicOrder - 0.5,
                                     dash: null
                                 };
                                 linesMap.set(casingKey, casingGroup);

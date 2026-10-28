@@ -291,7 +291,7 @@ function scaleDash(dashPx, tileSize, z, continuousZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
     const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
- const DASH_MULTIPLIER = 6;
+ const DASH_MULTIPLIER = 2;
     return [
         dashPx[0] * worldPerPx * DASH_MULTIPLIER,
         dashPx[1] * worldPerPx * DASH_MULTIPLIER

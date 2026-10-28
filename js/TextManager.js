@@ -58,6 +58,18 @@ class _GridIndex {
     }
 }
 
+/**
+ * Порог «стабильности» для первичного показа линейной подписи, мс.
+ * ~18 кадров при 60 fps — близко к рекомендации «20 кадров подряд».
+ */
+const LINE_LABEL_STABLE_MS = 300;
+
+/**
+ * Сколько кадров обновления видимости терпим коллизию уже размещённой
+ * подписи, прежде чем искать новую позицию.
+ */
+const LINE_LABEL_COLLISION_FRAMES = 5;
+
 export class TextManager {
     constructor(map) {
         this.map = map;
@@ -73,18 +85,13 @@ export class TextManager {
         this._lastFrameSig = null;
         this._dirty = true;
 
-        // ── Два независимых интервала обновления ─────────────────────
         // Частое обновление видимости (коллизии, показ/скрытие).
         this._lastVisibilityUpdateTime = 0;
         this._visibilityInterval = 150;
-        // Редкий поиск новых позиций для линейных подписей.
-        this._lastPlacementTime = 0;
-        this._placementInterval = 500;
-        // Признак того, что нужно принудительно найти новые позиции
-        // (например, после добавления/удаления подписей или смены зума).
+        // Флаг для принудительного обновления (новые подписи, LOD).
         this._forcePlacement = true;
 
-        // ── Кэш для отслеживания движения камеры ────────────────────
+        // Кэш для отслеживания движения камеры.
         this._lastCamPos = new THREE.Vector3(Infinity, Infinity, Infinity);
         this._lastWorldPos = new THREE.Vector3(Infinity, Infinity, Infinity);
         this._lastCamSig = '';
@@ -210,12 +217,15 @@ export class TextManager {
             _bbox: null,
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
+
+            // ── Состояние линейной подписи ──────────────────────
             _chosenT: null,
             _chosenIsFlipped: false,
-            // ── Поля для кэширования позиции линейной подписи ──────
-            _placed: false,          // была ли позиция уже найдена
-            _lastPlacementZoom: NaN, // зум, при котором позиция была найдена
-            _lastPlacementTime: 0    // время последнего размещения
+            _placed: false,
+            _wasShown: false,
+            _stableSince: 0,
+            _collisionFrames: 0,
+            _nextRetryTime: 0
         };
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
@@ -243,7 +253,10 @@ export class TextManager {
         label._chosenT = null;
         label._chosenIsFlipped = false;
         label._placed = false;
-        label._lastPlacementZoom = NaN;
+        label._wasShown = false;
+        label._stableSince = 0;
+        label._collisionFrames = 0;
+        label._nextRetryTime = 0;
 
         Object.assign(el.style, newStyle);
 
@@ -544,12 +557,38 @@ export class TextManager {
         return true;
     }
 
-    _collidesWithGrid(bbox) {
+    /**
+     * Точная попиксельная проверка двух массивов per-glyph AABB.
+     * Используется, когда у обоих bbox есть `perChar`.
+     */
+    _perCharOverlap(a, b) {
+        for (let i = 0; i < a.length; i++) {
+            const ca = a[i];
+            for (let j = 0; j < b.length; j++) {
+                const cb = b[j];
+                if (!(ca.maxX < cb.minX || cb.maxX < ca.minX ||
+                      ca.maxY < cb.minY || cb.maxY < ca.minY)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    _collidesWithGrid(bbox, selfLabel = null) {
         const others = this._gridIndex.query(bbox);
         for (let i = 0; i < others.length; i++) {
             const other = others[i];
+            if (other === selfLabel) continue;
             if (!other._bbox) continue;
-            if (this._bboxOverlap(bbox, other._bbox)) return true;
+            if (!this._bboxOverlap(bbox, other._bbox)) continue;
+
+            // Если у обоих есть perChar — точная проверка.
+            if (bbox.perChar && other._bbox.perChar) {
+                if (this._perCharOverlap(bbox.perChar, other._bbox.perChar)) return true;
+            } else {
+                return true;
+            }
         }
         return false;
     }
@@ -582,17 +621,6 @@ export class TextManager {
 
     // ═══════════════════════════════════════════════════════════════
     // Главный метод обновления
-    //
-    // Разделяет работу на два уровня:
-    //   1. Частое обновление видимости (коллизии, показ/скрытие).
-    //      Выполняется не чаще, чем раз в `_visibilityInterval` мс.
-    //   2. Редкий поиск новых позиций для линейных подписей.
-    //      Выполняется не чаще, чем раз в `_placementInterval` мс,
-    //      или принудительно (при изменении зума, добавлении/удалении
-    //      подписей).
-    //
-    // Такое разделение устраняет «дёрганье» и мерцание подписей
-    // при панорамировании и лёгком изменении зума.
     // ═══════════════════════════════════════════════════════════════
     update() {
         if (this._measureQueue.length > 0) {
@@ -604,7 +632,6 @@ export class TextManager {
         const zoom = map.continuousZoom;
         const now = performance.now();
 
-        // ── Проверка движения камеры ────────────────────────────────
         const cam = map.camera.position;
         const wp = map.worldGroup.position;
         const camMoved =
@@ -619,14 +646,12 @@ export class TextManager {
             this._lastCamSig = '';
         }
 
-        // ── Решение о необходимости обновления видимости ────────────
         const needVisibilityUpdate =
             this._dirty ||
             camMoved ||
             (now - this._lastVisibilityUpdateTime > this._visibilityInterval);
 
         if (!needVisibilityUpdate) {
-            // Только обновляем трансформации, если камера сдвинулась.
             const sig = this._camSig(zoom, wp, cam);
             if (this._lastFrameSig !== sig) {
                 this._lastFrameSig = sig;
@@ -635,56 +660,24 @@ export class TextManager {
             return;
         }
 
-        // ── Обновление видимости (лёгкая операция) ──────────────────
         this._lastVisibilityUpdateTime = now;
         this._lastFrameSig = null;
 
-        // Определяем, нужно ли искать новые позиции для линейных подписей.
-        const needPlacement =
-            this._forcePlacement ||
-            (now - this._lastPlacementTime > this._placementInterval) ||
-            Math.abs(zoom - (this._lastPlacementZoom ?? zoom)) > 1.0;
+        if (this._forcePlacement) this._forcePlacement = false;
 
-        if (needPlacement) {
-            this._lastPlacementTime = now;
-            this._lastPlacementZoom = zoom;
-            this._forcePlacement = false;
-        }
-
-        this._updateVisibility(zoom, needPlacement);
+        this._updateVisibility(zoom, now);
         this._applyTransforms();
     }
 
-    /**
-     * Возвращает сигнатуру камеры для проверки необходимости
-     * обновления трансформаций.
-     * @private
-     */
     _camSig(zoom, wp, cam) {
+        const q = cam.quaternion;
         return zoom.toFixed(2) + '|' +
             wp.x.toFixed(1) + ',' + wp.z.toFixed(1) + '|' +
-            cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ',' + cam.z.toFixed(1);
+            cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ',' + cam.z.toFixed(1) + '|' +
+            q.x.toFixed(3) + ',' + q.y.toFixed(3) + ',' + q.z.toFixed(3) + ',' + q.w.toFixed(3);
     }
 
-    /**
-     * Обновляет видимость подписей и, при необходимости, ищет
-     * новые позиции для линейных подписей.
-     *
-     * @param {number} zoom — текущий непрерывный зум.
-     * @param {boolean} needPlacement — нужно ли искать новые позиции
-     *   для линейных подписей.
-     * @private
-     */
-    _updateVisibility(zoom, needPlacement) {
-        const idSet = new Set();
-        for (const l of this.labels) {
-            const src = l.source;
-            const zb = src.getTextZoomBounds();
-            if (zoom >= zb.min && zoom <= zb.max && src.isVisible()) {
-                idSet.add(src);
-            }
-        }
-
+    _updateVisibility(zoom, now) {
         const visibleLabels = [];
         for (const label of this.labels) {
             const src = label.source;
@@ -740,55 +733,10 @@ export class TextManager {
         for (const lbl of sorted) {
             const type = lbl.source.getLabelType();
 
-if (type === 'line-curved') {
-    const candidates = lbl.source.getCandidates();
-
-    // 1) Если у нас уже есть валидная позиция — попробуем её сохранить.
-    if (lbl._placed && lbl._chosenT != null) {
-        const keep = candidates.find(c => c.t === lbl._chosenT);
-        if (keep && !this._collidesWithGrid(keep.bbox)) {
-            lbl._bbox = keep.bbox;
-            lbl._chosenIsFlipped = keep.isFlipped;   // пересчитываем флип каждый раз!
-            this._gridIndex.insert(keep.bbox, lbl);
-            lbl.hiddenByPriority = false;
-            // Запоминаем РЕАЛЬНО выбранный bbox для гистерезиса:
-            lbl.source._lastSelectedBBox = keep.bbox;
-            continue;
-        }
-    }
-
-    // 2) Если нет — ищем ближайший свободный к _chosenT.
-    let chosen = null;
-    if (lbl._chosenT != null) {
-        // сортировка по |t - _chosenT|
-        const arr = [...candidates].sort((a, b) =>
-            Math.abs(a.t - lbl._chosenT) - Math.abs(b.t - lbl._chosenT));
-        for (const c of arr) {
-            if (!this._collidesWithGrid(c.bbox)) { chosen = c; break; }
-        }
-    }
-
-    // 3) Если по-прежнему нет — берём лучший по score.
-    if (!chosen) {
-        for (const c of candidates) {
-            if (!this._collidesWithGrid(c.bbox)) { chosen = c; break; }
-        }
-    }
-
-    if (chosen) {
-        lbl._bbox = chosen.bbox;
-        lbl._chosenT = chosen.t;
-        lbl._chosenIsFlipped = chosen.isFlipped;
-        this._gridIndex.insert(chosen.bbox, lbl);
-        lbl.hiddenByPriority = false;
-        lbl._placed = true;
-        lbl.source._lastSelectedBBox = chosen.bbox;   // ← фикс бага
-    } else {
-        lbl._chosenT = null;
-        lbl._placed = false;
-        lbl.hiddenByPriority = true;
-    }
-}
+            if (type === 'line-curved') {
+                this._placeLineCurvedLabel(lbl, now);
+                continue;
+            }
 
             // ── Точечная / простая линейная подпись ─────────────────
             lbl.rect = this._getLabelCorners(lbl);
@@ -801,7 +749,7 @@ if (type === 'line-curved') {
             for (let i = 0; i < others.length; i++) {
                 const other = others[i];
                 if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
-                if (this._rectsIntersect(lbl.rect, other.rect)) { overlaps = true; break; }
+                if (this._rectsOverlapPrecise(lbl.rect, other.rect)) { overlaps = true; break; }
             }
             if (!overlaps) {
                 this._gridIndex.insert(bbox, lbl);
@@ -818,6 +766,113 @@ if (type === 'line-curved') {
         }
     }
 
+    _rectsOverlapPrecise(rectA, rectB) {
+        if (!rectA || !rectB) return false;
+        return this._rectsIntersect(rectA, rectB);
+    }
+
+    /**
+     * Логика размещения линейной подписи:
+     *  1. Если уже размещена и `_chosenT` валиден без коллизии —
+     *     держим (обновляем только flip).
+     *  2. Коллизия: терпим `LINE_LABEL_COLLISION_FRAMES` кадров
+     *     (проходящие соседи), затем ищем новую позицию.
+     *  3. Новая позиция: ближайший свободный по |t − _chosenT|, иначе
+     *     лучший по |t − tMidVisible|.
+     *  4. Первичный показ: только после 300 мс неизменной `t`.
+     *     Уже показанные — без задержки.
+     */
+    _placeLineCurvedLabel(lbl, now) {
+        const src = lbl.source;
+
+        // Защита от частых повторных попыток (нет свободных кандидатов).
+        if (!lbl._placed && lbl._nextRetryTime && now < lbl._nextRetryTime) {
+            lbl.hiddenByPriority = true;
+            return;
+        }
+
+        // ── 1. Try to keep existing t ────────────────────────────
+        if (lbl._placed && lbl._chosenT != null) {
+            const keep = src.getCandidateAtT(lbl._chosenT);
+            if (keep) {
+                lbl._chosenIsFlipped = keep.isFlipped;
+                lbl._bbox = keep.bbox;
+
+                if (!this._collidesWithGrid(keep.bbox, lbl)) {
+                    this._gridIndex.insert(keep.bbox, lbl);
+                    lbl.hiddenByPriority = false;
+                    lbl._collisionFrames = 0;
+                    return;
+                }
+            }
+
+            // Collision — tolerate a few frames
+            lbl._collisionFrames = (lbl._collisionFrames || 0) + 1;
+            if (lbl._collisionFrames < LINE_LABEL_COLLISION_FRAMES) {
+                lbl.hiddenByPriority = true;
+                return;
+            }
+        }
+
+        // ── 2. Find new position ─────────────────────────────────
+        lbl._collisionFrames = 0;
+        const candidates = src.getCandidates();
+        let chosen = null;
+
+        if (lbl._chosenT != null) {
+            // Prefer nearest to previous t (stability)
+            const arr = [...candidates].sort((a, b) =>
+                Math.abs(a.t - lbl._chosenT) - Math.abs(b.t - lbl._chosenT));
+            for (let i = 0; i < arr.length; i++) {
+                const c = arr[i];
+                if (!this._collidesWithGrid(c.bbox, lbl)) { chosen = c; break; }
+            }
+        }
+        if (!chosen) {
+            for (let i = 0; i < candidates.length; i++) {
+                const c = candidates[i];
+                if (!this._collidesWithGrid(c.bbox, lbl)) { chosen = c; break; }
+            }
+        }
+
+        if (!chosen) {
+            lbl._chosenT = null;
+            lbl._placed = false;
+            lbl.hiddenByPriority = true;
+            lbl._nextRetryTime = now + 500;
+            return;
+        }
+
+        // ── 3. Stability check for new t ─────────────────────────
+        const tChanged = lbl._chosenT !== chosen.t;
+        if (tChanged) {
+            lbl._chosenT = chosen.t;
+            lbl._chosenIsFlipped = chosen.isFlipped;
+            lbl._bbox = chosen.bbox;
+            lbl._stableSince = now;
+            lbl._placed = true;
+            this._gridIndex.insert(chosen.bbox, lbl);
+
+            if (lbl._wasShown) {
+                lbl.hiddenByPriority = false;
+            } else {
+                lbl.hiddenByPriority = true;
+            }
+        } else {
+            lbl._chosenIsFlipped = chosen.isFlipped;
+            lbl._bbox = chosen.bbox;
+            this._gridIndex.insert(chosen.bbox, lbl);
+
+            const stableMs = now - lbl._stableSince;
+            if (lbl._wasShown || stableMs >= LINE_LABEL_STABLE_MS) {
+                lbl.hiddenByPriority = false;
+                lbl._wasShown = true;
+            } else {
+                lbl.hiddenByPriority = true;
+            }
+        }
+    }
+
     _applyTransforms() {
         for (const label of this.labels) {
             if (label.hiddenByPriority) continue;
@@ -826,14 +881,12 @@ if (type === 'line-curved') {
 
             if (type === 'line-curved') {
                 if (label._chosenT == null) continue;
-                // Пересчитываем раскладку символов только если позиция
-                // изменилась или камера существенно сдвинулась.
-                // В остальное время можно использовать кэшированный
-                // результат, но для простоты пересчитываем при каждом
-                // вызове — это не самая тяжёлая операция.
-                const charLayout = src.getCharLayoutAtT(label._chosenT, label._chosenIsFlipped);
-                if (charLayout) {
-                    this._renderLineChars(label, charLayout);
+                // Живой пересчёт: flip обновляется каждый кадр с
+                // гистерезисом, глифы плавно едут по линии.
+                const live = src.getLiveLayoutAtT(label._chosenT);
+                if (live) {
+                    label._chosenIsFlipped = live.isFlipped;
+                    this._renderLineChars(label, live.charLayout);
                 }
                 continue;
             }
@@ -864,11 +917,5 @@ if (type === 'line-curved') {
             }
             el.style.transform = transform;
         }
-    }
-
-    _setDiffers(a, b) {
-        if (a.size !== b.size) return true;
-        for (const item of a) if (!b.has(item)) return true;
-        return false;
     }
 }

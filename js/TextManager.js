@@ -740,55 +740,55 @@ export class TextManager {
         for (const lbl of sorted) {
             const type = lbl.source.getLabelType();
 
-            if (type === 'line-curved') {
-                // ── Линейная подпись ────────────────────────────────
-                // Если позиция уже найдена и не требуется новый поиск,
-                // просто проверяем коллизию с текущей позицией.
-                if (lbl._placed && lbl._chosenT != null && !needPlacement) {
-                    const bbox = lbl._bbox;
-                    if (bbox && !this._collidesWithGrid(bbox)) {
-                        this._gridIndex.insert(bbox, lbl);
-                        lbl.hiddenByPriority = false;
-                        continue;
-                    }
-                    // Текущая позиция конфликтует — помечаем, что
-                    // нужно найти новую при следующем поиске.
-                    lbl.hiddenByPriority = true;
-                    continue;
-                }
+if (type === 'line-curved') {
+    const candidates = lbl.source.getCandidates();
 
-                // Ищем новую позицию среди кандидатов.
-                const candidates = lbl.source.getCandidates();
-                if (!candidates || candidates.length === 0) {
-                    lbl.hiddenByPriority = true;
-                    lbl._chosenT = null;
-                    lbl._placed = false;
-                    continue;
-                }
+    // 1) Если у нас уже есть валидная позиция — попробуем её сохранить.
+    if (lbl._placed && lbl._chosenT != null) {
+        const keep = candidates.find(c => c.t === lbl._chosenT);
+        if (keep && !this._collidesWithGrid(keep.bbox)) {
+            lbl._bbox = keep.bbox;
+            lbl._chosenIsFlipped = keep.isFlipped;   // пересчитываем флип каждый раз!
+            this._gridIndex.insert(keep.bbox, lbl);
+            lbl.hiddenByPriority = false;
+            // Запоминаем РЕАЛЬНО выбранный bbox для гистерезиса:
+            lbl.source._lastSelectedBBox = keep.bbox;
+            continue;
+        }
+    }
 
-                let chosen = null;
-                for (let i = 0; i < candidates.length; i++) {
-                    const cand = candidates[i];
-                    if (!this._collidesWithGrid(cand.bbox)) {
-                        chosen = cand;
-                        break;
-                    }
-                }
+    // 2) Если нет — ищем ближайший свободный к _chosenT.
+    let chosen = null;
+    if (lbl._chosenT != null) {
+        // сортировка по |t - _chosenT|
+        const arr = [...candidates].sort((a, b) =>
+            Math.abs(a.t - lbl._chosenT) - Math.abs(b.t - lbl._chosenT));
+        for (const c of arr) {
+            if (!this._collidesWithGrid(c.bbox)) { chosen = c; break; }
+        }
+    }
 
-                if (chosen) {
-                    lbl._bbox = chosen.bbox;
-                    this._gridIndex.insert(chosen.bbox, lbl);
-                    lbl._chosenT = chosen.t;
-                    lbl._chosenIsFlipped = chosen.isFlipped;
-                    lbl.hiddenByPriority = false;
-                    lbl._placed = true;
-                } else {
-                    lbl._chosenT = null;
-                    lbl.hiddenByPriority = true;
-                    lbl._placed = false;
-                }
-                continue;
-            }
+    // 3) Если по-прежнему нет — берём лучший по score.
+    if (!chosen) {
+        for (const c of candidates) {
+            if (!this._collidesWithGrid(c.bbox)) { chosen = c; break; }
+        }
+    }
+
+    if (chosen) {
+        lbl._bbox = chosen.bbox;
+        lbl._chosenT = chosen.t;
+        lbl._chosenIsFlipped = chosen.isFlipped;
+        this._gridIndex.insert(chosen.bbox, lbl);
+        lbl.hiddenByPriority = false;
+        lbl._placed = true;
+        lbl.source._lastSelectedBBox = chosen.bbox;   // ← фикс бага
+    } else {
+        lbl._chosenT = null;
+        lbl._placed = false;
+        lbl.hiddenByPriority = true;
+    }
+}
 
             // ── Точечная / простая линейная подпись ─────────────────
             lbl.rect = this._getLabelCorners(lbl);

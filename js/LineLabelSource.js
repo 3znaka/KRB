@@ -506,67 +506,56 @@ export class VectorLineLabelSource {
      * @param {Object} cw — ширины символов.
      * @returns {Array}
      */
-    _buildCandidates(data, cw) {
-        const totalPx = data.totalLenPx;
-        if (totalPx < cw.total) return [];
+_buildCandidates(data, cw) {
+    const totalPx = data.totalLenPx;
+    if (totalPx < cw.total) return [];
 
-        // Шаг между кандидатами: ширина текста × tracking.
-        const stepPx = cw.total * this.tracking;
-        const stepT = stepPx / totalPx;
+    // ВАЖНО: шаг в нормированной длине, а не в пикселях.
+    // Пиксельный шаг делал набор кандидатов зависимым от зума.
+    const stepT = 0.05;                      // ~20 кандидатов; можно 0.025 для длинных линий
+    const numCandidates = Math.max(1, Math.floor(1 / stepT));
 
-        const positions = [];
-        const numCandidates = Math.floor((totalPx - cw.total) / stepPx);
-        for (let i = 0; i <= numCandidates; i++) {
-            const t = i * stepT;
-            if (t > 1) break;
-            positions.push(t);
-        }
-        if (positions.length === 0) return [];
+    const candidates = [];
+    for (let i = 0; i <= numCandidates; i++) {
+        const t = Math.min(1, i * stepT);
+        const startPx = this._tToPx(data, t);
+        // Текст должен поместиться до конца линии
+        if (startPx + cw.total > totalPx) continue;
+        // И начинаться не раньше начала
+        if (startPx < 0) continue;
 
-        const candidates = [];
+        const isFlipped = this._determineFlipState(data, startPx, cw);
+        if (this._exceedsMaxAngle(data, startPx, cw)) continue;
 
-        for (const t of positions) {
-            const startPx = this._tToPx(data, t);
+        const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
+        if (!charLayout) continue;
 
-            // Определяем состояние переворота с гистерезисом.
-            const isFlipped = this._determineFlipState(data, startPx, cw);
+        const bbox = this._charBBox(charLayout);
+        if (!bbox) continue;
 
-            // Проверяем, не слишком ли крутой изгиб на протяжении текста.
-            if (this._exceedsMaxAngle(data, startPx, cw)) {
-                continue;
-            }
-
-            const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
-            if (!charLayout) continue;
-
-            const bbox = this._charBBox(charLayout);
-            if (!bbox) continue;
-
-            candidates.push({ t, isFlipped, charLayout, bbox });
-        }
-
-        if (candidates.length === 0) return [];
-
-        // Сортировка: ближайшие к центру вьюпорта — первыми.
-        const ref = { x: data.canvasW / 2, y: data.canvasH / 2 };
-        const baseScore = c => (c.bbox.cx - ref.x) ** 2 + (c.bbox.cy - ref.y) ** 2;
-
-        const last = this._lastSelectedBBox;
-        if (last && this.hysteresisPx > 0) {
-            const hystSq = this.hysteresisPx ** 2;
-            for (const c of candidates) {
-                const d = (c.bbox.cx - last.cx) ** 2 + (c.bbox.cy - last.cy) ** 2;
-                c._score = baseScore(c) - (d < hystSq ? hystSq * 0.5 : 0);
-            }
-        }
-
-        candidates.sort((a, b) => (a._score ?? baseScore(a)) - (b._score ?? baseScore(b)));
-
-        // Запоминаем bbox первого (лучшего) кандидата для следующего гистерезиса.
-        this._lastSelectedBBox = candidates[0].bbox;
-
-        return candidates;
+        candidates.push({ t, isFlipped, charLayout, bbox });
     }
+
+    if (candidates.length === 0) return [];
+
+    // Score: близость к центру экрана, с бонусом кандидату рядом
+    // с последним *фактически выбранным* bbox (см. ниже Правка 4).
+    const ref = { x: data.canvasW / 2, y: data.canvasH / 2 };
+    const baseScore = c => (c.bbox.cx - ref.x) ** 2 + (c.bbox.cy - ref.y) ** 2;
+    const last = this._lastSelectedBBox;
+    const hystSq = this.hysteresisPx ** 2;
+
+    for (const c of candidates) {
+        c._score = baseScore(c);
+        if (last && hystSq > 0) {
+            const d = (c.bbox.cx - last.cx) ** 2 + (c.bbox.cy - last.cy) ** 2;
+            if (d < hystSq) c._score -= hystSq * 0.5;
+        }
+    }
+
+    candidates.sort((a, b) => a._score - b._score);
+    return candidates;    // _lastSelectedBBox обновляется в TextManager, см. Правка 4
+}
 
     /**
      * Определяет, нужно ли переворачивать текст в данной позиции.
@@ -585,41 +574,45 @@ export class VectorLineLabelSource {
      * @param {Object} cw
      * @returns {boolean}
      */
-    _determineFlipState(data, startPx, cw) {
-        if (!this.keepUpright) return false;
+_determineFlipState(data, startPx, cw) {
+    if (!this.keepUpright) return false;
 
-        // Берём угол в середине текста, а не в начале.
-        const midPx = startPx + cw.total * 0.5;
-        const rawAngle = this._getRawAngleAt(data, midPx);
+    const len = cw.visual.length;
+    const firstCenterPx = startPx + cw.visual[0] * 0.5;
+    const lastCenterPx  = startPx + cw.total - cw.visual[len - 1] * 0.5;
 
-        // Нормализуем угол в диапазон (-180, 180].
-        let angle = rawAngle;
-        while (angle <= -180) angle += 360;
-        while (angle > 180) angle -= 360;
+    const first = this._samplePx(data, firstCenterPx);
+    const last  = this._samplePx(data, lastCenterPx);
 
-        const absAngle = Math.abs(angle);
+    const dx = last.x - first.x;
+    const dy = last.y - first.y;
 
-        // Проверяем гистерезис: если мы близко к вертикали и
-        // предыдущее состояние было зафиксировано, сохраняем его.
-        const last = this._lastFlipState;
-        if (last) {
-            const distFromVertical = Math.abs(absAngle - 90);
-            if (distFromVertical <= this.unflipRange) {
-                // Мы в «мёртвой зоне» — сохраняем предыдущее состояние.
-                return last.flipped;
-            }
+    // Основной критерий MapLibre: для horizontal — переворачиваем,
+    // если первый глиф правее последнего (текст читается R→L).
+    let flipped = dx < 0;
+
+    // Гистерезис только в узкой зоне около вертикали:
+    // если текст почти вертикальный и мы уже приняли решение — держим его.
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+    const deadZone = Math.sin(this.unflipRange * Math.PI / 180) * absDy;
+
+    if (absDx <= deadZone) {
+        const lastState = this._lastFlipState;
+        // Валидируем гистерезис: привязываемся к позиции и углу,
+        // а не «навсегда».
+        if (lastState &&
+            Math.abs(lastState.anchorPx - startPx) < cw.total * 0.75) {
+            return lastState.flipped;
         }
-
-        // Стандартное правило: переворачиваем, если текст идёт
-        // справа налево (угол больше 90° или меньше -90°).
-        const flipped = absAngle > 90;
-
-        // Запоминаем состояние для гистерезиса.
-        this._lastFlipState = { flipped, anchorPx: startPx };
-
-        return flipped;
+        // Если позиция сместилась сильно — сбрасываем и решаем заново,
+        // но выбираем «читаемое» состояние по умолчанию.
+        flipped = false;
     }
 
+    this._lastFlipState = { flipped, anchorPx: startPx };
+    return flipped;
+}
     /**
      * Проверяет, не превышает ли изгиб линии на протяжении текста
      * допустимый угол `maxAngle`.
@@ -684,63 +677,59 @@ export class VectorLineLabelSource {
      * @param {boolean} isFlipped
      * @returns {Array|null}
      */
-    _buildCharLayout(data, cw, startPx, isFlipped) {
-        const s = this.getTextStyle();
-        const fs = parseFloat(s.fontSize) || 12;
-        const [ox, oy] = this.lineData.textOffset || [0, 0];
+ _buildCharLayout(data, cw, startPx, isFlipped) {
+    const s = this.getTextStyle();
+    const fs = parseFloat(s.fontSize) || 12;
+    const [ox, oy] = this.lineData.textOffset || [0, 0];
 
-        // Определяем вертикальное выравнивание с учётом placement.
-        let align = this.lineData.textVerticalAlign || 'middle';
-        if (this.placement === 'above') align = 'top';
-        else if (this.placement === 'below') align = 'bottom';
-        else if (this.placement === 'center') align = 'middle';
+    let align = this.lineData.textVerticalAlign || 'middle';
+    if (this.placement === 'above') align = 'top';
+    else if (this.placement === 'below') align = 'bottom';
+    else if (this.placement === 'center') align = 'middle';
+    let coeff = 0;
+    if (align === 'top') coeff = 1;
+    else if (align === 'bottom') coeff = -1;
+    const perpDist = coeff * fs * 0.7;
 
-        // Коэффициент перпендикулярного смещения:
-        //   top    → +1 (текст над линией)
-        //   middle →  0 (текст на линии)
-        //   bottom → -1 (текст под линией)
-        let coeff = 0;
-        if (align === 'top') coeff = 1;
-        else if (align === 'bottom') coeff = -1;
+    const layout = [];
+    let px = startPx;
+    const endPx = data.totalLenPx + 1;
+    const len = cw.text.length;
+    const flipAngleDeg = isFlipped ? 180 : 0;
 
-        const perpDist = coeff * fs * 0.7;
+    for (let i = 0; i < len; i++) {
+        const charIndex = isFlipped ? (len - 1 - i) : i;
+        if (px > endPx) return null;
 
-        const layout = [];
-        let px = startPx;
-        const endPx = data.totalLenPx + 1;
-        const len = cw.text.length;
+        const visualW  = cw.visual[charIndex];
+        const advanceW = cw.advance[charIndex];
+        const centerPx = px + visualW * 0.5;
 
-        for (let i = 0; i < len; i++) {
-            // При перевороте символы идут в обратном порядке.
-            const charIndex = isFlipped ? (len - 1 - i) : i;
-            if (px > endPx) return null;
+        // ВАЖНО: сырой угол сегмента, без нормировки
+        const rawDeg = this._getRawAngleAt(data, centerPx);
+        const effDeg = rawDeg + flipAngleDeg;
+        const rad    = effDeg * Math.PI / 180;
 
-            const visualW = cw.visual[charIndex];
-            const advanceW = cw.advance[charIndex];
-            const centerPx = px + visualW * 0.5;
-            const p = this._samplePx(data, centerPx);
-            if (p.z <= 0 || p.z >= 1) return null;
+        const p = this._samplePx(data, centerPx);
+        if (p.z <= 0 || p.z >= 1) return null;
 
-            // Перпендикулярное смещение в экранных координатах.
-            const rad = p.angle * Math.PI / 180;
-            const sin = Math.sin(rad);
-            const cos = Math.cos(rad);
-            const dxp = sin * perpDist;
-            const dyp = -cos * perpDist;
+        const sin = Math.sin(rad);
+        const cos = Math.cos(rad);
+        const dxp = sin * perpDist;
+        const dyp = -cos * perpDist;
 
-            layout.push({
-                char: cw.text[charIndex],
-                x: p.x + dxp + ox,
-                y: p.y + dyp + oy,
-                angle: p.angle,
-                w: visualW
-            });
+        layout.push({
+            char: cw.text[charIndex],
+            x: p.x + dxp + ox,
+            y: p.y + dyp + oy,
+            angle: effDeg,
+            w: visualW
+        });
 
-            px += advanceW;
-        }
-
-        return layout;
+        px += advanceW;
     }
+    return layout;
+}
 
     /**
      * Вычисляет ограничивающий прямоугольник (bbox) для раскладки

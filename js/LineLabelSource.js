@@ -12,24 +12,6 @@ function _measure(text, fontSize, fontFamily, fontWeight, fontStyle) {
     return ctx.measureText(text).width;
 }
 
-/**
- * Подписи линейных объектов: предвычисленные кандидаты + посимвольный
- * layout для рендера по кривой.
- *
- * Кандидат — это положение ПЕРВОГО символа (в экранных пикселях) +
- * массив позиций/углов всех символов, вычисленных вдоль полилинии.
- * TextManager выбирает ровно один кандидат на тайл; рендерятся его символы.
- *
- * Позиция каждого символа (x, y) — это ЦЕНТР глифа. Ширина (w) —
- * визуальная ширина (без letterSpacing). Это согласовано с рендером
- * в TextManager: `translate3d(x - w/2, y - fs/2, 0) rotate(angle)`.
- *
- * Вертикальное выравнивание относительно линии:
- *  - `textVerticalAlign`: 'top' | 'middle' | 'bottom' (семантика MapLibre:
- *    'top' = подпись над линией, 'bottom' = под линией).
- *  - `placement` в опциях перекрывает: 'above'|'below'|'center'.
- *  - `textOffset` [dx, dy] в пикселях — добавляется к позиции (экранные оси).
- */
 export class VectorLineLabelSource {
     constructor(map, lineData, group, options = {}) {
         this.map = map;
@@ -40,6 +22,7 @@ export class VectorLineLabelSource {
         this.placement      = options.placement      ?? 'auto';
         this.priorityMode   = options.priorityMode   ?? 'tile';
         this.hysteresisPx   = options.hysteresisPx   ?? 40;
+        this.keepUpright    = options.keepUpright    ?? true; // text-keep-upright
 
         this._screenData = null;
         this._screenDataSig = null;
@@ -50,7 +33,6 @@ export class VectorLineLabelSource {
         this._lastSelectedBBox = null;
     }
 
-    // ── Public API ───────────────────────────────────────────────
     getText()               { return this.lineData.text || ''; }
     getLabelType()          { return 'line-curved'; }
     isVisible()             { return this.lineData.visible !== false; }
@@ -80,7 +62,7 @@ export class VectorLineLabelSource {
         this._lastSelectedBBox = this._candidates?.[idx]?.bbox ?? null;
     }
 
-    /** @returns {Array<{charLayout: Array<{char,x,y,angle,w}>, bbox: Object}>} */
+    /** Возвращает массив кандидатов. Вызывается TextManager'ом редко. */
     getCandidates() {
         const data = this._getScreenData();
         if (!data) return [];
@@ -105,11 +87,13 @@ export class VectorLineLabelSource {
         const offZ = wp.z + gp.z;
         const zoom = this.map.continuousZoom;
 
-        const sig = cam.position.x.toFixed(2) + ',' +
-                    cam.position.y.toFixed(2) + ',' +
-                    cam.position.z.toFixed(2) + '|' +
-                    offX.toFixed(2) + ',' + offZ.toFixed(2) + '|' +
-                    zoom.toFixed(2);
+        // Сигнатура меняется только при зуме или смене тайла (положение группы),
+        // но НЕ при простом панорамировании (для этого есть worldOffset).
+        const sig = cam.position.x.toFixed(1) + ',' +
+                    cam.position.y.toFixed(1) + ',' +
+                    cam.position.z.toFixed(1) + '|' +
+                    offX.toFixed(1) + ',' + offZ.toFixed(1) + '|' +
+                    zoom.toFixed(1);
         if (this._screenDataSig === sig) return this._screenData;
         this._screenDataSig = sig;
         this._screenData = this._computeScreenData(cam, offX, offZ);
@@ -179,7 +163,6 @@ export class VectorLineLabelSource {
         }
         if (totalLenPx < 1e-6) return null;
 
-        // Видимый интервал (грубый culling).
         const samples = 40;
         const probe = { pointsPx, pointsScreen, segAngles, totalLenPx };
         const flags = [];
@@ -204,7 +187,6 @@ export class VectorLineLabelSource {
         };
         if (visibleIntervalPx.max - visibleIntervalPx.min < 10) return null;
 
-        // Центр тайла в экранных координатах (для приоритета).
         v.set(offX, 0, offZ).project(camera);
         const tileCenterScreen = {
             x: (v.x * 0.5 + 0.5) * W,
@@ -241,8 +223,6 @@ export class VectorLineLabelSource {
         return { x: s.x, y: s.y, z: s.z, angle: segAngles[n - 2] ?? 0 };
     }
 
-    // ── Ширины символов (с letterSpacing, textTransform, пробелами) ──
-
     _getCharWidths() {
         if (this._charWidths) return this._charWidths;
         const rawText = this.lineData.text || '';
@@ -259,8 +239,6 @@ export class VectorLineLabelSource {
             lsPx = s.letterSpacing.endsWith('em') ? val * fsPx : val;
         }
 
-        // advance[] — сдвиг курсора после каждого символа.
-        // visual[] — визуальная ширина (для рендера и bbox).
         const advance = [];
         const visual = [];
         let total = 0;
@@ -296,17 +274,15 @@ export class VectorLineLabelSource {
         const visibleLen = data.visibleIntervalPx.max - data.visibleIntervalPx.min;
         if (totalPx < cw.total || visibleLen < cw.total * 0.9) return [];
 
+        // Равномерно размещаем якоря вдоль ВСЕЙ видимой части линии
         const step = cw.total * this.tracking;
         const startMin = data.visibleIntervalPx.min;
         const startMax = data.visibleIntervalPx.max - cw.total;
         if (startMax < startMin) return [];
 
         const positions = [];
-        const centerStart = startMin + (visibleLen - cw.total) * 0.5;
-        if (centerStart >= startMin && centerStart <= startMax) positions.push(centerStart);
-
         for (let x = startMin; x <= startMax + 1e-3; x += step) {
-            if (Math.abs(x - centerStart) > step * 0.5) positions.push(x);
+            positions.push(x);
         }
         if (positions.length === 0) return [];
 
@@ -320,9 +296,8 @@ export class VectorLineLabelSource {
         }
         if (candidates.length === 0) return [];
 
-        const ref = this.priorityMode === 'viewport'
-            ? { x: data.canvasW / 2, y: data.canvasH / 2 }
-            : data.tileCenterScreen;
+        // Сортируем: ближайшие к центру вьюпорта (а не тайла) — первыми
+        const ref = { x: data.canvasW / 2, y: data.canvasH / 2 };
         const baseScore = c => (c.bbox.cx - ref.x) ** 2 + (c.bbox.cy - ref.y) ** 2;
 
         const last = this._lastSelectedBBox;
@@ -342,16 +317,12 @@ export class VectorLineLabelSource {
         const fs = parseFloat(s.fontSize) || 12;
         const [ox, oy] = this.lineData.textOffset || [0, 0];
 
-        // Вертикальное выравнивание относительно линии.
-        // 'top'    → подпись над линией (для рек)
-        // 'middle' → поверх линии (для дорог)
-        // 'bottom' → под линией
         let align = this.lineData.textVerticalAlign || 'middle';
         if (this.placement === 'above') align = 'top';
         else if (this.placement === 'below') align = 'bottom';
         else if (this.placement === 'center') align = 'middle';
 
-        let coeff = 0;               // +1 = над линией, -1 = под
+        let coeff = 0;
         if (align === 'top') coeff = 1;
         else if (align === 'bottom') coeff = -1;
         const perpDist = coeff * fs * 0.7;
@@ -360,27 +331,34 @@ export class VectorLineLabelSource {
         let px = startPx;
         const endPx = data.visibleIntervalPx.max + 1;
         const len = cw.text.length;
+
+        // Проверяем, не идёт ли текст "назад" (против направления линии)
+        const startP = this._samplePx(data, px);
+        const endP = this._samplePx(data, Math.min(endPx, px + cw.total));
+        const isFlipped = this.keepUpright && (startP.angle > 90 || startP.angle < -90);
+
         for (let i = 0; i < len; i++) {
+            const charIndex = isFlipped ? (len - 1 - i) : i;
             if (px > endPx) return null;
-            const visualW = cw.visual[i];
-            const advanceW = cw.advance[i];
-            // Сэмплируем в ЦЕНТРЕ визуального глифа.
+            const visualW = cw.visual[charIndex];
+            const advanceW = cw.advance[charIndex];
             const centerPx = px + visualW * 0.5;
             const p = this._samplePx(data, centerPx);
             if (p.z <= 0 || p.z >= 1) return null;
 
-            // Перпендикуляр "вверх" относительно направления текста:
-            //   tangent = (cos θ, sin θ)  → up = (sin θ, −cos θ) в экранных (y↓) координатах.
             const rad = p.angle * Math.PI / 180;
             const sin = Math.sin(rad), cos = Math.cos(rad);
             const dxp = sin * perpDist;
             const dyp = -cos * perpDist;
 
+            let angle = p.angle;
+            if (isFlipped) angle += 180;
+
             layout.push({
-                char: cw.text[i],
+                char: cw.text[charIndex],
                 x: p.x + dxp + ox,
                 y: p.y + dyp + oy,
-                angle: p.angle,
+                angle,
                 w: visualW
             });
             px += advanceW;

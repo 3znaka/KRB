@@ -72,6 +72,11 @@ export class TextManager {
         this._measureScheduled = false;
         this._lastFrameSig = null;
         this._dirty = true;
+
+        // Троттлинг для тяжёлого поиска позиций (коллизий)
+        this._lastLayoutTime = 0;
+        this._layoutInterval = 150; // мс
+
         this._initPane();
     }
 
@@ -133,7 +138,6 @@ export class TextManager {
     }
 
     addLabel(source, stableId = null) {
-        // --- Reuse path -----------------------------------------------------
         if (stableId != null) {
             const existing = this._labelsById.get(stableId);
             if (existing) {
@@ -143,7 +147,6 @@ export class TextManager {
             }
         }
 
-        // --- Create path ----------------------------------------------------
         const type = source.getLabelType ? source.getLabelType() : 'point';
         const isCurved = type === 'line-curved';
 
@@ -176,8 +179,6 @@ export class TextManager {
         } else if (!isCurved) {
             el.textContent = source.getText();
         }
-        // Для 'line-curved' контейнер оставляем пустым — содержимое
-        // формируется через span-ы в _renderLineChars.
 
         this.pane.appendChild(el);
 
@@ -188,7 +189,6 @@ export class TextManager {
             t: 0,
             width: 0,
             height: 0,
-            stuck: false,
             hiddenByPriority: false,
             priority: source.getPriority ? source.getPriority() : 0,
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
@@ -196,7 +196,8 @@ export class TextManager {
             _bbox: null,
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
-            _chosenCand: null
+            _chosenCand: null,  // Сохраняем выбранного кандидата
+            _currentCand: null  // Обновляем каждый кадр для рендера
         };
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
@@ -220,14 +221,12 @@ export class TextManager {
         const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
 
         label.source = newSource;
-        // Форсируем пересчёт выбранного кандидата в ближайшем update.
         label._chosenCand = null;
+        label._currentCand = null;
 
         Object.assign(el.style, newStyle);
 
         if (newType === 'line-curved') {
-            // Текстовое содержимое управляется через char-span-ы. Ничего не
-            // обновляем здесь; _renderLineChars сам синхронизирует span-ы.
             label._fontSize = parseFloat(newStyle.fontSize) || 12;
             return;
         }
@@ -285,6 +284,7 @@ export class TextManager {
     }
 
     _wrapPointText(text, fontSize) {
+        // ... (без изменений) ...
         if (!text || text.indexOf(' ') === -1) return text;
         const words = text.split(/\s+/).filter(w => w.length > 0);
         if (words.length <= 1) return text;
@@ -322,11 +322,6 @@ export class TextManager {
         return lines.join('\n');
     }
 
-    _measureLabel(label) {
-        label._needsMeasure = true;
-        this._scheduleMeasure(label);
-    }
-
     _scheduleMeasure(label) {
         if (label._queuedForMeasure) return;
         label._queuedForMeasure = true;
@@ -339,6 +334,7 @@ export class TextManager {
     }
 
     _flushMeasurements() {
+        // ... (без изменений) ...
         if (!this._measureScheduled) return;
         this._measureScheduled = false;
         const queue = this._measureQueue;
@@ -402,6 +398,7 @@ export class TextManager {
     }
 
     _setLabelVisible(label, visible) {
+        // ... (без изменений) ...
         const el = label.element;
         if (visible) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
@@ -425,39 +422,34 @@ export class TextManager {
     }
 
     _computeAnchor(label, rotationDeg) {
+        // ... (без изменений) ...
         const src = label.source;
         if (label._needsMeasure) this._flushMeasurements();
-
         const w = label.width;
         const h = label.height;
-
         const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
         const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
         const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
-
         let anchorX;
         if (align === 'left') anchorX = 0;
         else if (align === 'right') anchorX = w;
         else anchorX = w / 2;
-
         let anchorY;
         if (vAlign === 'top') anchorY = 0;
         else if (vAlign === 'bottom') anchorY = h;
         else anchorY = h / 2;
-
         const rad = rotationDeg * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
-
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
         return { dx, dy, offX, offY, w, h, cos, sin };
     }
 
     _getLabelCorners(label, tOverride = null) {
+        // ... (без изменений) ...
         const src = label.source;
         const isLine = src.getLabelType() === 'line';
-
         let scrX, scrY, rotation = 0;
         if (isLine) {
             const t = tOverride !== null ? tOverride : label.t;
@@ -470,22 +462,16 @@ export class TextManager {
             if (!pos) return null;
             scrX = pos.x; scrY = pos.y;
         }
-
         const a = this._computeAnchor(label, rotation);
         const { dx, dy, offX, offY, w, h, cos, sin } = a;
-
-        // NOTE: сдвиг на _fontSize для линий убран — это был баг,
-        // из-за которого подпись всегда оказывалась ПОД линией.
         const top = scrY + dy + offY;
         const left = scrX + dx + offX;
-
         const corners = [
             { x: left,      y: top },
             { x: left + w,  y: top },
             { x: left + w,  y: top + h },
             { x: left,      y: top + h }
         ];
-
         if (rotation !== 0) {
             const cx = left, cy = top;
             for (const pt of corners) {
@@ -498,6 +484,7 @@ export class TextManager {
     }
 
     _getBBox(corners) {
+        // ... (без изменений) ...
         let minX = Infinity, minY = Infinity;
         let maxX = -Infinity, maxY = -Infinity;
         for (const c of corners) {
@@ -510,45 +497,9 @@ export class TextManager {
     }
 
     _bboxOverlap(a, b) {
-        return !(a.maxX < b.minX || b.maxX < a.minX ||
-                 a.maxY < b.minY || b.maxY < a.minY);
+        return !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY);
     }
 
-    _projectPolygon(axis, poly) {
-        let min = axis.x * poly[0].x + axis.y * poly[0].y;
-        let max = min;
-        for (let i = 1; i < poly.length; i++) {
-            const proj = axis.x * poly[i].x + axis.y * poly[i].y;
-            if (proj < min) min = proj;
-            if (proj > max) max = proj;
-        }
-        return { min, max };
-    }
-
-    _rectsIntersect(rectA, rectB) {
-        if (!rectA || !rectB) return false;
-        const polys = [rectA, rectB];
-        for (const poly of polys) {
-            for (let i = 0; i < poly.length; i++) {
-                const p1 = poly[i];
-                const p2 = poly[(i + 1) % poly.length];
-                const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
-                const axis = { x: -edge.y, y: edge.x };
-                const projA = this._projectPolygon(axis, rectA);
-                const projB = this._projectPolygon(axis, rectB);
-                if (projA.max < projB.min || projB.max < projA.min) return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Проверяет, пересекается ли bbox с чем-либо, уже размещённым в сетке.
-     * Для 'line-curved' достаточно AABB-проверки: bbox кандидата уже
-     * учитывает повороты символов (он вычислен как AABB объединения
-     * повёрнутых прямоугольников всех char-ов).
-     * @private
-     */
     _collidesWithGrid(bbox) {
         const others = this._gridIndex.query(bbox);
         for (let i = 0; i < others.length; i++) {
@@ -559,16 +510,10 @@ export class TextManager {
         return false;
     }
 
-    /**
-     * Рендерит per-char span-ы для подписи линейного объекта.
-     * Каждый символ позиционируется так, чтобы его центр оказался на
-     * точке полилинии; ориентация — вдоль касательной.
-     * @private
-     */
     _renderLineChars(label, charLayout) {
+        // ... (без изменений) ...
         const el = label.element;
         const need = charLayout.length;
-
         while (el.children.length < need) {
             const span = document.createElement('span');
             span.style.cssText =
@@ -580,24 +525,19 @@ export class TextManager {
         while (el.children.length > need) {
             el.removeChild(el.lastChild);
         }
-
         const fs = label._fontSize || 12;
         for (let i = 0; i < need; i++) {
             const c = charLayout[i];
             const span = el.children[i];
             if (span.textContent !== c.char) span.textContent = c.char;
-            // translate3d ставит top-left так, чтобы центр (50%, 50%)
-            // оказался ровно в точке (c.x, c.y).
             const tx = c.x - c.w * 0.5;
             const ty = c.y - fs * 0.5;
-            span.style.transform =
-                `translate3d(${tx}px, ${ty}px, 0) rotate(${c.angle}deg)`;
+            span.style.transform = `translate3d(${tx}px, ${ty}px, 0) rotate(${c.angle}deg)`;
         }
         el.style.transform = 'translate3d(0,0,0)';
     }
 
     update() {
-        // --- 0. Форсируем измерения ----------------------------------------
         if (this._measureQueue.length > 0) {
             if (!this._measureScheduled) this._measureScheduled = true;
             this._flushMeasurements();
@@ -605,20 +545,32 @@ export class TextManager {
 
         const map = this.map;
         const zoom = map.continuousZoom;
+        const now = performance.now();
 
-        // --- 1. Троттлинг ---------------------------------------------------
-        const wp = map.worldGroup.position;
-        const cam = map.camera.position;
-        const sig = zoom
-            + '|' + wp.x.toFixed(3) + ',' + wp.z.toFixed(3)
-            + '|' + cam.x.toFixed(3) + ',' + cam.y.toFixed(3) + ',' + cam.z.toFixed(3)
-            + '|' + this.labels.length;
+        // Определяем, нужно ли делать тяжёлый Layout (поиск позиций и коллизии)
+        // Только если изменился зум, состав, или прошло достаточно времени.
+        const needLayout = this._dirty || this._lastZoom !== zoom || (now - this._lastLayoutTime > this._layoutInterval);
 
-        if (!this._dirty && this._lastFrameSig === sig) return;
-        this._lastFrameSig = sig;
+        // Если Layout не нужен, но камера движется, мы просто обновляем трансформации
+        // на основе уже выбранных (_chosenCand) позиций.
+        if (!needLayout) {
+            const wp = map.worldGroup.position;
+            const cam = map.camera.position;
+            const sig = zoom + '|' + wp.x.toFixed(1) + ',' + wp.z.toFixed(1) + '|' + cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ',' + cam.z.toFixed(1);
+            
+            if (this._lastFrameSig !== sig) {
+                this._lastFrameSig = sig;
+                this._applyTransforms();
+            }
+            return;
+        }
+
+        // --- Тяжёлый Layout ---
+        this._lastLayoutTime = now;
+        this._lastZoom = zoom;
         this._dirty = false;
+        this._lastFrameSig = null; // Сброс, чтобы в следующий раз применились трансформации
 
-        // Сброс stuck при изменении состава или зума.
         const idSet = new Set();
         for (const l of this.labels) {
             const src = l.source;
@@ -627,20 +579,8 @@ export class TextManager {
                 idSet.add(src);
             }
         }
-        if (this._lastVisibleIds === null ||
-            this._lastZoom === null ||
-            this._lastZoom !== zoom ||
-            this._lastVisibleIds.size !== idSet.size ||
-            this._setDiffers(this._lastVisibleIds, idSet)) {
-            for (const lbl of this.labels) {
-                lbl.stuck = false;
-                lbl.hiddenByPriority = false;
-            }
-        }
-        this._lastVisibleIds = idSet;
-        this._lastZoom = zoom;
-
-        // --- 2. Сбор видимых подписей --------------------------------------
+        
+        // Сбор видимых подписей
         const visibleLabels = [];
         for (const label of this.labels) {
             const src = label.source;
@@ -655,7 +595,6 @@ export class TextManager {
             const type = src.getLabelType();
 
             if (type === 'line-curved') {
-                // Кандидаты запрашиваются лениво при размещении (п.4).
                 visibleLabels.push(label);
                 continue;
             }
@@ -684,107 +623,7 @@ export class TextManager {
             }
         }
 
-        // --- 3. Legacy-раздвижение линейных подписей -----------------------
-        // Работает только для типа 'line'; 'line-curved' физику не использует.
-        const legacyLineLabels = visibleLabels.filter(
-            l => l.source.getLabelType() === 'line'
-        );
-        if (legacyLineLabels.length > 0) {
-            const maxIterations = 15;
-            const learningRate = 0.4;
-            const stuckThreshold = 1e-5;
-
-            for (let iter = 0; iter < maxIterations; iter++) {
-                let anyChanged = false;
-
-                for (const lbl of legacyLineLabels) {
-                    if (lbl.stuck) continue;
-
-                    lbl.rect = this._getLabelCorners(lbl);
-                    if (!lbl.rect) continue;
-                    const lblBBox = this._getBBox(lbl.rect);
-
-                    const overlapping = [];
-                    for (const other of visibleLabels) {
-                        if (other === lbl) continue;
-                        if (!other.rect) continue;
-                        const otherBBox = other._bbox || this._getBBox(other.rect);
-                        other._bbox = otherBBox;
-                        if (!this._bboxOverlap(lblBBox, otherBBox)) continue;
-                        if (this._rectsIntersect(lbl.rect, other.rect)) {
-                            overlapping.push(other);
-                        }
-                    }
-                    if (overlapping.length === 0) continue;
-
-                    const relevant = overlapping.filter(o => o.priority >= lbl.priority);
-                    if (relevant.length === 0) continue;
-
-                    const pi = lbl.source.getScreenPositionAt(lbl.t);
-                    if (!pi) continue;
-
-                    let forceX = 0, forceY = 0;
-                    for (const other of relevant) {
-                        const pj = (other.source.getLabelType() === 'line')
-                            ? other.source.getScreenPositionAt(other.t)
-                            : other.source.getScreenPosition();
-                        if (!pj) continue;
-                        const dx = pi.x - pj.x;
-                        const dy = pi.y - pj.y;
-                        const dist2 = dx * dx + dy * dy + 1;
-                        const forceMag = 1 / dist2;
-                        forceX += (dx / Math.sqrt(dist2)) * forceMag;
-                        forceY += (dy / Math.sqrt(dist2)) * forceMag;
-                    }
-
-                    const ang = lbl.source.getScreenAngleAt(lbl.t) * Math.PI / 180;
-                    const tangentX = Math.cos(ang);
-                    const tangentY = Math.sin(ang);
-                    const dot = forceX * tangentX + forceY * tangentY;
-                    const step = dot * learningRate;
-
-                    const oldT = lbl.t;
-                    let newT = oldT + step;
-                    if (lbl.allowOverflow) {
-                        newT = Math.max(0, Math.min(1, newT));
-                    } else {
-                        const iv = lbl.visibleInterval;
-                        if (iv) newT = Math.max(iv.min, Math.min(iv.max, newT));
-                    }
-                    if (Math.abs(newT - oldT) > 1e-7) {
-                        lbl.t = newT;
-                        anyChanged = true;
-                    }
-                }
-                if (!anyChanged) break;
-            }
-
-            for (const lbl of legacyLineLabels) {
-                if (lbl.stuck) continue;
-                lbl.rect = this._getLabelCorners(lbl);
-                if (!lbl.rect) { lbl.stuck = true; continue; }
-                const lblBBox = this._getBBox(lbl.rect);
-                const overlapping = visibleLabels.filter(o => {
-                    if (o === lbl || !o.rect) return false;
-                    const otherBBox = o._bbox || this._getBBox(o.rect);
-                    o._bbox = otherBBox;
-                    if (!this._bboxOverlap(lblBBox, otherBBox)) return false;
-                    return this._rectsIntersect(lbl.rect, o.rect);
-                });
-                const oldT = lbl.source.getLabelParameter();
-                if (overlapping.length > 0 && Math.abs(lbl.t - oldT) < stuckThreshold) {
-                    lbl.stuck = true;
-                } else if (overlapping.length === 0) {
-                    lbl.stuck = false;
-                }
-            }
-            for (const lbl of legacyLineLabels) {
-                if (lbl.stuck) lbl.t = lbl.source.getLabelParameter();
-                else lbl.source.setLabelParameter(lbl.t);
-            }
-        }
-
-        // --- 4. Жадная приоритизация ---------------------------------------
+        // Сортировка
         const sorted = [...visibleLabels].sort((a, b) => {
             if (a.priority !== b.priority) return b.priority - a.priority;
             const aKind = a.source.getLabelType() === 'point' ? 0 : 1;
@@ -799,8 +638,6 @@ export class TextManager {
             const type = lbl.source.getLabelType();
 
             if (type === 'line-curved') {
-                // Пробуем кандидатов в порядке приоритета; показываем
-                // первый, чей bbox не пересекается с уже размещёнными.
                 const candidates = lbl.source.getCandidates();
                 if (!candidates || candidates.length === 0) {
                     lbl.hiddenByPriority = true;
@@ -808,12 +645,10 @@ export class TextManager {
                     continue;
                 }
                 let chosen = null;
-                let chosenIdx = -1;
                 for (let i = 0; i < candidates.length; i++) {
                     const cand = candidates[i];
                     if (!this._collidesWithGrid(cand.bbox)) {
                         chosen = cand;
-                        chosenIdx = i;
                         break;
                     }
                 }
@@ -821,10 +656,11 @@ export class TextManager {
                     lbl._bbox = chosen.bbox;
                     this._gridIndex.insert(chosen.bbox, lbl);
                     lbl._chosenCand = chosen;
-                    lbl.source.selectCandidate(chosenIdx);
+                    lbl._currentCand = chosen;
                     lbl.hiddenByPriority = false;
                 } else {
                     lbl._chosenCand = null;
+                    lbl._currentCand = null;
                     lbl.hiddenByPriority = true;
                 }
                 continue;
@@ -851,21 +687,53 @@ export class TextManager {
             }
         }
 
-        // --- Применяем видимость -------------------------------------------
+        // Применяем видимость
         const visibleSet = new Set(visibleLabels);
         for (const label of this.labels) {
             const shouldBeVisible = visibleSet.has(label) && !label.hiddenByPriority;
             this._setLabelVisible(label, shouldBeVisible);
         }
 
-        // --- 5. Рендеринг --------------------------------------------------
-        for (const label of visibleLabels) {
+        // Применяем трансформации
+        this._applyTransforms();
+    }
+
+    /**
+     * Лёгкий метод, обновляющий только DOM.
+     * Ищет того же кандидата (по смещению) и применяет к нему новые экранные координаты.
+     */
+    _applyTransforms() {
+        for (const label of this.labels) {
+            if (label.hiddenByPriority) continue;
             const src = label.source;
             const type = src.getLabelType();
 
             if (type === 'line-curved') {
-                if (label.hiddenByPriority || !label._chosenCand) continue;
-                this._renderLineChars(label, label._chosenCand.charLayout);
+                if (!label._chosenCand) continue;
+                
+                // Получаем свежие координаты кандидатов
+                const candidates = src.getCandidates();
+                if (!candidates || candidates.length === 0) continue;
+
+                // Ищем кандидата, который ближе всего к сохранённому _chosenCand
+                // Это предотвращает "прыжки" при движении камеры.
+                let bestCand = candidates[0];
+                let minDist = Infinity;
+                const targetX = label._chosenCand.charLayout[0].x;
+                const targetY = label._chosenCand.charLayout[0].y;
+
+                for (let i = 0; i < candidates.length; i++) {
+                    const cx = candidates[i].charLayout[0].x;
+                    const cy = candidates[i].charLayout[0].y;
+                    const d = (cx - targetX) ** 2 + (cy - targetY) ** 2;
+                    if (d < minDist) {
+                        minDist = d;
+                        bestCand = candidates[i];
+                    }
+                }
+                
+                label._currentCand = bestCand;
+                this._renderLineChars(label, label._currentCand.charLayout);
                 continue;
             }
 
@@ -879,14 +747,14 @@ export class TextManager {
                 screenY = pos.y;
                 rotation = src.getScreenAngleAt(label.t);
             } else {
-                screenX = label.screenPos.x;
-                screenY = label.screenPos.y;
+                const pos = src.getScreenPosition();
+                if (!pos) continue;
+                screenX = pos.x;
+                screenY = pos.y;
             }
 
             const a = this._computeAnchor(label, rotation);
             const { dx, dy, offX, offY } = a;
-
-            // NOTE: сдвиг на _fontSize для линий убран (см. _getLabelCorners).
             const top = screenY + dy + offY;
 
             let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;

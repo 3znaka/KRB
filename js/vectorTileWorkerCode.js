@@ -2,6 +2,18 @@
 /**
  * Модуль генерации кода воркера векторных тайлов.
  * Использует стили и порядок отрисовки из vectorTileDefaults.js.
+ *
+ * ИЗМЕНЕНИЯ:
+ *  — `pickMatch` отделён от `resolveMatch` (нужен для resolveCurve).
+ *  — `resolveCurve`/`curveKey`: ширина линии становится зависимостью от
+ *    зума (число или {stops}), а не числом, посчитанным в момент сборки.
+ *    Главный поток каждый кадр пересчитывает linewidth/dashScale —
+ *    тайлы одного LOD и оба LOD на переходе выглядят одинаково.
+ *  — `dash` считается на зуме тайла z; масштаб по continuousZoom
+ *    докручивает LineMaterial через dashScale.
+ *  — `styleZoom` (детерминированный = currentDiscreteZoom + zoomOffset)
+ *    используется для резолвинга всех стилей, кроме собственно ширин
+ *    линий и dash. Тайлы одного уровня получаются идентичными.
  */
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
@@ -46,12 +58,12 @@ function onMessage(e) {
     }
     if (msg.type === 'identify') {
         const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ,
-                tolerance, continuousZoom } = msg;
+                tolerance, continuousZoom, styleZoom } = msg;
         try {
             const tile = new VectorTile(new Protobuf(buffer));
             const result = identifyAt(
                 tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
-                continuousZoom ?? z
+                styleZoom ?? continuousZoom ?? z
             );
             self.postMessage({ id, result });
         } catch (err) {
@@ -63,7 +75,7 @@ function onMessage(e) {
         const {
             id, buffer, z, x, y, tileSize, maxMerc, is3d,
             visibleLayers, buildingEdges,
-            continuousZoom,
+            continuousZoom, styleZoom,
             exclusionPolygons = [], exclusionLayers = [],
             maxTextPointsPerTile = 300,
             maxTextLinesPerTile = 30
@@ -75,7 +87,7 @@ function onMessage(e) {
                 visibleLayers, buildingEdges,
                 exclusionPolygons, exclusionLayers,
                 maxTextPointsPerTile, maxTextLinesPerTile,
-                continuousZoom ?? z
+                styleZoom ?? continuousZoom ?? z
             );
             const transferList = [];
             const payload = { id, result };
@@ -95,7 +107,7 @@ const CARRIER_ONLY_LINE_LAYERS = new Set(['transportation_name', 'water_name']);
 
 // Casing (обводка) дорог. В style.json casing-слои идут отдельными
 // записями (highway-*-casing, bridge-*-casing, tunnel-*-casing);
-// здесь — упрощение: +4 px к толщине fill для дорог вне туннеля.
+// здесь — упрощение: +extraWidth px к толщине fill для дорог вне туннеля.
 const TRANSPORTATION_CASING = {
     motorway:  { color: 0xe9ac77, extraWidth: 2 },
     trunk:     { color: 0xe9ac77, extraWidth: 2 },
@@ -143,18 +155,26 @@ function resolveValue(spec, props, zoom, geomType) {
     }
 }
 
-function resolveMatch(spec, props, zoom, geomType) {
+/**
+ * Извлекает "сырое" значение match-ветки без его резолва. Нужен, чтобы
+ * resolveCurve мог увидеть, что выбранная ветка — это {type:'zoom',…},
+ * и сохранить её как кривую.
+ */
+function pickMatch(spec, props) {
     const keys = Array.isArray(spec.by) ? spec.by : [spec.by];
     for (const k of keys) {
         const v = props[k];
         if (v === undefined || v === null) continue;
-        let found = spec.values[v];
-        if (found !== undefined) return resolveValue(found, props, zoom, geomType);
+        if (spec.values[v] !== undefined) return spec.values[v];
         const sv = String(v);
-        if (sv in spec.values) return resolveValue(spec.values[sv], props, zoom, geomType);
-        if (v === true && '1' in spec.values) return resolveValue(spec.values['1'], props, zoom, geomType);
+        if (sv in spec.values) return spec.values[sv];
+        if (v === true && '1' in spec.values) return spec.values['1'];
     }
-    return resolveValue(spec.values._default, props, zoom, geomType);
+    return spec.values._default;
+}
+
+function resolveMatch(spec, props, zoom, geomType) {
+    return resolveValue(pickMatch(spec, props), props, zoom, geomType);
 }
 
 function resolveZoom(spec, zoom) {
@@ -261,12 +281,44 @@ function resolveHeight(spec, props, zoom, geomType) {
 }
 
 /**
- * Пересчитывает dash из «пикселей стиля» в world-units LineMaterial.
+ * Как resolveNumber, но сохраняет зависимость от зума:
+ * возвращает число, если значение константное, либо {stops}, если это
+ * была zoom-спека. Используется для ширины линий, чтобы главный поток
+ * мог каждый кадр пересчитывать толщину по continuousZoom.
  */
-function scaleDash(dashPx, tileSize, z, continuousZoom) {
+function resolveCurve(spec, props, geomType) {
+    if (spec === null || spec === undefined) return undefined;
+    if (typeof spec !== 'object' || Array.isArray(spec)) return spec;
+    if (spec.type === 'zoom') return { stops: spec.stops };
+    if (spec.type === 'match') {
+        return resolveCurve(pickMatch(spec, props), props, geomType);
+    }
+    if (spec.type === 'geometryType') {
+        const sub = spec.values[geomType];
+        return resolveCurve(sub !== undefined ? sub : spec._default, props, geomType);
+    }
+    // step, field, levels и т.п. — резолвим один раз (при необходимости
+    // 'step' можно так же превратить в stops, но в текущих стилях его
+    // нет для width).
+    return resolveValue(spec, props, 0, geomType);
+}
+
+function curveKey(c) {
+    if (typeof c === 'number') return String(c);
+    if (!c || !c.stops) return 'na';
+    return c.stops.map(function (s) { return s[0] + '/' + s[1]; }).join(';');
+}
+
+/**
+ * Пересчитывает dash из «пикселей стиля» в world-units LineMaterial.
+ * Вызывается со scaleZoom = z (зум тайла), т.к. dash «запекается» в
+ * координатах геометрии. Масштаб при отрисовке докручивается через
+ * mat.dashScale = 2^(continuousZoom - dashZ).
+ */
+function scaleDash(dashPx, tileSize, z, scaleZoom) {
     if (!dashPx || !Array.isArray(dashPx) || dashPx.length < 2) return null;
     const worldSize = tileSize * Math.pow(2, z);
-    const worldPerPx = worldSize / (256 * Math.pow(2, continuousZoom));
+    const worldPerPx = worldSize / (256 * Math.pow(2, scaleZoom));
     const DASH_MULTIPLIER = 2;
     return [
         dashPx[0] * worldPerPx * DASH_MULTIPLIER,
@@ -325,7 +377,7 @@ function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine =
     const centerX = originX + tileSize / 2;
     const centerZ = originZ + tileSize / 2;
     const geom = feature.loadGeometry();
-    
+
     if (isLine) {
         const resultRings = [];
         for (const line of geom) {
@@ -361,7 +413,7 @@ function clipLineToTile(line, size) {
     for (let i = 0; i < line.length - 1; i++) {
         const p1 = line[i];
         const p2 = line[i + 1];
-        
+
         const clipped = clipSegment(p1, p2, 0, size, 0, size);
         if (clipped) {
             const [cp1, cp2] = clipped;
@@ -693,8 +745,8 @@ function blendWithBackground(color, opacity) {
 // IDENTIFY
 // ════════════════════════════════════════════════════════════════════════
 
-function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance, continuousZoom) {
-    const zoom = continuousZoom ?? z;
+function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance, styleZoom) {
+    const zoom = styleZoom ?? z;
     const tol = tolerance || tileSize * 0.005;
     const tolSq = tol * tol;
     const results = [];
@@ -749,6 +801,7 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
                 layer: layerName,
                 type: geomType === 1 ? 'Point' : geomType === 2 ? 'LineString' : 'Polygon',
                 featureIndex: i,
+                featureId: feature.id,
                 distance: Math.sqrt(minDistSq),
                 filterPass,
                 style: layerStyle ? snapshotStyle(layerStyle, props, zoom, geomType) : null,
@@ -890,11 +943,10 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges,
                      exclusionPolygons = [], exclusionLayers = [],
                      maxTextPointsPerTile = 300, maxTextLinesPerTile = 30,
-                     continuousZoom = z) {
+                     styleZoom = z) {
     const eps = tileSize * 0.5 / 4096;
-    const pointScale = computePointScale(continuousZoom);
+    const pointScale = computePointScale(styleZoom);
     const halfTile = tileSize / 2;
-    const styleZoom = continuousZoom;
 
     const centerX = x * tileSize - maxMerc + tileSize / 2;
     const centerZ = -maxMerc + y * tileSize + tileSize / 2;
@@ -1109,11 +1161,21 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                 if (!isCarrierOnlyLine) {
                     const color = resolveColor(layerStyle.color, props, styleZoom, geomType);
                     if (color !== null) {
-                        const width = resolveNumber(layerStyle.width, props, styleZoom, 1, geomType);
+                        // Ширина — как кривая (число или {stops}).
+                        // Точное значение вычислит главный поток по continuousZoom
+                        // в каждом кадре; здесь определяется лишь «профиль».
+                        let widthCurve = resolveCurve(layerStyle.width, props, geomType);
+                        if (typeof widthCurve !== 'number' &&
+                            !(widthCurve && widthCurve.stops)) {
+                            widthCurve = 1;
+                        }
+
                         const opacity = resolveNumber(layerStyle.opacity, props, styleZoom, 1, geomType);
                         const dashPx = resolveArray(layerStyle.dash, props, styleZoom, geomType);
+                        // dash фиксируем на зуме тайла; масштаб по continuousZoom
+                        // докручивается в _updateDynamicLineMaterials.
                         const dash = dashPx
-                            ? scaleDash(dashPx, tileSize, z, styleZoom)
+                            ? scaleDash(dashPx, tileSize, z, z)
                             : null;
 
                         const finalColor = opacity < 1
@@ -1130,11 +1192,20 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         }
 
                         const dashKey = dash ? dash.map(v => v.toFixed(3)).join(',') : 'none';
+                        const wKey = curveKey(widthCurve);
                         const lineKey = 'line:' + name + ':' +
-                            finalColor.toString(16) + ':' + width + ':' + dashKey;
+                            finalColor.toString(16) + ':' + wKey + ':' + dashKey;
                         let lineGroup = linesMap.get(lineKey);
                         if (!lineGroup) {
-                            lineGroup = { rings: [], renderOrder: dynamicOrder, dash };
+                            lineGroup = {
+                                rings: [],
+                                renderOrder: dynamicOrder,
+                                dash,
+                                dashZ: dash ? z : null,
+                                width: widthCurve,
+                                widthAdd: 0,
+                                hideBelow: null
+                            };
                             linesMap.set(lineKey, lineGroup);
                         }
                         for (const ring of rings) {
@@ -1142,20 +1213,26 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         }
 
                         // ---- Casing (обводка) для дорог ----
+                        // hideBelow проверяется в главном потоке по вычисленной
+                        // ширине — не «запекаем» порог в момент сборки тайла.
                         const cls = props.class;
                         const brunnel = props.brunnel || '';
                         const casingInfo = TRANSPORTATION_CASING[cls];
                         if (name === 'transportation' && casingInfo &&
-                            brunnel !== 'tunnel' && width > 0.5) {
-                            const casingWidth = width + casingInfo.extraWidth;
+                            brunnel !== 'tunnel') {
                             const casingKey = 'line:' + name + ':' +
-                                casingInfo.color.toString(16) + ':' + casingWidth + ':none';
+                                casingInfo.color.toString(16) + ':' +
+                                wKey + '+' + casingInfo.extraWidth + ':none';
                             let casingGroup = linesMap.get(casingKey);
                             if (!casingGroup) {
                                 casingGroup = {
                                     rings: [],
                                     renderOrder: dynamicOrder - 0.5,
-                                    dash: null
+                                    dash: null,
+                                    dashZ: null,
+                                    width: widthCurve,
+                                    widthAdd: casingInfo.extraWidth,
+                                    hideBelow: 0.5
                                 };
                                 linesMap.set(casingKey, casingGroup);
                             }
@@ -1255,8 +1332,12 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
             positions,
             layerName: parts[1],
             color: parseInt(parts[2], 16),
-            width: parseFloat(parts[3]),
+            // Ширина как кривая; точное значение вычислит главный поток.
+            width: lineGroup.width,
+            widthAdd: lineGroup.widthAdd || 0,
+            hideBelow: lineGroup.hideBelow ?? null,
             dash: lineGroup.dash,
+            dashZ: lineGroup.dashZ ?? null,
             renderOrder: lineGroup.renderOrder + Math.min(avgSortKey * 0.001, 0.4)
         });
     }

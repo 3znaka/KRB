@@ -80,6 +80,11 @@ export class VectorLineLabelSource {
         const isFlipped = this._determineFlipState(data, startPx, cw, false, false);
         const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
         const bbox = charLayout ? this._charBBox(charLayout) : null;
+        
+        let screenOk = false;
+        if (bbox) {
+            screenOk = this._isBBoxOnScreen(bbox, data);
+        }
 
         return {
             t: t.toFixed(2),
@@ -87,10 +92,21 @@ export class VectorLineLabelSource {
             totalLenPx: data.totalLenPx.toFixed(1),
             angleOk,
             perspRatio: perspRatio.toFixed(2),
+            screenOk,
             charLayoutOk: !!charLayout,
             bbox: bbox ? `[${bbox.minX.toFixed(0)}, ${bbox.minY.toFixed(0)}, ${bbox.maxX.toFixed(0)}, ${bbox.maxY.toFixed(0)}]` : null,
-            error: !charLayout ? "buildCharLayout returned null (w<=0 or out of bounds)" : (!angleOk ? "angle too sharp" : (perspRatio < 0.6 ? "perspRatio < 0.6" : null))
+            error: !charLayout ? "buildCharLayout returned null (w<=0 or out of bounds)" : 
+                   (!angleOk ? "angle too sharp" : 
+                   (perspRatio < 0.6 ? "perspRatio < 0.6" : 
+                   (!screenOk ? "bbox is off-screen" : null)))
         };
+    }
+
+    // ── Проверка попадания на экран ──────────────────────────────
+    _isBBoxOnScreen(bbox, data) {
+        const pad = 50; // Небольшой отступ
+        return !(bbox.maxX < -pad || bbox.minX > data.canvasW + pad ||
+                 bbox.maxY < -pad || bbox.minY > data.canvasH + pad);
     }
 
     // ── Кандидаты ────────────────────────────────────────────────
@@ -119,6 +135,8 @@ export class VectorLineLabelSource {
 
         const bbox = this._charBBox(charLayout);
         if (!bbox) return null;
+        
+        if (!this._isBBoxOnScreen(bbox, data)) return null;
 
         return { t, isFlipped, charLayout, bbox };
     }
@@ -155,6 +173,8 @@ export class VectorLineLabelSource {
 
             const bbox = this._charBBox(charLayout);
             if (!bbox) continue;
+            
+            if (!this._isBBoxOnScreen(bbox, data)) continue;
 
             result.push({
                 t,

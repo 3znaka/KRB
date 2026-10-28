@@ -564,6 +564,41 @@ function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
     return false;
 }
 
+function splitRingByBoundary(ring, halfTile, eps) {
+    const boundaryEps = Math.max(eps, halfTile * 1e-4);
+    const n = ring.length;
+    if (n < 2) return [];
+
+    const isBoundary = (i) => {
+        const p0 = ring[i];
+        const p1 = ring[(i + 1) % n];
+        return isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
+    };
+
+    let start = -1;
+    for (let i = 0; i < n; i++) {
+        if (!isBoundary(i)) { start = i; break; }
+    }
+    if (start === -1) return [];
+
+    const chains = [];
+    let current = [ring[start]];
+
+    for (let k = 1; k <= n; k++) {
+        const i     = (start + k) % n;
+        const prevI = (start + k - 1) % n;
+        if (isBoundary(prevI)) {
+            if (current.length >= 2) chains.push(current);
+            current = [ring[i]];
+        } else {
+            current.push(ring[i]);
+        }
+    }
+    if (current.length >= 2) chains.push(current);
+
+    return chains;
+}
+
 function triangulatePolygon(outer, holes, eps) {
     if (outer.length < 3) return null;
     const cleanHoles = holes.filter(h => h.length >= 3);
@@ -1148,9 +1183,13 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     const strokeKey = 'stroke:' + name + ':' + strokeColor.toString(16) + ':' + strokeWidth;
                     let strokeGroup = strokesMap.get(strokeKey);
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
-                    for (const ring of rings) {
-                        if (ring.length >= 2) strokeGroup.push({ ring, sortKey });
-                    }
+for (const ring of rings) {
+    if (ring.length < 2) continue;
+    const chains = splitRingByBoundary(ring, halfTile, eps);
+    for (const chain of chains) {
+        if (chain.length >= 2) strokeGroup.push({ ring: chain, sortKey });
+    }
+}
                 }
             } else if (geomType === 2) {
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {

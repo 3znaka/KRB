@@ -1204,147 +1204,158 @@ export class VectorTileLayer {
         return val;
     }
 
-    // -------------------------------------------------------------------------
-    // Главный апдейт
-    // -------------------------------------------------------------------------
+_postUpdate(map) {
+    if (!this._map) return;
 
-    _postUpdate(map) {
-        if (!this._map) return;
-
-        const worldPos = map.worldGroup.position;
-        if (this._lastWorldPos.distanceToSquared(worldPos) > 1) {
-            this._lastWorldPos.copy(worldPos);
-            this._lastMovementTime = performance.now();
-        }
-
-        // Каждый кадр, без 500-мс троттлинга: живая ширина линий.
-        this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
-
-        const discreteZoom = map.currentDiscreteZoom;
-        const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
-        if (inRange) {
-            const is3d = this._is3dNow();
-            const sz = this._pickSourceZoom(map);
-            if (sz !== this._lastSourceZoom || is3d !== this._lastIs3d) {
-                this._lastIs3d = is3d;
-                this._beginTransition(sz);
-                this._lastUpdateTime = 0; // видимые тайлы пересчитать в этом же кадре
-            }
-        }
-        if (this._coverageDirty) this._resolveCoverage();
-
-        const now = performance.now();
-        if (now - this._lastUpdateTime < this._throttle) {
-            this._processQueue();
-            return;
-        }
-        this._lastUpdateTime = now;
-
-        const camPos = map.camera.position;
-        const camChanged =
-            !this._lastCheckInit ||
-            this._lastCheckCamPos.distanceToSquared(camPos) > 0.01 ||
-            this._lastWorldPos.distanceToSquared(worldPos) > 1 ||
-            this._lastCheckZoom !== discreteZoom;
-
-        if (!camChanged && !this._labelsDirty && this._tileCache.size > 0) {
-            this._processQueue();
-            return;
-        }
-
-        this._lastCheckInit = true;
-        this._lastCheckCamPos.copy(camPos);
-        this._lastCheckZoom = discreteZoom;
-
-        if (!inRange) {
-            if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
-                this._clearAllTiles();
-            }
-            this._lastSourceZoom = -1;
-            this._lastDiscreteZoom = -1;
-            return;
-        }
-
-        if (discreteZoom !== this._lastDiscreteZoom) this._labelsDirty = true;
-        this._lastDiscreteZoom = discreteZoom;
-
-        const sourceZoom = this._lastSourceZoom;
-        const continuousZoom = map.continuousZoom;
-        const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);
-        if (
-            nextSourceZoom > sourceZoom &&
-            continuousZoom > discreteZoom + 0.3 &&
-            this._lastPrefetchZoom !== sourceZoom
-        ) {
-            this._lastPrefetchZoom = sourceZoom;
-            this._prefetchNextZoom(nextSourceZoom);
-        }
-
-        const canvas = map.renderer.domElement;
-        const w = canvas.clientWidth, h = canvas.clientHeight;
-        if (this._lineMaterialsSet.size > 0 &&
-            (this._lastCanvasSize.width !== w || this._lastCanvasSize.height !== h)) {
-            this._lastCanvasSize.width = w;
-            this._lastCanvasSize.height = h;
-            this._canvasSizeVec.set(w, h);
-            this._lineMaterialsSet.forEach(mat => mat.resolution.copy(this._canvasSizeVec));
-        }
-
-        const visibleTiles = this._getVisibleTileKeys(sourceZoom);
-        this._requiredKeys = visibleTiles;
-        this._coverageDirty = true;
-
-        for (const key of this._tileCache.keys()) {
-            if (!visibleTiles.has(key)) {
-                const group = this._tileCache.get(key);
-                this._stashGroup(key, group);
-                this._tileCache.delete(key);
-                this._pendingLoads.delete(key);
-                this._labelsDirty = true;
-            }
-        }
-
-        const labelNow = performance.now();
-        const timeSinceLastMove = labelNow - this._lastMovementTime;
-        const isMoving = timeSinceLastMove < 1000;
-        const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000);
-        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
-
-        if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) &&
-            (this._tileCache.size > 0 || this._oldTileGroups)) {
-            this._labelsDirty = false;
-            this._lastLabelUpdateTime = labelNow;
-            this._refreshTextLabelsForVisibleTiles();
-        }
-
-        const maxMerc = map.MAX_MERCATOR;
-        const target = map.controls.target;
-        const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
-
-        const targetX = target.x;
-        const targetZ = target.z;
-        const unsortedNewKeys = [];
-        visibleTiles.forEach(key => {
-            if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
-            const comma1 = key.indexOf(',');
-            const comma2 = key.indexOf(',', comma1 + 1);
-            const xa = +key.slice(comma1 + 1, comma2);
-            const ya = +key.slice(comma2 + 1);
-            const cxa = xa * tileSizeAtZoom - maxMerc + tileSizeAtZoom / 2;
-            const cza = -maxMerc + ya * tileSizeAtZoom + tileSizeAtZoom / 2;
-            const dax = cxa - targetX, daz = cza - targetZ;
-            unsortedNewKeys.push({ key, distSq: dax * dax + daz * daz });
-        });
-        unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
-        const newKeys = unsortedNewKeys.map(o => o.key);
-
-        this._sortedLoadQueue = newKeys.concat(
-            this._sortedLoadQueue.filter(k =>
-                !this._tileCache.has(k) && !this._pendingLoads.has(k) && visibleTiles.has(k)
-            )
-        );
-        this._processQueue();
+    // ── Отслеживание движения мира ────────────────────────────────
+    // Вычисляем ОДИН раз: используется и для _lastMovementTime,
+    // и для camChanged ниже (иначе повторная проверка всегда false,
+    // потому что _lastWorldPos уже скопирован).
+    const worldPos = map.worldGroup.position;
+    const worldMoved = this._lastWorldPos.distanceToSquared(worldPos) > 1;
+    if (worldMoved) {
+        this._lastWorldPos.copy(worldPos);
+        this._lastMovementTime = performance.now();
     }
+
+    // Каждый кадр, без 500-мс троттлинга: живая ширина линий.
+    this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
+
+    const discreteZoom = map.currentDiscreteZoom;
+    const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
+
+    // ── Смена LOD ─────────────────────────────────────────────────
+    if (inRange) {
+        const is3d = this._is3dNow();
+        const sz = this._pickSourceZoom(map);
+        if (sz !== this._lastSourceZoom || is3d !== this._lastIs3d) {
+            this._lastIs3d = is3d;
+            this._beginTransition(sz);
+            this._lastUpdateTime = 0; // видимые тайлы пересчитать в этом же кадре
+        }
+    }
+    if (this._coverageDirty) this._resolveCoverage();
+
+    // ── ВАЖНО: обновление подписей — ВНЕ полного прохода ──────────
+    // Раньше это было ниже проверки camChanged. Из-за этого при
+    // панорамировании в пределах тайла (camChanged=false,
+    // _labelsDirty=false) до обновления не доходили, и подписи на
+    // вновь увиденных тайлах не появлялись до смены зума.
+    const labelNow = performance.now();
+    const timeSinceLastMove = labelNow - this._lastMovementTime;
+    const isMoving = timeSinceLastMove < 1000;
+    const periodicUpdateDue = isMoving && (labelNow - this._lastLabelUpdateTime > 1000);
+    const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
+
+    if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue) &&
+        (this._tileCache.size > 0 || this._oldTileGroups)) {
+        this._labelsDirty = false;
+        this._lastLabelUpdateTime = labelNow;
+        this._refreshTextLabelsForVisibleTiles();
+    }
+
+    // ── Троттлинг полного прохода (обновление набора тайлов) ──────
+    const now = performance.now();
+    if (now - this._lastUpdateTime < this._throttle) {
+        this._processQueue();
+        return;
+    }
+    this._lastUpdateTime = now;
+
+    const camPos = map.camera.position;
+    const camChanged =
+        !this._lastCheckInit ||
+        this._lastCheckCamPos.distanceToSquared(camPos) > 0.01 ||
+        worldMoved ||                          // ← ключевое: движение мира
+        this._lastCheckZoom !== discreteZoom;
+
+    if (!camChanged && !this._labelsDirty && this._tileCache.size > 0) {
+        this._processQueue();
+        return;
+    }
+
+    this._lastCheckInit = true;
+    this._lastCheckCamPos.copy(camPos);
+    this._lastCheckZoom = discreteZoom;
+
+    if (!inRange) {
+        if (this._tileCache.size > 0 || this._oldTileGroups || this._activeLoads > 0) {
+            this._clearAllTiles();
+        }
+        this._lastSourceZoom = -1;
+        this._lastDiscreteZoom = -1;
+        return;
+    }
+
+    if (discreteZoom !== this._lastDiscreteZoom) this._labelsDirty = true;
+    this._lastDiscreteZoom = discreteZoom;
+
+    const sourceZoom = this._lastSourceZoom;
+    const continuousZoom = map.continuousZoom;
+    const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);
+    if (
+        nextSourceZoom > sourceZoom &&
+        continuousZoom > discreteZoom + 0.3 &&
+        this._lastPrefetchZoom !== sourceZoom
+    ) {
+        this._lastPrefetchZoom = sourceZoom;
+        this._prefetchNextZoom(nextSourceZoom);
+    }
+
+    const canvas = map.renderer.domElement;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (this._lineMaterialsSet.size > 0 &&
+        (this._lastCanvasSize.width !== w || this._lastCanvasSize.height !== h)) {
+        this._lastCanvasSize.width = w;
+        this._lastCanvasSize.height = h;
+        this._canvasSizeVec.set(w, h);
+        this._lineMaterialsSet.forEach(mat => mat.resolution.copy(this._canvasSizeVec));
+    }
+
+    const visibleTiles = this._getVisibleTileKeys(sourceZoom);
+    this._requiredKeys = visibleTiles;
+    this._coverageDirty = true;
+
+    for (const key of this._tileCache.keys()) {
+        if (!visibleTiles.has(key)) {
+            const group = this._tileCache.get(key);
+            this._stashGroup(key, group);
+            this._tileCache.delete(key);
+            this._pendingLoads.delete(key);
+            this._labelsDirty = true;
+        }
+    }
+
+    // (Блок _refreshTextLabelsForVisibleTiles убран — он теперь выше.)
+
+    const maxMerc = map.MAX_MERCATOR;
+    const target = map.controls.target;
+    const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
+
+    const targetX = target.x;
+    const targetZ = target.z;
+    const unsortedNewKeys = [];
+    visibleTiles.forEach(key => {
+        if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
+        const comma1 = key.indexOf(',');
+        const comma2 = key.indexOf(',', comma1 + 1);
+        const xa = +key.slice(comma1 + 1, comma2);
+        const ya = +key.slice(comma2 + 1);
+        const cxa = xa * tileSizeAtZoom - maxMerc + tileSizeAtZoom / 2;
+        const cza = -maxMerc + ya * tileSizeAtZoom + tileSizeAtZoom / 2;
+        const dax = cxa - targetX, daz = cza - targetZ;
+        unsortedNewKeys.push({ key, distSq: dax * dax + daz * daz });
+    });
+    unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
+    const newKeys = unsortedNewKeys.map(o => o.key);
+
+    this._sortedLoadQueue = newKeys.concat(
+        this._sortedLoadQueue.filter(k =>
+            !this._tileCache.has(k) && !this._pendingLoads.has(k) && visibleTiles.has(k)
+        )
+    );
+    this._processQueue();
+}
 
     _processQueue() {
         if (this._activeLoads >= this._maxConcurrent) return;

@@ -13,36 +13,16 @@ function _measure(text, fontSize, fontFamily, fontWeight, fontStyle) {
 }
 
 /**
- * Источник подписи для линейных объектов (размещение вдоль линии).
+ * Источник подписи для линейных объектов.
  *
- * Архитектура максимально приближена к MapLibre:
- *
- *  1. **Позиция закрепляется один раз.** `t` — параметр вдоль линии
- *     [0..1]. После первичного выбора `t` (фаза «placement») он не
- *     меняется до тех пор, пока подпись не начнёт коллизировать с
- *     более приоритетными. Это устраняет «ездят по рельсам» при
- *     вращении/наклоне камеры.
- *
- *  2. **Сетка `t` не зависит от камеры.** `_getStableCandidateTs`
- *     возвращает фиксированный массив `[0, 0.05, 0.1, ..., 1]`.
- *     Порядок кандидатов — по близости к середине видимого интервала
- *     линии, что тоже стабильно при малых движениях камеры.
- *
- *  3. **Точки за камерой отсекаются корректно.** `_computeScreenData`
- *     считает clip-space вручную и хранит `w` для каждой вершины.
- *     `_samplePx` возвращает `null` для сегментов, где `w <= 0`.
- *     Это устраняет «слёты с рельс» при больших pitch.
- *
- *  4. **Проверка `maxAngle` — в tile-пространстве.** `segTileAngles`
- *     не зависят от наклона камеры, поэтому «ровная» улица при pitch
- *     не считается «изломанной».
- *
- *  5. **Flip пересчитывается каждый кадр** в режиме «живой» позиции
- *     (с гистерезисом в мёртвой зоне около вертикали), но не влияет
- *     на выбор `t`.
- *
- *  6. **Перспективный cutoff.** Кандидаты с `perspectiveRatio < 0.6`
- *     (слишком далеко) отбрасываются, как в MapLibre.
+ * Упрощённая схема:
+ *   - `t` выбирается один раз за «стабильный» кадр (см. TextManager);
+ *   - раскладка глифов пересчитывается по текущей камере каждый кадр;
+ *   - точки за камерой отсекаются (`w <= 0` → позиция невозможна);
+ *   - `maxAngle` проверяется по tile-углам (не зависит от pitch);
+ *   - flip — детерминированный критерий по экранным позициям первого
+ *     и последнего глифа; гистерезис включается только в «живом»
+ *     режиме и только в мёртвой зоне около вертикали.
  */
 export class VectorLineLabelSource {
     constructor(map, lineData, group, options = {}) {
@@ -50,28 +30,16 @@ export class VectorLineLabelSource {
         this.lineData = lineData;
         this.group = group;
 
-        /** Межтекстовый зазор, × ширины текста. */
         this.tracking       = options.tracking       ?? 1.35;
-        /** 'auto' | 'above' | 'below' | 'center'. */
         this.placement      = options.placement      ?? 'auto';
-        /** Разрешать ли переворот текста для сохранения читаемости. */
         this.keepUpright    = options.keepUpright    ?? true;
-        /** Максимальный угол между соседними сегментами текста (tile-углы). */
         this.maxAngle       = options.maxAngle       ?? 45;
-        /** Допуск для сохранения предыдущего состояния переворота. */
         this.unflipRange    = options.unflipRange    ?? 5;
 
-        // Кэш экранных данных.
         this._screenData = null;
         this._screenDataSig = null;
-
-        // Кэш ширин символов.
         this._charWidths = null;
-
-        // Стабильная сетка t-кандидатов (не зависит от камеры).
         this._stableTs = null;
-
-        // Последнее зафиксированное состояние переворота (для гистерезиса).
         this._lastFlipState = null;
     }
 
@@ -101,18 +69,54 @@ export class VectorLineLabelSource {
         };
     }
 
+    // ── Кандидаты ────────────────────────────────────────────────
+
     /**
-     * Возвращает массив кандидатов для **первичного размещения**:
-     *   - `t` — позиция начала текста [0..1];
-     *   - `isFlipped` — переворот для этой позиции (без гистерезиса);
-     *   - `charLayout` — раскладка глифов (в текущей камере);
-     *   - `bbox` — ограничивающий прямоугольник + `perChar`;
-     *   - `score` — |t − tMidVisible| (prefer ближе к середине видимой
-     *     части линии; стабильно при малых движениях).
+     * Раскладка для конкретного t. Используется в _applyTransforms
+     * каждый кадр для уже закреплённой позиции (плавное движение
+     * глифов по линии при сдвиге камеры). Не проверяет «помещается
+     * ли на линии» — это проверял placement.
+     */
+    getCharLayoutAtT(t, isFlipped) {
+        const data = this._getScreenData();
+        if (!data) return null;
+        const cw = this._getCharWidths();
+        if (!cw.total) return null;
+        const startPx = this._tToPx(data, t);
+        return this._buildCharLayout(data, cw, startPx, isFlipped);
+    }
+
+    /**
+     * Полноценный кандидат для конкретного t: проверяет «помещается
+     * ли», вычисляет flip с гистерезисом (для «прилипания» к
+     * предыдущему решению), возвращает bbox с perChar.
+     */
+    getCandidateAtT(t) {
+        const data = this._getScreenData();
+        if (!data) return null;
+        const cw = this._getCharWidths();
+        if (!cw.total) return null;
+
+        const startPx = this._tToPx(data, t);
+        if (startPx < 0 || startPx + cw.total > data.totalLenPx + 0.01) return null;
+
+        const isFlipped = this._determineFlipState(data, startPx, cw, /*useHysteresis*/true, /*updateState*/true);
+        const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
+        if (!charLayout) return null;
+
+        const bbox = this._charBBox(charLayout);
+        if (!bbox) return null;
+
+        return { t, isFlipped, charLayout, bbox };
+    }
+
+    /**
+     * Возвращает массив кандидатов, отсортированных по
+     * предпочтительности. Используется однократно при «стабилизации».
      *
-     * Не кэшируется: charLayout/bbox зависят от камеры. Список `t`
-     * берётся из стабильной сетки, поэтому при повороте камеры
-     * «набор позиций» остаётся тем же — меняется только их порядок.
+     * Сортировка — по |t − tMidVisible| (ближе к середине видимой
+     * части линии). Не зависит от экранных координат, поэтому при
+     * лёгких пан-движениях порядок меняется непрерывно.
      */
     getCandidates() {
         const data = this._getScreenData();
@@ -132,17 +136,13 @@ export class VectorLineLabelSource {
             if (startPx < 0) continue;
             if (startPx + cw.total > totalPx + 0.01) continue;
 
-            // Изгиб — по tile-углам (не зависит от pitch).
             if (this._exceedsMaxAngle(data, startPx, cw)) continue;
 
-            // Perspective cutoff.
             const wAtStart = this._sampleW(data, startPx);
             if (!(wAtStart > 1e-6)) continue;
             const perspRatio = 0.5 + 0.5 * camToCenter / wAtStart;
             if (perspRatio < 0.6) continue;
 
-            // Flip — детерминированный критерий (без гистерезиса),
-            // чтобы результат не зависел от порядка обработки t.
             const isFlipped = this._determineFlipState(data, startPx, cw, false, false);
 
             const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
@@ -164,50 +164,6 @@ export class VectorLineLabelSource {
         return result;
     }
 
-    /**
-     * Раскладка для **конкретного t**. Не фильтрует по «помещается ли
-     * текст» — это позволяет удерживать уже выбранную позицию, даже
-     * если она временно на границе. Возвращает `null` только если
-     * позиция физически невозможна (за камерой/вне линии).
-     */
-    getCandidateAtT(t) {
-        const data = this._getScreenData();
-        if (!data) return null;
-        const cw = this._getCharWidths();
-        if (!cw.total) return null;
-
-        const startPx = this._tToPx(data, t);
-        if (startPx + cw.total > data.totalLenPx + 0.01) return null;
-
-        const isFlipped = this._determineFlipState(data, startPx, cw, true, true);
-        const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
-        if (!charLayout) return null;
-
-        const bbox = this._charBBox(charLayout);
-        if (!bbox) return null;
-
-        return { t, isFlipped, charLayout, bbox };
-    }
-
-    /**
-     * «Живая» раскладка для уже закреплённого `t`: пересчитывает flip
-     * каждый кадр с гистерезисом в мёртвой зоне. Глифы плавно едут по
-     * линии при движении камеры.
-     */
-    getLiveLayoutAtT(t) {
-        const data = this._getScreenData();
-        if (!data) return null;
-        const cw = this._getCharWidths();
-        if (!cw.total) return null;
-
-        const startPx = this._tToPx(data, t);
-        const isFlipped = this._determineFlipState(data, startPx, cw, true, true);
-        const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
-        if (!charLayout) return null;
-
-        return { charLayout, isFlipped };
-    }
-
     // ── Экранные данные ───────────────────────────────────────────
 
     _getScreenData() {
@@ -219,8 +175,6 @@ export class VectorLineLabelSource {
         const zoom = this.map.continuousZoom;
         const q = cam.quaternion;
 
-        // Сигнатура включает кватернион камеры: важно при вращении без
-        // перемещения (редкий, но возможный случай в OrbitControls).
         const sig =
             cam.position.x.toFixed(1) + ',' +
             cam.position.y.toFixed(1) + ',' +
@@ -247,7 +201,6 @@ export class VectorLineLabelSource {
             points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
         }
 
-        // Длины сегментов в world-координатах.
         const segLengths = new Array(n - 1);
         let totalLen = 0;
         for (let i = 0; i < n - 1; i++) {
@@ -268,7 +221,6 @@ export class VectorLineLabelSource {
         const H = canvas.clientHeight;
         if (W <= 0 || H <= 0) return null;
 
-        // Проекция — вручную, сохраняя w для каждой вершины.
         camera.updateMatrixWorld();
         const viewProj = new THREE.Matrix4().multiplyMatrices(
             camera.projectionMatrix, camera.matrixWorldInverse
@@ -294,7 +246,6 @@ export class VectorLineLabelSource {
             }
         }
 
-        // Длины, углы (экранные и tile-углы для maxAngle), куммулятивные px.
         const segLengthsPx = new Array(n - 1);
         const segAngles = new Array(n - 1);
         const segRawAngles = new Array(n - 1);
@@ -310,7 +261,6 @@ export class VectorLineLabelSource {
             const s0 = pointsScreen[i];
             const s1 = pointsScreen[i + 1];
 
-            // tile-угол: не зависит от камеры
             const tdx = pts[i + 1].x - pts[i].x;
             const tdz = pts[i + 1].z - pts[i].z;
             if (tdx * tdx + tdz * tdz > 1e-18) {
@@ -336,7 +286,6 @@ export class VectorLineLabelSource {
                 segAngles[i] = lastAngle;
                 segRawAngles[i] = lastRawAngle;
             } else {
-                // Сегмент «за камерой» — длина 0, положение px не двигается.
                 segLengthsPx[i] = 0;
                 pointsPx[i + 1] = pointsPx[i];
                 segAngles[i] = lastAngle;
@@ -351,7 +300,6 @@ export class VectorLineLabelSource {
             pointsT, points3D, totalLenPx
         };
 
-        // Определение видимого интервала вдоль линии.
         const samples = 40;
         const flags = [];
         for (let i = 0; i <= samples; i++) {
@@ -378,12 +326,10 @@ export class VectorLineLabelSource {
         };
         if (visibleIntervalPx.max - visibleIntervalPx.min < 10) return null;
 
-        // t середины видимой части — для сортировки кандидатов.
         const tMinVisible = this._pxToT(probe, visibleIntervalPx.min);
         const tMaxVisible = this._pxToT(probe, visibleIntervalPx.max);
         const tMidVisible = (tMinVisible + tMaxVisible) / 2;
 
-        // Центр тайла (не используется, но оставлен для совместимости).
         const vc = new THREE.Vector3(offX, 0, offZ).project(camera);
         const tileCenterScreen = {
             x: (vc.x * 0.5 + 0.5) * W,
@@ -412,10 +358,6 @@ export class VectorLineLabelSource {
         };
     }
 
-    /**
-     * Возвращает точку и угол на линии. Возвращает `null`, если
-     * сегмент пересекает или полностью лежит за плоскостью камеры.
-     */
     _samplePx(data, px) {
         const { pointsPx, pointsScreen, pointsW, segAngles } = data;
         const n = pointsPx.length;
@@ -440,16 +382,12 @@ export class VectorLineLabelSource {
                 };
             }
         }
-        // Fallback: последняя точка.
         const last = n - 1;
         if (!(pointsW[last] > 1e-6)) return null;
         const s = pointsScreen[last];
         return { x: s.x, y: s.y, z: s.z, angle: segAngles[n - 2] ?? 0 };
     }
 
-    /**
-     * Интерполированное `w` на расстоянии px. Может быть ≤ 0.
-     */
     _sampleW(data, px) {
         const { pointsPx, pointsW } = data;
         const n = pointsPx.length;
@@ -465,7 +403,6 @@ export class VectorLineLabelSource {
         return pointsW[n - 1];
     }
 
-    /** t → px. */
     _tToPx(data, t) {
         const { pointsT, pointsPx } = data;
         const n = pointsT.length;
@@ -481,7 +418,6 @@ export class VectorLineLabelSource {
         return data.totalLenPx;
     }
 
-    /** px → t (обратное к _tToPx). */
     _pxToT(data, px) {
         const { pointsT, pointsPx } = data;
         const n = pointsT.length;
@@ -547,7 +483,7 @@ export class VectorLineLabelSource {
         return this._charWidths;
     }
 
-    // ── Стабильная сетка кандидатов ──────────────────────────────
+    // ── Стабильная сетка t ───────────────────────────────────────
 
     _getStableCandidateTs() {
         if (this._stableTs) return this._stableTs;
@@ -559,14 +495,8 @@ export class VectorLineLabelSource {
         return ts;
     }
 
-    // ── Переворот ────────────────────────────────────────────────
+    // ── Flip ─────────────────────────────────────────────────────
 
-    /**
-     * @param {boolean} useHysteresis — применять ли «мёртвую зону»
-     *   около вертикали. Включается только для закреплённой позиции.
-     * @param {boolean} updateState — обновить ли `_lastFlipState`
-     *   после решения.
-     */
     _determineFlipState(data, startPx, cw, useHysteresis, updateState) {
         if (!this.keepUpright) return false;
 
@@ -577,8 +507,6 @@ export class VectorLineLabelSource {
         const first = this._samplePx(data, firstCenterPx);
         const last  = this._samplePx(data, lastCenterPx);
 
-        // Если позиции не определены — используем прошлое решение
-        // (или false, если его нет).
         if (!first || !last) {
             return this._lastFlipState?.flipped ?? false;
         }
@@ -604,7 +532,7 @@ export class VectorLineLabelSource {
         return flipped;
     }
 
-    // ── maxAngle ─────────────────────────────────────────────────
+    // ── maxAngle (по tile-углам) ─────────────────────────────────
 
     _exceedsMaxAngle(data, startPx, cw) {
         if (this.maxAngle >= 180) return false;
@@ -684,9 +612,6 @@ export class VectorLineLabelSource {
         return layout;
     }
 
-    /**
-     * Возвращает общий AABB + per-glyph AABB (`perChar`).
-     */
     _charBBox(layout) {
         const s = this.getTextStyle();
         const fs = parseFloat(s.fontSize) || 12;

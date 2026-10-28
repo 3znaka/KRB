@@ -104,9 +104,9 @@ export class VectorLineLabelSource {
 
     // ── Проверка попадания на экран ──────────────────────────────
     _isBBoxOnScreen(bbox, data) {
-        const pad = 50; // Небольшой отступ
-        return !(bbox.maxX < -pad || bbox.minX > data.canvasW + pad ||
-                 bbox.maxY < -pad || bbox.minY > data.canvasH + pad);
+        const pad = 20; // Жесткий отступ от краев экрана
+        return bbox.maxX >= pad && bbox.minX <= data.canvasW - pad &&
+               bbox.maxY >= pad && bbox.minY <= data.canvasH - pad;
     }
 
     // ── Кандидаты ────────────────────────────────────────────────
@@ -176,6 +176,7 @@ export class VectorLineLabelSource {
             const bbox = this._charBBox(charLayout);
             if (!bbox) continue;
             
+            // Жёсткая проверка: текст должен быть полностью в пределах экрана
             if (!this._isBBoxOnScreen(bbox, data)) continue;
 
             // Сортируем по расстоянию до ЦЕНТРА ЭКРАНА.
@@ -340,7 +341,6 @@ export class VectorLineLabelSource {
             if (!p) { flags.push(false); continue; }
             const w = this._sampleW(probe, px);
             if (!(w > 1e-6)) { flags.push(false); continue; }
-            // Ужесточили проверку: только реально видимые пиксели
             flags.push(
                 p.z >= -1 && p.z <= 1 &&
                 p.x >= 0 && p.x <= W &&

@@ -1166,7 +1166,7 @@ export class VectorTileLayer {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-            depthTest: this.depthTest,
+            depthTest: true, 
             depthWrite: false,
         };
         if (line.dash) {
@@ -1929,7 +1929,7 @@ const msg = {
             side: THREE.DoubleSide,
             transparent: opacity < 1.0,
             opacity,
-            depthTest: this.depthTest,
+            depthTest: true, 
             depthWrite: false
         });
         this._fillMaterialCache.set(styleKey, mat);
@@ -1949,7 +1949,7 @@ const msg = {
                 this._map.renderer.domElement.clientWidth,
                 this._map.renderer.domElement.clientHeight
             ),
-            depthTest: this.depthTest,
+            depthTest: true, 
             depthWrite: false
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {

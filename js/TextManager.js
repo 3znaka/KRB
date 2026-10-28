@@ -73,9 +73,8 @@ export class TextManager {
         this._lastFrameSig = null;
         this._dirty = true;
 
-        // Троттлинг для тяжёлого поиска позиций (коллизий)
         this._lastLayoutTime = 0;
-        this._layoutInterval = 150; // мс
+        this._layoutInterval = 150;
 
         this._initPane();
     }
@@ -196,8 +195,8 @@ export class TextManager {
             _bbox: null,
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
-            _chosenCand: null,
-            _currentCand: null
+            _chosenT: null,
+            _chosenIsFlipped: false
         };
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
@@ -221,8 +220,8 @@ export class TextManager {
         const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
 
         label.source = newSource;
-        label._chosenCand = null;
-        label._currentCand = null;
+        label._chosenT = null;
+        label._chosenIsFlipped = false;
 
         Object.assign(el.style, newStyle);
 
@@ -568,10 +567,8 @@ export class TextManager {
         const zoom = map.continuousZoom;
         const now = performance.now();
 
-        // Определяем, нужно ли делать тяжёлый Layout (поиск позиций и коллизии)
         const needLayout = this._dirty || this._lastZoom !== zoom || (now - this._lastLayoutTime > this._layoutInterval);
 
-        // Если Layout не нужен, но камера движется, мы просто обновляем трансформации
         if (!needLayout) {
             const wp = map.worldGroup.position;
             const cam = map.camera.position;
@@ -658,7 +655,7 @@ export class TextManager {
                 const candidates = lbl.source.getCandidates();
                 if (!candidates || candidates.length === 0) {
                     lbl.hiddenByPriority = true;
-                    lbl._chosenCand = null;
+                    lbl._chosenT = null;
                     continue;
                 }
                 let chosen = null;
@@ -672,12 +669,11 @@ export class TextManager {
                 if (chosen) {
                     lbl._bbox = chosen.bbox;
                     this._gridIndex.insert(chosen.bbox, lbl);
-                    lbl._chosenCand = chosen;
-                    lbl._currentCand = chosen;
+                    lbl._chosenT = chosen.t;
+                    lbl._chosenIsFlipped = chosen.isFlipped;
                     lbl.hiddenByPriority = false;
                 } else {
-                    lbl._chosenCand = null;
-                    lbl._currentCand = null;
+                    lbl._chosenT = null;
                     lbl.hiddenByPriority = true;
                 }
                 continue;
@@ -719,28 +715,11 @@ export class TextManager {
             const type = src.getLabelType();
 
             if (type === 'line-curved') {
-                if (!label._chosenCand) continue;
-                
-                const candidates = src.getCandidates();
-                if (!candidates || candidates.length === 0) continue;
-
-                let bestCand = candidates[0];
-                let minDist = Infinity;
-                const targetX = label._chosenCand.charLayout[0].x;
-                const targetY = label._chosenCand.charLayout[0].y;
-
-                for (let i = 0; i < candidates.length; i++) {
-                    const cx = candidates[i].charLayout[0].x;
-                    const cy = candidates[i].charLayout[0].y;
-                    const d = (cx - targetX) ** 2 + (cy - targetY) ** 2;
-                    if (d < minDist) {
-                        minDist = d;
-                        bestCand = candidates[i];
-                    }
+                if (label._chosenT == null) continue;
+                const charLayout = src.getCharLayoutAtT(label._chosenT, label._chosenIsFlipped);
+                if (charLayout) {
+                    this._renderLineChars(label, charLayout);
                 }
-                
-                label._currentCand = bestCand;
-                this._renderLineChars(label, label._currentCand.charLayout);
                 continue;
             }
 

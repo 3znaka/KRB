@@ -29,7 +29,6 @@ export class VectorLineLabelSource {
         this._candidates = null;
         this._candidatesSig = null;
         this._charWidths = null;
-        this._selected = -1;
         this._lastSelectedBBox = null;
     }
 
@@ -56,13 +55,7 @@ export class VectorLineLabelSource {
         };
     }
 
-    getSelectedCandidate() { return this._candidates?.[this._selected] ?? null; }
-    selectCandidate(idx) {
-        this._selected = idx;
-        this._lastSelectedBBox = this._candidates?.[idx]?.bbox ?? null;
-    }
-
-    /** Возвращает массив кандидатов. Вызывается TextManager'ом редко. */
+    /** Возвращает массив кандидатов с зафиксированными параметрами t. */
     getCandidates() {
         const data = this._getScreenData();
         if (!data) return [];
@@ -77,6 +70,15 @@ export class VectorLineLabelSource {
         return this._candidates;
     }
 
+    /** Возвращает раскладку символов для заданного t и флага разворота. */
+    getCharLayoutAtT(t, isFlipped) {
+        const data = this._getScreenData();
+        if (!data) return null;
+        const cw = this._getCharWidths();
+        const startPx = this._tToPx(data, t);
+        return this._buildCharLayout(data, cw, startPx, isFlipped);
+    }
+
     // ── Полилиния в экранных координатах ─────────────────────────
 
     _getScreenData() {
@@ -87,8 +89,6 @@ export class VectorLineLabelSource {
         const offZ = wp.z + gp.z;
         const zoom = this.map.continuousZoom;
 
-        // Сигнатура меняется только при зуме или смене тайла (положение группы),
-        // но НЕ при простом панорамировании (для этого есть worldOffset).
         const sig = cam.position.x.toFixed(1) + ',' +
                     cam.position.y.toFixed(1) + ',' +
                     cam.position.z.toFixed(1) + '|' +
@@ -142,10 +142,13 @@ export class VectorLineLabelSource {
 
         const segLengthsPx = new Array(n - 1);
         const segAngles = new Array(n - 1);
+        const segRawAngles = new Array(n - 1);
         const pointsPx = new Array(n);
         pointsPx[0] = 0;
         let totalLenPx = 0;
         let lastAngle = 0;
+        let lastRawAngle = 0;
+        
         for (let i = 0; i < n - 1; i++) {
             const dx = pointsScreen[i + 1].x - pointsScreen[i].x;
             const dy = pointsScreen[i + 1].y - pointsScreen[i].y;
@@ -154,17 +157,19 @@ export class VectorLineLabelSource {
             pointsPx[i + 1] = pointsPx[i] + len;
             totalLenPx += len;
             if (len > 1e-6) {
-                let a = Math.atan2(dy, dx) * 180 / Math.PI;
+                lastRawAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+                let a = lastRawAngle;
                 if (a > 90) a -= 180;
                 else if (a < -90) a += 180;
                 lastAngle = a;
             }
             segAngles[i] = lastAngle;
+            segRawAngles[i] = lastRawAngle;
         }
         if (totalLenPx < 1e-6) return null;
 
         const samples = 40;
-        const probe = { pointsPx, pointsScreen, segAngles, totalLenPx };
+        const probe = { pointsPx, pointsScreen, segAngles, segRawAngles, totalLenPx };
         const flags = [];
         for (let i = 0; i <= samples; i++) {
             const px = (i / samples) * totalLenPx;
@@ -195,7 +200,7 @@ export class VectorLineLabelSource {
 
         return {
             points3D, pointsScreen, pointsT, pointsPx, segLengths, segLengthsPx,
-            segAngles, totalLen, totalLenPx, visibleIntervalPx, tileCenterScreen,
+            segAngles, segRawAngles, totalLen, totalLenPx, visibleIntervalPx, tileCenterScreen,
             canvasW: W, canvasH: H, camera
         };
     }
@@ -221,6 +226,35 @@ export class VectorLineLabelSource {
         }
         const s = pointsScreen[n - 1];
         return { x: s.x, y: s.y, z: s.z, angle: segAngles[n - 2] ?? 0 };
+    }
+
+    _tToPx(data, t) {
+        const { pointsT, pointsPx } = data;
+        const n = pointsT.length;
+        if (t <= 0) return 0;
+        if (t >= 1) return data.totalLenPx;
+        for (let i = 0; i < n - 1; i++) {
+            if (t <= pointsT[i + 1]) {
+                const segT = pointsT[i + 1] - pointsT[i];
+                const u = segT > 1e-9 ? (t - pointsT[i]) / segT : 0;
+                return pointsPx[i] + (pointsPx[i + 1] - pointsPx[i]) * u;
+            }
+        }
+        return data.totalLenPx;
+    }
+
+    _getRawAngleAt(data, px) {
+        const { pointsPx, segRawAngles } = data;
+        const n = pointsPx.length;
+        if (px < 0) px = 0;
+        if (px > data.totalLenPx) px = data.totalLenPx;
+
+        for (let i = 0; i < n - 1; i++) {
+            if (px <= pointsPx[i + 1]) {
+                return segRawAngles[i];
+            }
+        }
+        return segRawAngles[n - 2] ?? 0;
     }
 
     _getCharWidths() {
@@ -271,32 +305,37 @@ export class VectorLineLabelSource {
 
     _buildCandidates(data, cw) {
         const totalPx = data.totalLenPx;
-        const visibleLen = data.visibleIntervalPx.max - data.visibleIntervalPx.min;
-        if (totalPx < cw.total || visibleLen < cw.total * 0.9) return [];
+        if (totalPx < cw.total) return [];
 
-        // Равномерно размещаем якоря вдоль ВСЕЙ видимой части линии
-        const step = cw.total * this.tracking;
-        const startMin = data.visibleIntervalPx.min;
-        const startMax = data.visibleIntervalPx.max - cw.total;
-        if (startMax < startMin) return [];
+        // Равномерно размещаем якоря вдоль ВСЕЙ линии
+        const stepPx = cw.total * this.tracking;
+        const stepT = stepPx / totalPx;
 
         const positions = [];
-        for (let x = startMin; x <= startMax + 1e-3; x += step) {
-            positions.push(x);
+        const numCandidates = Math.floor((totalPx - cw.total) / stepPx);
+        for (let i = 0; i <= numCandidates; i++) {
+            const t = i * stepT;
+            if (t > 1) break;
+            positions.push(t);
         }
         if (positions.length === 0) return [];
 
         const candidates = [];
-        for (const startPx of positions) {
-            const charLayout = this._buildCharLayout(data, cw, startPx);
+        for (const t of positions) {
+            const startPx = this._tToPx(data, t);
+            const rawAngle = this._getRawAngleAt(data, startPx);
+            const isFlipped = this.keepUpright && (rawAngle > 90 || rawAngle < -90);
+            
+            const charLayout = this._buildCharLayout(data, cw, startPx, isFlipped);
             if (!charLayout) continue;
             const bbox = this._charBBox(charLayout);
             if (!bbox) continue;
-            candidates.push({ charLayout, bbox });
+            
+            candidates.push({ t, isFlipped, charLayout, bbox });
         }
         if (candidates.length === 0) return [];
 
-        // Сортируем: ближайшие к центру вьюпорта (а не тайла) — первыми
+        // Сортируем: ближайшие к центру вьюпорта — первыми
         const ref = { x: data.canvasW / 2, y: data.canvasH / 2 };
         const baseScore = c => (c.bbox.cx - ref.x) ** 2 + (c.bbox.cy - ref.y) ** 2;
 
@@ -312,7 +351,7 @@ export class VectorLineLabelSource {
         return candidates;
     }
 
-    _buildCharLayout(data, cw, startPx) {
+    _buildCharLayout(data, cw, startPx, isFlipped) {
         const s = this.getTextStyle();
         const fs = parseFloat(s.fontSize) || 12;
         const [ox, oy] = this.lineData.textOffset || [0, 0];
@@ -329,13 +368,8 @@ export class VectorLineLabelSource {
 
         const layout = [];
         let px = startPx;
-        const endPx = data.visibleIntervalPx.max + 1;
+        const endPx = data.totalLenPx + 1;
         const len = cw.text.length;
-
-        // Проверяем, не идёт ли текст "назад" (против направления линии)
-        const startP = this._samplePx(data, px);
-        const endP = this._samplePx(data, Math.min(endPx, px + cw.total));
-        const isFlipped = this.keepUpright && (startP.angle > 90 || startP.angle < -90);
 
         for (let i = 0; i < len; i++) {
             const charIndex = isFlipped ? (len - 1 - i) : i;
@@ -351,14 +385,11 @@ export class VectorLineLabelSource {
             const dxp = sin * perpDist;
             const dyp = -cos * perpDist;
 
-            let angle = p.angle;
-            if (isFlipped) angle += 180;
-
             layout.push({
                 char: cw.text[charIndex],
                 x: p.x + dxp + ox,
                 y: p.y + dyp + oy,
-                angle,
+                angle: p.angle,
                 w: visualW
             });
             px += advanceW;

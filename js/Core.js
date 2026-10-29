@@ -66,20 +66,23 @@ export class View {
  *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider}.
  *  - `heightScale` (число) — только для URL-источника DEM.
  *  - `crs` (строка) — CRS тайлового сервера, по умолчанию 'EPSG:3857'.
- *  - `minNativeZoom` / `maxNativeZoom` — диапазон доступных данных
- *    источника; выше `maxNativeZoom` включается overzoom (растровые
- *    тайлы `maxNativeZoom` растягиваются, векторные используют LOD
- *    `maxNativeZoom`).
+ *  - `minNativeZoom` / `maxNativeZoom` — диапазон доступных растровых
+ *    тайлов; выше `maxNativeZoom` включается overzoom.
+ *  - `minElevationZoom` / `maxElevationZoom` — диапазон доступных DEM-тайлов;
+ *    вне его высоты не запрашиваются, тайл остаётся плоским.
  *
- * ## Три «зума»
+ * ## «Зумы» карты
  *
  * В классе сознательно разделены:
- *  - **зум камеры** — `view.minZoom`/`view.maxZoom`, дискретный `currentDiscreteZoom`,
- *    плавный `continuousZoom`, целевой `targetZoom`;
+ *  - **зум камеры** — `view.minZoom`/`view.maxZoom`, дискретный
+ *    `currentDiscreteZoom`, плавный `continuousZoom`, целевой `targetZoom`;
  *  - **зум тайлов растрового слоя** — `tileZoom`, клампится в
  *    `[minNativeZoom, maxNativeZoom]` слоя, используется `TileManager`;
  *  - **зум векторного LOD** — вычисляется в `VectorTile._pickSourceZoom`
- *    по `map.targetZoom`, клампится в свои `[minNativeZoom, maxNativeZoom]`.
+ *    по `map.targetZoom`, клампится в свои `[minNativeZoom, maxNativeZoom]`;
+ *  - **зум DEM-данных** — `Tile.minElevationZoom` / `maxElevationZoom`,
+ *    читается через `_elevationLayer`; старые имена `MIN_RELIEF_Z` /
+ *    `MAX_RELIEF_Z` оставлены как геттеры для обратной совместимости.
  */
 export class KrbMap {
     /**
@@ -93,8 +96,8 @@ export class KrbMap {
      * @param {number} [options.R]
      * @param {number} [options.segments]
      * @param {number} [options.animDuration]
-     * @param {number} [options.minReliefZ]
-     * @param {number} [options.maxReliefZ]
+     * @param {number} [options.minReliefZ] — **deprecated**, используйте `Tile.minElevationZoom`.
+     * @param {number} [options.maxReliefZ] — **deprecated**, используйте `Tile.maxElevationZoom`.
      * @param {number} [options.tileMargin]
      * @param {number} [options.tileMarginBg]
      * @param {number} [options.visibleUpdateThrottle]
@@ -124,55 +127,86 @@ export class KrbMap {
         this.hasElevation = options.layers.some(layer => !!layer.elevation);
         this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
 
-// crs — каноническое имя, projection — алиас (обратная совместимость).
-if (options.crs && options.projection && options.crs !== options.projection) {
-    console.warn(
-        `KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
-        `использую crs.`
-    );
-}
-this.projection = Projections.get(options.crs ?? options.projection ?? 'EPSG:3857');
-this._resolveViewCenter();
+        // crs — каноническое имя, projection — алиас (обратная совместимость).
+        if (options.crs && options.projection && options.crs !== options.projection) {
+            console.warn(
+                `KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
+                `использую crs.`
+            );
+        }
+        this.projection = Projections.get(options.crs ?? options.projection ?? 'EPSG:3857');
+        this._resolveViewCenter();
 
-this.inputCRS = options.inputCRS
-    ? Projections.get(options.inputCRS)
-    : Projections.get('EPSG:4326');
+        this.inputCRS = options.inputCRS
+            ? Projections.get(options.inputCRS)
+            : Projections.get('EPSG:4326');
 
-/**
- * CRS источника тайлов. Все тайловые слои считаются в одной CRS;
- * берётся из первого слоя с `texture` или `elevation`, дефолт —
- * EPSG:3857. У слоя тоже принимаются оба имени (`crs` и `projection`),
- * с приоритетом `crs`.
- *
- * Тот же слой (`_tileLayer`) задаёт границы доступных данных источника:
- * `minNativeZoom` / `maxNativeZoom`. Их читают {@link KrbMap#tileZoom}
- * и (через него) {@link TileManager}.
- * @type {Projection|Object|null}
- */
-this._tileLayer = this.layers.find(l => l.texture || l.elevation) ?? null;
-this._defaultZoomOffset = options.zoomOffset ?? 0;
+        /**
+         * «Главный» тайловый слой: определяет `tileCRS`, `zoomOffset`,
+         * `minNativeZoom`/`maxNativeZoom`. Берётся первый слой с
+         * `texture` или `elevation`.
+         * @type {Object|null}
+         */
+        this._tileLayer = this.layers.find(l => l.texture || l.elevation) ?? null;
 
-if (options.zoomOffset !== undefined && this._tileLayer?.zoomOffset !== undefined) {
-    console.warn(
-        'KrbMap: заданы и options.zoomOffset, и zoomOffset у тайлового слоя; ' +
-        'использую значение слоя. Уберите options.zoomOffset.'
-    );
-}
+        /**
+         * Слой-источник высот (DEM). Определяет `minElevationZoom` /
+         * `maxElevationZoom`. Может совпадать с `_tileLayer` или быть
+         * отдельным слоем.
+         * @type {Object|null}
+         */
+        this._elevationLayer = this.layers.find(l => l.elevation) ?? null;
 
-const tileCrsCode =
-    this._tileLayer?.crs ??
-    this._tileLayer?.projection ??
-    'EPSG:3857';
-this.tileCRS = Projections.get(tileCrsCode);
+        this._defaultZoomOffset = options.zoomOffset ?? 0;
+        this._defaultMinReliefZ = undefined;
+        this._defaultMaxReliefZ = undefined;
 
-// Линейная сетка тайлов работает только если тайлы и карта — обе в
-// Mercator-семействе (3857/3395): world-координата тайла совпадает с
-// world-координатой карты без проекции. Иначе — deformed через lon/lat.
-const tileAndMapMatch =
-    this.tileCRS === this.projection &&
-    this.projection.isMercator;
-this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
+        if (options.zoomOffset !== undefined && this._tileLayer?.zoomOffset !== undefined) {
+            console.warn(
+                'KrbMap: заданы и options.zoomOffset, и zoomOffset у тайлового слоя; ' +
+                'использую значение слоя. Уберите options.zoomOffset.'
+            );
+        }
 
+        // ── Deprecated: minReliefZ / maxReliefZ ─────────────────────
+        // Переехали в Tile (minElevationZoom / maxElevationZoom).
+        // Старые имена читаются через геттеры MIN_RELIEF_Z / MAX_RELIEF_Z;
+        // явные значения перекидываются в _elevationLayer, если он есть.
+        if (options.minReliefZ !== undefined) {
+            console.warn(
+                'KrbMap: опция minReliefZ устарела, используйте Tile.minElevationZoom. ' +
+                'Значение будет перекинуто в слой высот.'
+            );
+            if (this._elevationLayer) {
+                this._elevationLayer.minElevationZoom = options.minReliefZ;
+            } else {
+                this._defaultMinReliefZ = options.minReliefZ;
+            }
+        }
+        if (options.maxReliefZ !== undefined) {
+            console.warn(
+                'KrbMap: опция maxReliefZ устарела, используйте Tile.maxElevationZoom. ' +
+                'Значение будет перекинуто в слой высот.'
+            );
+            if (this._elevationLayer) {
+                this._elevationLayer.maxElevationZoom = options.maxReliefZ;
+            } else {
+                this._defaultMaxReliefZ = options.maxReliefZ;
+            }
+        }
+
+        const tileCrsCode =
+            this._tileLayer?.crs ??
+            this._tileLayer?.projection ??
+            'EPSG:3857';
+        this.tileCRS = Projections.get(tileCrsCode);
+
+        // Линейная сетка тайлов работает, только если тайлы и карта — обе
+        // в Mercator-семействе (3857/3395). Иначе — deformed через lon/lat.
+        const tileAndMapMatch =
+            this.tileCRS === this.projection &&
+            this.projection.isMercator;
+        this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
@@ -180,9 +214,7 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
         /**
          * Характерный размер «мира» в world-координатах карты для каллинга
-         * (`margin`, `radius`) в deformed-режиме. Для Mercator-карт
-         * совпадает с `WORLD_SIZE`; для остальных калибруется в
-         * `_calibrateBaseDistance`.
+         * в deformed-режиме. Для Mercator-карт совпадает с `WORLD_SIZE`.
          * @type {number}
          */
         this.WORLD_EXTENT = this.WORLD_SIZE;
@@ -193,8 +225,7 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
         this.MIN_ZOOM = this.view.minZoom;
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
-        this.MIN_RELIEF_Z = options.minReliefZ ?? DEFAULTS.MIN_RELIEF_Z;
-        this.MAX_RELIEF_Z = options.maxReliefZ ?? DEFAULTS.MAX_RELIEF_Z;
+        // MIN_RELIEF_Z / MAX_RELIEF_Z — теперь геттеры (см. ниже).
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
         this.TILE_MARGIN_BG = options.tileMarginBg ?? DEFAULTS.TILE_MARGIN_BG;
         this.VISIBLE_UPDATE_THROTTLE = options.visibleUpdateThrottle ?? DEFAULTS.VISIBLE_UPDATE_THROTTLE;
@@ -224,8 +255,6 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
         /**
          * Причины, по которым карта сейчас должна быть на паузе.
          * Пока множество непустое — карта не рендерит.
-         * Причины: 'tab' (вкладка скрыта), 'viewport' (вне экрана),
-         * 'manual' (пользователь вызвал pause()).
          * @private
          * @type {Set<string>}
          */
@@ -330,11 +359,8 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
     /**
      * Настраивает авто-паузу: карта встаёт на паузу, когда вкладка
-     * скрыта или её контейнер ушёл за пределы вьюпорта (с запасом
-     * 200px по краям, чтобы подгрузка шла заранее).
-     *
+     * скрыта или её контейнер ушёл за пределы вьюпорта (с запасом 200px).
      * Отключается через `options.autoPause: false`.
-     *
      * @private
      */
     _setupAutoPause() {
@@ -347,7 +373,6 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
             else if (!shouldPause && this._paused) this._doResume();
         };
 
-        // 1. Скрытие вкладки браузера — глобальная пауза.
         this._onVisChange = () => {
             if (document.hidden) this._pauseReasons.add('tab');
             else this._pauseReasons.delete('tab');
@@ -355,7 +380,6 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
         };
         document.addEventListener('visibilitychange', this._onVisChange);
 
-        // 2. Уход карты за пределы вьюпорта (с запасом 200px).
         if (typeof IntersectionObserver !== 'undefined' && this.targetElement) {
             this._io = new IntersectionObserver(entries => {
                 for (const e of entries) {
@@ -367,10 +391,6 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
             this._io.observe(this.targetElement);
         }
 
-        // Синхронная проверка стартового состояния: если вкладка уже
-        // скрыта на момент конструирования — сразу ставим на паузу,
-        // чтобы не тратить кадры впустую. Положение во вьюпорте
-        // подтянется асинхронно через IntersectionObserver.
         if (document.hidden) {
             this._pauseReasons.add('tab');
             apply();
@@ -379,13 +399,9 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
     /**
      * Приводит `view.center` к проекции карты. После вызова:
-     *  - `view.center`       — в CRS карты (world-координаты, y → -z);
-     *  - `view.centerLonLat` — WGS84 (lon, lat);
+     *  - `view.center`       — в CRS карты (y → -z);
+     *  - `view.centerLonLat` — WGS84;
      *  - `view.projection`   — код CRS карты.
-     *
-     * Приоритет источников — `centerLonLat`. Если задан только `center`,
-     * он интерпретируется в `view.projection`.
-     *
      * @private
      */
     _resolveViewCenter() {
@@ -423,9 +439,7 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
     /**
      * Экранный AABB тайла уровня z под точкой (worldX, worldZ), в пикселях.
-     * Возвращает null, если тайл выходит за домен проекции или камера
-     * смотрит мимо.
-     *
+     * Возвращает `null`, если тайл выходит за домен проекции.
      * @private
      */
     _measureTileScreenSize(z, worldX, worldZ) {
@@ -472,17 +486,8 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
     }
 
     /**
-     * Калибрует `BASE_DISTANCE` и `WORLD_EXTENT` под текущую проекцию:
-     * после калибровки `continuousZoom = z` означает, что тайл уровня z
-     * у `controls.target` рендерится в `TILE_PIXELS` пикселей.
-     *
-     * Достаточно одного измерения, потому что при `continuousZoom = z`
-     * экранный размер тайла от z не зависит:
-     *     (WORLD_EXTENT / 2^z) * focal / (BASE_DISTANCE * 2^(BASE_ZOOM-z))
-     *     = const
-     *
-     * Для Mercator-карт с Mercator-тайлами (линейный путь) — no-op.
-     *
+     * Калибрует `BASE_DISTANCE` и `WORLD_EXTENT` под текущую проекцию.
+     * Для Mercator-карт с Mercator-тайлами — no-op.
      * @private
      */
     _calibrateBaseDistance() {
@@ -662,11 +667,7 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
 
     /**
      * world (CRS карты) → дробный tile-индекс в `tileCRS`.
-     *
-     * В линейном режиме (Mercator-карта + Mercator-тайлы) — прямая
-     * линейная формула. В deformed — через lon/lat: world → lon/lat
-     * (map.projection), lon/lat → tile-world (tileCRS), tile-world →
-     * tile-индекс.
+     * В линейном режиме — прямая линейная формула; в deformed — через lon/lat.
      */
     worldToTileIndex(worldX, worldZ, z) {
         const lx = worldX - this.worldGroup.position.x;
@@ -700,10 +701,7 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
         ];
     }
 
-    /**
-     * tile-индекс (в `tileCRS`) → world (CRS карты). Обратная операция
-     * к `worldToTileIndex`. В deformed-режиме — через lon/lat.
-     */
+    /** tile-индекс (в `tileCRS`) → world (CRS карты). Обратная к `worldToTileIndex`. */
     tileIndexToWorld(tx, ty, z) {
         const n = 1 << z;
         if (!this.deformedTiles) {
@@ -752,10 +750,10 @@ this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
             MIDDLE: THREE.MOUSE.DOLLY,
             RIGHT: THREE.MOUSE.ROTATE
         };
-this.controls.touches = {
-    ONE: THREE.TOUCH.PAN,
-    TWO: TOUCH_MAP_CONTROLS
-};
+        this.controls.touches = {
+            ONE: THREE.TOUCH.PAN,
+            TWO: TOUCH_MAP_CONTROLS
+        };
         this.controls.maxPolarAngle = (85 * Math.PI) / 180;
         this.controls.minPolarAngle = 0.001;
         this.controls.enableDamping = true;
@@ -791,8 +789,7 @@ this.controls.touches = {
 
     /**
      * Размещает камеру по орбитальным параметрам (pitch/azimuth/dist)
-     * так, чтобы она не оказалась под рельефом. Подробнее — см. историю.
-     *
+     * так, чтобы она не оказалась под рельефом.
      * @private
      */
     _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
@@ -960,50 +957,42 @@ this.controls.touches = {
     resetBearing() { this.rotateToNorth(0.3); }
 
     /** @param {number} z @returns {number} */
-getTargetDistanceForZoom(z) {
-    const canvas = this.renderer?.domElement;
-    const H = canvas ? canvas.clientHeight : 0;
-    const fov = this.camera?.fov ?? 45;
+    getTargetDistanceForZoom(z) {
+        const canvas = this.renderer?.domElement;
+        const H = canvas ? canvas.clientHeight : 0;
+        const fov = this.camera?.fov ?? 45;
 
-    // Fallback до инициализации рендерера
-    if (H <= 0) {
-        return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
+        if (H <= 0) {
+            return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
+        }
+
+        const tanHalfFov = Math.tan((fov * Math.PI) / 360);
+        return (this.WORLD_SIZE / Math.pow(2, z)) * H
+             / (2 * this.TILE_PIXELS * tanHalfFov);
     }
 
-    const tanHalfFov = Math.tan((fov * Math.PI) / 360);   // tan(fov/2)
-    // Расстояние, при котором тайл z-уровня (WORLD_SIZE/2^z метров)
-    // в центре экрана занимает ровно TILE_PIXELS CSS-пикселей.
-    return (this.WORLD_SIZE / Math.pow(2, z)) * H
-         / (2 * this.TILE_PIXELS * tanHalfFov);
-}
+    /**
+     * Обратная операция к {@link KrbMap#getTargetDistanceForZoom}.
+     * При H <= 0 откатывается к легаси-формуле.
+     * @param {number} d — расстояние от target до камеры, world-метры.
+     * @returns {number}
+     */
+    getZoomForDistance(d) {
+        if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
 
-/**
- * Обратная операция к {@link KrbMap#getTargetDistanceForZoom}:
- * по желаемой дистанции камеры возвращает зум.
- *
- * При H <= 0 (рендерер ещё не готов) откатывается к легаси-формуле.
- *
- * @param {number} d — расстояние от target до камеры, world-метры.
- * @returns {number}
- */
-getZoomForDistance(d) {
-    if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
+        const canvas = this.renderer?.domElement;
+        const H = canvas ? canvas.clientHeight : 0;
+        const fov = this.camera?.fov ?? 45;
 
-    const canvas = this.renderer?.domElement;
-    const H = canvas ? canvas.clientHeight : 0;
-    const fov = this.camera?.fov ?? 45;
+        if (H <= 0) {
+            return this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / d);
+        }
 
-    if (H <= 0) {
-        // Легаси-фолбэк: старое соотношение d = BASE_DISTANCE * 2^(BASE_ZOOM-z)
-        return this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / d);
+        const tanHalfFov = Math.tan((fov * Math.PI) / 360);
+        const K = H / (2 * this.TILE_PIXELS * tanHalfFov);
+
+        return Math.log2((this.WORLD_SIZE * K) / d);
     }
-
-    const tanHalfFov = Math.tan((fov * Math.PI) / 360);
-    const K = H / (2 * this.TILE_PIXELS * tanHalfFov);
-
-    // d = (WORLD_SIZE / 2^z) * K   ⇒   z = log2(WORLD_SIZE * K / d)
-    return Math.log2((this.WORLD_SIZE * K) / d);
-}
 
     /* ================================================================
        URL-хелперы
@@ -1023,9 +1012,13 @@ getZoomForDistance(d) {
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
-    /** @returns {string|null} */
+    /**
+     * URL DEM-тайла. Берётся из {@link KrbMap#_elevationLayer} — того же
+     * слоя, что определяет `minElevationZoom`/`maxElevationZoom`.
+     * @returns {string|null}
+     */
     getElevationUrl(z, x, y) {
-        const layer = this.layers[0];
+        const layer = this._elevationLayer;
         if (!layer || !layer.elevation) return null;
         if (layer.elevation === 'demo') return null;
         return layer.elevation
@@ -1039,33 +1032,472 @@ getZoomForDistance(d) {
     }
 
     /**
- * Смещение тайлового зума растровых слоёв.
- * Читается из {@link Tile#zoomOffset}, если задано; иначе — из опции
- * `zoomOffset`, переданной в конструктор карты; иначе 0.
- *
- * Положительное значение — тайлы выше по зуму (крупнее),
- * отрицательное — ниже (мельче).
- *
- * Не влияет на границы видимости слоя (`Tile.minZoom`/`maxZoom`) и
- * доступности данных источника (`Tile.minNativeZoom`/`maxNativeZoom`),
- * только сдвигает выборку по шкале зумов.
- *
- * @type {number}
- */
-get zoomOffset() {
-    const z = this._tileLayer?.zoomOffset;
-    return (z !== undefined && z !== null) ? z : this._defaultZoomOffset;
-}
+     * Смещение тайлового зума растровых слоёв. Читается из
+     * {@link Tile#zoomOffset}, иначе — из `options.zoomOffset`, иначе 0.
+     * Не влияет на границы видимости и доступности данных.
+     * @type {number}
+     */
+    get zoomOffset() {
+        const z = this._tileLayer?.zoomOffset;
+        return (z !== undefined && z !== null) ? z : this._defaultZoomOffset;
+    }
 
-set zoomOffset(v) {
-    if (this._tileLayer) this._tileLayer.zoomOffset = v;
-    else this._defaultZoomOffset = v;
+    set zoomOffset(v) {
+        if (this._tileLayer) this._tileLayer.zoomOffset = v;
+        else this._defaultZoomOffset = v;
 
-    if (this._disposed) return;
-    if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
-    this.lastVisibleUpdateTime = 0;
-    this.maybeUpdateVisibleTiles(true);
-}
+        if (this._disposed) return;
+        if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
+        this.lastVisibleUpdateTime = 0;
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /* ================================================================
+       Зум и видимость
+       ================================================================ */
+
+    /**
+     * Целевой зум камеры. Публичный геттер, чтобы внешние слои
+     * (`VectorTile`) не завязывались на приватное поле `_cameraAnimation`.
+     * @type {number}
+     */
+    get targetZoom() {
+        return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;
+    }
+
+    /**
+     * Зум запрашиваемых растровых тайлов: `currentDiscreteZoom + zoomOffset`,
+     * клампится в `[minNativeZoom, maxNativeZoom]` растрового слоя.
+     * Выше `maxNativeZoom` — overzoom.
+     * @type {number}
+     */
+    get tileZoom() {
+        const z = this.currentDiscreteZoom + this.zoomOffset;
+        const layer = this._tileLayer;
+        const min = layer?.minNativeZoom ?? this.MIN_ZOOM;
+        const max = layer?.maxNativeZoom ?? this.MAX_ZOOM;
+        return Math.max(min, Math.min(max, z));
+    }
+
+    /**
+     * Нижняя граница зумов DEM-данных. Legacy-алиас на
+     * {@link Tile.minElevationZoom} у `_elevationLayer`. Если слоя высот
+     * нет — устаревшее `options.minReliefZ` (при наличии) или `DEFAULTS`.
+     *
+     * Новый код должен использовать `_elevationLayer.minElevationZoom`
+     * (или, если слой не нужен, `Tile.minElevationZoom`).
+     * @type {number}
+     */
+    get MIN_RELIEF_Z() {
+        return this._elevationLayer?.minElevationZoom
+            ?? this._defaultMinReliefZ
+            ?? DEFAULTS.MIN_RELIEF_Z;
+    }
+
+    /**
+     * Верхняя граница зумов DEM-данных. Legacy-алиас на
+     * {@link Tile.maxElevationZoom}.
+     * @type {number}
+     */
+    get MAX_RELIEF_Z() {
+        return this._elevationLayer?.maxElevationZoom
+            ?? this._defaultMaxReliefZ
+            ?? DEFAULTS.MAX_RELIEF_Z;
+    }
+
+    maybeUpdateVisibleTiles(force = false) {
+        if (this._disposed) return;
+        const now = performance.now();
+        if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
+        this.lastVisibleUpdateTime = now;
+
+        const newZ = this.peekIdealZoom(this.continuousZoom);
+        if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
+
+        if (!this.hasTileLayers) return;
+
+        this.tileManager.update(
+            this.camera, this.controls.target,
+            this.continuousZoom, this.worldGroup.position
+        );
+    }
+
+    moveCameraTo(lon, lat, targetZoom = null) {
+        this.moveCameraToSlow(lon, lat, 0, targetZoom);
+    }
+
+    /** @private */
+    _wrapLongitudeIfNeeded() {
+        if (!this._wrapsLongitude()) return;
+
+        const now = performance.now();
+        if (now - this._lastWrapCheck < 1000) return;
+        this._lastWrapCheck = now;
+
+        const worldPos = this.worldGroup.position;
+        const centerX = this.controls.target.x - worldPos.x;
+        const centerZ = this.controls.target.z - worldPos.z;
+        const [lon, lat] = this.unprojectToLonLat(centerX, centerZ);
+
+        let newLon = lon;
+        if (lon < -180) newLon = lon + 360;
+        else if (lon > 180) newLon = lon - 360;
+        if (newLon === lon) return;
+
+        const [newCenterX, newCenterZ] = this.projectLonLat(newLon, lat);
+        this.worldGroup.position.x = this.controls.target.x - newCenterX;
+        this.worldGroup.position.z = this.controls.target.z - newCenterZ;
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /**
+     * Анимированный перелёт к (lon, lat).
+     * При duration <= 0 выполняется синхронно, без rAF и _cameraAnimation.
+     *
+     * @param {number} lon
+     * @param {number} lat
+     * @param {number} [duration=1.0]
+     * @param {number|null} [targetZoom=null]
+     */
+    moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
+        if (this._disposed) return;
+
+        if (!(duration > 0)) {
+            if (this._cameraAnimation) {
+                this._cameraAnimation = null;
+                if (this._cameraAnimFrame !== null) {
+                    cancelAnimationFrame(this._cameraAnimFrame);
+                    this._cameraAnimFrame = null;
+                }
+                this._cameraAnimations.pitch = null;
+                this._cameraAnimations.bearing = null;
+                this.controls.enableDamping = this._controlsDampingWasEnabled;
+            }
+
+            const [cx, cz] = this.projectLonLat(lon, lat);
+            const off = this.worldGroup.position;
+            const endTarget = this._tempVec3a.set(cx + off.x, 0, cz + off.z);
+
+            const currentDir = this._tempDir.subVectors(this.camera.position, this.controls.target);
+            const dist0 = currentDir.length();
+            const animPitch = dist0 > 1e-6
+                ? Math.acos(Math.max(-1, Math.min(1, currentDir.y / dist0)))
+                : 0.001;
+            const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
+
+            const endZoom = targetZoom !== null ? targetZoom : this.continuousZoom;
+
+            this._resolveCameraPlacement(
+                endTarget,
+                this.getTargetDistanceForZoom(endZoom),
+                animPitch,
+                animAzimuth,
+                this._tempPlacementOut
+            );
+            this.camera.position.copy(this._tempPlacementOut);
+            this.controls.target.copy(endTarget);
+            this.controls.update();
+
+            this.continuousZoom = endZoom;
+            this.targetContinuousZoom = endZoom;
+            this.maybeUpdateVisibleTiles(true);
+            return;
+        }
+
+        if (this._cameraAnimation) return;
+
+        const startTarget = new THREE.Vector3().copy(this.controls.target);
+        const startPos = new THREE.Vector3().copy(this.camera.position);
+        const startZoom = this.continuousZoom;
+
+        const [cx, cz] = this.projectLonLat(lon, lat);
+        const worldOffset = this.worldGroup.position;
+        const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cz + worldOffset.z);
+
+        const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
+        const animPitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
+        const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
+        const endZoom = targetZoom !== null ? targetZoom : startZoom;
+
+        const startTime = performance.now();
+        this._cameraAnimation = {
+            startTarget, endTarget,
+            startZoom, endZoom,
+            duration, startTime
+        };
+
+        this._controlsDampingWasEnabled = this.controls.enableDamping;
+        this.controls.enableDamping = false;
+
+        const animateStep = (now) => {
+            if (this._disposed || !this._cameraAnimation) return;
+            const anim = this._cameraAnimation;
+            let t = (now - anim.startTime) / (anim.duration * 1000);
+            t = Math.min(t, 1.0);
+            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+            const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
+            const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
+
+            this._resolveCameraPlacement(
+                currentTarget,
+                this.getTargetDistanceForZoom(currentZoom),
+                animPitch,
+                animAzimuth,
+                this._tempPlacementOut
+            );
+            this.camera.position.copy(this._tempPlacementOut);
+            this.controls.target.copy(currentTarget);
+            this.controls.update();
+
+            this.continuousZoom = currentZoom;
+            this.targetContinuousZoom = currentZoom;
+            this.maybeUpdateVisibleTiles();
+
+            if (t >= 1.0) {
+                this._cameraAnimation = null;
+                this.controls.enableDamping = this._controlsDampingWasEnabled;
+
+                this._resolveCameraPlacement(
+                    anim.endTarget,
+                    this.getTargetDistanceForZoom(anim.endZoom),
+                    animPitch,
+                    animAzimuth,
+                    this._tempPlacementOut
+                );
+                this.camera.position.copy(this._tempPlacementOut);
+                this.controls.target.copy(anim.endTarget);
+                this.controls.update();
+
+                this.continuousZoom = anim.endZoom;
+                this.targetContinuousZoom = anim.endZoom;
+                this.maybeUpdateVisibleTiles(true);
+                return;
+            }
+            requestAnimationFrame(animateStep);
+        };
+        requestAnimationFrame(animateStep);
+    }
+
+    /**
+     * Поворот к северу (и сброс pitch, если надо).
+     * @param {number} [duration=0.3] @param {boolean} [resetPitch=true]
+     */
+    rotateToNorth(duration = 0.3, resetPitch = true) {
+        if (this._disposed || this._cameraAnimation) return;
+
+        const startTarget = new THREE.Vector3().copy(this.controls.target);
+        const startPos = new THREE.Vector3().copy(this.camera.position);
+        const dir = new THREE.Vector3().subVectors(startPos, startTarget);
+        const startDistance = dir.length();
+        if (startDistance < 1) return;
+
+        const startPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / startDistance)));
+        const startBearing = Math.atan2(-dir.x, dir.z);
+        const endBearing = 0;
+        const endPitch = resetPitch ? 0.001 : startPitch;
+
+        let endDistance = startDistance;
+        if (resetPitch) {
+            endDistance = this.getTargetDistanceForZoom(this.continuousZoom);
+        }
+
+        let deltaBearing = endBearing - startBearing;
+        while (deltaBearing > Math.PI) deltaBearing -= 2 * Math.PI;
+        while (deltaBearing < -Math.PI) deltaBearing += 2 * Math.PI;
+        const deltaPitch = endPitch - startPitch;
+
+        if (Math.abs(deltaBearing) < 0.001 && Math.abs(deltaPitch) < 0.001 &&
+            Math.abs(endDistance - startDistance) < 1) return;
+
+        this._controlsDampingWasEnabled = this.controls.enableDamping;
+        this.controls.enableDamping = false;
+
+        const startTime = performance.now();
+        this._cameraAnimation = {
+            startTarget, startBearing, startPitch, startDistance,
+            endBearing, endPitch, endDistance, duration, startTime
+        };
+
+        const animateStep = (now) => {
+            if (this._disposed || !this._cameraAnimation) return;
+            const anim = this._cameraAnimation;
+            let t = (now - anim.startTime) / (anim.duration * 1000);
+            t = Math.min(t, 1.0);
+            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+            const curBearing = anim.startBearing + (anim.endBearing - anim.startBearing) * eased;
+            const curPitch   = anim.startPitch   + (anim.endPitch   - anim.startPitch)   * eased;
+            const curDist    = anim.startDistance + (anim.endDistance - anim.startDistance) * eased;
+
+            const azimuth = curBearing + Math.PI / 2;
+            this._resolveCameraPlacement(
+                anim.startTarget, curDist, curPitch, azimuth,
+                this._tempPlacementOut
+            );
+            this.camera.position.copy(this._tempPlacementOut);
+            this.controls.target.copy(anim.startTarget);
+            this.controls.update();
+            this.maybeUpdateVisibleTiles();
+
+            if (t >= 1.0) {
+                this._cameraAnimation = null;
+                this.controls.enableDamping = this._controlsDampingWasEnabled;
+                const endAz = anim.endBearing + Math.PI / 2;
+                this._resolveCameraPlacement(
+                    anim.startTarget, anim.endDistance, anim.endPitch, endAz,
+                    this._tempPlacementOut
+                );
+                this.camera.position.copy(this._tempPlacementOut);
+                this.controls.target.copy(anim.startTarget);
+                this.controls.update();
+                this.maybeUpdateVisibleTiles();
+                return;
+            }
+            requestAnimationFrame(animateStep);
+        };
+        requestAnimationFrame(animateStep);
+    }
+
+    /* ================================================================
+       fitToBounds / fitTo
+       ================================================================ */
+
+    fitToBounds(bounds, options = {}) {
+        if (!bounds || !bounds[0] || !bounds[1]) {
+            console.warn('fitToBounds: bounds must be [[minX, minY], [maxX, maxY]]');
+            return;
+        }
+        const {
+            crs = this.inputCRS,
+            padding = 0,
+            duration = 0.5,
+            maxZoom = this.MAX_ZOOM
+        } = options;
+
+        const [[ax, ay], [bx, by]] = bounds;
+        const minInX = Math.min(ax, bx), maxInX = Math.max(ax, bx);
+        const minInY = Math.min(ay, by), maxInY = Math.max(ay, by);
+
+        const [padX, padY] = Array.isArray(padding)
+            ? [padding[0], padding[1]]
+            : [padding, padding];
+
+        const srcCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
+
+        let minWX = Infinity, maxWX = -Infinity, minWZ = Infinity, maxWZ = -Infinity;
+        const corners = [
+            [minInX, minInY], [maxInX, minInY],
+            [minInX, maxInY], [maxInX, maxInY]
+        ];
+        for (const [px, py] of corners) {
+            const lonLat = srcCrs.toLonLat([px, py]);
+            const [wx, wy] = this.projection.fromLonLat(lonLat);
+            const wz = -wy;
+            if (wx < minWX) minWX = wx;
+            if (wx > maxWX) maxWX = wx;
+            if (wz < minWZ) minWZ = wz;
+            if (wz > maxWZ) maxWZ = wz;
+        }
+
+        const targetX = (minWX + maxWX) / 2;
+        const targetZ = (minWZ + maxWZ) / 2;
+        const halfW = (maxWX - minWX) / 2;
+        const halfH = (maxWZ - minWZ) / 2;
+
+        const [targetLon, targetLat] = this.projection.toLonLat([targetX, -targetZ]);
+
+        const epsilon = 1e-6;
+        if (halfW < epsilon && halfH < epsilon) {
+            const currentZoom = this.continuousZoom;
+            this.moveCameraToSlow(targetLon, targetLat, duration, Math.min(currentZoom, maxZoom));
+            return;
+        }
+
+        const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
+        let z = this.getZoomForDistance(D);
+        if (!isFinite(z)) z = this.continuousZoom;
+        z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
+
+        this.moveCameraToSlow(targetLon, targetLat, duration, z);
+    }
+
+    fitTo(objectOrArray, options = {}) {
+        const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
+        const crsCode = options.crs ?? 'EPSG:4326';
+        const crs = typeof crsCode === 'string' ? Projections.get(crsCode) : crsCode;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const obj of objs) {
+            if (!obj || typeof obj.getBounds !== 'function') continue;
+            let b;
+            try {
+                b = obj.getBounds(crsCode);
+            } catch (err) {
+                console.warn('fitTo: getBounds() threw an error for', obj, err);
+                continue;
+            }
+            if (!b) continue;
+            if (b[0][0] < minX) minX = b[0][0];
+            if (b[0][1] < minY) minY = b[0][1];
+            if (b[1][0] > maxX) maxX = b[1][0];
+            if (b[1][1] > maxY) maxY = b[1][1];
+        }
+        if (!isFinite(minX)) return;
+
+        this.fitToBounds([[minX, minY], [maxX, maxY]], { ...options, crs });
+    }
+
+    /** @private */
+    _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
+        const canvas = this.renderer.domElement;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        if (W <= 0 || H <= 0) return this.BASE_DISTANCE;
+
+        const camera = this.camera;
+        camera.updateMatrixWorld();
+
+        const fovYRad = camera.fov * Math.PI / 180;
+        const ty = Math.tan(fovYRad / 2);
+        const tx = ty * camera.aspect;
+        if (ty <= 0 || tx <= 0) return this.BASE_DISTANCE;
+
+        const ndcXMax = 1 - (2 * padX) / W;
+        const ndcYMax = 1 - (2 * padY) / H;
+        if (ndcXMax <= 0 || ndcYMax <= 0) return this.BASE_DISTANCE;
+
+        const e = camera.matrixWorld.elements;
+        const m1x = e[0], m1y = e[1], m1z = e[2];
+        const m2x = e[4], m2y = e[5], m2z = e[6];
+        const m3x = e[8], m3y = e[9], m3z = e[10];
+
+        const corners = [
+            [targetX - halfW, 0, targetZ - halfH],
+            [targetX + halfW, 0, targetZ - halfH],
+            [targetX - halfW, 0, targetZ + halfH],
+            [targetX + halfW, 0, targetZ + halfH]
+        ];
+
+        let dRequired = 0;
+        for (const [px, py, pz] of corners) {
+            const ox = px - targetX;
+            const oy = py;
+            const oz = pz - targetZ;
+
+            const r1 = m1x * ox + m1y * oy + m1z * oz;
+            const r2 = m2x * ox + m2y * oy + m2z * oz;
+            const r3 = m3x * ox + m3y * oy + m3z * oz;
+
+            const dX = r3 + Math.abs(r1) / (ndcXMax * tx);
+            const dY = r3 + Math.abs(r2) / (ndcYMax * ty);
+            const dCorner = Math.max(dX, dY);
+            if (dCorner > dRequired) dRequired = dCorner;
+        }
+
+        if (!isFinite(dRequired) || dRequired <= 0) return this.BASE_DISTANCE;
+        return dRequired;
+    }
 
     /* ================================================================
        Источник высот
@@ -1103,9 +1535,9 @@ set zoomOffset(v) {
         }
     }
 
-getSurfaceMaxHeight(worldX, worldZ) {
-    if (!this.hasElevation) return 0;
-    const z = this.tileZoom;
+    getSurfaceMaxHeight(worldX, worldZ) {
+        if (!this.hasElevation) return 0;
+        const z = this.tileZoom;
         const maxTile = (1 << z) - 1;
 
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
@@ -1132,9 +1564,9 @@ getSurfaceMaxHeight(worldX, worldZ) {
         return maxY;
     }
 
-getSurfaceHeightAt(worldX, worldZ) {
-    if (!this.hasElevation) return 0;
-    const zMax = this.tileZoom;
+    getSurfaceHeightAt(worldX, worldZ) {
+        if (!this.hasElevation) return 0;
+        const zMax = this.tileZoom;
         const zMin = Math.max(0, this.MIN_RELIEF_Z);
         for (let zz = zMax; zz >= zMin; zz--) {
             const h = this._sampleHeightAtZoom(worldX, worldZ, zz);
@@ -1179,7 +1611,7 @@ getSurfaceHeightAt(worldX, worldZ) {
     }
 
     ensureTileForPoint(worldX, worldZ) {
-        const z = this.tileZoom;  
+        const z = this.tileZoom;
         const maxTile = (1 << z) - 1;
 
         const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
@@ -1411,7 +1843,6 @@ getSurfaceHeightAt(worldX, worldZ) {
         this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
 
-        // --- 1. Hit ground plane Y=0 (для identify векторных фич) ---
         const groundPoint = new THREE.Vector3();
         if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, groundPoint)) {
             console.log('[shift-click] Ray did not hit ground plane (looking at horizon?)');
@@ -1421,7 +1852,6 @@ getSurfaceHeightAt(worldX, worldZ) {
         const localZ = groundPoint.z - this.worldGroup.position.z;
         const [lon, lat] = this.unprojectToLonLat(localX, localZ);
 
-        // --- 2. Raster hit для высоты (если есть elevation) ---
         let elevation = null;
         const meshes = [];
         for (const inst of this.tileManager.tiles.values()) {
@@ -1430,7 +1860,6 @@ getSurfaceHeightAt(worldX, worldZ) {
         const intersects = this._tempRaycaster.intersectObjects(meshes, false);
         if (intersects.length > 0) elevation = intersects[0].point.y;
 
-        // --- 3. Запрос во все векторные слои ---
         const identLayers = this._dynamicLayers.filter(l => typeof l.identify === 'function');
         if (identLayers.length === 0) {
             console.log(
@@ -1518,7 +1947,7 @@ getSurfaceHeightAt(worldX, worldZ) {
     }
 
     /* ================================================================
-       Зум и видимость
+       Зум: применение
        ================================================================ */
 
     applyZoomDistance() {
@@ -1540,461 +1969,21 @@ getSurfaceHeightAt(worldX, worldZ) {
         this.camera.lookAt(target);
     }
 
-applyZoomDelta(delta) {
-    this.targetContinuousZoom += delta;
-    this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
+    applyZoomDelta(delta) {
+        this.targetContinuousZoom += delta;
+        this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
 
-    const futureTileZ = this.targetContinuousZoom + this.zoomOffset;   // ← new
-    if (futureTileZ > this.MAX_RELIEF_Z) {                             // ← было this.targetContinuousZoom
-        const futureCenter = this._tempVec3a.copy(this.controls.target);
-        const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, this.MAX_RELIEF_Z); // ← futureTileZ
-        this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
-    }
-}
-
-peekIdealZoom(continuousZoom) {
-    return Math.max(this.MIN_ZOOM,
-                    Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
-}
-
-    /**
-     * Целевой зум камеры (куда камера едет).
-     *
-     * Публичный геттер, чтобы внешние слои (`VectorTile`) не завязывались
-     * на приватное поле `_cameraAnimation`. Если сейчас идёт анимация
-     * камеры, возвращает её конечный зум; иначе — `targetContinuousZoom`.
-     *
-     * @type {number}
-     */
-    get targetZoom() {
-        return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;
-    }
-
-    /**
-     * Зум запрашиваемых растровых тайлов.
-     *
-     * Вычисляется как `currentDiscreteZoom + zoomOffset` и клампится в
-     * диапазон доступных данных источника:
-     *
-     *  - `minNativeZoom` — ниже этого зума тайлов у сервера нет;
-     *  - `maxNativeZoom` — выше включается overzoom (тайл старшего зума
-     *    растягивается на несколько экранных клеток).
-     *
-     * Если `_tileLayer` не задан (нет растровых слоёв), используются
-     * глобальные `MIN_ZOOM` / `MAX_ZOOM` из `View`.
-     *
-     * Не путать с:
-     *  - `currentDiscreteZoom` — дискретный зум камеры (может быть
-     *    выше `maxNativeZoom` — overzoom);
-     *  - `continuousZoom` — плавный зум камеры;
-     *  - `targetZoom` — целевой зум (куда едет камера).
-     *
-     * @type {number}
-     */
-    get tileZoom() {
-        const z = this.currentDiscreteZoom + this.zoomOffset;
-        const layer = this._tileLayer;
-        const min = layer?.minNativeZoom ?? this.MIN_ZOOM;
-        const max = layer?.maxNativeZoom ?? this.MAX_ZOOM;
-        return Math.max(min, Math.min(max, z));
-    }
-
-    maybeUpdateVisibleTiles(force = false) {
-        if (this._disposed) return;
-        const now = performance.now();
-        if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
-        this.lastVisibleUpdateTime = now;
-
-        const newZ = this.peekIdealZoom(this.continuousZoom);
-        if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
-
-        if (!this.hasTileLayers) return;
-
-        this.tileManager.update(
-            this.camera, this.controls.target,
-            this.continuousZoom, this.worldGroup.position
-        );
-    }
-
-    moveCameraTo(lon, lat, targetZoom = null) {
-    this.moveCameraToSlow(lon, lat, 0, targetZoom);
-}
-
-    /** @private */
-    _wrapLongitudeIfNeeded() {
-        if (!this._wrapsLongitude()) return;
-
-        const now = performance.now();
-        if (now - this._lastWrapCheck < 1000) return;
-        this._lastWrapCheck = now;
-
-        const worldPos = this.worldGroup.position;
-        const centerX = this.controls.target.x - worldPos.x;
-        const centerZ = this.controls.target.z - worldPos.z;
-        const [lon, lat] = this.unprojectToLonLat(centerX, centerZ);
-
-        let newLon = lon;
-        if (lon < -180) newLon = lon + 360;
-        else if (lon > 180) newLon = lon - 360;
-        if (newLon === lon) return;
-
-        const [newCenterX, newCenterZ] = this.projectLonLat(newLon, lat);
-        this.worldGroup.position.x = this.controls.target.x - newCenterX;
-        this.worldGroup.position.z = this.controls.target.z - newCenterZ;
-        this.maybeUpdateVisibleTiles(true);
-    }
-
-/**
- * Анимированный перелёт к (lon, lat).
- * При duration <= 0 выполняется синхронно, без rAF и без _cameraAnimation.
- *
- * @param {number} lon
- * @param {number} lat
- * @param {number} [duration=1.0]
- * @param {number|null} [targetZoom=null]
- */
-moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
-    if (this._disposed) return;
-
-    // --- Синхронный fast-path ---------------------------------------
-    if (!(duration > 0)) {
-        // Гасим любую идущую анимацию, иначе её rAF-шаг перезапишет камеру.
-        if (this._cameraAnimation) {
-            this._cameraAnimation = null;
-            if (this._cameraAnimFrame !== null) {
-                cancelAnimationFrame(this._cameraAnimFrame);
-                this._cameraAnimFrame = null;
-            }
-            this._cameraAnimations.pitch = null;
-            this._cameraAnimations.bearing = null;
-            this.controls.enableDamping = this._controlsDampingWasEnabled;
+        const futureTileZ = this.targetContinuousZoom + this.zoomOffset;
+        if (futureTileZ > this.MAX_RELIEF_Z) {
+            const futureCenter = this._tempVec3a.copy(this.controls.target);
+            const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, this.MAX_RELIEF_Z);
+            this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
         }
-
-        const [cx, cz] = this.projectLonLat(lon, lat);
-        const off = this.worldGroup.position;
-        const endTarget = this._tempVec3a.set(cx + off.x, 0, cz + off.z);
-
-        const currentDir = this._tempDir.subVectors(this.camera.position, this.controls.target);
-        const dist0 = currentDir.length();
-        const animPitch = dist0 > 1e-6
-            ? Math.acos(Math.max(-1, Math.min(1, currentDir.y / dist0)))
-            : 0.001;
-        const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
-
-        const endZoom = targetZoom !== null ? targetZoom : this.continuousZoom;
-
-        this._resolveCameraPlacement(
-            endTarget,
-            this.getTargetDistanceForZoom(endZoom),
-            animPitch,
-            animAzimuth,
-            this._tempPlacementOut
-        );
-        this.camera.position.copy(this._tempPlacementOut);
-        this.controls.target.copy(endTarget);
-        this.controls.update();
-
-        this.continuousZoom = endZoom;
-        this.targetContinuousZoom = endZoom;
-        this.maybeUpdateVisibleTiles(true);
-        return;
-    }
-    // ----------------------------------------------------------------
-
-    if (this._cameraAnimation) return;
-
-    const startTarget = new THREE.Vector3().copy(this.controls.target);
-    const startPos = new THREE.Vector3().copy(this.camera.position);
-    const startZoom = this.continuousZoom;
-
-    const [cx, cz] = this.projectLonLat(lon, lat);
-    const worldOffset = this.worldGroup.position;
-    const endTarget = new THREE.Vector3(cx + worldOffset.x, 0, cz + worldOffset.z);
-
-    const currentDir = new THREE.Vector3().subVectors(startPos, startTarget).normalize();
-    const animPitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
-    const animAzimuth = Math.atan2(currentDir.z, currentDir.x);
-    const endZoom = targetZoom !== null ? targetZoom : startZoom;
-
-    const startTime = performance.now();
-    this._cameraAnimation = {
-        startTarget, endTarget,
-        startZoom, endZoom,
-        duration, startTime
-    };
-
-    this._controlsDampingWasEnabled = this.controls.enableDamping;
-    this.controls.enableDamping = false;
-
-    const animateStep = (now) => {
-        if (this._disposed || !this._cameraAnimation) return;
-        const anim = this._cameraAnimation;
-        let t = (now - anim.startTime) / (anim.duration * 1000);
-        t = Math.min(t, 1.0);
-        const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-        const currentZoom = anim.startZoom + (anim.endZoom - anim.startZoom) * eased;
-        const currentTarget = this._tempVec3a.lerpVectors(anim.startTarget, anim.endTarget, eased);
-
-        this._resolveCameraPlacement(
-            currentTarget,
-            this.getTargetDistanceForZoom(currentZoom),
-            animPitch,
-            animAzimuth,
-            this._tempPlacementOut
-        );
-        this.camera.position.copy(this._tempPlacementOut);
-        this.controls.target.copy(currentTarget);
-        this.controls.update();
-
-        this.continuousZoom = currentZoom;
-        this.targetContinuousZoom = currentZoom;
-        this.maybeUpdateVisibleTiles();
-
-        if (t >= 1.0) {
-            this._cameraAnimation = null;
-            this.controls.enableDamping = this._controlsDampingWasEnabled;
-
-            this._resolveCameraPlacement(
-                anim.endTarget,
-                this.getTargetDistanceForZoom(anim.endZoom),
-                animPitch,
-                animAzimuth,
-                this._tempPlacementOut
-            );
-            this.camera.position.copy(this._tempPlacementOut);
-            this.controls.target.copy(anim.endTarget);
-            this.controls.update();
-
-            this.continuousZoom = anim.endZoom;
-            this.targetContinuousZoom = anim.endZoom;
-            this.maybeUpdateVisibleTiles(true);
-            return;
-        }
-        requestAnimationFrame(animateStep);
-    };
-    requestAnimationFrame(animateStep);
-}
-
-
-    /**
-     * Поворот к северу (и сброс pitch, если надо).
-     * @param {number} [duration=0.3] @param {boolean} [resetPitch=true]
-     */
-    rotateToNorth(duration = 0.3, resetPitch = true) {
-        if (this._disposed || this._cameraAnimation) return;
-
-        const startTarget = new THREE.Vector3().copy(this.controls.target);
-        const startPos = new THREE.Vector3().copy(this.camera.position);
-        const dir = new THREE.Vector3().subVectors(startPos, startTarget);
-        const startDistance = dir.length();
-        if (startDistance < 1) return;
-
-        const startPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / startDistance)));
-        const startBearing = Math.atan2(-dir.x, dir.z);
-        const endBearing = 0;
-        const endPitch = resetPitch ? 0.001 : startPitch;
-
-        let endDistance = startDistance;
-        if (resetPitch) {
-            endDistance = this.getTargetDistanceForZoom(this.continuousZoom);
-        }
-
-        let deltaBearing = endBearing - startBearing;
-        while (deltaBearing > Math.PI) deltaBearing -= 2 * Math.PI;
-        while (deltaBearing < -Math.PI) deltaBearing += 2 * Math.PI;
-        const deltaPitch = endPitch - startPitch;
-
-        if (Math.abs(deltaBearing) < 0.001 && Math.abs(deltaPitch) < 0.001 &&
-            Math.abs(endDistance - startDistance) < 1) return;
-
-        this._controlsDampingWasEnabled = this.controls.enableDamping;
-        this.controls.enableDamping = false;
-
-        const startTime = performance.now();
-        this._cameraAnimation = {
-            startTarget, startBearing, startPitch, startDistance,
-            endBearing, endPitch, endDistance, duration, startTime
-        };
-
-        const animateStep = (now) => {
-            if (this._disposed || !this._cameraAnimation) return;
-            const anim = this._cameraAnimation;
-            let t = (now - anim.startTime) / (anim.duration * 1000);
-            t = Math.min(t, 1.0);
-            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-            const curBearing = anim.startBearing + (anim.endBearing - anim.startBearing) * eased;
-            const curPitch   = anim.startPitch   + (anim.endPitch   - anim.startPitch)   * eased;
-            const curDist    = anim.startDistance + (anim.endDistance - anim.startDistance) * eased;
-
-            const azimuth = curBearing + Math.PI / 2;
-            this._resolveCameraPlacement(
-                anim.startTarget, curDist, curPitch, azimuth,
-                this._tempPlacementOut
-            );
-            this.camera.position.copy(this._tempPlacementOut);
-            this.controls.target.copy(anim.startTarget);
-            this.controls.update();
-            this.maybeUpdateVisibleTiles();
-
-            if (t >= 1.0) {
-                this._cameraAnimation = null;
-                this.controls.enableDamping = this._controlsDampingWasEnabled;
-                const endAz = anim.endBearing + Math.PI / 2;
-                this._resolveCameraPlacement(
-                    anim.startTarget, anim.endDistance, anim.endPitch, endAz,
-                    this._tempPlacementOut
-                );
-                this.camera.position.copy(this._tempPlacementOut);
-                this.controls.target.copy(anim.startTarget);
-                this.controls.update();
-                this.maybeUpdateVisibleTiles();
-                return;
-            }
-            requestAnimationFrame(animateStep);
-        };
-        requestAnimationFrame(animateStep);
     }
 
-    /* ================================================================
-       fitToBounds / fitTo
-       ================================================================ */
-
-    fitToBounds(bounds, options = {}) {
-        if (!bounds || !bounds[0] || !bounds[1]) {
-            console.warn('fitToBounds: bounds must be [[minX, minY], [maxX, maxY]]');
-            return;
-        }
-        const {
-            crs = this.inputCRS,
-            padding = 0,
-            duration = 0.5,
-            maxZoom = this.MAX_ZOOM
-        } = options;
-
-        const [[ax, ay], [bx, by]] = bounds;
-        const minInX = Math.min(ax, bx), maxInX = Math.max(ax, bx);
-        const minInY = Math.min(ay, by), maxInY = Math.max(ay, by);
-
-        const [padX, padY] = Array.isArray(padding)
-            ? [padding[0], padding[1]]
-            : [padding, padding];
-
-        const srcCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
-
-        let minWX = Infinity, maxWX = -Infinity, minWZ = Infinity, maxWZ = -Infinity;
-        const corners = [
-            [minInX, minInY], [maxInX, minInY],
-            [minInX, maxInY], [maxInX, maxInY]
-        ];
-        for (const [px, py] of corners) {
-            const lonLat = srcCrs.toLonLat([px, py]);
-            const [wx, wy] = this.projection.fromLonLat(lonLat);
-            const wz = -wy;
-            if (wx < minWX) minWX = wx;
-            if (wx > maxWX) maxWX = wx;
-            if (wz < minWZ) minWZ = wz;
-            if (wz > maxWZ) maxWZ = wz;
-        }
-
-        const targetX = (minWX + maxWX) / 2;
-        const targetZ = (minWZ + maxWZ) / 2;
-        const halfW = (maxWX - minWX) / 2;
-        const halfH = (maxWZ - minWZ) / 2;
-
-        const [targetLon, targetLat] = this.projection.toLonLat([targetX, -targetZ]);
-
-        const epsilon = 1e-6;
-        if (halfW < epsilon && halfH < epsilon) {
-            const currentZoom = this.continuousZoom;
-            this.moveCameraToSlow(targetLon, targetLat, duration, Math.min(currentZoom, maxZoom));
-            return;
-        }
-
-const D = this._computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY);
-let z = this.getZoomForDistance(D);       // ← было: BASE_ZOOM + log2(BASE_DISTANCE / D)
-if (!isFinite(z)) z = this.continuousZoom;
-z = Math.max(this.MIN_ZOOM, Math.min(maxZoom, z));
-
-this.moveCameraToSlow(targetLon, targetLat, duration, z);
-    }
-
-    fitTo(objectOrArray, options = {}) {
-        const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
-        const crsCode = options.crs ?? 'EPSG:4326';
-        const crs = typeof crsCode === 'string' ? Projections.get(crsCode) : crsCode;
-
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const obj of objs) {
-            if (!obj || typeof obj.getBounds !== 'function') continue;
-            let b;
-            try {
-                b = obj.getBounds(crsCode);
-            } catch (err) {
-                console.warn('fitTo: getBounds() threw an error for', obj, err);
-                continue;
-            }
-            if (!b) continue;
-            if (b[0][0] < minX) minX = b[0][0];
-            if (b[0][1] < minY) minY = b[0][1];
-            if (b[1][0] > maxX) maxX = b[1][0];
-            if (b[1][1] > maxY) maxY = b[1][1];
-        }
-        if (!isFinite(minX)) return;
-
-        this.fitToBounds([[minX, minY], [maxX, maxY]], { ...options, crs });
-    }
-
-    /** @private */
-    _computeFitDistance(targetX, targetZ, halfW, halfH, padX, padY) {
-        const canvas = this.renderer.domElement;
-        const W = canvas.clientWidth;
-        const H = canvas.clientHeight;
-        if (W <= 0 || H <= 0) return this.BASE_DISTANCE;
-
-        const camera = this.camera;
-        camera.updateMatrixWorld();
-
-        const fovYRad = camera.fov * Math.PI / 180;
-        const ty = Math.tan(fovYRad / 2);
-        const tx = ty * camera.aspect;
-        if (ty <= 0 || tx <= 0) return this.BASE_DISTANCE;
-
-        const ndcXMax = 1 - (2 * padX) / W;
-        const ndcYMax = 1 - (2 * padY) / H;
-        if (ndcXMax <= 0 || ndcYMax <= 0) return this.BASE_DISTANCE;
-
-        const e = camera.matrixWorld.elements;
-        const m1x = e[0], m1y = e[1], m1z = e[2];
-        const m2x = e[4], m2y = e[5], m2z = e[6];
-        const m3x = e[8], m3y = e[9], m3z = e[10];
-
-        const corners = [
-            [targetX - halfW, 0, targetZ - halfH],
-            [targetX + halfW, 0, targetZ - halfH],
-            [targetX - halfW, 0, targetZ + halfH],
-            [targetX + halfW, 0, targetZ + halfH]
-        ];
-
-        let dRequired = 0;
-        for (const [px, py, pz] of corners) {
-            const ox = px - targetX;
-            const oy = py;
-            const oz = pz - targetZ;
-
-            const r1 = m1x * ox + m1y * oy + m1z * oz;
-            const r2 = m2x * ox + m2y * oy + m2z * oz;
-            const r3 = m3x * ox + m3y * oy + m3z * oz;
-
-            const dX = r3 + Math.abs(r1) / (ndcXMax * tx);
-            const dY = r3 + Math.abs(r2) / (ndcYMax * ty);
-            const dCorner = Math.max(dX, dY);
-            if (dCorner > dRequired) dRequired = dCorner;
-        }
-
-        if (!isFinite(dRequired) || dRequired <= 0) return this.BASE_DISTANCE;
-        return dRequired;
+    peekIdealZoom(continuousZoom) {
+        return Math.max(this.MIN_ZOOM,
+                        Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
     }
 
     /* ================================================================
@@ -2002,14 +1991,8 @@ this.moveCameraToSlow(targetLon, targetLat, duration, z);
        ================================================================ */
 
     /**
-     * Публичная пауза. Пока карта «на паузе», её rAF-цикл не крутится,
-     * ничего не рендерится и не считается.
-     *
-     * Внутренне работает через набор причин (`_pauseReasons`): вызов
-     * `pause()` добавляет причину `'manual'`. Если карта вне вьюпорта
-     * или вкладка скрыта — она останется на паузе даже после `resume()`,
-     * пока не вернётся в зону видимости (это ожидаемое поведение и
-     * не тратит кадры впустую).
+     * Публичная пауза. Пока карта «на паузе», её rAF-цикл не крутится.
+     * Внутри — набор причин `_pauseReasons`; `pause()` добавляет `'manual'`.
      */
     pause() {
         if (this._disposed) return;
@@ -2029,11 +2012,7 @@ this.moveCameraToSlow(targetLon, targetLat, duration, z);
         if (this._pauseReasons.size === 0) this._doResume();
     }
 
-    /**
-     * Внутренняя реализация паузы. Вызывается либо из публичного
-     * `pause()`, либо из авто-логики (`_setupAutoPause`).
-     * @private
-     */
+    /** @private */
     _doPause() {
         if (this._disposed || this._paused) return;
         this._paused = true;
@@ -2052,12 +2031,7 @@ this.moveCameraToSlow(targetLon, targetLat, duration, z);
         this._currentDeltaTime = 0;
     }
 
-    /**
-     * Внутренняя реализация возобновления. Защищена от нулевых размеров
-     * контейнера (когда карта «просыпается» раньше, чем браузер успел
-     * пересчитать layout).
-     * @private
-     */
+    /** @private */
     _doResume() {
         if (this._disposed || !this._paused) return;
         this._paused = false;
@@ -2080,7 +2054,6 @@ this.moveCameraToSlow(targetLon, targetLat, duration, z);
         if (this._disposed) return;
         this._disposed = true;
 
-        // Отписываемся от глобальных обработчиков авто-паузы.
         if (this._onVisChange) {
             try { document.removeEventListener('visibilitychange', this._onVisChange); }
             catch (e) { console.warn(e); }
@@ -2155,6 +2128,8 @@ this.moveCameraToSlow(targetLon, targetLat, duration, z);
         this._tempMouse = null;
         this.targetElement = null;
         this._pauseReasons.clear();
+        this._tileLayer = null;
+        this._elevationLayer = null;
     }
 
     /** @private */

@@ -2,8 +2,9 @@ import {
   THREE
 } from '../js_TP/tpb.js';
 import { getOriginZ, getVirtKey, DEFAULTS } from './Utils.js';
+import { Projections } from './Projections.js';
 
-/** Максимальное количество кэшируемых тайлов. @private */
+/** Максимальное количество кэшируемых тайлов на один слой. @private */
 const MAX_CACHED_TILES = 350;
 
 /** Количество уровней предков для фолбэка при приближении. @private */
@@ -42,12 +43,25 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
  * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
  * камеры. Не влияет ни на видимость, ни на доступность данных.
  *
+ * ## CRS и режим рендера
+ *
+ * `crs` — CRS сетки `{z}/{x}/{y}` этого слоя. Определяет, как слой
+ * будет рендериться в мире карты: линейно (если совпадает с CRS карты
+ * и обе в Mercator-семействе) или через deformed-меш (lon/lat → CRS карты).
+ * Разные растровые слои могут иметь разные `crs` — например, 2GIS (3857)
+ * и Yandex (3395) на одной карте.
+ *
+ * ## Служебные поля
+ *
+ *  - `visible` — видимость слоя (`false` → тайлы скрываются, не грузятся);
+ *  - `baseRenderOrder` — база для `mesh.renderOrder`; назначается
+ *    `KrbMap._rebuildLayerStack` при изменении порядка слоёв. Не
+ *    задаётся пользователем.
+ *
  * ## Deprecated-алиасы
  *
  *  - `maxSourceZoom` / `minSourceZoom` → `maxNativeZoom` / `minNativeZoom`;
  *  - `maxReliefZ` / `minReliefZ` → `maxElevationZoom` / `minElevationZoom`.
- *
- * При использовании выводят предупреждение в консоль.
  */
 export class Tile {
     constructor(options) {
@@ -59,7 +73,8 @@ export class Tile {
         this.heightScale = options.heightScale;
         this.zoomOffset = options.zoomOffset ?? 0;
 
-        // ── Зум видимости слоя ──────────────────────────────────────
+        // ── Видимость слоя ──────────────────────────────────────────
+        this.visible = options.visible ?? true;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
 
@@ -84,8 +99,6 @@ export class Tile {
             ?? 22;
 
         // ── Зум доступных DEM-данных ────────────────────────────────
-        // Раньше жили на KrbMap как MIN_RELIEF_Z / MAX_RELIEF_Z —
-        // переехали сюда, т.к. это свойство источника высот, а не карты.
         if (options.maxReliefZ !== undefined && options.maxElevationZoom === undefined) {
             console.warn(
                 'Tile: опция maxReliefZ устарела, используйте maxElevationZoom. ' +
@@ -113,16 +126,33 @@ export class Tile {
             );
         }
         /**
-         * CRS сетки `{z}/{x}/{y}` растрового тайлового сервера.
+         * CRS сетки `{z}/{x}/{y}` этого слоя.
          * Mercator-семейство: 'EPSG:3857' (по умолчанию), 'EPSG:3395' (Yandex).
          * @type {string}
          */
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
+
+        /**
+         * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`
+         * при изменении порядка слоёв — пользователь не задаёт.
+         * @type {number}
+         */
+        this.baseRenderOrder = 0;
     }
 }
 
 /**
- * Менеджер растровых тайлов.
+ * Менеджер растровых тайлов **одного слоя**.
+ *
+ * ## Per-layer
+ *
+ * Каждый экземпляр привязан к одному {@link Tile} через `this.layer`.
+ * Создаётся по одному на слой — так разные слои могут иметь разные
+ * `crs`, `minNativeZoom`/`maxNativeZoom`, `zoomOffset` и т.д. Порядок
+ * отрисовки между слоями задаётся через `layer.baseRenderOrder`.
+ *
+ * Если `layer` не передан, берётся `engine._tileLayer` (обратная
+ * совместимость с одиночным слоем).
  *
  * ## LOD и глубина
  *
@@ -131,18 +161,26 @@ export class Tile {
  * покрывающие его потомки (`collectCover`), либо готовый предок-фолбэк
  * (`findReadyAncestor`). Primary (`z >= idealZ`) пишет `depthWrite = true`,
  * fallback (`z < idealZ`) — `false` и рисуется раньше по `renderOrder`.
- * Атомарность — в одном проходе по `this.tiles` в конце `update`.
  *
  * ## Границы зумов
  *
  * Растровые тайлы запрашиваются только в диапазоне
  * `[Tile.minNativeZoom, Tile.maxNativeZoom]`. Выше — overzoom (тот же тайл
  * растягивается); ниже — запросы не уходят. DEM-тайлы — только в
- * `[Tile.minElevationZoom, Tile.maxElevationZoom]`.
+ * `[Tile.minElevationZoom, Tile.maxElevationZoom]` (у этого слоя; если
+ * у слоя нет `elevation`, а у карты есть отдельный `_elevationLayer` —
+ * DEM-границы берутся из него).
  */
 export class TileManager {
-    constructor(engine) {
+    /**
+     * @param {Object} engine — KrbMap.
+     * @param {Tile|null} [layer] — конкретный слой. Если не передан,
+     *     берётся `engine._tileLayer` (для обратной совместимости).
+     */
+    constructor(engine, layer = null) {
         this.engine = engine;
+        this.layer = layer ?? engine._tileLayer ?? engine.layers?.[0] ?? null;
+
         this.tiles = new Map();
         this.textureCache = new Map();
         this._inFlightTextures = new Map();
@@ -190,47 +228,90 @@ export class TileManager {
     }
 
     /* ================================================================
-       Границы зумов
+       Границы зумов и режим рендера (per-layer)
        ================================================================ */
 
     /**
-     * Верхняя граница зумов растровых тайлов. Выше — overzoom.
+     * Верхняя граница зумов растровых тайлов этого слоя.
      * @type {number}
      */
     get _maxNativeZoom() {
-        return this.engine._tileLayer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
+        return this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
     }
 
     /**
-     * Нижняя граница зумов растровых тайлов.
+     * Нижняя граница зумов растровых тайлов этого слоя.
      * @type {number}
      */
     get _minNativeZoom() {
-        return this.engine._tileLayer?.minNativeZoom ?? 0;
+        return this.layer?.minNativeZoom ?? 0;
     }
 
     /**
-     * Верхняя граница зумов DEM-данных. Читается из слоя высот
-     * (`engine._elevationLayer.maxElevationZoom`); fallback — на
-     * legacy-поле `engine.MAX_RELIEF_Z` и затем на `DEFAULTS`.
+     * Верхняя граница зумов DEM-данных. Приоритет — `layer.maxElevationZoom`
+     * (если у слоя есть `elevation`); иначе — `engine._elevationLayer.maxElevationZoom`
+     * (сценарий «отдельный слой высот»); иначе — `DEFAULTS`.
      * @type {number}
      */
     get _maxElevationZoom() {
-        const layer = this.engine._elevationLayer;
-        if (layer && layer.maxElevationZoom !== undefined) return layer.maxElevationZoom;
+        if (this.layer?.maxElevationZoom !== undefined) return this.layer.maxElevationZoom;
+        const elev = this.engine._elevationLayer;
+        if (elev?.maxElevationZoom !== undefined) return elev.maxElevationZoom;
         return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
     }
 
     /**
-     * Нижняя граница зумов DEM-данных. Читается из слоя высот
-     * (`engine._elevationLayer.minElevationZoom`); fallback — на
-     * legacy-поле `engine.MIN_RELIEF_Z` и затем на `DEFAULTS`.
+     * Нижняя граница зумов DEM-данных.
      * @type {number}
      */
     get _minElevationZoom() {
-        const layer = this.engine._elevationLayer;
-        if (layer && layer.minElevationZoom !== undefined) return layer.minElevationZoom;
+        if (this.layer?.minElevationZoom !== undefined) return this.layer.minElevationZoom;
+        const elev = this.engine._elevationLayer;
+        if (elev?.minElevationZoom !== undefined) return elev.minElevationZoom;
         return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
+    }
+
+    /**
+     * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`.
+     * @type {number}
+     */
+    get _baseRenderOrder() {
+        return this.layer?.baseRenderOrder ?? 0;
+    }
+
+    /**
+     * Видим ли слой сейчас: `layer.visible !== false` и текущий
+     * дискретный зум камеры в `[layer.minZoom, layer.maxZoom]`.
+     * @type {boolean}
+     */
+    get _isVisible() {
+        const layer = this.layer;
+        if (!layer) return true;
+        if (layer.visible === false) return false;
+        const dz = this.engine.currentDiscreteZoom;
+        if (dz < (layer.minZoom ?? 0)) return false;
+        if (dz > (layer.maxZoom ?? Infinity)) return false;
+        return true;
+    }
+
+    /**
+     * Этот слой рендерится в deformed-режиме (через lon/lat), а не
+     * линейно. Определяется CRS слоя и CRS карты. Если `KrbMap` не
+     * предоставляет `_isLayerLinear`, используется legacy-флаг
+     * `engine.deformedTiles`.
+     * @type {boolean}
+     */
+    get _isDeformed() {
+        if (typeof this.engine._isLayerLinear === 'function') {
+            return !this.engine._isLayerLinear(this.layer);
+        }
+        return this.engine.deformedTiles;
+    }
+
+    /** CRS этого слоя как объект Projection. @private */
+    get _layerCrs() {
+        const code = this.layer?.crs ?? 'EPSG:3857';
+        return typeof code === 'string' ? Projections.get(code) : code;
     }
 
     /** Строковый ключ тайла. @private */
@@ -247,9 +328,6 @@ export class TileManager {
      * глубину включаем динамически в {@link TileManager#update} только
      * для primary-тайлов.
      *
-     * @param {THREE.Texture|null} texture
-     * @param {{depthWrite?:boolean, depthTest?:boolean}} [opts]
-     * @returns {THREE.Material}
      * @private
      */
     _createTileMaterial(texture, opts = {}) {
@@ -289,12 +367,22 @@ export class TileManager {
         mesh.material.needsUpdate = true;
     }
 
+    /**
+     * Скрывает все тайлы слоя, не удаляя их. Используется, когда слой
+     * выключен (`layer.visible = false`) или вне диапазона `minZoom`/`maxZoom`.
+     */
+    setVisible(visible) {
+        for (const inst of this.tiles.values()) {
+            if (inst.mesh) inst.mesh.visible = !!visible;
+        }
+    }
+
     /* ================================================================
        Основной метод — вызывается из Core.maybeUpdateVisibleTiles
        ================================================================ */
 
     /**
-     * Обновляет видимые тайлы и роли `depthWrite`.
+     * Обновляет видимые тайлы и роли `depthWrite` для этого слоя.
      *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
@@ -303,14 +391,26 @@ export class TileManager {
      * @returns {number} Идеальный дискретный зум.
      */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
+        // Слой вне диапазона видимости — не грузим, скрываем всё.
+        if (!this._isVisible) {
+            this.setVisible(false);
+            return -1;
+        }
+
         this.frame++;
-        const idealZ = this.engine.tileZoom;
+
+        const idealZ = (typeof this.engine.getTileZoom === 'function')
+            ? this.engine.getTileZoom(this.layer)
+            : this.engine.tileZoom;
+
+        const layerCrs = this.layer?.crs;
+        const isDeformed = this._isDeformed;
+        const cullUnit = isDeformed
+            ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
+            : this.engine.WORLD_SIZE;
 
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
-        const cullUnit = this.engine.deformedTiles
-            ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
-            : this.engine.WORLD_SIZE;
         const tileSize = cullUnit / Math.pow(2, idealZ);
         const maxTile = (1 << idealZ) - 1;
         const vFov = (camera.fov * Math.PI) / 180;
@@ -322,7 +422,7 @@ export class TileManager {
 
         let xMin, xMax, yMin, yMax;
 
-        if (this.engine.deformedTiles) {
+        if (isDeformed) {
             let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
 
             const spanW = maxX - minX;
@@ -333,7 +433,7 @@ export class TileManager {
                 const wx = minX + spanW * (i / G);
                 for (let j = 0; j <= G; j++) {
                     const wz = minZ + spanH * (j / G);
-                    const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
+                    const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
                     if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
                     if (tx < minTx) minTx = tx;
                     if (tx > maxTx) maxTx = tx;
@@ -353,7 +453,7 @@ export class TileManager {
                         if (!p) continue;
                         const wx = p[0], wz = -p[1];
                         if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
-                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
+                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
                         if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
                         if (tx < minTx) minTx = tx;
                         if (tx > maxTx) maxTx = tx;
@@ -369,7 +469,7 @@ export class TileManager {
                         if (!p) continue;
                         const wx = p[0], wz = -p[1];
                         if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
-                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ);
+                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
                         if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
                         if (tx < minTx) minTx = tx;
                         if (tx > maxTx) maxTx = tx;
@@ -504,8 +604,7 @@ export class TileManager {
 
     /**
      * Возвращает существующий тайл или создаёт и запускает загрузку нового.
-     * @param {number} z @param {number} virtX @param {number} y
-     * @returns {Object}
+     * @private
      */
     ensureTile(z, virtX, y) {
         const k = this.key(z, virtX, y);
@@ -575,12 +674,12 @@ export class TileManager {
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
             const srcKey = getVirtKey(inst.z, srcX, inst.y);
-            const texUrl = this.engine.getTextureUrl(inst.z, srcX, inst.y);
+            const texUrl = this.engine.getTextureUrl(this.layer, inst.z, srcX, inst.y);
 
             if (this.hasElevation &&
                 inst.z >= this._minElevationZoom &&
                 inst.z <= this._maxElevationZoom) {
-                const elevUrl = this.engine.getElevationUrl(inst.z, srcX, inst.y);
+                const elevUrl = this.engine.getElevationUrl(this.layer, inst.z, srcX, inst.y);
                 if (elevUrl) this.srcKeyToElevUrl.set(srcKey, elevUrl);
             }
 
@@ -624,7 +723,8 @@ export class TileManager {
 
     /**
      * Запрашивать ли для тайла высоты. Ограничено диапазоном
-     * `[Tile.minElevationZoom, Tile.maxElevationZoom]`.
+     * `[Tile.minElevationZoom, Tile.maxElevationZoom]` этого слоя
+     * (или глобального слоя высот).
      * @private
      */
     shouldRequestElevation(inst) {
@@ -634,7 +734,7 @@ export class TileManager {
 
     /** @private */
     createTileMesh(inst, texture) {
-        if (this.engine.deformedTiles) {
+        if (this._isDeformed) {
             return this._createDeformedTileMesh(inst, texture);
         }
 
@@ -661,7 +761,7 @@ export class TileManager {
             0,
             originZ + tileSize / 2
         );
-        mesh.renderOrder = z;
+        mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
         return mesh;
     }
@@ -671,7 +771,7 @@ export class TileManager {
         const { z, virtX, y } = inst;
         const n = 1 << z;
         const mapProj = this.engine.projection;
-        const tileCrs = this.engine.tileCRS;
+        const tileCrs = this._layerCrs;
         const MAX = this.engine.MAX_MERCATOR;
 
         const seg = this.hasElevation ? this.engine.SEGMENTS : DEFORM_SEGMENTS_FLAT;
@@ -753,15 +853,14 @@ export class TileManager {
 
         const mesh = new THREE.Mesh(geom, mat);
         mesh.position.set(cx, 0, cz);
-        mesh.renderOrder = z;
+        mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
         mesh.userData.deformedTile = true;
         return mesh;
     }
 
     /**
-     * Статический фоновый меш: `depthWrite/depthTest = false`,
-     * `renderOrder = -2`.
+     * Статический фоновый меш: `depthWrite/depthTest = false`.
      * @private
      */
     createStaticTileMesh(tileSize, originX, originZ, texture) {
@@ -969,7 +1068,7 @@ export class TileManager {
     async getParentElevData(z, srcX, y) {
         if (z < this._minElevationZoom || z > this._maxElevationZoom) return null;
 
-        const url = this.engine.getElevationUrl(z, srcX, y);
+        const url = this.engine.getElevationUrl(this.layer, z, srcX, y);
         if (!url) return null;
 
         const key = `${z},${srcX},${y}`;
@@ -1058,8 +1157,7 @@ export class TileManager {
 
     /** @private */
     getElevationHeightScale() {
-        const layerWithElev = this.engine.layers.find(l => l.elevation);
-        return layerWithElev?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
+        return this.layer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
     }
 
     /**
@@ -1072,7 +1170,9 @@ export class TileManager {
             z > this._maxElevationZoom) return;
         if (this.elevationProvider) return;
 
-        const cullUnit = this.engine.deformedTiles
+        const isDeformed = this._isDeformed;
+        const layerCrs = this.layer?.crs;
+        const cullUnit = isDeformed
             ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
             : this.engine.WORLD_SIZE;
         const tileSize = cullUnit / Math.pow(2, z);
@@ -1082,7 +1182,7 @@ export class TileManager {
 
         let xMin, xMax, yMin, yMax;
 
-        if (this.engine.deformedTiles) {
+        if (isDeformed) {
             const samples = [
                 [center.x - radius, center.z - radius],
                 [center.x + radius, center.z - radius],
@@ -1092,7 +1192,7 @@ export class TileManager {
             ];
             let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
             for (const [wx, wz] of samples) {
-                const [tx, ty] = this.engine.worldToTileIndex(wx, wz, z);
+                const [tx, ty] = this.engine.worldToTileIndex(wx, wz, z, layerCrs);
                 if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
                 if (tx < minTx) minTx = tx;
                 if (tx > maxTx) maxTx = tx;
@@ -1116,7 +1216,7 @@ export class TileManager {
         if (xMin > xMax || yMin > yMax) return;
 
         for (let y = yMin; y <= yMax; y++) {
-            if (!this.engine.deformedTiles) {
+            if (!isDeformed) {
                 const oz = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR) + worldGroupPos.z;
                 if (oz + tileSize < center.z - radius || oz > center.z + radius) continue;
             }
@@ -1136,7 +1236,7 @@ export class TileManager {
         if (z < 0 || z > maxZ) return;
         const maxTile = (1 << z) - 1;
 
-        const [txF, tyF] = this.engine.worldToTileIndex(center.x, center.z, z);
+        const [txF, tyF] = this.engine.worldToTileIndex(center.x, center.z, z, this.layer?.crs);
         if (!Number.isFinite(txF) || !Number.isFinite(tyF)) return;
 
         const cx = Math.floor(txF);

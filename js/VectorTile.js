@@ -120,38 +120,37 @@ function _flatY(renderOrder) {
 /**
  * Векторный тайловый слой.
  *
- * ## Три «зума» — три разных опции
+ * ## Зумы
  *
- * В API слоя сознательно разделены три независимых понятия, которые
- * в старых версиях (`VectorTileLayer`) смешивались в `minZoom`/`maxZoom`
- * и `maxSourceZoom`:
+ * В API слоя сознательно разделены три независимых понятия:
  *
- *  1. **Зум камеры** — задаётся глобально в `KRB.View` (`view.minZoom` /
- *     `view.maxZoom`). Определяет, насколько пользователь может приблизить
- *     или отдалить карту. К слою отношения не имеет.
- *
- *  2. **Зум видимости слоя** — `minZoom` / `maxZoom` этого класса. В каком
- *     диапазоне зумов камеры слой вообще показывается. Вне диапазона
- *     тайлы не грузятся и не рисуются. Аналог: Leaflet `minZoom`/`maxZoom`.
- *
+ *  1. **Зум камеры** — задаётся глобально в `KRB.View`. К слою не относится.
+ *  2. **Зум видимости слоя** — `minZoom` / `maxZoom`. Вне диапазона
+ *     тайлы не грузятся, слой скрыт (`_rootGroup.visible = false`).
  *  3. **Зум доступных данных источника** — `minNativeZoom` / `maxNativeZoom`.
- *     Диапазон зумов, для которых сервер реально отдаёт тайлы. Выше
- *     `maxNativeZoom` выполняется overzoom (тайл старшего уровня
- *     растягивается на несколько экранных тайлов); ниже `minNativeZoom`
- *     используется тайл `minNativeZoom` (уменьшается). Аналог: Leaflet
- *     `minNativeZoom`/`maxNativeZoom`, Mapbox/MapLibre `minzoom`/`maxzoom`
- *     источника.
+ *     Выше `maxNativeZoom` — overzoom; ниже `minNativeZoom` — не запрашиваем.
  *
- * `zoomOffset` — отдельная сущность: смещение запрашиваемого зума тайлов
- * относительно зума карты. Не влияет ни на видимость, ни на доступность
- * данных, только сдвигает выборку по шкале зумов.
+ * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
+ * карты. Не влияет ни на видимость, ни на доступность данных.
+ *
+ * ## Стек слоёв
+ *
+ * Слой встраивается в общий стек отрисовки карты. `_tileGroupRenderOrder`
+ * запрашивается у `KrbMap` при `addTo(map)` (метод
+ * `map._getDynamicLayerRenderOrder(layer)`), если карта его предоставляет;
+ * иначе берётся `options.tileGroupRenderOrder ?? 1_000_000`. Изменение
+ * порядка — через `map.setLayerOrder(layer, index)`, который вызовет
+ * {@link VectorTile#_applyRenderOrder}.
+ *
+ * Видимость — через публичный {@link VectorTile#setVisible} или прямое
+ * присваивание `layer.visible = true/false` (применяется в ближайшем
+ * `_postUpdate`).
  *
  * ## Совместимость
  *
- *  - `maxSourceZoom` — устаревший алиас для `maxNativeZoom`. Если передан,
- *    используется как `maxNativeZoom` и выводится предупреждение.
- *  - `minSourceZoom` — аналогично для `minNativeZoom`.
- *  - `VectorTileLayer` экспортируется как алиас `VectorTile`.
+ *  - `maxSourceZoom` / `minSourceZoom` — deprecated-алиасы для
+ *    `maxNativeZoom` / `minNativeZoom`.
+ *  - `VectorTileLayer` — алиас `VectorTile`.
  */
 export class VectorTile {
     constructor(options = {}) {
@@ -160,17 +159,16 @@ export class VectorTile {
         this._crsCode = options.crs ?? null;
         this._crs = null;
 
-        // ── Атрибуция (как у растрового KRB.Tile) ────────────────────
+        // ── Атрибуция ────────────────────────────────────────────────
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl   = options.attributionUrl   || '';
 
-        // ── Зум видимости слоя ──────────────────────────────────────
+        // ── Видимость слоя ──────────────────────────────────────────
+        this.visible = options.visible ?? true;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
 
         // ── Зум доступных данных источника ──────────────────────────
-        // Канонические имена — minNativeZoom/maxNativeZoom (Leaflet-style).
-        // maxSourceZoom/minSourceZoom оставлены как deprecated-алиасы.
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn(
                 'VectorTile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
@@ -210,24 +208,26 @@ export class VectorTile {
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
 
         // ── Подписи линейных объектов ────────────────────────────────
-        // Прокидываются в VectorLineLabelSource при создании источника.
-        /** Межтекстовый зазор, × ширины текста (1.0 = вплотную, 2.0 = разнесено). */
         this.lineLabelTracking     = options.lineLabelTracking     ?? 1.35;
-        /** 'tile' — кандидат ближе к центру тайла приоритетнее; 'viewport' — к центру экрана. */
         this.lineLabelPriorityMode = options.lineLabelPriorityMode ?? 'tile';
-        /** «Бонус» ранее выбранному кандидату (px²), уменьшает дрожание при движении. */
         this.lineLabelHysteresisPx = options.lineLabelHysteresisPx ?? 40;
-        /** 'auto' | 'above' | 'below' | 'center' — жёсткая переустановка вертикали. */
         this.lineLabelPlacement    = options.lineLabelPlacement    ?? 'auto';
 
         this._debug = options.debug ?? false;
 
         this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
 
+        /**
+         * Порядок отрисовки группы тайлов. Может быть переопределён
+         * картой при `addTo` (через `_getDynamicLayerRenderOrder`) и при
+         * изменении порядка слоёв — через {@link VectorTile#_applyRenderOrder}.
+         * @type {number}
+         */
         this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
 
         this._map = null;
         this._rootGroup = new THREE.Group();
+        this._rootGroup.visible = this.visible;
 
         this._tileCache = new Map();
         this._pendingLoads = new Set();
@@ -275,15 +275,15 @@ export class VectorTile {
         this._labelsDirty = false;
 
         // ── Переход LOD ───────────────────────────────────────────────
-        /** @type {Set<string>} ключи текущего LOD, завершившиеся ошибкой. */
+        /** @type {Set<string>} */
         this._settledKeys = new Set();
-        /** @type {Set<string>} видимые ключи текущего LOD. */
+        /** @type {Set<string>} */
         this._requiredKeys = new Set();
         /** @type {boolean} */
         this._coverageDirty = false;
         /** @type {boolean|undefined} */
         this._lastIs3d = undefined;
-        /** @type {number} последний зум, для которого считали живые стили. */
+        /** @type {number} */
         this._lastStyleZoom = NaN;
 
         // ── Префетч следующего sourceZoom ─────────────────────────────
@@ -520,6 +520,57 @@ export class VectorTile {
     }
 
     // -------------------------------------------------------------------------
+    // Видимость и стек слоёв
+    // -------------------------------------------------------------------------
+
+    /**
+     * Включает/выключает слой. Скрытый слой не грузит новые тайлы,
+     * все меши скрываются (`_rootGroup.visible = false`), подписи
+     * удаляются. При включении — форсируется полный проход и
+     * перестройка подписей.
+     *
+     * @param {boolean} visible
+     */
+    setVisible(visible) {
+        const v = !!visible;
+        if (this.visible === v) return;
+        this.visible = v;
+
+        if (this._rootGroup) this._rootGroup.visible = v;
+        this._lastCheckInit = false;
+        this._lastDiscreteZoom = -1;
+        this._labelsDirty = true;
+
+        if (!v) {
+            // Очищаем очередь загрузки и подписи.
+            this._sortedLoadQueue = [];
+            if (this._queueTimer) {
+                clearTimeout(this._queueTimer);
+                this._queueTimer = null;
+            }
+            if (this._map?.textManager) {
+                this._tileCache.forEach(g => this._removeTextLabelsForGroup(g));
+                this._oldTileGroups?.forEach(g => this._removeTextLabelsForGroup(g));
+            }
+        }
+    }
+
+    /**
+     * Устанавливает базовый `renderOrder` группы тайлов. Вызывается
+     * картой при изменении порядка слоёв. Обновляет `renderOrder` у
+     * `_rootGroup` и у всех уже созданных групп.
+     *
+     * @param {number} baseOrder
+     */
+    _applyRenderOrder(baseOrder) {
+        if (this._tileGroupRenderOrder === baseOrder) return;
+        this._tileGroupRenderOrder = baseOrder;
+        if (this._rootGroup) this._rootGroup.renderOrder = baseOrder;
+        for (const g of this._tileCache.values()) g.renderOrder = baseOrder;
+        this._oldTileGroups?.forEach(g => { g.renderOrder = baseOrder; });
+    }
+
+    // -------------------------------------------------------------------------
     // Покрытие / переход LOD
     // -------------------------------------------------------------------------
 
@@ -528,14 +579,8 @@ export class VectorTile {
     }
 
     /**
-     * LOD с гистерезисом: целимся в зум, к которому камера едет, без
-     * промежуточных уровней. Клампится в диапазон доступных данных
-     * источника `[minNativeZoom, maxNativeZoom]` (не путать с `minZoom`/
-     * `maxZoom` — видимостью слоя).
-     *
-     * Целевой зум берётся из публичного `map.targetZoom` (добавлен в
-     * `KrbMap`); fallback на приватное `_cameraAnimation?.endZoom` оставлен
-     * на случай, если `Core.js` ещё не обновлён.
+     * LOD с гистерезисом: целимся в зум, к которому камера едет.
+     * Клампится в `[minNativeZoom, maxNativeZoom]`.
      */
     _pickSourceZoom(map) {
         const clamp = z => Math.max(this.minNativeZoom, Math.min(z, this.maxNativeZoom));
@@ -573,7 +618,6 @@ export class VectorTile {
 
     _beginTransition(newZ) {
         this._generation++;
-        // Подложкой становится то, что реально видно сейчас (даже если это смесь уровней).
         const fallback = new Map();
         const take = (g, k) => {
             if (g.visible && g.parent) fallback.set(k, g);
@@ -606,7 +650,7 @@ export class VectorTile {
             return;
         }
         const required = this._requiredKeys;
-        if (required.size === 0) return; // видимость нового LOD ещё не посчитана
+        if (required.size === 0) return;
 
         const zn = this._lastSourceZoom;
         const parse = k => k.split(',').map(Number);
@@ -619,7 +663,7 @@ export class VectorTile {
         const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
         const link = (ok, nk) => { push(oldLinks, ok, nk); push(newLinks, nk, ok); };
 
-        const ancIndex = new Map(); // zo -> Map(предок на zo -> [новые ключи])
+        const ancIndex = new Map();
         const ancestorsAt = zo => {
             let m = ancIndex.get(zo);
             if (m) return m;
@@ -644,7 +688,6 @@ export class VectorTile {
             }
         });
 
-        // Старый живёт, пока хоть один нужный новый на его площади не готов.
         let anyOldVisible = false;
         old.forEach((g, ok) => {
             const links = oldLinks.get(ok);
@@ -652,17 +695,15 @@ export class VectorTile {
             setVis(g, keep);
             if (keep) anyOldVisible = true;
         });
-        // Новый показываем, только когда все перекрытые им старые скрыты.
         this._tileCache.forEach((g, nk) => {
             const links = newLinks.get(nk);
             setVis(g, !links || links.every(ok => !old.get(ok).visible));
         });
 
         if (!anyOldVisible) {
-            old.forEach((g, ok) => this._stashGroup(ok, g)); // пригодятся при обратном зуме
+            old.forEach((g, ok) => this._stashGroup(ok, g));
             this._oldTileGroups = null;
         }
-        // Подписи меняем в тот же кадр, что и геометрию.
         if (changed) this._refreshTextLabelsForVisibleTiles();
     }
 
@@ -890,7 +931,6 @@ export class VectorTile {
 
                     if (!hasValidPoints) continue;
 
-                    // Проверяем пересечение общего AABB линии с экраном
                     const anyOnScreen =
                         maxTx >= -1 - screenMarginX && minTx <= 1 + screenMarginX &&
                         maxTy >= -1 - screenMarginY && minTy <= 1 + screenMarginY;
@@ -974,7 +1014,7 @@ export class VectorTile {
         this._lineMaterialCache.set(key, mat);
         this._lineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
-        this._lastStyleZoom = NaN; // форсируем пересчёт в следующем кадре
+        this._lastStyleZoom = NaN;
         return mat;
     }
 
@@ -1129,7 +1169,13 @@ export class VectorTile {
             ? Projections.get(this._crsCode)
             : map.inputCRS;
 
+        // Порядок отрисовки: спрашиваем у карты базовый render order,
+        // если она предоставляет метод (общий стек слоёв).
+        if (typeof map._getDynamicLayerRenderOrder === 'function') {
+            this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
+        }
         this._rootGroup.renderOrder = this._tileGroupRenderOrder;
+        this._rootGroup.visible = this.visible;
 
         map.worldGroup.add(this._rootGroup);
         if (!map._dynamicLayers.includes(this)) map._dynamicLayers.push(this);
@@ -1242,10 +1288,31 @@ export class VectorTile {
 _postUpdate(map) {
     if (!this._map) return;
 
+    // ── Видимость слоя ───────────────────────────────────────────
+    // Скрытый слой не грузит тайлы, не обновляет подписи, не рисуется.
+    // `_rootGroup.visible = false` рекурсивно скрывает все меши.
+    if (!this.visible) {
+        if (this._rootGroup.visible) {
+            this._rootGroup.visible = false;
+            // Подписи — DOM-элементы, `_rootGroup.visible` их не скрывает.
+            if (this._map.textManager) {
+                this._tileCache.forEach(g => this._removeTextLabelsForGroup(g));
+                this._oldTileGroups?.forEach(g => this._removeTextLabelsForGroup(g));
+            }
+            this._labelsDirty = true;
+            this._lastCheckInit = false;
+            this._lastDiscreteZoom = -1;
+        }
+        return;
+    }
+    if (!this._rootGroup.visible) {
+        this._rootGroup.visible = true;
+        this._lastCheckInit = false;
+        this._lastDiscreteZoom = -1;
+        this._labelsDirty = true;
+    }
+
     // ── Отслеживание движения мира ────────────────────────────────
-    // Вычисляем ОДИН раз: используется и для _lastMovementTime,
-    // и для camChanged ниже (иначе повторная проверка всегда false,
-    // потому что _lastWorldPos уже скопирован).
     const worldPos = map.worldGroup.position;
     const worldMoved = this._lastWorldPos.distanceToSquared(worldPos) > 1;
     if (worldMoved) {
@@ -1257,7 +1324,7 @@ _postUpdate(map) {
     this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
 
     const discreteZoom = map.currentDiscreteZoom;
-    // Видимость слоя — отдельно от доступности данных (minNativeZoom/maxNativeZoom).
+    // Видимость слоя — отдельно от доступности данных.
     const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
 
     // ── Смена LOD ─────────────────────────────────────────────────
@@ -1267,16 +1334,12 @@ _postUpdate(map) {
         if (sz !== this._lastSourceZoom || is3d !== this._lastIs3d) {
             this._lastIs3d = is3d;
             this._beginTransition(sz);
-            this._lastUpdateTime = 0; // видимые тайлы пересчитать в этом же кадре
+            this._lastUpdateTime = 0;
         }
     }
     if (this._coverageDirty) this._resolveCoverage();
 
-    // ── ВАЖНО: обновление подписей — ВНЕ полного прохода ──────────
-    // Раньше это было ниже проверки camChanged. Из-за этого при
-    // панорамировании в пределах тайла (camChanged=false,
-    // _labelsDirty=false) до обновления не доходили, и подписи на
-    // вновь увиденных тайлах не появлялись до смены зума.
+    // ── Обновление подписей — вне полного прохода ─────────────────
     const labelNow = performance.now();
     const timeSinceLastMove = labelNow - this._lastMovementTime;
     const isMoving = timeSinceLastMove < 1000;
@@ -1290,7 +1353,7 @@ _postUpdate(map) {
         this._refreshTextLabelsForVisibleTiles();
     }
 
-    // ── Троттлинг полного прохода (обновление набора тайлов) ──────
+    // ── Троттлинг полного прохода ─────────────────────────────────
     const now = performance.now();
     if (now - this._lastUpdateTime < this._throttle) {
         this._processQueue();
@@ -1302,7 +1365,7 @@ _postUpdate(map) {
     const camChanged =
         !this._lastCheckInit ||
         this._lastCheckCamPos.distanceToSquared(camPos) > 0.01 ||
-        worldMoved ||                          // ← ключевое: движение мира
+        worldMoved ||
         this._lastCheckZoom !== discreteZoom;
 
     if (!camChanged && !this._labelsDirty && this._tileCache.size > 0) {
@@ -1328,7 +1391,6 @@ _postUpdate(map) {
 
     const sourceZoom = this._lastSourceZoom;
     const continuousZoom = map.continuousZoom;
-    // Префетч следующего зума — не выходим за maxNativeZoom.
     const nextSourceZoom = Math.min(sourceZoom + 1, this.maxNativeZoom);
     if (
         nextSourceZoom > sourceZoom &&
@@ -1363,8 +1425,6 @@ _postUpdate(map) {
         }
     }
 
-    // (Блок _refreshTextLabelsForVisibleTiles убран — он теперь выше.)
-
     const maxMerc = map.MAX_MERCATOR;
     const target = map.controls.target;
     const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
@@ -1395,6 +1455,7 @@ _postUpdate(map) {
 }
 
     _processQueue() {
+        if (!this.visible) return;
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) return;
         const toLoad = this._sortedLoadQueue.splice(0, this._maxConcurrent - this._activeLoads);
@@ -1415,7 +1476,6 @@ _postUpdate(map) {
         const map = this._map;
         if (!map) return;
 
-        // Переиспользуем готовый тайл из подложки (быстрый зум туда-обратно).
         const fb = this._oldTileGroups?.get(key);
         if (fb && fb.userData.is3d === this._is3dNow()) {
             this._oldTileGroups.delete(key);
@@ -1486,7 +1546,6 @@ _postUpdate(map) {
             const group = await this._sendToWorker(buffer, z, xSlippy, ySlippy, is3dNow);
             if (group) this._adoptTile(key, group);
         } catch (err) {
-            // Тайл не загрузился — помечаем settled, чтобы переход не ждал его вечно.
             if (z === this._lastSourceZoom) {
                 this._settledKeys.add(key);
                 this._coverageDirty = true;
@@ -1502,9 +1561,6 @@ _postUpdate(map) {
         if (!this._map || !this._worker) return { error: 'layer not attached' };
         const map = this._map;
 
-        // LOD слоя может отличаться от дискретного зума карты — используем
-        // фактически загруженный sourceZoom; fallback считаем в диапазоне
-        // доступных данных источника.
         const sourceZoom = this._lastSourceZoom >= 0
             ? this._lastSourceZoom
             : Math.max(this.minNativeZoom,

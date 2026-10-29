@@ -59,30 +59,38 @@ export class View {
 }
 
 /**
- * Основной класс карты: сцена, тайлы, камера, ввод.
+ * Основной класс карты: сцена, слои, камера, ввод.
  *
- * Спецзначения полей слоя:
- *  - `texture: 'demo'` — картинки из `demotiles/1.webp … 24.webp`.
- *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider}.
- *  - `heightScale` (число) — только для URL-источника DEM.
- *  - `crs` (строка) — CRS тайлового сервера, по умолчанию 'EPSG:3857'.
- *  - `minNativeZoom` / `maxNativeZoom` — диапазон доступных растровых
- *    тайлов; выше `maxNativeZoom` включается overzoom.
- *  - `minElevationZoom` / `maxElevationZoom` — диапазон доступных DEM-тайлов;
- *    вне его высоты не запрашиваются, тайл остаётся плоским.
+ * ## Слои
+ *
+ * Растровые слои ({@link Tile}) передаются через `options.layers: Tile[]`.
+ * Каждый слой рендерится независимо, со своим `crs` (может отличаться
+ * между слоями — 2GIS = 3857, Yandex = 3395 на одной карте), своим
+ * `minNativeZoom`/`maxNativeZoom`, `zoomOffset`, `visible` и т.д.
+ *
+ * Векторные и DOM-слои (`VectorTile`, `Layer`, `ClusterLayer`) добавляются
+ * через `.addTo(map)` и попадают в `_dynamicLayers`. Общий стек отрисовки:
+ * `[...this.layers, ...this._dynamicLayers]`, индекс `0` — нижний.
+ * Управление — {@link KrbMap#setLayerOrder}, {@link KrbMap#bringToFront},
+ * {@link KrbMap#sendToBack}; видимость — {@link KrbMap#setLayerVisible}.
  *
  * ## «Зумы» карты
  *
- * В классе сознательно разделены:
  *  - **зум камеры** — `view.minZoom`/`view.maxZoom`, дискретный
  *    `currentDiscreteZoom`, плавный `continuousZoom`, целевой `targetZoom`;
- *  - **зум тайлов растрового слоя** — `tileZoom`, клампится в
- *    `[minNativeZoom, maxNativeZoom]` слоя, используется `TileManager`;
- *  - **зум векторного LOD** — вычисляется в `VectorTile._pickSourceZoom`
- *    по `map.targetZoom`, клампится в свои `[minNativeZoom, maxNativeZoom]`;
- *  - **зум DEM-данных** — `Tile.minElevationZoom` / `maxElevationZoom`,
- *    читается через `_elevationLayer`; старые имена `MIN_RELIEF_Z` /
- *    `MAX_RELIEF_Z` оставлены как геттеры для обратной совместимости.
+ *  - **зум тайлов растрового слоя** — `getTileZoom(layer)`, клампится в
+ *    `[minNativeZoom, maxNativeZoom]` слоя;
+ *  - **зум векторного LOD** — в `VectorTile._pickSourceZoom` по `map.targetZoom`;
+ *  - **зум DEM-данных** — `Tile.minElevationZoom`/`maxElevationZoom` у
+ *    слоя высот (`_elevationLayer`); старые имена `MIN_RELIEF_Z` /
+ *    `MAX_RELIEF_Z` — геттеры для обратной совместимости.
+ *
+ * ## Спецзначения полей слоя
+ *
+ *  - `texture: 'demo'` — картинки из `demotiles/1.webp … 24.webp`;
+ *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider};
+ *  - `heightScale` (число) — только для URL-источника DEM;
+ *  - `crs` (строка) — CRS сетки слоя, по умолчанию 'EPSG:3857'.
  */
 export class KrbMap {
     /**
@@ -92,7 +100,6 @@ export class KrbMap {
      * @param {View} options.view
      * @param {string} [options.projection='EPSG:3857']
      * @param {string} [options.inputCRS='EPSG:4326']
-     * @param {boolean} [options.deformedTiles]
      * @param {number} [options.R]
      * @param {number} [options.segments]
      * @param {number} [options.animDuration]
@@ -112,8 +119,7 @@ export class KrbMap {
      * @param {number} [options.tileLightingRoughness=0.7]
      * @param {number} [options.tileLightingMetalness=0.0]
      * @param {number} [options.tileLightingEmissive=0.5]
-     * @param {boolean} [options.autoPause=true] — автоматически ставить карту на паузу,
-     *   когда вкладка скрыта или карта вне вьюпорта. По умолчанию `true`.
+     * @param {boolean} [options.autoPause=true]
      */
     constructor(options) {
         if (!options) throw new Error('Map constructor: options object is required');
@@ -124,8 +130,8 @@ export class KrbMap {
         if (!options.view) throw new Error('View required');
         this.globalElevCache = new Map();
         this.view = options.view;
-        this.hasElevation = options.layers.some(layer => !!layer.elevation);
-        this.hasTileLayers = options.layers.some(layer => !!(layer.texture || layer.elevation));
+        this.hasElevation = this.layers.some(layer => !!layer.elevation);
+        this.hasTileLayers = this.layers.some(layer => !!(layer.texture || layer.elevation));
 
         // crs — каноническое имя, projection — алиас (обратная совместимость).
         if (options.crs && options.projection && options.crs !== options.projection) {
@@ -142,20 +148,25 @@ export class KrbMap {
             : Projections.get('EPSG:4326');
 
         /**
-         * «Главный» тайловый слой: определяет `tileCRS`, `zoomOffset`,
-         * `minNativeZoom`/`maxNativeZoom`. Берётся первый слой с
-         * `texture` или `elevation`.
-         * @type {Object|null}
+         * Слои-растры с текстурой. По одному `TileManager` на каждый.
+         * @type {Array<Object>}
          */
-        this._tileLayer = this.layers.find(l => l.texture || l.elevation) ?? null;
+        this._rasterLayers = this.layers.filter(l => !!l.texture);
 
         /**
-         * Слой-источник высот (DEM). Определяет `minElevationZoom` /
-         * `maxElevationZoom`. Может совпадать с `_tileLayer` или быть
-         * отдельным слоем.
+         * Слой-источник DEM. Может совпадать с одним из `_rasterLayers`
+         * или быть отдельным (только `elevation`).
          * @type {Object|null}
          */
-        this._elevationLayer = this.layers.find(l => l.elevation) ?? null;
+        this._elevationLayer = this.layers.find(l => !!l.elevation) ?? null;
+
+        /**
+         * Legacy-указатель на «главный» тайловый слой. Используется
+         * только `zoomOffset` и старым кодом. Новый код должен работать
+         * с `_rasterLayers` / `_elevationLayer` явно.
+         * @type {Object|null}
+         */
+        this._tileLayer = this._rasterLayers[0] ?? this._elevationLayer ?? null;
 
         this._defaultZoomOffset = options.zoomOffset ?? 0;
         this._defaultMinReliefZ = undefined;
@@ -169,13 +180,9 @@ export class KrbMap {
         }
 
         // ── Deprecated: minReliefZ / maxReliefZ ─────────────────────
-        // Переехали в Tile (minElevationZoom / maxElevationZoom).
-        // Старые имена читаются через геттеры MIN_RELIEF_Z / MAX_RELIEF_Z;
-        // явные значения перекидываются в _elevationLayer, если он есть.
         if (options.minReliefZ !== undefined) {
             console.warn(
-                'KrbMap: опция minReliefZ устарела, используйте Tile.minElevationZoom. ' +
-                'Значение будет перекинуто в слой высот.'
+                'KrbMap: опция minReliefZ устарела, используйте Tile.minElevationZoom.'
             );
             if (this._elevationLayer) {
                 this._elevationLayer.minElevationZoom = options.minReliefZ;
@@ -185,8 +192,7 @@ export class KrbMap {
         }
         if (options.maxReliefZ !== undefined) {
             console.warn(
-                'KrbMap: опция maxReliefZ устарела, используйте Tile.maxElevationZoom. ' +
-                'Значение будет перекинуто в слой высот.'
+                'KrbMap: опция maxReliefZ устарела, используйте Tile.maxElevationZoom.'
             );
             if (this._elevationLayer) {
                 this._elevationLayer.maxElevationZoom = options.maxReliefZ;
@@ -195,18 +201,25 @@ export class KrbMap {
             }
         }
 
+        /**
+         * Legacy CRS первого растрового слоя. Оставлено для обратной
+         * совместимости; новый код использует `layer.crs` напрямую.
+         * @type {Projection}
+         */
         const tileCrsCode =
             this._tileLayer?.crs ??
             this._tileLayer?.projection ??
             'EPSG:3857';
         this.tileCRS = Projections.get(tileCrsCode);
 
-        // Линейная сетка тайлов работает, только если тайлы и карта — обе
-        // в Mercator-семействе (3857/3395). Иначе — deformed через lon/lat.
-        const tileAndMapMatch =
-            this.tileCRS === this.projection &&
-            this.projection.isMercator;
-        this.deformedTiles = options.deformedTiles ?? !tileAndMapMatch;
+        /**
+         * Legacy «есть ли хоть один deformed-слой». Новый код использует
+         * {@link KrbMap#_isLayerLinear}.
+         * @type {boolean}
+         */
+        this.deformedTiles = this._rasterLayers.length > 0
+            ? this._rasterLayers.some(l => !this._isLayerLinear(l))
+            : !(this.tileCRS === this.projection && this.projection.isMercator);
 
         this.R = options.R ?? DEFAULTS.R;
         this.WORLD_SIZE = 2 * Math.PI * this.R;
@@ -214,7 +227,7 @@ export class KrbMap {
 
         /**
          * Характерный размер «мира» в world-координатах карты для каллинга
-         * в deformed-режиме. Для Mercator-карт совпадает с `WORLD_SIZE`.
+         * в deformed-режиме.
          * @type {number}
          */
         this.WORLD_EXTENT = this.WORLD_SIZE;
@@ -225,7 +238,7 @@ export class KrbMap {
         this.MIN_ZOOM = this.view.minZoom;
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
-        // MIN_RELIEF_Z / MAX_RELIEF_Z — теперь геттеры (см. ниже).
+        // MIN_RELIEF_Z / MAX_RELIEF_Z — геттеры (см. ниже).
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
         this.TILE_MARGIN_BG = options.tileMarginBg ?? DEFAULTS.TILE_MARGIN_BG;
         this.VISIBLE_UPDATE_THROTTLE = options.visibleUpdateThrottle ?? DEFAULTS.VISIBLE_UPDATE_THROTTLE;
@@ -252,13 +265,7 @@ export class KrbMap {
 
         /** @private */ this._disposed = false;
         /** @private */ this._paused = false;
-        /**
-         * Причины, по которым карта сейчас должна быть на паузе.
-         * Пока множество непустое — карта не рендерит.
-         * @private
-         * @type {Set<string>}
-         */
-        this._pauseReasons = new Set();
+        /** @private @type {Set<string>} */ this._pauseReasons = new Set();
         /** @private */ this._autoPauseDisabled = options.autoPause === false;
         /** @private */ this._onVisChange = null;
         /** @private */ this._io = null;
@@ -315,30 +322,59 @@ export class KrbMap {
         this.textManager = new TextManager(this);
         this.popupManager = new PopupManager(this);
         this.interaction = new InteractionManager(this);
-        this.tileManager = new TileManager(this);
 
+        // ── Менеджеры растровых слоёв — по одному на слой ─────────────
+        /** @type {TileManager[]} */
+        this._tileManagers = this._rasterLayers.map(layer => new TileManager(this, layer));
+
+        /**
+         * Менеджер слоя высот: если `_elevationLayer` — растровый слой,
+         * берём его менеджер; иначе — первый растровый менеджер (высоты
+         * будут применены к его тайлам из URL `_elevationLayer`).
+         * @type {TileManager|null}
+         */
+        this._elevationManager = null;
+        if (this._elevationLayer) {
+            const idx = this._rasterLayers.indexOf(this._elevationLayer);
+            this._elevationManager = idx >= 0 ? this._tileManagers[idx] : (this._tileManagers[0] ?? null);
+        }
+
+        /**
+         * Legacy-указатель на «главный» менеджер. Используется внешним
+         * кодом (`onClick`, `dispose`); новый код работает с
+         * `_tileManagers` / `_elevationManager` напрямую.
+         * @type {TileManager|null}
+         */
+        this.tileManager = this._elevationManager ?? this._tileManagers[0] ?? null;
+
+        // Расставить baseRenderOrder по порядку в `layers`.
+        this._rebuildLayerStack();
+
+        // Демо-рельеф (noise-provider).
         const demoElevLayer = this.layers.find(l => l.elevation === 'demo');
-        if (demoElevLayer) {
+        if (demoElevLayer && this._elevationManager) {
             const provider = new NoiseElevationProvider({
                 ...(demoElevLayer.noise || {}),
                 heightScale: demoElevLayer.heightScale ?? 1,
             });
-            this.tileManager.enableGeotiffElevation(provider);
+            this._elevationManager.enableGeotiffElevation(provider);
         }
 
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
-        this.tileManager.onTileHeightAppliedCallbacks.push(() => {
-            this._surfaceMaxHeightCache.clear();
-        });
+        if (this._elevationManager) {
+            this._elevationManager.onTileHeightAppliedCallbacks.push(() => {
+                this._surfaceMaxHeightCache.clear();
+            });
+        }
 
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
-        if (this.layers.length && this.layers.some(layer => layer.texture)) {
+        if (this._rasterLayers.length > 0) {
             this.createStaticBackgroundLayer();
         }
 
-        // Калибровка масштаба под немеркаторовские проекции — см. метод.
+        // Калибровка масштаба под немеркаторовские проекции.
         this._calibrateBaseDistance();
 
         this.lastVisibleUpdateTime = 0;
@@ -348,21 +384,196 @@ export class KrbMap {
         this.bindEvents();
         this.maybeUpdateVisibleTiles(true);
 
-        // Авто-пауза должна быть установлена ДО animate(): если вкладка
-        // уже скрыта, _doPause() успеет выставить _paused = true, и
-        // animate() не запустит цикл.
         this._setupAutoPause();
 
         this.animate();
         requestAnimationFrame(() => initUI(this));
     }
 
+    /* ================================================================
+       Слои: порядок, видимость
+       ================================================================ */
+
     /**
-     * Настраивает авто-паузу: карта встаёт на паузу, когда вкладка
-     * скрыта или её контейнер ушёл за пределы вьюпорта (с запасом 200px).
-     * Отключается через `options.autoPause: false`.
+     * Слой рендерится линейно (world-координаты тайлов совпадают с
+     * world-координатами карты)? Если нет — через deformed (lon/lat).
+     * @param {Object|null} layer
+     * @returns {boolean}
+     */
+    _isLayerLinear(layer) {
+        if (!layer) return true;
+        const code = layer.crs ?? layer.projection ?? 'EPSG:3857';
+        const crs = typeof code === 'string' ? Projections.get(code) : code;
+        return crs === this.projection && this.projection.isMercator;
+    }
+
+    /**
+     * Полный индекс слоя в общем стеке отрисовки:
+     *   `[0 .. layers.length-1]`           — растровые слои;
+     *   `[layers.length .. ]`              — динамические (векторные, DOM).
+     *
+     * Возвращает -1, если слой не принадлежит карте.
+     *
+     * @param {Object} layer
+     * @returns {number}
      * @private
      */
+    _getLayerIndex(layer) {
+        const rasterIdx = this.layers.indexOf(layer);
+        if (rasterIdx >= 0) return rasterIdx;
+        const dynIdx = this._dynamicLayers.indexOf(layer);
+        if (dynIdx >= 0) return this.layers.length + dynIdx;
+        return -1;
+    }
+
+    /**
+     * Базовый `renderOrder` для слоя по его текущему индексу в стеке.
+     * Если слой ещё не добавлен — возвращает «следующую позицию».
+     *
+     * @param {Object} layer
+     * @returns {number}
+     * @private
+     */
+    _getLayerRenderOrder(layer) {
+        let idx = this._getLayerIndex(layer);
+        if (idx < 0) {
+            idx = this.layers.length + this._dynamicLayers.length;
+        }
+        return idx * 1000;
+    }
+
+    /**
+     * Вызывается из `VectorTile.addTo` **до** того, как слой попадёт в
+     * `_dynamicLayers`. Возвращает базовый `renderOrder`, который слой
+     * должен использовать в `_rootGroup.renderOrder`.
+     *
+     * @param {Object} layer
+     * @returns {number}
+     */
+    _getDynamicLayerRenderOrder(layer) {
+        let idx = this._dynamicLayers.indexOf(layer);
+        if (idx < 0) idx = this._dynamicLayers.length;
+        return (this.layers.length + idx) * 1000;
+    }
+
+    /**
+     * Применяет базовый `renderOrder` к одному слою.
+     *  - для растровых `Tile` — обновляет `mesh.renderOrder` у всех
+     *    уже созданных тайлов через соответствующий `TileManager`;
+     *  - для `VectorTile` и других — если у слоя есть метод
+     *    `_applyRenderOrder`, вызывает его.
+     *
+     * @param {Object} layer
+     * @param {number} newBase
+     * @private
+     */
+    _applyLayerRenderOrder(layer, newBase) {
+        layer.baseRenderOrder = newBase;
+
+        const mgr = this._tileManagers.find(m => m.layer === layer);
+        if (mgr) {
+            for (const inst of mgr.tiles.values()) {
+                if (inst.mesh) inst.mesh.renderOrder = newBase + inst.z;
+            }
+        }
+
+        if (typeof layer._applyRenderOrder === 'function') {
+            layer._applyRenderOrder(newBase);
+        }
+    }
+
+    /**
+     * Пересчитывает `baseRenderOrder` всех слоёв по их порядку в стеке
+     * `[...this.layers, ...this._dynamicLayers]` и применяет к мешам.
+     *
+     * @private
+     */
+    _rebuildLayerStack() {
+        let order = 0;
+        for (const layer of this.layers) {
+            this._applyLayerRenderOrder(layer, order * 1000);
+            order++;
+        }
+        for (const layer of this._dynamicLayers) {
+            this._applyLayerRenderOrder(layer, order * 1000);
+            order++;
+        }
+    }
+
+    /**
+     * Перемещает слой на заданную позицию в общем стеке отрисовки
+     * (`0` — нижний). Индекс может выходить за границы текущего массива
+     * (`this.layers` или `this._dynamicLayers`) — слой будет перемещён
+     * между ними.
+     *
+     * @param {Object} layer
+     * @param {number} index
+     */
+    setLayerOrder(layer, index) {
+        const rasterIdx = this.layers.indexOf(layer);
+        const dynIdx = this._dynamicLayers.indexOf(layer);
+        if (rasterIdx < 0 && dynIdx < 0) return;
+
+        const currentIdx = rasterIdx >= 0 ? rasterIdx : (this.layers.length + dynIdx);
+        const totalLen = this.layers.length + this._dynamicLayers.length;
+        const clamped = Math.max(0, Math.min(index, totalLen - 1));
+        if (currentIdx === clamped) return;
+
+        // Убираем из текущего массива.
+        if (rasterIdx >= 0) this.layers.splice(rasterIdx, 1);
+        else this._dynamicLayers.splice(dynIdx, 1);
+
+        // Вставляем в целевой.
+        if (clamped < this.layers.length) {
+            this.layers.splice(clamped, 0, layer);
+        } else {
+            this._dynamicLayers.splice(clamped - this.layers.length, 0, layer);
+        }
+
+        this._rebuildLayerStack();
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /** Слой наверх (последняя позиция в общем стеке). @param {Object} layer */
+    bringToFront(layer) {
+        this.setLayerOrder(layer, this.layers.length + this._dynamicLayers.length - 1);
+    }
+
+    /** Слой вниз (позиция 0 в общем стеке). @param {Object} layer */
+    sendToBack(layer) {
+        this.setLayerOrder(layer, 0);
+    }
+
+    /**
+     * Включает/выключает слой. Работает для растровых `Tile`, векторных
+     * `VectorTile` и DOM-слоёв (`Layer`/`ClusterLayer`).
+     *
+     *  - `layer.visible` выставляется всегда;
+     *  - растровый менеджер вызывает свой `setVisible`;
+     *  - если у слоя есть метод `setVisible` — вызывается и он.
+     *
+     * @param {Object} layer
+     * @param {boolean} visible
+     */
+    setLayerVisible(layer, visible) {
+        const v = !!visible;
+        layer.visible = v;
+
+        const mgr = this._tileManagers.find(m => m.layer === layer);
+        if (mgr) mgr.setVisible(v);
+
+        if (typeof layer.setVisible === 'function') {
+            layer.setVisible(v);
+        }
+
+        this.maybeUpdateVisibleTiles(true);
+    }
+
+    /* ================================================================
+       Авто-пауза
+       ================================================================ */
+
+    /** @private */
     _setupAutoPause() {
         if (this._autoPauseDisabled) return;
 
@@ -397,13 +608,11 @@ export class KrbMap {
         }
     }
 
-    /**
-     * Приводит `view.center` к проекции карты. После вызова:
-     *  - `view.center`       — в CRS карты (y → -z);
-     *  - `view.centerLonLat` — WGS84;
-     *  - `view.projection`   — код CRS карты.
-     * @private
-     */
+    /* ================================================================
+       Приведение view.center к CRS карты
+       ================================================================ */
+
+    /** @private */
     _resolveViewCenter() {
         const v = this.view;
         const mapCode = this.projection.code;
@@ -439,19 +648,18 @@ export class KrbMap {
 
     /**
      * Экранный AABB тайла уровня z под точкой (worldX, worldZ), в пикселях.
-     * Возвращает `null`, если тайл выходит за домен проекции.
      * @private
      */
-    _measureTileScreenSize(z, worldX, worldZ) {
-        const [txf, tyf] = this.worldToTileIndex(worldX, worldZ, z);
+    _measureTileScreenSize(z, worldX, worldZ, crs) {
+        const [txf, tyf] = this.worldToTileIndex(worldX, worldZ, z, crs);
         if (!Number.isFinite(txf) || !Number.isFinite(tyf)) return null;
         const tx = Math.floor(txf);
         const ty = Math.floor(tyf);
         const maxTile = (1 << z) - 1;
         if (ty < 0 || ty > maxTile) return null;
 
-        const [x0, z0] = this.tileIndexToWorld(tx, ty, z);
-        const [x1, z1] = this.tileIndexToWorld(tx + 1, ty + 1, z);
+        const [x0, z0] = this.tileIndexToWorld(tx, ty, z, crs);
+        const [x1, z1] = this.tileIndexToWorld(tx + 1, ty + 1, z, crs);
         if (![x0, z0, x1, z1].every(Number.isFinite)) return null;
 
         const canvas = this.renderer.domElement;
@@ -492,11 +700,14 @@ export class KrbMap {
      */
     _calibrateBaseDistance() {
         if (this.projection.isMercator) return;
-        if (!this.deformedTiles) return;
+
+        const refLayer = this._rasterLayers[0] ?? this._elevationLayer ?? null;
+        if (!refLayer) return;
 
         const z = this.currentDiscreteZoom;
         const target = this.controls.target;
-        const m = this._measureTileScreenSize(z, target.x, target.z);
+        const crs = refLayer.crs ?? 'EPSG:3857';
+        const m = this._measureTileScreenSize(z, target.x, target.z, crs);
         if (!m || !Number.isFinite(m.size) || m.size <= 0.01) {
             console.warn(
                 `KrbMap: не удалось измерить экранный размер тайла для ${this.projection.code}, ` +
@@ -666,15 +877,30 @@ export class KrbMap {
     }
 
     /**
-     * world (CRS карты) → дробный tile-индекс в `tileCRS`.
-     * В линейном режиме — прямая линейная формула; в deformed — через lon/lat.
+     * world (CRS карты) → дробный tile-индекс в CRS `crs` (по умолчанию
+     * — CRS первого тайлового слоя, для обратной совместимости).
+     *
+     * Если `crs === this.projection && this.projection.isMercator` —
+     * линейная формула; иначе — через lon/lat.
+     *
+     * @param {number} worldX
+     * @param {number} worldZ
+     * @param {number} z
+     * @param {string|Projection|null} [crs]
+     * @returns {[number, number]}
      */
-    worldToTileIndex(worldX, worldZ, z) {
+    worldToTileIndex(worldX, worldZ, z, crs = null) {
+        const useCrs = crs
+            ? (typeof crs === 'string' ? Projections.get(crs) : crs)
+            : this._layerCrsOrProjection();
+
+        const isLinear = useCrs === this.projection && this.projection.isMercator;
+
         const lx = worldX - this.worldGroup.position.x;
         const lz = worldZ - this.worldGroup.position.z;
         const n = 1 << z;
 
-        if (!this.deformedTiles) {
+        if (isLinear) {
             const tileSize = this.WORLD_SIZE / n;
             return [
                 (lx + this.MAX_MERCATOR) / tileSize,
@@ -689,9 +915,9 @@ export class KrbMap {
         if (Math.abs(lonLat[0]) > 180.0001 || Math.abs(lonLat[1]) > 90.0001) {
             return [NaN, NaN];
         }
-        const tileWorld = typeof this.tileCRS.fromLonLatSafe === 'function'
-            ? this.tileCRS.fromLonLatSafe(lonLat)
-            : this.tileCRS.fromLonLat(lonLat);
+        const tileWorld = typeof useCrs.fromLonLatSafe === 'function'
+            ? useCrs.fromLonLatSafe(lonLat)
+            : useCrs.fromLonLat(lonLat);
         if (!tileWorld || !Number.isFinite(tileWorld[0]) || !Number.isFinite(tileWorld[1])) {
             return [NaN, NaN];
         }
@@ -701,10 +927,26 @@ export class KrbMap {
         ];
     }
 
-    /** tile-индекс (в `tileCRS`) → world (CRS карты). Обратная к `worldToTileIndex`. */
-    tileIndexToWorld(tx, ty, z) {
+    /**
+     * tile-индекс (в CRS `crs`) → world (CRS карты). Обратная к
+     * {@link KrbMap#worldToTileIndex}. По умолчанию — CRS первого
+     * тайлового слоя (для обратной совместимости).
+     *
+     * @param {number} tx
+     * @param {number} ty
+     * @param {number} z
+     * @param {string|Projection|null} [crs]
+     * @returns {[number, number]}
+     */
+    tileIndexToWorld(tx, ty, z, crs = null) {
+        const useCrs = crs
+            ? (typeof crs === 'string' ? Projections.get(crs) : crs)
+            : this._layerCrsOrProjection();
+
+        const isLinear = useCrs === this.projection && this.projection.isMercator;
         const n = 1 << z;
-        if (!this.deformedTiles) {
+
+        if (isLinear) {
             const tileSize = this.WORLD_SIZE / n;
             return [
                 tx * tileSize - this.MAX_MERCATOR + this.worldGroup.position.x,
@@ -714,7 +956,7 @@ export class KrbMap {
 
         const tileWorldX = (tx / n) * 2 * this.MAX_MERCATOR - this.MAX_MERCATOR;
         const tileWorldY = this.MAX_MERCATOR - (ty / n) * 2 * this.MAX_MERCATOR;
-        const lonLat = this.tileCRS.toLonLat([tileWorldX, tileWorldY]);
+        const lonLat = useCrs.toLonLat([tileWorldX, tileWorldY]);
         if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
             return [NaN, NaN];
         }
@@ -728,6 +970,14 @@ export class KrbMap {
             proj[0] + this.worldGroup.position.x,
             -proj[1] + this.worldGroup.position.z
         ];
+    }
+
+    /** CRS первого тайлового слоя (для дефолтов в legacy-вызовах). @private */
+    _layerCrsOrProjection() {
+        const layer = this._tileLayer;
+        if (!layer) return this.projection;
+        const code = layer.crs ?? layer.projection ?? 'EPSG:3857';
+        return typeof code === 'string' ? Projections.get(code) : code;
     }
 
     /** @private */
@@ -787,11 +1037,7 @@ export class KrbMap {
         };
     }
 
-    /**
-     * Размещает камеру по орбитальным параметрам (pitch/azimuth/dist)
-     * так, чтобы она не оказалась под рельефом.
-     * @private
-     */
+    /** @private */
     _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
         let dist = desiredDist;
         let pitch = Math.max(0.001, Math.min(Math.PI - 0.001, desiredPitch));
@@ -971,12 +1217,7 @@ export class KrbMap {
              / (2 * this.TILE_PIXELS * tanHalfFov);
     }
 
-    /**
-     * Обратная операция к {@link KrbMap#getTargetDistanceForZoom}.
-     * При H <= 0 откатывается к легаси-формуле.
-     * @param {number} d — расстояние от target до камеры, world-метры.
-     * @returns {number}
-     */
+    /** @param {number} d @returns {number} */
     getZoomForDistance(d) {
         if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
 
@@ -998,9 +1239,16 @@ export class KrbMap {
        URL-хелперы
        ================================================================ */
 
-    /** @returns {string|null} */
-    getTextureUrl(z, x, y) {
-        const layer = this.layers[0];
+    /**
+     * URL текстуры тайла для слоя `layer`.
+     *
+     * @param {Object} layer — конкретный {@link Tile}.
+     * @param {number} z
+     * @param {number} x
+     * @param {number} y
+     * @returns {string|null}
+     */
+    getTextureUrl(layer, z, x, y) {
         if (!layer || !layer.texture) return null;
 
         if (layer.texture === 'demo') {
@@ -1013,15 +1261,21 @@ export class KrbMap {
     }
 
     /**
-     * URL DEM-тайла. Берётся из {@link KrbMap#_elevationLayer} — того же
-     * слоя, что определяет `minElevationZoom`/`maxElevationZoom`.
+     * URL DEM-тайла. Берётся из `layer.elevation`, если у переданного
+     * слоя он есть; иначе fallback на `_elevationLayer.elevation`
+     * (сценарий «отдельный слой высот»).
+     *
+     * @param {Object} layer
+     * @param {number} z
+     * @param {number} x
+     * @param {number} y
      * @returns {string|null}
      */
-    getElevationUrl(z, x, y) {
-        const layer = this._elevationLayer;
-        if (!layer || !layer.elevation) return null;
-        if (layer.elevation === 'demo') return null;
-        return layer.elevation
+    getElevationUrl(layer, z, x, y) {
+        const elevLayer = (layer && layer.elevation) ? layer : this._elevationLayer;
+        if (!elevLayer || !elevLayer.elevation) return null;
+        if (elevLayer.elevation === 'demo') return null;
+        return elevLayer.elevation
             .replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     }
 
@@ -1032,9 +1286,8 @@ export class KrbMap {
     }
 
     /**
-     * Смещение тайлового зума растровых слоёв. Читается из
-     * {@link Tile#zoomOffset}, иначе — из `options.zoomOffset`, иначе 0.
-     * Не влияет на границы видимости и доступности данных.
+     * Legacy: `zoomOffset` первого тайлового слоя (или `options.zoomOffset`).
+     * Новый код должен задавать `zoomOffset` на конкретном {@link Tile}.
      * @type {number}
      */
     get zoomOffset() {
@@ -1057,8 +1310,7 @@ export class KrbMap {
        ================================================================ */
 
     /**
-     * Целевой зум камеры. Публичный геттер, чтобы внешние слои
-     * (`VectorTile`) не завязывались на приватное поле `_cameraAnimation`.
+     * Целевой зум камеры (куда едет камера).
      * @type {number}
      */
     get targetZoom() {
@@ -1066,26 +1318,36 @@ export class KrbMap {
     }
 
     /**
-     * Зум запрашиваемых растровых тайлов: `currentDiscreteZoom + zoomOffset`,
-     * клампится в `[minNativeZoom, maxNativeZoom]` растрового слоя.
-     * Выше `maxNativeZoom` — overzoom.
-     * @type {number}
+     * Зум запрашиваемых растровых тайлов конкретного слоя:
+     * `currentDiscreteZoom + layer.zoomOffset`, клампится в
+     * `[layer.minNativeZoom, layer.maxNativeZoom]`. Выше — overzoom.
+     *
+     * @param {Object} layer
+     * @returns {number}
      */
-    get tileZoom() {
-        const z = this.currentDiscreteZoom + this.zoomOffset;
-        const layer = this._tileLayer;
+    getTileZoom(layer) {
+        const z = this.currentDiscreteZoom + (layer?.zoomOffset ?? 0);
         const min = layer?.minNativeZoom ?? this.MIN_ZOOM;
         const max = layer?.maxNativeZoom ?? this.MAX_ZOOM;
         return Math.max(min, Math.min(max, z));
     }
 
     /**
+     * Legacy-геттер `tileZoom`: зум тайлов слоя высот (для сэмплинга
+     * высот `getSurfaceHeightAt`). Если слоя высот нет — первого
+     * тайлового слоя. Новый код должен использовать
+     * {@link KrbMap#getTileZoom}.
+     * @type {number}
+     */
+    get tileZoom() {
+        const layer = this._elevationLayer ?? this._tileLayer;
+        if (!layer) return this.currentDiscreteZoom;
+        return this.getTileZoom(layer);
+    }
+
+    /**
      * Нижняя граница зумов DEM-данных. Legacy-алиас на
-     * {@link Tile.minElevationZoom} у `_elevationLayer`. Если слоя высот
-     * нет — устаревшее `options.minReliefZ` (при наличии) или `DEFAULTS`.
-     *
-     * Новый код должен использовать `_elevationLayer.minElevationZoom`
-     * (или, если слой не нужен, `Tile.minElevationZoom`).
+     * `_elevationLayer.minElevationZoom`.
      * @type {number}
      */
     get MIN_RELIEF_Z() {
@@ -1096,7 +1358,7 @@ export class KrbMap {
 
     /**
      * Верхняя граница зумов DEM-данных. Legacy-алиас на
-     * {@link Tile.maxElevationZoom}.
+     * `_elevationLayer.maxElevationZoom`.
      * @type {number}
      */
     get MAX_RELIEF_Z() {
@@ -1114,12 +1376,11 @@ export class KrbMap {
         const newZ = this.peekIdealZoom(this.continuousZoom);
         if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
 
-        if (!this.hasTileLayers) return;
+        if (this._tileManagers.length === 0) return;
 
-        this.tileManager.update(
-            this.camera, this.controls.target,
-            this.continuousZoom, this.worldGroup.position
-        );
+        for (const mgr of this._tileManagers) {
+            mgr.update(this.camera, this.controls.target, this.continuousZoom, this.worldGroup.position);
+        }
     }
 
     moveCameraTo(lon, lat, targetZoom = null) {
@@ -1153,11 +1414,6 @@ export class KrbMap {
     /**
      * Анимированный перелёт к (lon, lat).
      * При duration <= 0 выполняется синхронно, без rAF и _cameraAnimation.
-     *
-     * @param {number} lon
-     * @param {number} lat
-     * @param {number} [duration=1.0]
-     * @param {number|null} [targetZoom=null]
      */
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
         if (this._disposed) return;
@@ -1279,10 +1535,7 @@ export class KrbMap {
         requestAnimationFrame(animateStep);
     }
 
-    /**
-     * Поворот к северу (и сброс pitch, если надо).
-     * @param {number} [duration=0.3] @param {boolean} [resetPitch=true]
-     */
+    /** @param {number} [duration=0.3] @param {boolean} [resetPitch=true] */
     rotateToNorth(duration = 0.3, resetPitch = true) {
         if (this._disposed || this._cameraAnimation) return;
 
@@ -1504,19 +1757,19 @@ export class KrbMap {
        ================================================================ */
 
     enableGeotiffElevation(layer) {
-        if (!layer || !this.tileManager) return;
+        if (!layer || !this._elevationManager) return;
 
         this.hasElevation = true;
         if (!this.hasTileLayers) this.hasTileLayers = true;
 
-        this.tileManager.enableGeotiffElevation(layer);
+        this._elevationManager.enableGeotiffElevation(layer);
         this._surfaceMaxHeightCache.clear();
         this.maybeUpdateVisibleTiles(true);
     }
 
     disableGeotiffElevation() {
-        if (!this.tileManager) return;
-        this.tileManager.elevationProvider = null;
+        if (!this._elevationManager) return;
+        this._elevationManager.elevationProvider = null;
         this._surfaceMaxHeightCache.clear();
         this.maybeUpdateVisibleTiles(true);
     }
@@ -1536,11 +1789,13 @@ export class KrbMap {
     }
 
     getSurfaceMaxHeight(worldX, worldZ) {
-        if (!this.hasElevation) return 0;
-        const z = this.tileZoom;
+        if (!this.hasElevation || !this._elevationManager) return 0;
+        const elevLayer = this._elevationManager.layer;
+        const crs = elevLayer?.crs ?? 'EPSG:3857';
+        const z = this.getTileZoom(elevLayer);
         const maxTile = (1 << z) - 1;
 
-        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z, crs);
         if (!Number.isFinite(tx) || !Number.isFinite(ty)) return 0;
 
         const virtX = Math.floor(tx);
@@ -1550,7 +1805,7 @@ export class KrbMap {
 
         if (this._surfaceMaxHeightCache.has(vk)) return this._surfaceMaxHeightCache.get(vk);
 
-        const inst = this.tileManager.tiles.get(vk);
+        const inst = this._elevationManager.tiles.get(vk);
         let maxY = 0;
         if (inst && inst.heightsApplied && inst.mesh) {
             const pos = inst.geometry.attributes.position.array;
@@ -1565,27 +1820,29 @@ export class KrbMap {
     }
 
     getSurfaceHeightAt(worldX, worldZ) {
-        if (!this.hasElevation) return 0;
-        const zMax = this.tileZoom;
+        if (!this.hasElevation || !this._elevationManager) return 0;
+        const elevLayer = this._elevationManager.layer;
+        const crs = elevLayer?.crs ?? 'EPSG:3857';
+        const zMax = this.getTileZoom(elevLayer);
         const zMin = Math.max(0, this.MIN_RELIEF_Z);
         for (let zz = zMax; zz >= zMin; zz--) {
-            const h = this._sampleHeightAtZoom(worldX, worldZ, zz);
+            const h = this._sampleHeightAtZoom(worldX, worldZ, zz, crs);
             if (h !== null) return h;
         }
         return 0;
     }
 
     /** @private */
-    _sampleHeightAtZoom(worldX, worldZ, z) {
+    _sampleHeightAtZoom(worldX, worldZ, z, crs) {
         const maxTile = (1 << z) - 1;
-        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z, crs);
         if (!Number.isFinite(tx) || !Number.isFinite(ty)) return null;
 
         const virtX = Math.floor(tx);
         const y = Math.floor(ty);
         if (y < 0 || y > maxTile) return null;
 
-        const inst = this.tileManager.tiles.get(getVirtKey(z, virtX, y));
+        const inst = this._elevationManager.tiles.get(getVirtKey(z, virtX, y));
         if (!inst || !inst.heightsApplied || !inst.mesh) return null;
 
         const u = tx - virtX;
@@ -1611,25 +1868,30 @@ export class KrbMap {
     }
 
     ensureTileForPoint(worldX, worldZ) {
-        const z = this.tileZoom;
+        if (!this._elevationManager) return;
+        const elevLayer = this._elevationManager.layer;
+        const crs = elevLayer?.crs ?? 'EPSG:3857';
+        const z = this.getTileZoom(elevLayer);
         const maxTile = (1 << z) - 1;
 
-        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z);
+        const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z, crs);
         if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
 
         const virtX = Math.floor(tx);
         const y = Math.floor(ty);
         if (y < 0 || y > maxTile) return;
-        this.tileManager.ensureTile(z, virtX, y);
+        this._elevationManager.ensureTile(z, virtX, y);
     }
 
     /* ================================================================
-       Статический фон
+       Статический фон (legacy, для первого слоя)
        ================================================================ */
 
     createStaticBackgroundLayer() {
-        if (this.deformedTiles) return;
-        if (!this.layers.length || !this.layers.some(l => l.texture)) return;
+        if (this._rasterLayers.length === 0) return;
+        const bgLayer = this._rasterLayers[0];
+        if (!this._isLayerLinear(bgLayer)) return;
+
         while (this.staticBgGroup.children.length > 0) {
             const child = this.staticBgGroup.children[0];
             this.staticBgGroup.remove(child);
@@ -1640,6 +1902,9 @@ export class KrbMap {
             }
         }
 
+        const mgr = this._tileManagers[0];
+        if (!mgr) return;
+
         const z = this.staticBgZoom;
         const tileSize = this.WORLD_SIZE / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
@@ -1648,15 +1913,15 @@ export class KrbMap {
             const originZ = getOriginZ(y, tileSize, this.MAX_MERCATOR);
             for (let x = 0; x <= maxTile; x++) {
                 const originX = x * tileSize - this.MAX_MERCATOR;
-                const texUrl = this.getTextureUrl(z, x, y);
+                const texUrl = this.getTextureUrl(bgLayer, z, x, y);
 
-                const mesh = this.tileManager.createStaticTileMesh(tileSize, originX, originZ, null);
+                const mesh = mgr.createStaticTileMesh(tileSize, originX, originZ, null);
                 this.staticBgGroup.add(mesh);
 
-                this.tileManager.loadTextureAsync(texUrl).then(tex => {
-                    if (this._disposed || !this.tileManager || !this.staticBgGroup) return;
+                mgr.loadTextureAsync(texUrl).then(tex => {
+                    if (this._disposed || !mgr || !this.staticBgGroup) return;
                     if (tex && mesh.parent === this.staticBgGroup) {
-                        this.tileManager.setMeshTexture(mesh, tex);
+                        mgr.setMeshTexture(mesh, tex);
                     }
                 }).catch(() => {});
             }
@@ -1854,8 +2119,10 @@ export class KrbMap {
 
         let elevation = null;
         const meshes = [];
-        for (const inst of this.tileManager.tiles.values()) {
-            if (inst.mesh && inst.mesh.visible) meshes.push(inst.mesh);
+        for (const mgr of this._tileManagers) {
+            for (const inst of mgr.tiles.values()) {
+                if (inst.mesh && inst.mesh.visible) meshes.push(inst.mesh);
+            }
         }
         const intersects = this._tempRaycaster.intersectObjects(meshes, false);
         if (intersects.length > 0) elevation = intersects[0].point.y;
@@ -1973,11 +2240,16 @@ export class KrbMap {
         this.targetContinuousZoom += delta;
         this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.targetContinuousZoom));
 
-        const futureTileZ = this.targetContinuousZoom + this.zoomOffset;
-        if (futureTileZ > this.MAX_RELIEF_Z) {
+        const elevMgr = this._elevationManager;
+        if (!elevMgr) return;
+
+        const elevLayer = elevMgr.layer;
+        const futureTileZ = this.targetContinuousZoom + (elevLayer?.zoomOffset ?? this.zoomOffset);
+        const maxElevZ = elevMgr._maxElevationZoom;
+        if (futureTileZ > maxElevZ) {
             const futureCenter = this._tempVec3a.copy(this.controls.target);
-            const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, this.MAX_RELIEF_Z);
-            this.tileManager.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
+            const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, maxElevZ);
+            elevMgr.prefetchParentElevations(futureCenter, neededParentZ, this.worldGroup.position);
         }
     }
 
@@ -1990,22 +2262,12 @@ export class KrbMap {
        Пауза / уничтожение
        ================================================================ */
 
-    /**
-     * Публичная пауза. Пока карта «на паузе», её rAF-цикл не крутится.
-     * Внутри — набор причин `_pauseReasons`; `pause()` добавляет `'manual'`.
-     */
     pause() {
         if (this._disposed) return;
         this._pauseReasons.add('manual');
         this._doPause();
     }
 
-    /**
-     * Публичное возобновление. Снимает причину `'manual'`. Если других
-     * причин (скрытая вкладка, вне вьюпорта) нет — карта возобновит
-     * рендеринг. В противном случае — останется на паузе до того
-     * момента, пока не станет снова видимой.
-     */
     resume() {
         if (this._disposed) return;
         this._pauseReasons.delete('manual');
@@ -2080,7 +2342,23 @@ export class KrbMap {
             this._abortController = null;
         }
 
-        const managers = ['tileManager', 'textManager', 'popupManager', 'interaction'];
+        // Текстуры и воркеры менеджеров растровых слоёв.
+        for (const mgr of this._tileManagers) {
+            if (!mgr) continue;
+            try { if (mgr.worker && mgr.worker.terminate) mgr.worker.terminate(); }
+            catch (e) { console.warn(e); }
+            mgr.worker = null;
+            try { mgr.textureCache?.clear(); } catch (e) {}
+            try { mgr.tiles?.clear(); } catch (e) {}
+        }
+        this._tileManagers = [];
+        this._elevationManager = null;
+        this.tileManager = null;
+
+        // Снимаем ссылки на слои до удаления сцены.
+        this._dynamicLayers = [];
+
+        const managers = ['textManager', 'popupManager', 'interaction'];
         for (const name of managers) {
             const m = this[name];
             if (m && typeof m.dispose === 'function') {
@@ -2111,8 +2389,8 @@ export class KrbMap {
         this.ambientLight = null;
         this.sunLight = null;
 
-        this._dynamicLayers = [];
         this.layers = [];
+        this._rasterLayers = [];
         this.globalElevCache?.clear?.();
         this.globalElevCache = null;
         this._surfaceMaxHeightCache?.clear?.();
@@ -2183,6 +2461,12 @@ export class KrbMap {
 
         this.maybeUpdateVisibleTiles();
 
+        // `_postUpdate` — и для растровых, и для динамических слоёв.
+        // Слой может физически лежать в любом из массивов после
+        // `setLayerOrder` — обходим оба, чтобы не пропустить.
+        for (const layer of this.layers) {
+            if (layer._postUpdate) layer._postUpdate(this);
+        }
         for (const layer of this._dynamicLayers) {
             if (layer._postUpdate) layer._postUpdate(this);
         }

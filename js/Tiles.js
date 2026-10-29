@@ -38,25 +38,23 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
  *     `maxNativeZoom`. Выше `maxNativeZoom` — overzoom; ниже
  *     `minNativeZoom` — запросы не уходят.
  *  4. **Зум доступных DEM-данных** — `minElevationZoom` / `maxElevationZoom`.
- *     Вне этого диапазона высоты не запрашиваются, тайл остаётся плоским.
  *
  * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
  * камеры. Не влияет ни на видимость, ни на доступность данных.
  *
  * ## CRS и режим рендера
  *
- * `crs` — CRS сетки `{z}/{x}/{y}` этого слоя. Определяет, как слой
- * будет рендериться в мире карты: линейно (если совпадает с CRS карты
- * и обе в Mercator-семействе) или через deformed-меш (lon/lat → CRS карты).
- * Разные растровые слои могут иметь разные `crs` — например, 2GIS (3857)
- * и Yandex (3395) на одной карте.
+ * `crs` — CRS сетки `{z}/{x}/{y}` этого слоя. Линейный режим — если
+ * совпадает с CRS карты и обе в Mercator-семействе; иначе deformed
+ * через lon/lat. Разные растровые слои могут иметь разные `crs`
+ * (2GIS = 3857, Yandex = 3395 на одной карте).
  *
  * ## Служебные поля
  *
  *  - `visible` — видимость слоя (`false` → тайлы скрываются, не грузятся);
+ *  - `opacity` — прозрачность 0..1 (`< 1` → материал в transparent pass);
  *  - `baseRenderOrder` — база для `mesh.renderOrder`; назначается
- *    `KrbMap._rebuildLayerStack` при изменении порядка слоёв. Не
- *    задаётся пользователем.
+ *    `KrbMap._rebuildLayerStack`. Не задаётся пользователем.
  *
  * ## Deprecated-алиасы
  *
@@ -134,8 +132,7 @@ export class Tile {
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
 
         /**
-         * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`
-         * при изменении порядка слоёв — пользователь не задаёт.
+         * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`.
          * @type {number}
          */
         this.baseRenderOrder = 0;
@@ -149,34 +146,44 @@ export class Tile {
  *
  * Каждый экземпляр привязан к одному {@link Tile} через `this.layer`.
  * Создаётся по одному на слой — так разные слои могут иметь разные
- * `crs`, `minNativeZoom`/`maxNativeZoom`, `zoomOffset` и т.д. Порядок
- * отрисовки между слоями задаётся через `layer.baseRenderOrder`.
+ * `crs`, `minNativeZoom`/`maxNativeZoom`, `zoomOffset` и т.д.
  *
- * Если `layer` не передан, берётся `engine._tileLayer` (обратная
- * совместимость с одиночным слоем).
+ * ## Порядок отрисовки (без depth-буфера)
  *
- * ## LOD и глубина
+ * Тайлы **не тестируют и не пишут глубину** (`depthTest: false`,
+ * `depthWrite: false`). Это принципиально: все тайлы лежат на плоскости
+ * `Y=0`, и если бы они участвовали в depth-тесте, разные слои и
+ * LOD-уровни внутри слоя давали бы z-fighting.
  *
- * На каждый кадр в {@link TileManager#update} формируется `renderSet`:
- * для каждой видимой клетки на `idealZ` — primary-тайл (готовый), либо
- * покрывающие его потомки (`collectCover`), либо готовый предок-фолбэк
- * (`findReadyAncestor`). Primary (`z >= idealZ`) пишет `depthWrite = true`,
- * fallback (`z < idealZ`) — `false` и рисуется раньше по `renderOrder`.
+ * Порядок отрисовки задаётся только `mesh.renderOrder`:
  *
- * ## Границы зумов
+ *  - между слоями — `layer.baseRenderOrder` (назначается `KrbMap._rebuildLayerStack`:
+ *    слой с индексом `i` в общем стеке получает `i * 1000`);
+ *  - внутри слоя — `+ z`: тайлы меньшего зума (предки) рисуются раньше,
+ *    большего (потомки) — позже и перекрывают предков. Это обеспечивает
+ *    корректный LOD-переход и overzoom без z-fighting.
  *
- * Растровые тайлы запрашиваются только в диапазоне
- * `[Tile.minNativeZoom, Tile.maxNativeZoom]`. Выше — overzoom (тот же тайл
- * растягивается); ниже — запросы не уходят. DEM-тайлы — только в
- * `[Tile.minElevationZoom, Tile.maxElevationZoom]` (у этого слоя; если
- * у слоя нет `elevation`, а у карты есть отдельный `_elevationLayer` —
- * DEM-границы берутся из него).
+ * ## Изоляция от 3D
+ *
+ * «Плоскость без глубины» касается только растровых тайлов. 3D-объекты
+ * (`VectorTile` — здания, векторные фичи) и DOM-слои (`Layer`,
+ * `ClusterLayer`) рисуются после всех тайлов (`renderOrder` у них выше)
+ * со своими `depthTest`/`depthWrite`. Тайлы их не перекрывают и не
+ * затрагивают.
+ *
+ * ## Полупрозрачные слои
+ *
+ * `layer.opacity < 1` → материал уходит в transparent pass Three.js,
+ * который рендерится после всех opaque объектов. В сочетании с
+ * `depthTest: false` и корректным `renderOrder` это даёт правильное
+ * смешение: например, полупрозрачный слой поверх непрозрачного
+ * сравнивается как в Photoshop.
  */
 export class TileManager {
     /**
      * @param {Object} engine — KrbMap.
      * @param {Tile|null} [layer] — конкретный слой. Если не передан,
-     *     берётся `engine._tileLayer` (для обратной совместимости).
+     *     берётся `engine._tileLayer` (обратная совместимость).
      */
     constructor(engine, layer = null) {
         this.engine = engine;
@@ -232,28 +239,14 @@ export class TileManager {
        Границы зумов и режим рендера (per-layer)
        ================================================================ */
 
-    /**
-     * Верхняя граница зумов растровых тайлов этого слоя.
-     * @type {number}
-     */
     get _maxNativeZoom() {
         return this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
     }
 
-    /**
-     * Нижняя граница зумов растровых тайлов этого слоя.
-     * @type {number}
-     */
     get _minNativeZoom() {
         return this.layer?.minNativeZoom ?? 0;
     }
 
-    /**
-     * Верхняя граница зумов DEM-данных. Приоритет — `layer.maxElevationZoom`
-     * (если у слоя есть `elevation`); иначе — `engine._elevationLayer.maxElevationZoom`
-     * (сценарий «отдельный слой высот»); иначе — `DEFAULTS`.
-     * @type {number}
-     */
     get _maxElevationZoom() {
         if (this.layer?.maxElevationZoom !== undefined) return this.layer.maxElevationZoom;
         const elev = this.engine._elevationLayer;
@@ -261,10 +254,6 @@ export class TileManager {
         return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
     }
 
-    /**
-     * Нижняя граница зумов DEM-данных.
-     * @type {number}
-     */
     get _minElevationZoom() {
         if (this.layer?.minElevationZoom !== undefined) return this.layer.minElevationZoom;
         const elev = this.engine._elevationLayer;
@@ -272,10 +261,6 @@ export class TileManager {
         return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
     }
 
-    /**
-     * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`.
-     * @type {number}
-     */
     get _baseRenderOrder() {
         return this.layer?.baseRenderOrder ?? 0;
     }
@@ -295,13 +280,6 @@ export class TileManager {
         return true;
     }
 
-    /**
-     * Этот слой рендерится в deformed-режиме (через lon/lat), а не
-     * линейно. Определяется CRS слоя и CRS карты. Если `KrbMap` не
-     * предоставляет `_isLayerLinear`, используется legacy-флаг
-     * `engine.deformedTiles`.
-     * @type {boolean}
-     */
     get _isDeformed() {
         if (typeof this.engine._isLayerLinear === 'function') {
             return !this.engine._isLayerLinear(this.layer);
@@ -309,13 +287,11 @@ export class TileManager {
         return this.engine.deformedTiles;
     }
 
-    /** CRS этого слоя как объект Projection. @private */
     get _layerCrs() {
         const code = this.layer?.crs ?? 'EPSG:3857';
         return typeof code === 'string' ? Projections.get(code) : code;
     }
 
-    /** Строковый ключ тайла. @private */
     key(z, virtX, y) {
         return getVirtKey(z, virtX, y);
     }
@@ -325,26 +301,32 @@ export class TileManager {
        ================================================================ */
 
     /**
-     * Создаёт материал тайла. `depthWrite` здесь всегда `false` —
-     * глубину включаем динамически в {@link TileManager#update} только
-     * для primary-тайлов.
+     * Создаёт материал тайла.
+     *
+     * По умолчанию `depthTest: false` и `depthWrite: false`. Тайлы
+     * лежат на плоскости `Y=0` и не должны участвовать в depth-буфере:
+     * иначе между слоями и LOD-уровнями возникает z-fighting. Порядок
+     * отрисовки однозначно задаётся `mesh.renderOrder`
+     * (= `baseRenderOrder + z`); верхний слой рисуется после нижнего,
+     * дочерний тайл (`z+1`) — после родителя (`z`) и перекрывает его.
+     *
+     * Это изолирует тайлы от 3D: `VectorTile` и DOM-слои со своими
+     * `depthTest`/`depthWrite` и большими `renderOrder` рисуются
+     * после и не затрагиваются.
      *
      * @private
      */
     _createTileMaterial(texture, opts = {}) {
         const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : false;
-        const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : true;
+        const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : false;
 
-        // opacity слоя — по умолчанию 1 (непрозрачный)
         const rawOpacity = this.layer?.opacity;
         const opacity = (Number.isFinite(rawOpacity) ? rawOpacity : 1);
         const transparent = opacity < 1;
 
         const common = {
             map: texture,
-            // Полупрозрачные тайлы не должны писать в depth-буфер:
-            // иначе они перекроют то, что под ними (2GIS под Yandex).
-            depthWrite: transparent ? false : depthWrite,
+            depthWrite,
             depthTest,
             opacity,
             transparent
@@ -391,10 +373,13 @@ export class TileManager {
         }
     }
 
-        /**
-     * Устанавливает прозрачность слоя (0..1) и обновляет все
-     * уже созданные меши. При переключении transparent — форсирует
+    /**
+     * Устанавливает прозрачность слоя (0..1) и обновляет все уже
+     * созданные меши. При переключении `transparent` форсирует
      * пересборку материала (`needsUpdate`).
+     *
+     * `depthWrite` не трогаем: тайлы всегда `depthWrite: false`,
+     * `depthTest: false` (см. {@link TileManager#_createTileMaterial}).
      *
      * @param {number} opacity
      */
@@ -411,13 +396,9 @@ export class TileManager {
             mat.opacity = v;
             if (mat.transparent !== transparent) {
                 mat.transparent = transparent;
-                mat.needsUpdate = true; // transparent влияет на шейдер
+                mat.needsUpdate = true;
             }
-            // Полупрозрачный материал не должен писать depth.
-            if (transparent) mat.depthWrite = false;
         }
-        // Если переключились обратно в непрозрачный — принудительный
-        // проход update() восстановит правильные роли depthWrite.
     }
 
     /* ================================================================
@@ -425,7 +406,12 @@ export class TileManager {
        ================================================================ */
 
     /**
-     * Обновляет видимые тайлы и роли `depthWrite` для этого слоя.
+     * Обновляет видимые тайлы для этого слоя.
+     *
+     * `depthWrite` не переключается: тайлы принципиально не участвуют
+     * в depth-буфере (см. {@link TileManager#_createTileMaterial}).
+     * Порядок отрисовки слоёв и LOD-уровней обеспечивается только
+     * `mesh.renderOrder = baseRenderOrder + z`.
      *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
@@ -434,7 +420,6 @@ export class TileManager {
      * @returns {number} Идеальный дискретный зум.
      */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
-        // Слой вне диапазона видимости — не грузим, скрываем всё.
         if (!this._isVisible) {
             this.setVisible(false);
             return -1;
@@ -568,20 +553,14 @@ export class TileManager {
             }
         }
 
-        // Видимость + роль depthWrite — атомарно в одном проходе.
+        // Видимость — в одном проходе. Порядок между слоями и LOD-переход
+        // обеспечиваются исключительно `renderOrder` (= baseRenderOrder + z):
+        // тайлы не тестируют и не пишут глубину (см. _createTileMaterial).
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
             if (inst.mesh.visible !== show) inst.mesh.visible = show;
             if (!show) continue;
-
-const layerTransparent = (this.layer?.opacity ?? 1) < 1;
-            const shouldWriteDepth = !layerTransparent && inst.z >= idealZ;
-            const mat = inst.mesh.material;
-            if (mat.depthWrite !== shouldWriteDepth) {
-                mat.depthWrite = shouldWriteDepth;
-            }
-
             inst.lastUsed = this.frame;
         }
 
@@ -601,11 +580,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         return idealZ;
     }
 
-    /**
-     * Рекурсивно ищет потомков, полностью покрывающих клетку.
-     * Не уходит выше `Tile.maxNativeZoom` — там данных нет.
-     * @private
-     */
+    /** @private */
     collectCover(z, virtX, y, renderSet, depth = 0) {
         if (z > this._maxNativeZoom) return false;
 
@@ -628,11 +603,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         return full;
     }
 
-    /**
-     * Ищет готового предка-фолбэка. Не спускается ниже
-     * `max(MIN_ZOOM, Tile.minNativeZoom)`.
-     * @private
-     */
+    /** @private */
     findReadyAncestor(z, virtX, y) {
         const minZ = Math.max(this.engine.MIN_ZOOM, this._minNativeZoom);
         for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= minZ; dz++) {
@@ -646,10 +617,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         return null;
     }
 
-    /**
-     * Возвращает существующий тайл или создаёт и запускает загрузку нового.
-     * @private
-     */
+    /** @private */
     ensureTile(z, virtX, y) {
         const k = this.key(z, virtX, y);
         let inst = this.tiles.get(k);
@@ -765,12 +733,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         }
     }
 
-    /**
-     * Запрашивать ли для тайла высоты. Ограничено диапазоном
-     * `[Tile.minElevationZoom, Tile.maxElevationZoom]` этого слоя
-     * (или глобального слоя высот).
-     * @private
-     */
+    /** @private */
     shouldRequestElevation(inst) {
         return inst.z >= this._minElevationZoom
             && inst.z <= this._maxElevationZoom;
@@ -903,10 +866,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         return mesh;
     }
 
-    /**
-     * Статический фоновый меш: `depthWrite/depthTest = false`.
-     * @private
-     */
+    /** @private */
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
@@ -1204,10 +1164,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         return this.layer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
     }
 
-    /**
-     * Пре-фетч DEM-предков при отдалении (вызывается из Core).
-     * @private
-     */
+    /** @private */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation ||
             z < this._minElevationZoom ||
@@ -1270,11 +1227,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
         }
     }
 
-    /**
-     * Пре-фетч тайлов следующего зума при приближении. Верхняя граница —
-     * `min(engine.MAX_ZOOM, Tile.maxNativeZoom)`.
-     * @private
-     */
+    /** @private */
     prefetchNextZoomLevel(center, z, worldGroupPos) {
         const maxZ = Math.min(this.engine.MAX_ZOOM, this._maxNativeZoom);
         if (z < 0 || z > maxZ) return;
@@ -1300,11 +1253,7 @@ const layerTransparent = (this.layer?.opacity ?? 1) < 1;
 
     /* ---- LRU сборщик мусора ---- */
 
-    /**
-     * Освобождает тайлы за пределами `renderSet` до `MAX_CACHED_TILES`.
-     * Загружающиеся и входящие в `renderSet` не трогаются.
-     * @private
-     */
+    /** @private */
     gc(renderSet) {
         if (this.tiles.size <= MAX_CACHED_TILES) return;
         const candidates = [];

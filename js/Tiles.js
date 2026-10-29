@@ -193,36 +193,37 @@ export class Tile {
  * Создаётся по одному на слой — так разные слои могут иметь разные
  * `crs`, `minNativeZoom`/`maxNativeZoom`, `zoomOffset` и т.д.
  *
- * ## Порядок отрисовки (без depth-буфера)
+ * ## Порядок отрисовки и depth-буфер
  *
- * Тайлы **не тестируют и не пишут глубину** (`depthTest: false`,
- * `depthWrite: false`). Это принципиально: все тайлы лежат на плоскости
- * `Y=0`, и если бы они участвовали в depth-тесте, разные слои и
- * LOD-уровни внутри слоя давали бы z-fighting.
+ * **Плоские тайлы (без elevation)** — `depthTest: false`,
+ * `depthWrite: false`. Все лежат на плоскости `Y=0`, порядок
+ * задаётся `mesh.renderOrder = baseRenderOrder + z`: между слоями —
+ * по `baseRenderOrder`, внутри слоя — по `z` (потомки поверх предков).
+ * Без depth нет z-fighting между слоями/уровнями.
  *
- * Порядок отрисовки задаётся только `mesh.renderOrder`:
+ * **Тайлы с elevation (DEM/GeoTIFF)** — `depthTest: true`,
+ * `depthWrite: true`. Вершины на разных высотах, без depth-буфера
+ * дальняя гора рисовалась бы поверх ближней (порядок треугольников
+ * в буфере ≠ экранная глубина). `renderOrder` по-прежнему определяет
+ * порядок между слоями; внутри слоя корректное перекрытие обеспечивает
+ * depth-буфер.
  *
- *  - между слоями — `layer.baseRenderOrder` (назначается `KrbMap._rebuildLayerStack`:
- *    слой с индексом `i` в общем стеке получает `i * 1000`);
- *  - внутри слоя — `+ z`: тайлы меньшего зума (предки) рисуются раньше,
- *    большего (потомки) — позже и перекрывают предков. Это обеспечивает
- *    корректный LOD-переход и overzoom без z-fighting.
+ * Это per-layer: наличие elevation у одного слоя не включает depth
+ * для плоских слоёв на той же карте.
  *
  * ## Изоляция от 3D
  *
- * «Плоскость без глубины» касается только растровых тайлов. 3D-объекты
- * (`VectorTile` — здания, векторные фичи) и DOM-слои (`Layer`,
- * `ClusterLayer`) рисуются после всех тайлов (`renderOrder` у них выше)
- * со своими `depthTest`/`depthWrite`. Тайлы их не перекрывают и не
- * затрагивают.
+ * 3D-объекты (`VectorTile` — здания, векторные фичи) и DOM-слои
+ * (`Layer`, `ClusterLayer`) рисуются после всех тайлов (`renderOrder`
+ * у них выше) со своими `depthTest`/`depthWrite`. Тайлы их не
+ * перекрывают и не затрагивают.
  *
  * ## Полупрозрачные слои
  *
  * `layer.opacity < 1` → материал уходит в transparent pass Three.js,
  * который рендерится после всех opaque объектов. В сочетании с
- * `depthTest: false` и корректным `renderOrder` это даёт правильное
- * смешение: например, полупрозрачный слой поверх непрозрачного
- * сравнивается как в Photoshop.
+ * корректным `renderOrder` это даёт правильное смешение: например,
+ * полупрозрачный слой поверх непрозрачного сравнивается как в Photoshop.
  *
  * ## DEM-границы и overzoom
  *
@@ -249,7 +250,16 @@ export class TileManager {
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
-        this.hasElevation = engine.hasElevation;
+        // Per-layer: у этого конкретного слоя есть 3D-рельеф?
+        //  - `elevation: URL` / `'demo'` — да (DEM-тайлы);
+        //  - `enableGeotiffElevation(provider)` — ставится позже, там же
+        //    this.hasElevation = true;
+        //  - иначе — нет (плоский слой).
+        //
+        // Ключевое отличие от прежнего `engine.hasElevation`: наличие
+        // elevation у одного слоя больше не включает depth и запросы DEM
+        // на всех слоях карты.
+        this.hasElevation = !!(layer?.elevation);
 
         this.tileLighting = engine.tileLighting === true;
         this.tileRoughness = Number.isFinite(engine.tileLightingRoughness)
@@ -358,6 +368,11 @@ export class TileManager {
         return typeof code === 'string' ? Projections.get(code) : code;
     }
 
+    /** Есть ли у слоя реальный 3D-рельеф (DEM-тайлы или GeoTIFF/noise). */
+    get _layerHasElevation() {
+        return this.hasElevation || !!this.elevationProvider;
+    }
+
     key(z, virtX, y) {
         return getVirtKey(z, virtX, y);
     }
@@ -369,22 +384,35 @@ export class TileManager {
     /**
      * Создаёт материал тайла.
      *
-     * По умолчанию `depthTest: false` и `depthWrite: false`. Тайлы
-     * лежат на плоскости `Y=0` и не должны участвовать в depth-буфере:
-     * иначе между слоями и LOD-уровнями возникает z-fighting. Порядок
-     * отрисовки однозначно задаётся `mesh.renderOrder`
-     * (= `baseRenderOrder + z`); верхний слой рисуется после нижнего,
-     * дочерний тайл (`z+1`) — после родителя (`z`) и перекрывает его.
+     * Дефолт `depthTest`/`depthWrite` зависит от наличия рельефа
+     * **у этого слоя**:
      *
-     * Это изолирует тайлы от 3D: `VectorTile` и DOM-слои со своими
-     * `depthTest`/`depthWrite` и большими `renderOrder` рисуются
-     * после и не затрагиваются.
+     *  - **плоский слой** (нет `elevation` и нет `elevationProvider`) —
+     *    `depthTest: false`, `depthWrite: false`. Все тайлы на плоскости
+     *    `Y=0`, порядок задаётся `mesh.renderOrder = baseRenderOrder + z`
+     *    (между слоями по `baseRenderOrder`, внутри слоя по `z`). Без
+     *    depth нет z-fighting между слоями и LOD-уровнями.
+     *  - **слой с рельефом** (DEM-тайлы или `enableGeotiffElevation`) —
+     *    `depthTest: true`, `depthWrite: true`. У тайлов реальная
+     *    3D-геометрия, Y-координаты вершин разные. Без depth-буфера
+     *    дальняя гора рисовалась бы поверх ближней: порядок треугольников
+     *    в буфере не совпадает с экранной глубиной.
+     *
+     * Явные `opts.depthTest` / `opts.depthWrite` переопределяют дефолт.
+     * `createStaticTileMesh` пользуется этим, чтобы статический фон
+     * всегда оставался плоским и не участвовал в 3D.
      *
      * @private
      */
     _createTileMaterial(texture, opts = {}) {
-        const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : false;
-        const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : false;
+        const layerHasElevation = this._layerHasElevation;
+
+        const depthWrite = opts.depthWrite !== undefined
+            ? opts.depthWrite
+            : layerHasElevation;
+        const depthTest = opts.depthTest !== undefined
+            ? opts.depthTest
+            : layerHasElevation;
 
         const rawOpacity = this.layer?.opacity;
         const opacity = (Number.isFinite(rawOpacity) ? rawOpacity : 1);
@@ -444,8 +472,8 @@ export class TileManager {
      * созданные меши. При переключении `transparent` форсирует
      * пересборку материала (`needsUpdate`).
      *
-     * `depthWrite` не трогаем: тайлы всегда `depthWrite: false`,
-     * `depthTest: false` (см. {@link TileManager#_createTileMaterial}).
+     * `depthWrite`/`depthTest` не трогаем: они зависят только от
+     * наличия рельефа у слоя (см. {@link TileManager#_createTileMaterial}).
      *
      * @param {number} opacity
      */
@@ -474,10 +502,12 @@ export class TileManager {
     /**
      * Обновляет видимые тайлы для этого слоя.
      *
-     * `depthWrite` не переключается: тайлы принципиально не участвуют
-     * в depth-буфере (см. {@link TileManager#_createTileMaterial}).
-     * Порядок отрисовки слоёв и LOD-уровней обеспечивается только
-     * `mesh.renderOrder = baseRenderOrder + z`.
+     * Порядок отрисовки и depth-состояние определяются в
+     * {@link TileManager#_createTileMaterial} по наличию рельефа у слоя:
+     *
+     *  - плоские тайлы — только `renderOrder` (`baseRenderOrder + z`),
+     *    depth не используется;
+     *  - тайлы с рельефом — плюс к `renderOrder` работает depth-буфер.
      *
      * @param {THREE.Camera} camera
      * @param {THREE.Vector3} controlsTarget
@@ -619,9 +649,15 @@ export class TileManager {
             }
         }
 
-        // Видимость — в одном проходе. Порядок между слоями и LOD-переход
-        // обеспечиваются исключительно `renderOrder` (= baseRenderOrder + z):
-        // тайлы не тестируют и не пишут глубину (см. _createTileMaterial).
+        // Видимость — в одном проходе.
+        //  - Плоские тайлы (без elevation): порядок между слоями и внутри
+        //    слоя (LOD-переход, overzoom) обеспечивает `renderOrder`
+        //    (= baseRenderOrder + z). Depth-буфер не используется, иначе
+        //    между слоями/уровнями был бы z-fighting.
+        //  - Тайлы с elevation (DEM/GeoTIFF): у них реальная 3D-геометрия,
+        //    Y-координаты разные, поэтому материал создан с depthTest +
+        //    depthWrite (см. _createTileMaterial) — иначе дальняя гора
+        //    рисуется поверх ближней.
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
@@ -715,7 +751,14 @@ export class TileManager {
         this.elevationProvider = provider;
         this.hasElevation = true;
 
+        // Плоский слой стал высотным — нужен воркер.
+        if (!this.worker) {
+            this.initWorker();
+        }
+
         if (!wasElevated) {
+            // Пересоздаём тайлы: у них seg был 1 (плоский), а для рельефа
+            // нужен `SEGMENTS`, и материал должен стать depth-aware.
             this._disposeFlatTiles();
         } else {
             this._refreshElevationsFromProvider();
@@ -944,6 +987,8 @@ export class TileManager {
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
+        // Статический фон не участвует в 3D даже на слое с рельефом —
+        // явно передаём depthTest/depthWrite = false.
         const mat = this._createTileMaterial(texture, {
             depthWrite: false,
             depthTest: false

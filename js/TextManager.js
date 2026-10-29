@@ -877,47 +877,65 @@ export class TextManager {
         }
     }
 
-    _applyTransforms() {
-        for (let i = 0; i < this.labels.length; i++) {
-            const label = this.labels[i];
-            if (label.hiddenByPriority) continue;
-            const src = label.source;
-            const type = src.getLabelType();
+_applyTransforms() {
+    const zoom = this.map.continuousZoom;
 
-            if (type === 'line-curved') {
-                if (label._chosenT == null) continue;
-                const charLayout = src.getCharLayoutAtT(label._chosenT, label._chosenIsFlipped);
-                if (charLayout) {
-                    this._renderLineChars(label, charLayout);
-                }
+    for (let i = 0; i < this.labels.length; i++) {
+        const label = this.labels[i];
+        const src = label.source;
+        const type = src.getLabelType();
+        const isCurved = type === 'line-curved';
+
+        // ── 1. Дешёвая per-frame видимость (source-authoritative) ──
+        const zb = src.getTextZoomBounds();
+        const sourceVisible =
+            src.isVisible() &&
+            zoom >= zb.min && zoom <= zb.max;
+
+        if (!sourceVisible || label.hiddenByPriority) {
+            this._setLabelVisible(label, false);
+            continue;
+        }
+
+        // ── 2. Линейные кривые идут своим путём ──────────────────
+        if (isCurved) {
+            if (label._chosenT == null) {
+                this._setLabelVisible(label, false);
                 continue;
             }
-
-            const el = label.element;
-            let screenX, screenY, rotation = 0;
-
-            if (type === 'line') {
-                const pos = src.getScreenPositionAt(label.t);
-                if (!pos) continue;
-                screenX = pos.x;
-                screenY = pos.y;
-                rotation = src.getScreenAngleAt(label.t);
-            } else {
-                const pos = src.getScreenPosition();
-                if (!pos) continue;
-                screenX = pos.x;
-                screenY = pos.y;
+            const charLayout = src.getCharLayoutAtT(
+                label._chosenT, label._chosenIsFlipped
+            );
+            if (!charLayout) {
+                this._setLabelVisible(label, false);
+                continue;
             }
-
-            const a = this._computeAnchor(label, rotation);
-            const { dx, dy, offX, offY } = a;
-            const top = screenY + dy + offY;
-
-            let transform = `translate3d(${screenX + dx + offX}px, ${top}px, 0)`;
-            if (type === 'line' && src.getPlacement() === 'along') {
-                transform += ` rotate(${rotation}deg)`;
-            }
-            el.style.transform = transform;
+            this._renderLineChars(label, charLayout);
+            this._setLabelVisible(label, true);
+            continue;
         }
+
+        // ── 3. Точечные/обычные линии: позиция ──────────────────
+        let pos;
+        if (type === 'line') pos = src.getScreenPositionAt(label.t);
+        else                  pos = src.getScreenPosition();
+
+        if (!pos) {
+            this._setLabelVisible(label, false);
+            continue;
+        }
+
+        const rotation = type === 'line' ? src.getScreenAngleAt(label.t) : 0;
+        const a = this._computeAnchor(label, rotation);
+        const { dx, dy, offX, offY } = a;
+        const top = pos.y + dy + offY;
+
+        let transform = `translate3d(${pos.x + dx + offX}px, ${top}px, 0)`;
+        if (type === 'line' && src.getPlacement() === 'along') {
+            transform += ` rotate(${rotation}deg)`;
+        }
+        label.element.style.transform = transform;
+        this._setLabelVisible(label, true);
     }
+}
 }

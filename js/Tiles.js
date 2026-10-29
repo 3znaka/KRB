@@ -37,7 +37,10 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
  *  3. **Зум доступных данных растровых тайлов** — `minNativeZoom` /
  *     `maxNativeZoom`. Выше `maxNativeZoom` — overzoom; ниже
  *     `minNativeZoom` — запросы не уходят.
- *  4. **Зум доступных DEM-данных** — `minElevationZoom` / `maxElevationZoom`.
+ *  4. **Зум доступных DEM-данных** — `minElevationNativeZoom` /
+ *     `maxElevationNativeZoom`. Выше `maxElevationNativeZoom` — overzoom:
+ *     DEM предка старшего доступного зума растягивается на тайлы
+ *     большего зума. Ниже `minElevationNativeZoom` — DEM не запрашивается.
  *
  * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
  * камеры. Не влияет ни на видимость, ни на доступность данных.
@@ -59,7 +62,9 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
  * ## Deprecated-алиасы
  *
  *  - `maxSourceZoom` / `minSourceZoom` → `maxNativeZoom` / `minNativeZoom`;
- *  - `maxReliefZ` / `minReliefZ` → `maxElevationZoom` / `minElevationZoom`.
+ *  - `maxReliefZ` / `minReliefZ` → `maxElevationNativeZoom` / `minElevationNativeZoom`;
+ *  - `maxElevationZoom` / `minElevationZoom` (промежуточное имя) →
+ *    `maxElevationNativeZoom` / `minElevationNativeZoom`.
  */
 export class Tile {
     constructor(options) {
@@ -98,24 +103,64 @@ export class Tile {
             ?? 22;
 
         // ── Зум доступных DEM-данных ────────────────────────────────
-        if (options.maxReliefZ !== undefined && options.maxElevationZoom === undefined) {
+        // Канонические имена — *ElevationNativeZoom (аналог min/maxNativeZoom
+        // для растровых тайлов). Выше maxElevationNativeZoom — overzoom:
+        // DEM предка старшего доступного зума растягивается на тайлы
+        // большего зума (см. TileManager.getFallbackElevation).
+        if (options.maxReliefZ !== undefined &&
+            options.maxElevationZoom === undefined &&
+            options.maxElevationNativeZoom === undefined) {
             console.warn(
-                'Tile: опция maxReliefZ устарела, используйте maxElevationZoom. ' +
-                'Значение maxReliefZ будет использовано как maxElevationZoom.'
+                'Tile: опция maxReliefZ устарела, используйте maxElevationNativeZoom.'
             );
         }
-        if (options.minReliefZ !== undefined && options.minElevationZoom === undefined) {
+        if (options.minReliefZ !== undefined &&
+            options.minElevationZoom === undefined &&
+            options.minElevationNativeZoom === undefined) {
             console.warn(
-                'Tile: опция minReliefZ устарела, используйте minElevationZoom. ' +
-                'Значение minReliefZ будет использовано как minElevationZoom.'
+                'Tile: опция minReliefZ устарела, используйте minElevationNativeZoom.'
             );
         }
-        this.minElevationZoom = options.minElevationZoom
+        if (options.maxElevationZoom !== undefined &&
+            options.maxElevationNativeZoom === undefined) {
+            console.warn(
+                'Tile: опция maxElevationZoom устарела, используйте maxElevationNativeZoom.'
+            );
+        }
+        if (options.minElevationZoom !== undefined &&
+            options.minElevationNativeZoom === undefined) {
+            console.warn(
+                'Tile: опция minElevationZoom устарела, используйте minElevationNativeZoom.'
+            );
+        }
+        this.minElevationNativeZoom = options.minElevationNativeZoom
+            ?? options.minElevationZoom
             ?? options.minReliefZ
             ?? DEFAULTS.MIN_RELIEF_Z;
-        this.maxElevationZoom = options.maxElevationZoom
+        this.maxElevationNativeZoom = options.maxElevationNativeZoom
+            ?? options.maxElevationZoom
             ?? options.maxReliefZ
             ?? DEFAULTS.MAX_RELIEF_Z;
+
+        // Deprecated-алиасы без warning'ов на чтении/записи.
+        // `Core.js` пока обращается к `_elevationLayer.minElevationZoom` /
+        // `maxElevationZoom` (в геттерах `MIN_RELIEF_Z` / `MAX_RELIEF_Z`
+        // и в конструкторе при переносе deprecated `options.minReliefZ` /
+        // `maxReliefZ`). Через эти геттеры/сеттеры значения проксируются
+        // в канонические поля. После миграции `Core.js` на новые имена
+        // эти `defineProperty` можно удалить.
+        Object.defineProperty(this, 'minElevationZoom', {
+            configurable: true,
+            enumerable: false,
+            get: () => this.minElevationNativeZoom,
+            set: (v) => { this.minElevationNativeZoom = v; },
+        });
+        Object.defineProperty(this, 'maxElevationZoom', {
+            configurable: true,
+            enumerable: false,
+            get: () => this.maxElevationNativeZoom,
+            set: (v) => { this.maxElevationNativeZoom = v; },
+        });
 
         // ── CRS источника растровых тайлов ──────────────────────────
         if (options.crs && options.projection && options.crs !== options.projection) {
@@ -178,6 +223,14 @@ export class Tile {
  * `depthTest: false` и корректным `renderOrder` это даёт правильное
  * смешение: например, полупрозрачный слой поверх непрозрачного
  * сравнивается как в Photoshop.
+ *
+ * ## DEM-границы и overzoom
+ *
+ * DEM-тайлы запрашиваются напрямую только в диапазоне
+ * `[minElevationNativeZoom, maxElevationNativeZoom]`. Выше
+ * `maxElevationNativeZoom` — overzoom: `getFallbackElevation` находит
+ * предка ровно на `maxElevationNativeZoom` и растягивает его DEM на
+ * сетку тайла большего зума. Это старое поведение `maxReliefZ`.
  */
 export class TileManager {
     /**
@@ -247,17 +300,30 @@ export class TileManager {
         return this.layer?.minNativeZoom ?? 0;
     }
 
-    get _maxElevationZoom() {
-        if (this.layer?.maxElevationZoom !== undefined) return this.layer.maxElevationZoom;
+    /**
+     * Верхняя граница зумов, для которых у DEM-источника есть данные.
+     * Выше этой границы — overzoom: DEM предка старшего доступного зума
+     * растягивается на тайлы большего зума (см. `getFallbackElevation`).
+     *
+     * Приоритет: `layer.maxElevationNativeZoom` → `engine._elevationLayer`
+     * (сценарий «отдельный слой высот») → `engine.MAX_RELIEF_Z` → `DEFAULTS`.
+     * @type {number}
+     */
+    get _maxElevationNativeZoom() {
+        if (this.layer?.maxElevationNativeZoom !== undefined) return this.layer.maxElevationNativeZoom;
         const elev = this.engine._elevationLayer;
-        if (elev?.maxElevationZoom !== undefined) return elev.maxElevationZoom;
+        if (elev?.maxElevationNativeZoom !== undefined) return elev.maxElevationNativeZoom;
         return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
     }
 
-    get _minElevationZoom() {
-        if (this.layer?.minElevationZoom !== undefined) return this.layer.minElevationZoom;
+    /**
+     * Нижняя граница зумов, для которых у DEM-источника есть данные.
+     * @type {number}
+     */
+    get _minElevationNativeZoom() {
+        if (this.layer?.minElevationNativeZoom !== undefined) return this.layer.minElevationNativeZoom;
         const elev = this.engine._elevationLayer;
-        if (elev?.minElevationZoom !== undefined) return elev.minElevationZoom;
+        if (elev?.minElevationNativeZoom !== undefined) return elev.minElevationNativeZoom;
         return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
     }
 
@@ -674,7 +740,7 @@ export class TileManager {
     _refreshElevationsFromProvider() {
         for (const inst of this.tiles.values()) {
             if (!inst.mesh || inst.loading || inst.heightsApplied) continue;
-            if (!this.shouldRequestElevation(inst)) continue;
+            if (!this.shouldApplyElevation(inst)) continue;
             inst.expectsElevation = true;
             this.requestElevation(inst);
         }
@@ -689,8 +755,8 @@ export class TileManager {
             const texUrl = this.engine.getTextureUrl(this.layer, inst.z, srcX, inst.y);
 
             if (this.hasElevation &&
-                inst.z >= this._minElevationZoom &&
-                inst.z <= this._maxElevationZoom) {
+                inst.z >= this._minElevationNativeZoom &&
+                inst.z <= this._maxElevationNativeZoom) {
                 const elevUrl = this.engine.getElevationUrl(this.layer, inst.z, srcX, inst.y);
                 if (elevUrl) this.srcKeyToElevUrl.set(srcKey, elevUrl);
             }
@@ -718,7 +784,7 @@ export class TileManager {
 
             this.engine.worldGroup.add(mesh);
 
-            if (this.hasElevation && this.shouldRequestElevation(inst)) {
+            if (this.hasElevation && this.shouldApplyElevation(inst)) {
                 inst.expectsElevation = true;
                 this.requestElevation(inst);
             } else {
@@ -733,10 +799,18 @@ export class TileManager {
         }
     }
 
-    /** @private */
-    shouldRequestElevation(inst) {
-        return inst.z >= this._minElevationZoom
-            && inst.z <= this._maxElevationZoom;
+    /**
+     * Применять ли к тайлу рельеф вообще.
+     *
+     * `true` для всех тайлов не мельче `minElevationNativeZoom`. Для
+     * тайлов выше `maxElevationNativeZoom` рельеф придёт через
+     * {@link TileManager#getFallbackElevation} — DEM предка старшего
+     * доступного зума (overzoom). Именно так работало старое `maxReliefZ`.
+     *
+     * @private
+     */
+    shouldApplyElevation(inst) {
+        return inst.z >= this._minElevationNativeZoom;
     }
 
     /** @private */
@@ -936,7 +1010,19 @@ export class TileManager {
 
     /* ---- высоты ---- */
 
-    /** @private */
+    /**
+     * Запрашивает высоты для тайла и применяет их к геометрии.
+     *
+     * Логика источника:
+     *  - если `inst.z` в `[minElevationNativeZoom, maxElevationNativeZoom]` —
+     *    пробуем прямой DEM этого зума (провайдер → URL);
+     *  - иначе (тайл выше `maxElevationNativeZoom`) или если прямой DEM
+     *    не получен — `getFallbackElevation`, который берёт DEM предка
+     *    на `maxElevationNativeZoom` и пересчитывает высоты под сетку
+     *    текущего тайла (overzoom).
+     *
+     * @private
+     */
     async requestElevation(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -945,26 +1031,33 @@ export class TileManager {
 
             let heights = null;
 
-            const provider = this.elevationProvider;
-            if (provider &&
-                typeof provider.isElevationProvider === 'function' &&
-                provider.isElevationProvider() &&
-                typeof provider.getTileHeights === 'function') {
-                heights = provider.getTileHeights(
-                    inst.z, inst.virtX, inst.y, this.engine.SEGMENTS
-                );
-            }
+            // Прямой DEM — только в пределах native-диапазона.
+            if (inst.z >= this._minElevationNativeZoom &&
+                inst.z <= this._maxElevationNativeZoom) {
 
-            if (!heights) {
-                const elevUrl = this.srcKeyToElevUrl.get(srcKey);
-                if (elevUrl) {
-                    const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
-                    const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
-                    const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
-                    heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
+                const provider = this.elevationProvider;
+                if (provider &&
+                    typeof provider.isElevationProvider === 'function' &&
+                    provider.isElevationProvider() &&
+                    typeof provider.getTileHeights === 'function') {
+                    heights = provider.getTileHeights(
+                        inst.z, inst.virtX, inst.y, this.engine.SEGMENTS
+                    );
+                }
+
+                if (!heights) {
+                    const elevUrl = this.srcKeyToElevUrl.get(srcKey);
+                    if (elevUrl) {
+                        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
+                        const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
+                        const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
+                        heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
+                    }
                 }
             }
 
+            // Fallback (overzoom) — для тайлов выше maxElevationNativeZoom
+            // или когда прямой DEM недоступен.
             if (!heights) {
                 heights = await this.getFallbackElevation(inst);
             }
@@ -1034,11 +1127,16 @@ export class TileManager {
         }
     }
 
-    /** @private */
+    /**
+     * Overzoom: DEM предка на `maxElevationNativeZoom` пересчитывается
+     * под сетку текущего тайла. Для `inst.z <= maxElevationNativeZoom`
+     * ищет ближайшего предка (обычно `inst.z - 1`).
+     * @private
+     */
     async getFallbackElevation(inst) {
         let fz = inst.z - 1;
-        while (fz > this._maxElevationZoom) fz--;
-        if (fz < this._minElevationZoom) throw new Error('No elevation fallback');
+        while (fz > this._maxElevationNativeZoom) fz--;
+        if (fz < this._minElevationNativeZoom) throw new Error('No elevation fallback');
 
         const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
         const scale = 1 << (inst.z - fz);
@@ -1070,7 +1168,7 @@ export class TileManager {
 
     /** @private */
     async getParentElevData(z, srcX, y) {
-        if (z < this._minElevationZoom || z > this._maxElevationZoom) return null;
+        if (z < this._minElevationNativeZoom || z > this._maxElevationNativeZoom) return null;
 
         const url = this.engine.getElevationUrl(this.layer, z, srcX, y);
         if (!url) return null;
@@ -1167,8 +1265,8 @@ export class TileManager {
     /** @private */
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation ||
-            z < this._minElevationZoom ||
-            z > this._maxElevationZoom) return;
+            z < this._minElevationNativeZoom ||
+            z > this._maxElevationNativeZoom) return;
         if (this.elevationProvider) return;
 
         const isDeformed = this._isDeformed;

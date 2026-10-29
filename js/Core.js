@@ -81,9 +81,11 @@ export class View {
  *  - **зум тайлов растрового слоя** — `getTileZoom(layer)`, клампится в
  *    `[minNativeZoom, maxNativeZoom]` слоя;
  *  - **зум векторного LOD** — в `VectorTile._pickSourceZoom` по `map.targetZoom`;
- *  - **зум DEM-данных** — `Tile.minElevationZoom`/`maxElevationZoom` у
- *    слоя высот (`_elevationLayer`); старые имена `MIN_RELIEF_Z` /
- *    `MAX_RELIEF_Z` — геттеры для обратной совместимости.
+ *  - **зум DEM-данных** — `Tile.minElevationNativeZoom` /
+ *    `maxElevationNativeZoom` у слоя высот (`_elevationLayer`). Выше
+ *    `maxElevationNativeZoom` — overzoom из предка (DEM предка старшего
+ *    доступного зума растягивается на текущий тайл). Старые имена
+ *    `MIN_RELIEF_Z` / `MAX_RELIEF_Z` — геттеры для обратной совместимости.
  *
  * ## Спецзначения полей слоя
  *
@@ -103,8 +105,8 @@ export class KrbMap {
      * @param {number} [options.R]
      * @param {number} [options.segments]
      * @param {number} [options.animDuration]
-     * @param {number} [options.minReliefZ] — **deprecated**, используйте `Tile.minElevationZoom`.
-     * @param {number} [options.maxReliefZ] — **deprecated**, используйте `Tile.maxElevationZoom`.
+     * @param {number} [options.minReliefZ] — **deprecated**, используйте `Tile.minElevationNativeZoom`.
+     * @param {number} [options.maxReliefZ] — **deprecated**, используйте `Tile.maxElevationNativeZoom`.
      * @param {number} [options.tileMargin]
      * @param {number} [options.tileMarginBg]
      * @param {number} [options.visibleUpdateThrottle]
@@ -180,22 +182,25 @@ export class KrbMap {
         }
 
         // ── Deprecated: minReliefZ / maxReliefZ ─────────────────────
+        // Переехали в Tile (minElevationNativeZoom / maxElevationNativeZoom).
+        // Старые имена на карте читаются через геттеры MIN_RELIEF_Z /
+        // MAX_RELIEF_Z; явные значения перекидываются в _elevationLayer.
         if (options.minReliefZ !== undefined) {
             console.warn(
-                'KrbMap: опция minReliefZ устарела, используйте Tile.minElevationZoom.'
+                'KrbMap: опция minReliefZ устарела, используйте Tile.minElevationNativeZoom.'
             );
             if (this._elevationLayer) {
-                this._elevationLayer.minElevationZoom = options.minReliefZ;
+                this._elevationLayer.minElevationNativeZoom = options.minReliefZ;
             } else {
                 this._defaultMinReliefZ = options.minReliefZ;
             }
         }
         if (options.maxReliefZ !== undefined) {
             console.warn(
-                'KrbMap: опция maxReliefZ устарела, используйте Tile.maxElevationZoom.'
+                'KrbMap: опция maxReliefZ устарела, используйте Tile.maxElevationNativeZoom.'
             );
             if (this._elevationLayer) {
-                this._elevationLayer.maxElevationZoom = options.maxReliefZ;
+                this._elevationLayer.maxElevationNativeZoom = options.maxReliefZ;
             } else {
                 this._defaultMaxReliefZ = options.maxReliefZ;
             }
@@ -569,7 +574,7 @@ export class KrbMap {
         this.maybeUpdateVisibleTiles(true);
     }
 
-        /**
+    /**
      * Устанавливает прозрачность растрового слоя (0..1). Работает только
      * для `Tile` (`layer.texture`); для остальных слоёв — no-op.
      *
@@ -1361,22 +1366,22 @@ export class KrbMap {
 
     /**
      * Нижняя граница зумов DEM-данных. Legacy-алиас на
-     * `_elevationLayer.minElevationZoom`.
+     * `_elevationLayer.minElevationNativeZoom`.
      * @type {number}
      */
     get MIN_RELIEF_Z() {
-        return this._elevationLayer?.minElevationZoom
+        return this._elevationLayer?.minElevationNativeZoom
             ?? this._defaultMinReliefZ
             ?? DEFAULTS.MIN_RELIEF_Z;
     }
 
     /**
      * Верхняя граница зумов DEM-данных. Legacy-алиас на
-     * `_elevationLayer.maxElevationZoom`.
+     * `_elevationLayer.maxElevationNativeZoom`.
      * @type {number}
      */
     get MAX_RELIEF_Z() {
-        return this._elevationLayer?.maxElevationZoom
+        return this._elevationLayer?.maxElevationNativeZoom
             ?? this._defaultMaxReliefZ
             ?? DEFAULTS.MAX_RELIEF_Z;
     }
@@ -2259,7 +2264,7 @@ export class KrbMap {
 
         const elevLayer = elevMgr.layer;
         const futureTileZ = this.targetContinuousZoom + (elevLayer?.zoomOffset ?? this.zoomOffset);
-        const maxElevZ = elevMgr._maxElevationZoom;
+        const maxElevZ = elevMgr._maxElevationNativeZoom;
         if (futureTileZ > maxElevZ) {
             const futureCenter = this._tempVec3a.copy(this.controls.target);
             const neededParentZ = Math.min(Math.floor(futureTileZ) - 1, maxElevZ);

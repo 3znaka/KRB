@@ -1,6 +1,4 @@
-import {
-  THREE
-} from '../js_TP/tpb.js';
+import { THREE } from '../js_TP/tpb.js';
 import { getOriginZ, getVirtKey, DEFAULTS } from './Utils.js';
 import { Projections } from './Projections.js';
 
@@ -13,14 +11,10 @@ const ANCESTOR_FALLBACK = 4;
 /** Максимальная глубина поиска потомков при отдалении. @private */
 const MAX_COVER_DEPTH = 2;
 
-/**
- * Количество сегментов по стороне для деформированного тайла
- * в режиме БЕЗ рельефа. В режиме с рельефом — `engine.SEGMENTS`.
- * @private
- */
+/** Сегментов по стороне деформированного тайла без рельефа. @private */
 const DEFORM_SEGMENTS_FLAT = 8;
 
-/** Значения по умолчанию для освещаемых тайлов. @private */
+/** Освещение тайлов по умолчанию. @private */
 const TILE_DEFAULT_ROUGHNESS = 0.7;
 const TILE_DEFAULT_METALNESS = 0.0;
 const TILE_DEFAULT_EMISSIVE  = 0.5;
@@ -28,43 +22,14 @@ const TILE_DEFAULT_EMISSIVE  = 0.5;
 /**
  * Растровый тайловый слой.
  *
- * ## Зумы
+ * Зумы:
+ *  - видимость слоя — `minZoom` / `maxZoom`;
+ *  - растровые данные — `minNativeZoom` / `maxNativeZoom` (overzoom выше);
+ *  - DEM-данные — `minElevationNativeZoom` / `maxElevationNativeZoom`
+ *    (overzoom выше `maxElevationNativeZoom`).
  *
- * В слое разделены четыре независимых понятия:
- *
- *  1. **Зум камеры** — `KRB.View.minZoom`/`maxZoom`. К слою не относится.
- *  2. **Зум видимости слоя** — `minZoom` / `maxZoom` (Leaflet-style).
- *  3. **Зум доступных данных растровых тайлов** — `minNativeZoom` /
- *     `maxNativeZoom`. Выше `maxNativeZoom` — overzoom; ниже
- *     `minNativeZoom` — запросы не уходят.
- *  4. **Зум доступных DEM-данных** — `minElevationNativeZoom` /
- *     `maxElevationNativeZoom`. Выше `maxElevationNativeZoom` — overzoom:
- *     DEM предка старшего доступного зума растягивается на тайлы
- *     большего зума. Ниже `minElevationNativeZoom` — DEM не запрашивается.
- *
- * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
- * камеры. Не влияет ни на видимость, ни на доступность данных.
- *
- * ## CRS и режим рендера
- *
- * `crs` — CRS сетки `{z}/{x}/{y}` этого слоя. Линейный режим — если
- * совпадает с CRS карты и обе в Mercator-семействе; иначе deformed
- * через lon/lat. Разные растровые слои могут иметь разные `crs`
- * (2GIS = 3857, Yandex = 3395 на одной карте).
- *
- * ## Служебные поля
- *
- *  - `visible` — видимость слоя (`false` → тайлы скрываются, не грузятся);
- *  - `opacity` — прозрачность 0..1 (`< 1` → материал в transparent pass);
- *  - `baseRenderOrder` — база для `mesh.renderOrder`; назначается
- *    `KrbMap._rebuildLayerStack`. Не задаётся пользователем.
- *
- * ## Deprecated-алиасы
- *
- *  - `maxSourceZoom` / `minSourceZoom` → `maxNativeZoom` / `minNativeZoom`;
- *  - `maxReliefZ` / `minReliefZ` → `maxElevationNativeZoom` / `minElevationNativeZoom`;
- *  - `maxElevationZoom` / `minElevationZoom` (промежуточное имя) →
- *    `maxElevationNativeZoom` / `minElevationNativeZoom`.
+ * CRS сетки `{z}/{x}/{y}` — `crs`. Линейный режим, если совпадает с CRS
+ * карты и обе в Mercator-семействе, иначе deformed через lon/lat.
  */
 export class Tile {
     constructor(options) {
@@ -76,62 +41,40 @@ export class Tile {
         this.heightScale = options.heightScale;
         this.zoomOffset = options.zoomOffset ?? 0;
 
-        // ── Видимость слоя ──────────────────────────────────────────
+        // Видимость слоя
         this.visible = options.visible ?? true;
         this.opacity = options.opacity ?? 1;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
 
-        // ── Зум доступных растровых данных ──────────────────────────
+        // Зум растровых данных
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
-                'Значение maxSourceZoom будет использовано как maxNativeZoom.'
-            );
+            console.warn('Tile: maxSourceZoom устарела, используйте maxNativeZoom.');
         }
         if (options.minSourceZoom !== undefined && options.minNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция minSourceZoom устарела, используйте minNativeZoom. ' +
-                'Значение minSourceZoom будет использовано как minNativeZoom.'
-            );
+            console.warn('Tile: minSourceZoom устарела, используйте minNativeZoom.');
         }
-        this.minNativeZoom = options.minNativeZoom
-            ?? options.minSourceZoom
-            ?? 0;
-        this.maxNativeZoom = options.maxNativeZoom
-            ?? options.maxSourceZoom
-            ?? 22;
+        this.minNativeZoom = options.minNativeZoom ?? options.minSourceZoom ?? 0;
+        this.maxNativeZoom = options.maxNativeZoom ?? options.maxSourceZoom ?? 22;
 
-        // ── Зум доступных DEM-данных ────────────────────────────────
-        // Канонические имена — *ElevationNativeZoom (аналог min/maxNativeZoom
-        // для растровых тайлов). Выше maxElevationNativeZoom — overzoom:
-        // DEM предка старшего доступного зума растягивается на тайлы
-        // большего зума (см. TileManager.getFallbackElevation).
+        // Зум DEM-данных
         if (options.maxReliefZ !== undefined &&
             options.maxElevationZoom === undefined &&
             options.maxElevationNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция maxReliefZ устарела, используйте maxElevationNativeZoom.'
-            );
+            console.warn('Tile: maxReliefZ устарела, используйте maxElevationNativeZoom.');
         }
         if (options.minReliefZ !== undefined &&
             options.minElevationZoom === undefined &&
             options.minElevationNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция minReliefZ устарела, используйте minElevationNativeZoom.'
-            );
+            console.warn('Tile: minReliefZ устарела, используйте minElevationNativeZoom.');
         }
         if (options.maxElevationZoom !== undefined &&
             options.maxElevationNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция maxElevationZoom устарела, используйте maxElevationNativeZoom.'
-            );
+            console.warn('Tile: maxElevationZoom устарела, используйте maxElevationNativeZoom.');
         }
         if (options.minElevationZoom !== undefined &&
             options.minElevationNativeZoom === undefined) {
-            console.warn(
-                'Tile: опция minElevationZoom устарела, используйте minElevationNativeZoom.'
-            );
+            console.warn('Tile: minElevationZoom устарела, используйте minElevationNativeZoom.');
         }
         this.minElevationNativeZoom = options.minElevationNativeZoom
             ?? options.minElevationZoom
@@ -142,13 +85,7 @@ export class Tile {
             ?? options.maxReliefZ
             ?? DEFAULTS.MAX_RELIEF_Z;
 
-        // Deprecated-алиасы без warning'ов на чтении/записи.
-        // `Core.js` пока обращается к `_elevationLayer.minElevationZoom` /
-        // `maxElevationZoom` (в геттерах `MIN_RELIEF_Z` / `MAX_RELIEF_Z`
-        // и в конструкторе при переносе deprecated `options.minReliefZ` /
-        // `maxReliefZ`). Через эти геттеры/сеттеры значения проксируются
-        // в канонические поля. После миграции `Core.js` на новые имена
-        // эти `defineProperty` можно удалить.
+        // Deprecated-алиасы без warning'ов.
         Object.defineProperty(this, 'minElevationZoom', {
             configurable: true,
             enumerable: false,
@@ -162,22 +99,16 @@ export class Tile {
             set: (v) => { this.maxElevationNativeZoom = v; },
         });
 
-        // ── CRS источника растровых тайлов ──────────────────────────
+        // CRS
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(
-                `Tile: заданы и crs='${options.crs}', и projection='${options.projection}'; ` +
-                `использую crs.`
+                `Tile: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`
             );
         }
-        /**
-         * CRS сетки `{z}/{x}/{y}` этого слоя.
-         * Mercator-семейство: 'EPSG:3857' (по умолчанию), 'EPSG:3395' (Yandex).
-         * @type {string}
-         */
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
 
         /**
-         * База для `mesh.renderOrder`. Назначается `KrbMap._rebuildLayerStack`.
+         * База для `mesh.renderOrder` (назначает `KrbMap._rebuildLayerStack`).
          * @type {number}
          */
         this.baseRenderOrder = 0;
@@ -185,59 +116,45 @@ export class Tile {
 }
 
 /**
- * Менеджер растровых тайлов **одного слоя**.
+ * Менеджер растровых тайлов одного слоя.
  *
- * ## Per-layer
+ * ## Источник рельефа
  *
- * Каждый экземпляр привязан к одному {@link Tile} через `this.layer`.
- * Создаётся по одному на слой — так разные слои могут иметь разные
- * `crs`, `minNativeZoom`/`maxNativeZoom`, `zoomOffset` и т.д.
+ * Менеджер не хранит собственного «мнения» о наличии рельефа. Источник
+ * истины — `KrbMap._elevationProvider` (единственный на карту). Менеджер
+ * получает его в конструкторе через `engine.elevationProvider` и
+ * обновляет через {@link TileManager#setElevationProvider}.
  *
- * ## Порядок отрисовки и depth-буфер
+ * `hasElevation` — геттер: `true`, если задан провайдер карты **или** у
+ * самого `layer` есть `elevation` (URL DEM). Никакой ручной синхронизации
+ * `this.hasElevation` между картой и менеджером больше нет.
  *
- * **Плоские тайлы (без elevation)** — `depthTest: false`,
- * `depthWrite: false`. Все лежат на плоскости `Y=0`, порядок
- * задаётся `mesh.renderOrder = baseRenderOrder + z`: между слоями —
- * по `baseRenderOrder`, внутри слоя — по `z` (потомки поверх предков).
- * Без depth нет z-fighting между слоями/уровнями.
+ * ## Порядок отрисовки и depth
  *
- * **Тайлы с elevation (DEM/GeoTIFF)** — `depthTest: true`,
- * `depthWrite: true`. Вершины на разных высотах, без depth-буфера
- * дальняя гора рисовалась бы поверх ближней (порядок треугольников
- * в буфере ≠ экранная глубина). `renderOrder` по-прежнему определяет
- * порядок между слоями; внутри слоя корректное перекрытие обеспечивает
- * depth-буфер.
+ *  - **плоские тайлы** — `depthTest: false`, `depthWrite: false`,
+ *    порядок по `renderOrder = baseRenderOrder + z`;
+ *  - **тайлы с elevation** — `depthTest: true`, `depthWrite: true`
+ *    (реальная 3D-геометрия, без depth-буфера дальняя гора рисовалась
+ *    бы поверх ближней).
  *
- * Это per-layer: наличие elevation у одного слоя не включает depth
+ * Решение per-layer: наличие elevation у одного слоя не включает depth
  * для плоских слоёв на той же карте.
- *
- * ## Изоляция от 3D
- *
- * 3D-объекты (`VectorTile` — здания, векторные фичи) и DOM-слои
- * (`Layer`, `ClusterLayer`) рисуются после всех тайлов (`renderOrder`
- * у них выше) со своими `depthTest`/`depthWrite`. Тайлы их не
- * перекрывают и не затрагивают.
- *
- * ## Полупрозрачные слои
- *
- * `layer.opacity < 1` → материал уходит в transparent pass Three.js,
- * который рендерится после всех opaque объектов. В сочетании с
- * корректным `renderOrder` это даёт правильное смешение: например,
- * полупрозрачный слой поверх непрозрачного сравнивается как в Photoshop.
  *
  * ## DEM-границы и overzoom
  *
- * DEM-тайлы запрашиваются напрямую только в диапазоне
- * `[minElevationNativeZoom, maxElevationNativeZoom]`. Выше
- * `maxElevationNativeZoom` — overzoom: `getFallbackElevation` находит
- * предка ровно на `maxElevationNativeZoom` и растягивает его DEM на
- * сетку тайла большего зума. Это старое поведение `maxReliefZ`.
+ * Границы берутся из приоритета:
+ *  1. `elevationProvider.minZoom` / `.maxZoom` (GeoTIFF/Noise — обычно
+ *     `[0, Infinity]` — они сэмплируют на любом зуме);
+ *  2. `layer.minElevationNativeZoom` / `.maxElevationNativeZoom` (URL DEM);
+ *  3. `engine.MIN_RELIEF_Z` / `.MAX_RELIEF_Z` / `DEFAULTS.*`.
+ *
+ * Выше `maxElevationNativeZoom` — overzoom: `getFallbackElevation`
+ * растягивает DEM предка на сетку текущего тайла.
  */
 export class TileManager {
     /**
      * @param {Object} engine — KrbMap.
-     * @param {Tile|null} [layer] — конкретный слой. Если не передан,
-     *     берётся `engine._tileLayer` (обратная совместимость).
+     * @param {Tile|null} [layer]
      */
     constructor(engine, layer = null) {
         this.engine = engine;
@@ -250,30 +167,20 @@ export class TileManager {
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
-        // Per-layer: у этого конкретного слоя есть 3D-рельеф?
-        //  - `elevation: URL` / `'demo'` — да (DEM-тайлы);
-        //  - `enableGeotiffElevation(provider)` — ставится позже, там же
-        //    this.hasElevation = true;
-        //  - иначе — нет (плоский слой).
-        //
-        // Ключевое отличие от прежнего `engine.hasElevation`: наличие
-        // elevation у одного слоя больше не включает depth и запросы DEM
-        // на всех слоях карты.
-        this.hasElevation = !!(layer?.elevation);
+        /**
+         * Единственный источник DEM. Задаётся картой; менеджер читает
+         * его через `_elevationProvider` (см. геттер `hasElevation`).
+         * @private @type {Object|null}
+         */
+        this._elevationProvider = engine.elevationProvider ?? null;
 
         this.tileLighting = engine.tileLighting === true;
         this.tileRoughness = Number.isFinite(engine.tileLightingRoughness)
-            ? engine.tileLightingRoughness
-            : TILE_DEFAULT_ROUGHNESS;
+            ? engine.tileLightingRoughness : TILE_DEFAULT_ROUGHNESS;
         this.tileMetalness = Number.isFinite(engine.tileLightingMetalness)
-            ? engine.tileLightingMetalness
-            : TILE_DEFAULT_METALNESS;
+            ? engine.tileLightingMetalness : TILE_DEFAULT_METALNESS;
         this.tileEmissive = Number.isFinite(engine.tileLightingEmissive)
-            ? engine.tileLightingEmissive
-            : TILE_DEFAULT_EMISSIVE;
-
-        /** @type {Object|null} */
-        this.elevationProvider = null;
+            ? engine.tileLightingEmissive : TILE_DEFAULT_EMISSIVE;
 
         this.pendingWorkerJobs = [];
         this.activeWorkerJobs = 0;
@@ -299,8 +206,47 @@ export class TileManager {
     }
 
     /* ================================================================
-       Границы зумов и режим рендера (per-layer)
+       Рельеф: источник, зум-границы, смена провайдера
        ================================================================ */
+
+    /**
+     * Есть ли у слоя 3D-рельеф: либо провайдер карты, либо `layer.elevation`.
+     * @type {boolean}
+     */
+    get hasElevation() {
+        return !!this._elevationProvider || !!this.layer?.elevation;
+    }
+
+    /**
+     * Устанавливает источник DEM. Единственная точка входа для смены
+     * состояния «есть рельеф / нет рельефа / рельеф из другого источника».
+     *
+     * При любом изменении тайлы пересоздаются (`_disposeAllTiles`):
+     * старые высоты в геометрии уже невалидны.
+     *
+     * @param {Object|null} provider
+     */
+    setElevationProvider(provider) {
+        if (this._elevationProvider === provider) return;
+
+        const had = this.hasElevation;
+        this._elevationProvider = provider;
+        const has = this.hasElevation;
+
+        if (!had && !has) return;
+
+        if (has && !this.worker) this.initWorker();
+
+        this._disposeAllTiles();
+        this.srcKeyToElevUrl.clear();
+        this.frame = 0;
+    }
+
+    /** @private */
+    _disposeAllTiles() {
+        const toDispose = Array.from(this.tiles.values());
+        for (const inst of toDispose) this.disposeTile(inst);
+    }
 
     get _maxNativeZoom() {
         return this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
@@ -310,42 +256,24 @@ export class TileManager {
         return this.layer?.minNativeZoom ?? 0;
     }
 
-    /**
-     * Верхняя граница зумов, для которых у DEM-источника есть данные.
-     * Выше этой границы — overzoom: DEM предка старшего доступного зума
-     * растягивается на тайлы большего зума (см. `getFallbackElevation`).
-     *
-     * Приоритет: `layer.maxElevationNativeZoom` → `engine._elevationLayer`
-     * (сценарий «отдельный слой высот») → `engine.MAX_RELIEF_Z` → `DEFAULTS`.
-     * @type {number}
-     */
-    get _maxElevationNativeZoom() {
-        if (this.layer?.maxElevationNativeZoom !== undefined) return this.layer.maxElevationNativeZoom;
-        const elev = this.engine._elevationLayer;
-        if (elev?.maxElevationNativeZoom !== undefined) return elev.maxElevationNativeZoom;
-        return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
-    }
+get _maxElevationNativeZoom() {
+    const p = this._elevationProvider;
+    if (p && p.elevationMaxZoom != null) return p.elevationMaxZoom;   // ← было p.maxZoom
+    if (this.layer?.elevation) return this.layer.maxElevationNativeZoom;
+    return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
+}
 
-    /**
-     * Нижняя граница зумов, для которых у DEM-источника есть данные.
-     * @type {number}
-     */
-    get _minElevationNativeZoom() {
-        if (this.layer?.minElevationNativeZoom !== undefined) return this.layer.minElevationNativeZoom;
-        const elev = this.engine._elevationLayer;
-        if (elev?.minElevationNativeZoom !== undefined) return elev.minElevationNativeZoom;
-        return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
-    }
+get _minElevationNativeZoom() {
+    const p = this._elevationProvider;
+    if (p && p.elevationMinZoom != null) return p.elevationMinZoom;   // ← было p.minZoom
+    if (this.layer?.elevation) return this.layer.minElevationNativeZoom;
+    return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
+}
 
     get _baseRenderOrder() {
         return this.layer?.baseRenderOrder ?? 0;
     }
 
-    /**
-     * Видим ли слой сейчас: `layer.visible !== false` и текущий
-     * дискретный зум камеры в `[layer.minZoom, layer.maxZoom]`.
-     * @type {boolean}
-     */
     get _isVisible() {
         const layer = this.layer;
         if (!layer) return true;
@@ -368,11 +296,6 @@ export class TileManager {
         return typeof code === 'string' ? Projections.get(code) : code;
     }
 
-    /** Есть ли у слоя реальный 3D-рельеф (DEM-тайлы или GeoTIFF/noise). */
-    get _layerHasElevation() {
-        return this.hasElevation || !!this.elevationProvider;
-    }
-
     key(z, virtX, y) {
         return getVirtKey(z, virtX, y);
     }
@@ -382,49 +305,22 @@ export class TileManager {
        ================================================================ */
 
     /**
-     * Создаёт материал тайла.
-     *
-     * Дефолт `depthTest`/`depthWrite` зависит от наличия рельефа
-     * **у этого слоя**:
-     *
-     *  - **плоский слой** (нет `elevation` и нет `elevationProvider`) —
-     *    `depthTest: false`, `depthWrite: false`. Все тайлы на плоскости
-     *    `Y=0`, порядок задаётся `mesh.renderOrder = baseRenderOrder + z`
-     *    (между слоями по `baseRenderOrder`, внутри слоя по `z`). Без
-     *    depth нет z-fighting между слоями и LOD-уровнями.
-     *  - **слой с рельефом** (DEM-тайлы или `enableGeotiffElevation`) —
-     *    `depthTest: true`, `depthWrite: true`. У тайлов реальная
-     *    3D-геометрия, Y-координаты вершин разные. Без depth-буфера
-     *    дальняя гора рисовалась бы поверх ближней: порядок треугольников
-     *    в буфере не совпадает с экранной глубиной.
-     *
-     * Явные `opts.depthTest` / `opts.depthWrite` переопределяют дефолт.
-     * `createStaticTileMesh` пользуется этим, чтобы статический фон
-     * всегда оставался плоским и не участвовал в 3D.
-     *
+     * Создаёт материал тайла. `depthTest`/`depthWrite` по умолчанию равны
+     * `hasElevation` (у слоя с рельефом — `true`, у плоского — `false`).
+     * Явные `opts.depthTest`/`opts.depthWrite` переопределяют.
      * @private
      */
     _createTileMaterial(texture, opts = {}) {
-        const layerHasElevation = this._layerHasElevation;
+        const layerHasElevation = this.hasElevation;
 
-        const depthWrite = opts.depthWrite !== undefined
-            ? opts.depthWrite
-            : layerHasElevation;
-        const depthTest = opts.depthTest !== undefined
-            ? opts.depthTest
-            : layerHasElevation;
+        const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : layerHasElevation;
+        const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : layerHasElevation;
 
         const rawOpacity = this.layer?.opacity;
-        const opacity = (Number.isFinite(rawOpacity) ? rawOpacity : 1);
+        const opacity = Number.isFinite(rawOpacity) ? rawOpacity : 1;
         const transparent = opacity < 1;
 
-        const common = {
-            map: texture,
-            depthWrite,
-            depthTest,
-            opacity,
-            transparent
-        };
+        const common = { map: texture, depthWrite, depthTest, opacity, transparent };
 
         if (!this.tileLighting) {
             return new THREE.MeshBasicMaterial(common);
@@ -439,15 +335,12 @@ export class TileManager {
         if (this.tileEmissive > 0) {
             mat.emissive = new THREE.Color(0xffffff);
             mat.emissiveIntensity = this.tileEmissive;
-            if (texture) {
-                mat.emissiveMap = texture;
-            }
+            if (texture) mat.emissiveMap = texture;
         }
-
         return mat;
     }
 
-    /** Заменяет текстуру у меша тайла (map и emissiveMap). */
+    /** @param {THREE.Mesh} mesh @param {THREE.Texture} texture */
     setMeshTexture(mesh, texture) {
         if (!mesh || !mesh.material) return;
         mesh.material.map = texture;
@@ -457,10 +350,7 @@ export class TileManager {
         mesh.material.needsUpdate = true;
     }
 
-    /**
-     * Скрывает все тайлы слоя, не удаляя их. Используется, когда слой
-     * выключен (`layer.visible = false`) или вне диапазона `minZoom`/`maxZoom`.
-     */
+    /** @param {boolean} visible */
     setVisible(visible) {
         for (const inst of this.tiles.values()) {
             if (inst.mesh) inst.mesh.visible = !!visible;
@@ -468,13 +358,8 @@ export class TileManager {
     }
 
     /**
-     * Устанавливает прозрачность слоя (0..1) и обновляет все уже
-     * созданные меши. При переключении `transparent` форсирует
-     * пересборку материала (`needsUpdate`).
-     *
-     * `depthWrite`/`depthTest` не трогаем: они зависят только от
-     * наличия рельефа у слоя (см. {@link TileManager#_createTileMaterial}).
-     *
+     * Устанавливает прозрачность слоя (0..1). `depth*` не трогает —
+     * они зависят только от наличия рельефа.
      * @param {number} opacity
      */
     setOpacity(opacity) {
@@ -500,20 +385,8 @@ export class TileManager {
        ================================================================ */
 
     /**
-     * Обновляет видимые тайлы для этого слоя.
-     *
-     * Порядок отрисовки и depth-состояние определяются в
-     * {@link TileManager#_createTileMaterial} по наличию рельефа у слоя:
-     *
-     *  - плоские тайлы — только `renderOrder` (`baseRenderOrder + z`),
-     *    depth не используется;
-     *  - тайлы с рельефом — плюс к `renderOrder` работает depth-буфер.
-     *
-     * @param {THREE.Camera} camera
-     * @param {THREE.Vector3} controlsTarget
-     * @param {number} continuousZoom
-     * @param {THREE.Vector3} worldGroupPos
-     * @returns {number} Идеальный дискретный зум.
+     * Обновляет видимые тайлы слоя.
+     * @returns {number} идеальный дискретный зум.
      */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
         if (!this._isVisible) {
@@ -649,15 +522,6 @@ export class TileManager {
             }
         }
 
-        // Видимость — в одном проходе.
-        //  - Плоские тайлы (без elevation): порядок между слоями и внутри
-        //    слоя (LOD-переход, overzoom) обеспечивает `renderOrder`
-        //    (= baseRenderOrder + z). Depth-буфер не используется, иначе
-        //    между слоями/уровнями был бы z-fighting.
-        //  - Тайлы с elevation (DEM/GeoTIFF): у них реальная 3D-геометрия,
-        //    Y-координаты разные, поэтому материал создан с depthTest +
-        //    depthWrite (см. _createTileMaterial) — иначе дальняя гора
-        //    рисуется поверх ближней.
         for (const [k, inst] of this.tiles) {
             if (!inst.mesh) continue;
             const show = renderSet.has(k);
@@ -740,54 +604,8 @@ export class TileManager {
     }
 
     /* ================================================================
-       Внешний источник высот (GeoTIFF / Noise)
+       Загрузка тайла
        ================================================================ */
-
-    enableGeotiffElevation(provider) {
-        if (!provider) return;
-        if (this.elevationProvider === provider) return;
-
-        const wasElevated = this.hasElevation;
-        this.elevationProvider = provider;
-        this.hasElevation = true;
-
-        // Плоский слой стал высотным — нужен воркер.
-        if (!this.worker) {
-            this.initWorker();
-        }
-
-        if (!wasElevated) {
-            // Пересоздаём тайлы: у них seg был 1 (плоский), а для рельефа
-            // нужен `SEGMENTS`, и материал должен стать depth-aware.
-            this._disposeFlatTiles();
-        } else {
-            this._refreshElevationsFromProvider();
-        }
-        this.frame = 0;
-    }
-
-    /** @private */
-    _disposeFlatTiles() {
-        const targetCount = (this.engine.SEGMENTS + 1) * (this.engine.SEGMENTS + 1);
-        const toDispose = [];
-        for (const inst of this.tiles.values()) {
-            if (!inst.mesh || !inst.geometry) continue;
-            if (inst.loading) continue;
-            const count = inst.geometry.attributes.position.count;
-            if (count !== targetCount) toDispose.push(inst);
-        }
-        for (const inst of toDispose) this.disposeTile(inst);
-    }
-
-    /** @private */
-    _refreshElevationsFromProvider() {
-        for (const inst of this.tiles.values()) {
-            if (!inst.mesh || inst.loading || inst.heightsApplied) continue;
-            if (!this.shouldApplyElevation(inst)) continue;
-            inst.expectsElevation = true;
-            this.requestElevation(inst);
-        }
-    }
 
     /** @private */
     async loadTile(inst) {
@@ -843,13 +661,9 @@ export class TileManager {
     }
 
     /**
-     * Применять ли к тайлу рельеф вообще.
-     *
-     * `true` для всех тайлов не мельче `minElevationNativeZoom`. Для
-     * тайлов выше `maxElevationNativeZoom` рельеф придёт через
-     * {@link TileManager#getFallbackElevation} — DEM предка старшего
-     * доступного зума (overzoom). Именно так работало старое `maxReliefZ`.
-     *
+     * Применять ли к тайлу рельеф вообще: `true` для всех тайлов не мельче
+     * `minElevationNativeZoom`. Выше `maxElevationNativeZoom` рельеф придёт
+     * через `getFallbackElevation` (overzoom).
      * @private
      */
     shouldApplyElevation(inst) {
@@ -880,11 +694,7 @@ export class TileManager {
         const mat = this._createTileMaterial(texture);
 
         const mesh = new THREE.Mesh(geometry, mat);
-        mesh.position.set(
-            originX + tileSize / 2,
-            0,
-            originZ + tileSize / 2
-        );
+        mesh.position.set(originX + tileSize / 2, 0, originZ + tileSize / 2);
         mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
         return mesh;
@@ -987,18 +797,12 @@ export class TileManager {
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
-        // Статический фон не участвует в 3D даже на слое с рельефом —
-        // явно передаём depthTest/depthWrite = false.
         const mat = this._createTileMaterial(texture, {
             depthWrite: false,
             depthTest: false
         });
         const mesh = new THREE.Mesh(geom, mat);
-        mesh.position.set(
-            originX + tileSize / 2,
-            -1.5,
-            originZ + tileSize / 2
-        );
+        mesh.position.set(originX + tileSize / 2, -1.5, originZ + tileSize / 2);
         mesh.renderOrder = -2;
         return mesh;
     }
@@ -1058,14 +862,9 @@ export class TileManager {
     /**
      * Запрашивает высоты для тайла и применяет их к геометрии.
      *
-     * Логика источника:
-     *  - если `inst.z` в `[minElevationNativeZoom, maxElevationNativeZoom]` —
-     *    пробуем прямой DEM этого зума (провайдер → URL);
-     *  - иначе (тайл выше `maxElevationNativeZoom`) или если прямой DEM
-     *    не получен — `getFallbackElevation`, который берёт DEM предка
-     *    на `maxElevationNativeZoom` и пересчитывает высоты под сетку
-     *    текущего тайла (overzoom).
-     *
+     * Порядок источников:
+     *  - прямой DEM в native-диапазоне: `_elevationProvider` → URL;
+     *  - overzoom через `getFallbackElevation` (DEM предка).
      * @private
      */
     async requestElevation(inst) {
@@ -1076,11 +875,10 @@ export class TileManager {
 
             let heights = null;
 
-            // Прямой DEM — только в пределах native-диапазона.
             if (inst.z >= this._minElevationNativeZoom &&
                 inst.z <= this._maxElevationNativeZoom) {
 
-                const provider = this.elevationProvider;
+                const provider = this._elevationProvider;
                 if (provider &&
                     typeof provider.isElevationProvider === 'function' &&
                     provider.isElevationProvider() &&
@@ -1101,8 +899,6 @@ export class TileManager {
                 }
             }
 
-            // Fallback (overzoom) — для тайлов выше maxElevationNativeZoom
-            // или когда прямой DEM недоступен.
             if (!heights) {
                 heights = await this.getFallbackElevation(inst);
             }
@@ -1173,9 +969,7 @@ export class TileManager {
     }
 
     /**
-     * Overzoom: DEM предка на `maxElevationNativeZoom` пересчитывается
-     * под сетку текущего тайла. Для `inst.z <= maxElevationNativeZoom`
-     * ищет ближайшего предка (обычно `inst.z - 1`).
+     * Overzoom: DEM предка растягивается на сетку текущего тайла.
      * @private
      */
     async getFallbackElevation(inst) {
@@ -1312,7 +1106,7 @@ export class TileManager {
         if (!this.hasElevation ||
             z < this._minElevationNativeZoom ||
             z > this._maxElevationNativeZoom) return;
-        if (this.elevationProvider) return;
+        if (this._elevationProvider) return;
 
         const isDeformed = this._isDeformed;
         const layerCrs = this.layer?.crs;
@@ -1394,7 +1188,7 @@ export class TileManager {
         }
     }
 
-    /* ---- LRU сборщик мусора ---- */
+    /* ---- LRU ---- */
 
     /** @private */
     gc(renderSet) {
@@ -1429,6 +1223,10 @@ export class TileManager {
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
     }
+
+    /* ================================================================
+       Воркер
+       ================================================================ */
 
     /** @private */
     initWorker() {

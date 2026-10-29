@@ -250,9 +250,9 @@ export class GeoTiffLayer extends Layer {
             this._unregisterInteraction = null;
         }
 
-        if (this._map?.tileManager?.elevationProvider === this) {
-            this._map.tileManager.elevationProvider = null;
-        }
+if (this._map?.elevationProvider === this) {
+    this._map.setElevationProvider(null);
+}
 
         if (this._group && this._group.parent) {
             this._group.parent.remove(this._group);
@@ -387,6 +387,54 @@ export class GeoTiffLayer extends Layer {
         return out;
     }
 
+/**
+ * Прямое сэмплирование высоты в world-координатах карты, независимо
+ * от того, загружены ли уже тайлы. Возвращает высоту, уже умноженную
+ * на `heightScale`, либо `null`, если точка вне данных / NoData.
+ *
+ * @param {number} worldX
+ * @param {number} worldZ
+ * @param {import('./Core.js').KrbMap} map
+ * @returns {number|null}
+ */
+sampleAtWorld(worldX, worldZ, map) {
+    if (!this.isElevationProvider()) return null;
+    const lonLat = map.unprojectToLonLat(worldX, worldZ);
+    if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
+    const v = this._sampleAtLonLat(lonLat[0], lonLat[1]);
+    if (v === null || !Number.isFinite(v)) return null;
+    if (this._geoNoData !== null && v === this._geoNoData) return null;
+    return v * this._elevationHeightScale;
+}
+
+/**
+ * Максимальная высота в тайле `(z, x, y)`. Возвращает `0`, если данных
+ * нет (тайл целиком в NoData или вне покрытия растра).
+ *
+ * @param {number} z @param {number} x @param {number} y @param {number} segments
+ * @returns {number}
+ */
+getTileMaxHeight(z, x, y, segments) {
+    const heights = this.getTileHeights(z, x, y, segments);
+    let max = -Infinity;
+    for (let i = 0; i < heights.length; i++) {
+        if (heights[i] > max) max = heights[i];
+    }
+    return max === -Infinity ? 0 : max;
+}
+
+/**
+ * Нижняя/верхняя граница нативных DEM-зумов для TileManager.
+ * Провайдер сэмплирует на любом зуме: выше — overzoom DEM по своей
+ * сетке, ниже — тоже работает (шаг сетки крупнее пикселя).
+ *
+ * Не путать с `options.minZoom`/`options.maxZoom` (видимость слоя).
+ * @type {number}
+ */
+get elevationMinZoom() { return 0; }
+get elevationMaxZoom() { return Infinity; }
+
+
     /* ================================================================
        Загрузка
        ================================================================ */
@@ -421,9 +469,9 @@ export class GeoTiffLayer extends Layer {
 
             this._registerInteraction();
 
-            if (this._asElevation && typeof this._map.enableGeotiffElevation === 'function') {
-                this._map.enableGeotiffElevation(this);
-            }
+if (this._asElevation) {
+    this._map.setElevationProvider(this);
+}
 
             this._loaded = true;
             this._progress(1);

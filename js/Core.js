@@ -131,8 +131,16 @@ this.inputCRS = options.inputCRS
  * с приоритетом `crs`.
  * @type {Projection}
  */
-const firstTileLayer = this.layers.find(l => l.texture || l.elevation);
-this.zoomOffset = options.zoomOffset ?? firstTileLayer?.zoomOffset ?? 0;
+this._tileLayer = this.layers.find(l => l.texture || l.elevation) ?? null;
+this._defaultZoomOffset = options.zoomOffset ?? 0;
+
+if (options.zoomOffset !== undefined && this._tileLayer?.zoomOffset !== undefined) {
+    console.warn(
+        'KrbMap: заданы и options.zoomOffset, и zoomOffset у тайлового слоя; ' +
+        'использую значение слоя. Уберите options.zoomOffset.'
+    );
+}
+
 const tileCrsCode = firstTileLayer?.crs ?? firstTileLayer?.projection ?? 'EPSG:3857';
 this.tileCRS = Projections.get(tileCrsCode);
 
@@ -1008,6 +1016,31 @@ getZoomForDistance(d) {
         const distToTarget = this.camera.position.distanceTo(this.controls.target);
         return distToTarget * this.objectRenderDistanceFactor;
     }
+
+    /**
+ * Смещение тайлового зума растровых слоёв.
+ * Читается из {@link Tile#zoomOffset}, если задано; иначе — из опции
+ * `zoomOffset`, переданной в конструктор карты; иначе 0.
+ *
+ * Положительное значение — тайлы выше по зуму (крупнее),
+ * отрицательное — ниже (мельче).
+ *
+ * @type {number}
+ */
+get zoomOffset() {
+    const z = this._tileLayer?.zoomOffset;
+    return (z !== undefined && z !== null) ? z : this._defaultZoomOffset;
+}
+
+set zoomOffset(v) {
+    if (this._tileLayer) this._tileLayer.zoomOffset = v;
+    else this._defaultZoomOffset = v;
+
+    if (this._disposed) return;
+    if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
+    this.lastVisibleUpdateTime = 0;
+    this.maybeUpdateVisibleTiles(true);
+}
 
     /* ================================================================
        Источник высот

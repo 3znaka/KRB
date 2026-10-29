@@ -52,6 +52,7 @@ export class Tile {
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale;
+        this.zoomOffset = options.zoomOffset ?? 0;
 
         // crs — каноническое имя, projection — алиас (обратная совместимость).
         if (options.crs && options.projection && options.crs !== options.projection) {

@@ -569,6 +569,20 @@ export class KrbMap {
         this.maybeUpdateVisibleTiles(true);
     }
 
+        /**
+     * Устанавливает прозрачность растрового слоя (0..1). Работает только
+     * для `Tile` (`layer.texture`); для остальных слоёв — no-op.
+     *
+     * @param {Object} layer
+     * @param {number} opacity — 0..1
+     */
+    setLayerOpacity(layer, opacity) {
+        const mgr = this._tileManagers.find(m => m.layer === layer);
+        if (!mgr) return;
+        mgr.setOpacity(opacity);
+        this.maybeUpdateVisibleTiles(true);
+    }
+
     /* ================================================================
        Авто-пауза
        ================================================================ */

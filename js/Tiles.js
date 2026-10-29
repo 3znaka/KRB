@@ -75,6 +75,7 @@ export class Tile {
 
         // ── Видимость слоя ──────────────────────────────────────────
         this.visible = options.visible ?? true;
+        this.opacity = options.opacity ?? 1;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
 
@@ -334,7 +335,20 @@ export class TileManager {
         const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : false;
         const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : true;
 
-        const common = { map: texture, depthWrite, depthTest };
+        // opacity слоя — по умолчанию 1 (непрозрачный)
+        const rawOpacity = this.layer?.opacity;
+        const opacity = (Number.isFinite(rawOpacity) ? rawOpacity : 1);
+        const transparent = opacity < 1;
+
+        const common = {
+            map: texture,
+            // Полупрозрачные тайлы не должны писать в depth-буфер:
+            // иначе они перекроют то, что под ними (2GIS под Yandex).
+            depthWrite: transparent ? false : depthWrite,
+            depthTest,
+            opacity,
+            transparent
+        };
 
         if (!this.tileLighting) {
             return new THREE.MeshBasicMaterial(common);
@@ -375,6 +389,35 @@ export class TileManager {
         for (const inst of this.tiles.values()) {
             if (inst.mesh) inst.mesh.visible = !!visible;
         }
+    }
+
+        /**
+     * Устанавливает прозрачность слоя (0..1) и обновляет все
+     * уже созданные меши. При переключении transparent — форсирует
+     * пересборку материала (`needsUpdate`).
+     *
+     * @param {number} opacity
+     */
+    setOpacity(opacity) {
+        if (!this.layer) return;
+        const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+        if (this.layer.opacity === v) return;
+        this.layer.opacity = v;
+
+        const transparent = v < 1;
+        for (const inst of this.tiles.values()) {
+            const mat = inst.mesh?.material;
+            if (!mat) continue;
+            mat.opacity = v;
+            if (mat.transparent !== transparent) {
+                mat.transparent = transparent;
+                mat.needsUpdate = true; // transparent влияет на шейдер
+            }
+            // Полупрозрачный материал не должен писать depth.
+            if (transparent) mat.depthWrite = false;
+        }
+        // Если переключились обратно в непрозрачный — принудительный
+        // проход update() восстановит правильные роли depthWrite.
     }
 
     /* ================================================================
@@ -532,7 +575,8 @@ export class TileManager {
             if (inst.mesh.visible !== show) inst.mesh.visible = show;
             if (!show) continue;
 
-            const shouldWriteDepth = inst.z >= idealZ;
+const layerTransparent = (this.layer?.opacity ?? 1) < 1;
+            const shouldWriteDepth = !layerTransparent && inst.z >= idealZ;
             const mat = inst.mesh.material;
             if (mat.depthWrite !== shouldWriteDepth) {
                 mat.depthWrite = shouldWriteDepth;

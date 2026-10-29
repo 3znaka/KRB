@@ -42,7 +42,36 @@ const TILE_DEFAULT_METALNESS = 0.0;
 const TILE_DEFAULT_EMISSIVE  = 0.5;
 
 /**
- * Тайл карты с текстурой, данными высоты и атрибуцией.
+ * Растровый тайловый слой (тайлы-изображения).
+ *
+ * ## Три «зума» — три разных опции
+ *
+ * В API слоя сознательно разделены три независимых понятия (по аналогии
+ * с {@link VectorTile}):
+ *
+ *  1. **Зум камеры** — задаётся глобально в `KRB.View` (`view.minZoom` /
+ *     `view.maxZoom`). К слою отношения не имеет.
+ *
+ *  2. **Зум видимости слоя** — `minZoom` / `maxZoom`. В каком диапазоне
+ *     зумов камеры слой показывается. Аналог: Leaflet `minZoom`/`maxZoom`.
+ *     Поля сохраняются для симметрии с {@link VectorTile}; сама логика
+ *     скрытия слоя вне диапазона реализуется в следующих версиях.
+ *
+ *  3. **Зум доступных данных источника** — `minNativeZoom` / `maxNativeZoom`.
+ *     Диапазон зумов, для которых сервер реально отдаёт тайлы. Выше
+ *     `maxNativeZoom` выполняется overzoom (тайл старшего уровня
+ *     растягивается на несколько экранных клеток); ниже `minNativeZoom`
+ *     запросы не уходят. Аналог: Leaflet `minNativeZoom`/`maxNativeZoom`,
+ *     Mapbox/MapLibre `minzoom`/`maxzoom` источника.
+ *
+ * `zoomOffset` — смещение запрашиваемого зума тайлов относительно зума
+ * камеры. Не влияет ни на видимость, ни на доступность данных.
+ *
+ * ## Совместимость
+ *
+ *  - `maxSourceZoom` / `minSourceZoom` — устаревшие алиасы для
+ *    `maxNativeZoom` / `minNativeZoom`. При использовании выводят
+ *    предупреждение в консоль.
  */
 export class Tile {
     constructor(options) {
@@ -53,6 +82,32 @@ export class Tile {
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale;
         this.zoomOffset = options.zoomOffset ?? 0;
+
+        // ── Зум видимости слоя (для симметрии с VectorTile) ─────────
+        this.minZoom = options.minZoom ?? 0;
+        this.maxZoom = options.maxZoom ?? Infinity;
+
+        // ── Зум доступных данных источника ──────────────────────────
+        // Канонические имена — minNativeZoom/maxNativeZoom (Leaflet-style).
+        // maxSourceZoom/minSourceZoom оставлены как deprecated-алиасы.
+        if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
+            console.warn(
+                'Tile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
+                'Значение maxSourceZoom будет использовано как maxNativeZoom.'
+            );
+        }
+        if (options.minSourceZoom !== undefined && options.minNativeZoom === undefined) {
+            console.warn(
+                'Tile: опция minSourceZoom устарела, используйте minNativeZoom. ' +
+                'Значение minSourceZoom будет использовано как minNativeZoom.'
+            );
+        }
+        this.minNativeZoom = options.minNativeZoom
+            ?? options.minSourceZoom
+            ?? 0;
+        this.maxNativeZoom = options.maxNativeZoom
+            ?? options.maxSourceZoom
+            ?? 22;
 
         // crs — каноническое имя, projection — алиас (обратная совместимость).
         if (options.crs && options.projection && options.crs !== options.projection) {
@@ -101,6 +156,15 @@ export class Tile {
  * На больших дистанциях это давало z-fighting и «наезд» родителя на ребёнка.
  * Теперь Y-offset убран, а разделение LOD обеспечивается флагом записи
  * глубины — без z-fighting и без смещения реальных высот.
+ *
+ * ## Зумы и границы
+ *
+ * Верхняя граница зумов, для которых у слоя есть реальные тайлы, —
+ * `Tile.maxNativeZoom`. Выше неё `collectCover` не рекурсит и
+ * `prefetchNextZoomLevel` не уходит — сервер таких тайлов не отдаёт.
+ * Верхняя граница видимости (камера) — `engine.MAX_ZOOM`; обе проверяются
+ * независимо. Нижняя граница доступных данных — `Tile.minNativeZoom`;
+ * ниже неё `findReadyAncestor` не спускается.
  */
 export class TileManager {
     constructor(engine) {
@@ -152,6 +216,37 @@ export class TileManager {
 
         this.onTileHeightAppliedCallbacks = [];
         this.onTileDisposedCallbacks = [];
+    }
+
+    /* ================================================================
+       Границы зумов (источник данных)
+       ================================================================ */
+
+    /**
+     * Верхняя граница зумов, для которых у растрового слоя есть реальные
+     * тайлы. Выше неё включается overzoom: тайлы `maxNativeZoom`
+     * растягиваются на несколько экранных клеток, а не запрашиваются
+     * у сервера (который таких тайлов не отдаст).
+     *
+     * Берётся из `Tile.maxNativeZoom`; если слой не задан — `engine.MAX_ZOOM`.
+     *
+     * @type {number}
+     */
+    get _maxNativeZoom() {
+        return this.engine._tileLayer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
+    }
+
+    /**
+     * Нижняя граница зумов, для которых у растрового слоя есть реальные
+     * тайлы. Ниже неё `findReadyAncestor` не спускается — сервер таких
+     * тайлов не отдаёт.
+     *
+     * Берётся из `Tile.minNativeZoom`; если слой не задан — 0.
+     *
+     * @type {number}
+     */
+    get _minNativeZoom() {
+        return this.engine._tileLayer?.minNativeZoom ?? 0;
     }
 
     /** Строковый ключ тайла. @private */
@@ -392,9 +487,13 @@ if (this.engine.deformedTiles) {
 
         this.gc(renderSet);
 const viewZ = this.engine.currentDiscreteZoom;
+// Префетч следующего зума — только если он ещё в пределах данных
+// источника и видимости. `prefetchNextZoomLevel` дополнительно
+// проверяет обе границы; здесь дублируем, чтобы не плодить no-op вызовы.
 if (
-    continuousZoom > viewZ + 0.3 &&                  
+    continuousZoom > viewZ + 0.3 &&
     idealZ < this.engine.MAX_ZOOM &&
+    idealZ < this._maxNativeZoom &&
     this._lastPrefetchZoom < idealZ
 ) {
     this._lastPrefetchZoom = idealZ;
@@ -404,8 +503,21 @@ if (
         return idealZ;
     }
 
-    /** @private */
+    /**
+     * Рекурсивно ищет полностью покрывающих потомков, если primary ещё
+     * не загружен.
+     *
+     * Глубина ограничена `MAX_COVER_DEPTH` и доступностью данных
+     * источника: тайлы выше `Tile.maxNativeZoom` сервер не отдаёт,
+     * поэтому рекурсия останавливается на этой границе.
+     *
+     * @private
+     */
     collectCover(z, virtX, y, renderSet, depth = 0) {
+        // За границей доступных данных источника детей не существует —
+        // не пытаемся их загрузить.
+        if (z > this._maxNativeZoom) return false;
+
         const k = this.key(z, virtX, y);
         const inst = this.tiles.get(k);
         if (inst && inst.ready && inst.mesh) {
@@ -425,9 +537,16 @@ if (
         return full;
     }
 
-    /** @private */
+    /**
+     * Ищет готового предка для фолбэка. Не спускается ниже
+     * `max(MIN_ZOOM, Tile.minNativeZoom)` — там тайлов у сервера нет,
+     * запросы только жгут трафик.
+     *
+     * @private
+     */
     findReadyAncestor(z, virtX, y) {
-        for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= this.engine.MIN_ZOOM; dz++) {
+        const minZ = Math.max(this.engine.MIN_ZOOM, this._minNativeZoom);
+        for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= minZ; dz++) {
             const az = z - dz;
             const ax = virtX >> dz;
             const ay = y >> dz;
@@ -1091,12 +1210,16 @@ const tileSize = cullUnit / Math.pow(2, z);
      * `continuousZoom` подходит к порогу смены зума. Сокращает окно, в
      * котором видны fallback-предки, до одного-двух кадров.
      *
+     * Верхняя граница — `min(engine.MAX_ZOOM, Tile.maxNativeZoom)`:
+     * выше камеры нет смысла, выше источника нет данных.
+     *
      * @param {THREE.Vector3} center
      * @param {number} z — целевой зум (idealZ + 1)
      * @param {THREE.Vector3} worldGroupPos
      */
     prefetchNextZoomLevel(center, z, worldGroupPos) {
-        if (z < 0 || z > this.engine.MAX_ZOOM) return;
+        const maxZ = Math.min(this.engine.MAX_ZOOM, this._maxNativeZoom);
+        if (z < 0 || z > maxZ) return;
         const maxTile = (1 << z) - 1;
 
         const [txF, tyF] = this.engine.worldToTileIndex(center.x, center.z, z);

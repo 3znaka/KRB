@@ -11,6 +11,41 @@ import {
 } from '../js_TP/tpb.js';
 
 /**
+ * Собирает атрибуцию со всех слоёв карты — как растровых, переданных
+ * в `layers`, так и векторных/динамических, добавленных через
+ * `addTo(map)` и лежащих в `_dynamicLayers`.
+ *
+ * Устраняет старую проблему: векторный слой с `attributionTitle`
+ * не попадал в `map.layers`, поэтому копирайт не отображался.
+ *
+ * @param {Object} map
+ * @returns {Array<{title: string, url: string}>}
+ */
+function collectAttributions(map) {
+    const result = [];
+    const seen = new Set();
+
+    const push = (layer) => {
+        if (!layer || !layer.attributionTitle) return;
+        const title = String(layer.attributionTitle).trim();
+        if (!title) return;
+        const url = layer.attributionUrl || '';
+        const key = title + '|' + url;
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push({ title, url });
+    };
+
+    const staticLayers = Array.isArray(map.layers) ? map.layers : [];
+    for (const layer of staticLayers) push(layer);
+
+    const dynamicLayers = Array.isArray(map._dynamicLayers) ? map._dynamicLayers : [];
+    for (const layer of dynamicLayers) push(layer);
+
+    return result;
+}
+
+/**
  * Инициализирует интерфейс карты внутри указанного контейнера.
  * Добавляет панель с кнопками, масштабной линейкой и атрибуцией,
  * запускает цикл анимации для обновления показаний.
@@ -33,7 +68,8 @@ import {
  * @param {THREE.Camera} map.camera - Камера сцены.
  * @param {THREE.WebGLRenderer} map.renderer - Рендерер (для размеров canvas).
  * @param {THREE.Plane} map.groundPlane - Плоскость земли.
- * @param {Array} [map.layers] - Массив слоёв карты (первый используется для атрибуции).
+ * @param {Array} [map.layers] - Массив растровых слоёв карты.
+ * @param {Array} [map._dynamicLayers] - Массив динамических (векторных) слоёв.
  * @returns {{destroy: Function}} Дескриптор для уничтожения UI.
  */
 export function initUI(map) {
@@ -132,22 +168,45 @@ export function initUI(map) {
     rightBottom.appendChild(buttons);
 
     // Атрибуция
+    // Ищем attributionTitle у всех слоёв: и растровых (map.layers),
+    // и векторных/динамических (map._dynamicLayers). Каждый источник
+    // отображается отдельной ссылкой, разделённой точкой с запятой,
+    // как принято в картографических библиотеках при нескольких
+    // источниках данных.
     const attribution = document.createElement('div');
     attribution.className = 'krb-attribution';
     rightBottom.appendChild(attribution);
 
-    const layer = map.layers?.[0];
-    if (layer?.attributionTitle) {
-        const attrLink = document.createElement('a');
-        attrLink.href = layer.attributionUrl || '#';
-        attrLink.textContent = '© ' + layer.attributionTitle;
-        attrLink.className = 'krb-attribution-link';
-        attrLink.target = '_blank';
-        attrLink.rel = 'noopener noreferrer';
-        // Pane имеет pointer-events: none, поэтому ссылка не кликается
-        // без явного разрешения pointer-events.
-        attrLink.style.pointerEvents = 'all';
-        attribution.appendChild(attrLink);
+    const attributions = collectAttributions(map);
+    if (attributions.length > 0) {
+        attributions.forEach((entry, idx) => {
+            if (idx > 0) {
+                const sep = document.createElement('span');
+                sep.className = 'krb-attribution-sep';
+                sep.textContent = ' · ';
+                attribution.appendChild(sep);
+            }
+
+            const text = '© ' + entry.title;
+
+            if (entry.url) {
+                const attrLink = document.createElement('a');
+                attrLink.href = entry.url;
+                attrLink.textContent = text;
+                attrLink.className = 'krb-attribution-link';
+                attrLink.target = '_blank';
+                attrLink.rel = 'noopener noreferrer';
+                // Pane имеет pointer-events: none, поэтому ссылка не
+                // кликается без явного разрешения pointer-events.
+                attrLink.style.pointerEvents = 'all';
+                attribution.appendChild(attrLink);
+            } else {
+                const attrSpan = document.createElement('span');
+                attrSpan.className = 'krb-attribution-text';
+                attrSpan.textContent = text;
+                attribution.appendChild(attrSpan);
+            }
+        });
     }
 
     // Кэш ссылки на иконку компаса — ищем один раз, а не каждый кадр.

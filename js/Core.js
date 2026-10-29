@@ -66,6 +66,20 @@ export class View {
  *  - `elevation: 'demo'` — процедурный рельеф через {@link NoiseElevationProvider}.
  *  - `heightScale` (число) — только для URL-источника DEM.
  *  - `crs` (строка) — CRS тайлового сервера, по умолчанию 'EPSG:3857'.
+ *  - `minNativeZoom` / `maxNativeZoom` — диапазон доступных данных
+ *    источника; выше `maxNativeZoom` включается overzoom (растровые
+ *    тайлы `maxNativeZoom` растягиваются, векторные используют LOD
+ *    `maxNativeZoom`).
+ *
+ * ## Три «зума»
+ *
+ * В классе сознательно разделены:
+ *  - **зум камеры** — `view.minZoom`/`view.maxZoom`, дискретный `currentDiscreteZoom`,
+ *    плавный `continuousZoom`, целевой `targetZoom`;
+ *  - **зум тайлов растрового слоя** — `tileZoom`, клампится в
+ *    `[minNativeZoom, maxNativeZoom]` слоя, используется `TileManager`;
+ *  - **зум векторного LOD** — вычисляется в `VectorTile._pickSourceZoom`
+ *    по `map.targetZoom`, клампится в свои `[minNativeZoom, maxNativeZoom]`.
  */
 export class KrbMap {
     /**
@@ -129,7 +143,11 @@ this.inputCRS = options.inputCRS
  * берётся из первого слоя с `texture` или `elevation`, дефолт —
  * EPSG:3857. У слоя тоже принимаются оба имени (`crs` и `projection`),
  * с приоритетом `crs`.
- * @type {Projection}
+ *
+ * Тот же слой (`_tileLayer`) задаёт границы доступных данных источника:
+ * `minNativeZoom` / `maxNativeZoom`. Их читают {@link KrbMap#tileZoom}
+ * и (через него) {@link TileManager}.
+ * @type {Projection|Object|null}
  */
 this._tileLayer = this.layers.find(l => l.texture || l.elevation) ?? null;
 this._defaultZoomOffset = options.zoomOffset ?? 0;
@@ -1028,6 +1046,10 @@ getZoomForDistance(d) {
  * Положительное значение — тайлы выше по зуму (крупнее),
  * отрицательное — ниже (мельче).
  *
+ * Не влияет на границы видимости слоя (`Tile.minZoom`/`maxZoom`) и
+ * доступности данных источника (`Tile.minNativeZoom`/`maxNativeZoom`),
+ * только сдвигает выборку по шкале зумов.
+ *
  * @type {number}
  */
 get zoomOffset() {
@@ -1535,10 +1557,47 @@ peekIdealZoom(continuousZoom) {
                     Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
 }
 
-get tileZoom() {
-    const z = this.currentDiscreteZoom + this.zoomOffset;
-    return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, z));
-}
+    /**
+     * Целевой зум камеры (куда камера едет).
+     *
+     * Публичный геттер, чтобы внешние слои (`VectorTile`) не завязывались
+     * на приватное поле `_cameraAnimation`. Если сейчас идёт анимация
+     * камеры, возвращает её конечный зум; иначе — `targetContinuousZoom`.
+     *
+     * @type {number}
+     */
+    get targetZoom() {
+        return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;
+    }
+
+    /**
+     * Зум запрашиваемых растровых тайлов.
+     *
+     * Вычисляется как `currentDiscreteZoom + zoomOffset` и клампится в
+     * диапазон доступных данных источника:
+     *
+     *  - `minNativeZoom` — ниже этого зума тайлов у сервера нет;
+     *  - `maxNativeZoom` — выше включается overzoom (тайл старшего зума
+     *    растягивается на несколько экранных клеток).
+     *
+     * Если `_tileLayer` не задан (нет растровых слоёв), используются
+     * глобальные `MIN_ZOOM` / `MAX_ZOOM` из `View`.
+     *
+     * Не путать с:
+     *  - `currentDiscreteZoom` — дискретный зум камеры (может быть
+     *    выше `maxNativeZoom` — overzoom);
+     *  - `continuousZoom` — плавный зум камеры;
+     *  - `targetZoom` — целевой зум (куда едет камера).
+     *
+     * @type {number}
+     */
+    get tileZoom() {
+        const z = this.currentDiscreteZoom + this.zoomOffset;
+        const layer = this._tileLayer;
+        const min = layer?.minNativeZoom ?? this.MIN_ZOOM;
+        const max = layer?.maxNativeZoom ?? this.MAX_ZOOM;
+        return Math.max(min, Math.min(max, z));
+    }
 
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;

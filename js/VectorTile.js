@@ -1,52 +1,4 @@
-// VectorTileLayer.js
-/**
- * Модуль слоя векторных тайлов (объёмные здания с выделением острых рёбер).
- * Основная логика управления тайлами, материалов и подписей.
- *
- * ПЕРЕХОД LOD (sourceZoom):
- *  — Новые тайлы добавляются в сцену скрытыми.
- *  — Старый тайл скрывается только тогда, когда готовы ВСЕ нужные новые
- *    тайлы на его площади.
- *  — Новый тайл показывается только тогда, когда скрыты все старые,
- *    которые он перекрывает.
- *  Таким образом в каждой точке экрана всегда ровно один LOD; подмена
- *  атомарна в пределах одного старого тайла. Нет двойных дорог, дыр и
- *  мигания подписей при переключении.
- *
- * ВЫБОР LOD:
- *  — `_pickSourceZoom` целится в `targetContinuousZoom` (куда едет камера),
- *    а не в дискретный зум карты. Гистерезис ±0.65 отсекает дребезг при
- *    остановке зума около x.5.
- *
- * ЖИВАЯ ШИРИНА ЛИНИЙ:
- *  — Воркер отдаёт ширину как кривую (число или {stops}), главный поток
- *    каждый кадр пересчитывает linewidth/dashScale по continuousZoom.
- *    Соседние тайлы одного уровня и оба LOD всегда имеют одинаковую
- *    толщину — при переходе ничего не прыгает.
- *
- * ГЛУБИНА:
- *  — Плоские слои упорядочены renderOrder'ом (алгоритм художника) и
- *    используют `depthTest: this.depthTest` (по умолчанию false).
- *  — Здания рисуются ПОСЛЕ всей плоской графики (renderOrder 5000/5001)
- *    со своей depth-записью — их больше не закрашивают парки и вода.
- *
- * ПОДПИСИ ЛИНЕЙНЫХ ОБЪЕКТОВ:
- *  — Используется `VectorLineLabelSource` из `./LineLabelSource.js`.
- *    Для каждой линии предвычисляется набор «кандидатов» (положение
- *    первого символа по полилинии); TextManager выбирает один, чей bbox
- *    не пересекается с более приоритетными подписями. Каждый символ
- *    рендерится отдельным span'ом с индивидуальным rotate — подпись
- *    «огибает» изгибы.
- *  — Поведение настраивается опциями:
- *      • `lineLabelTracking`      — межтекстовый зазор (× ширины текста),
- *      • `lineLabelPriorityMode`  — 'tile' | 'viewport' — приоритет
- *                                   кандидата по удалённости от центра
- *                                   тайла или от центра экрана,
- *      • `lineLabelHysteresisPx`  — «бонус» ранее выбранному кандидату
- *                                   (меньше дрожания при движении),
- *      • `lineLabelPlacement`     — 'auto' | 'above' | 'below' | 'center',
- *                                   жёстко перекрывает textVerticalAlign.
- */
+// VectorTile.js
 
 import {
   THREE,
@@ -164,16 +116,80 @@ function _flatY(renderOrder) {
 // -----------------------------------------------------------------------------
 // Основной класс.
 // -----------------------------------------------------------------------------
-export class VectorTileLayer {
+
+/**
+ * Векторный тайловый слой.
+ *
+ * ## Три «зума» — три разных опции
+ *
+ * В API слоя сознательно разделены три независимых понятия, которые
+ * в старых версиях (`VectorTileLayer`) смешивались в `minZoom`/`maxZoom`
+ * и `maxSourceZoom`:
+ *
+ *  1. **Зум камеры** — задаётся глобально в `KRB.View` (`view.minZoom` /
+ *     `view.maxZoom`). Определяет, насколько пользователь может приблизить
+ *     или отдалить карту. К слою отношения не имеет.
+ *
+ *  2. **Зум видимости слоя** — `minZoom` / `maxZoom` этого класса. В каком
+ *     диапазоне зумов камеры слой вообще показывается. Вне диапазона
+ *     тайлы не грузятся и не рисуются. Аналог: Leaflet `minZoom`/`maxZoom`.
+ *
+ *  3. **Зум доступных данных источника** — `minNativeZoom` / `maxNativeZoom`.
+ *     Диапазон зумов, для которых сервер реально отдаёт тайлы. Выше
+ *     `maxNativeZoom` выполняется overzoom (тайл старшего уровня
+ *     растягивается на несколько экранных тайлов); ниже `minNativeZoom`
+ *     используется тайл `minNativeZoom` (уменьшается). Аналог: Leaflet
+ *     `minNativeZoom`/`maxNativeZoom`, Mapbox/MapLibre `minzoom`/`maxzoom`
+ *     источника.
+ *
+ * `zoomOffset` — отдельная сущность: смещение запрашиваемого зума тайлов
+ * относительно зума карты. Не влияет ни на видимость, ни на доступность
+ * данных, только сдвигает выборку по шкале зумов.
+ *
+ * ## Совместимость
+ *
+ *  - `maxSourceZoom` — устаревший алиас для `maxNativeZoom`. Если передан,
+ *    используется как `maxNativeZoom` и выводится предупреждение.
+ *  - `minSourceZoom` — аналогично для `minNativeZoom`.
+ *  - `VectorTileLayer` экспортируется как алиас `VectorTile`.
+ */
+export class VectorTile {
     constructor(options = {}) {
         this.url = options.url;
 
         this._crsCode = options.crs ?? null;
         this._crs = null;
 
+        // ── Атрибуция (как у растрового KRB.Tile) ────────────────────
+        this.attributionTitle = options.attributionTitle || '';
+        this.attributionUrl   = options.attributionUrl   || '';
+
+        // ── Зум видимости слоя ──────────────────────────────────────
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
-        this.maxSourceZoom = options.maxSourceZoom ?? 14;
+
+        // ── Зум доступных данных источника ──────────────────────────
+        // Канонические имена — minNativeZoom/maxNativeZoom (Leaflet-style).
+        // maxSourceZoom/minSourceZoom оставлены как deprecated-алиасы.
+        if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
+            console.warn(
+                'VectorTile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
+                'Значение maxSourceZoom будет использовано как maxNativeZoom.'
+            );
+        }
+        if (options.minSourceZoom !== undefined && options.minNativeZoom === undefined) {
+            console.warn(
+                'VectorTile: опция minSourceZoom устарела, используйте minNativeZoom. ' +
+                'Значение minSourceZoom будет использовано как minNativeZoom.'
+            );
+        }
+        this.minNativeZoom = options.minNativeZoom
+            ?? options.minSourceZoom
+            ?? 0;
+        this.maxNativeZoom = options.maxNativeZoom
+            ?? options.maxSourceZoom
+            ?? 14;
+
         this.lineWidthMultiplier = options.lineWidthMultiplier ?? 1.0;
         this.fillOpacity = options.fillOpacity ?? 1.0;
         this.depthTest = options.depthTest ?? false;
@@ -297,7 +313,7 @@ export class VectorTileLayer {
             }
         });
         if (this._workerScriptUrls.length < 2) {
-            console.warn('VectorTileLayer: workerScripts должен содержать два URL (tpb.js и earcut.js).');
+            console.warn('VectorTile: workerScripts должен содержать два URL (tpb.js и earcut.js).');
         }
 
         this._worker = null;
@@ -345,7 +361,7 @@ export class VectorTileLayer {
         try {
             this._buildGroupFromWorkerResult(group, result);
         } catch (err) {
-            console.error('[VectorTileLayer] Failed to build tile group:', err);
+            console.error('[VectorTile] Failed to build tile group:', err);
             this._disposeTile(group);
             pending.reject(err);
             return;
@@ -491,7 +507,7 @@ export class VectorTileLayer {
                 lGeo.computeLineDistances();
             } else {
                 console.warn(
-                    '[VectorTileLayer] computeLineDistances() недоступен ни на Line2, ни на LineSegmentsGeometry. ' +
+                    '[VectorTile] computeLineDistances() недоступен ни на Line2, ни на LineSegmentsGeometry. ' +
                     'Пунктир не будет работать. Проверьте сборку tpb.js.'
                 );
             }
@@ -511,10 +527,22 @@ export class VectorTileLayer {
         return this.buildings3d && (this._map.currentDiscreteZoom ?? 0) >= this.buildings3dMinZoom;
     }
 
-    /** LOD с гистерезисом: целимся в зум, к которому камера едет, без промежуточных уровней. */
+    /**
+     * LOD с гистерезисом: целимся в зум, к которому камера едет, без
+     * промежуточных уровней. Клампится в диапазон доступных данных
+     * источника `[minNativeZoom, maxNativeZoom]` (не путать с `minZoom`/
+     * `maxZoom` — видимостью слоя).
+     *
+     * Целевой зум берётся из публичного `map.targetZoom` (добавлен в
+     * `KrbMap`); fallback на приватное `_cameraAnimation?.endZoom` оставлен
+     * на случай, если `Core.js` ещё не обновлён.
+     */
     _pickSourceZoom(map) {
-        const clamp = z => Math.max(this.minZoom, Math.min(z, this.maxSourceZoom));
-        const target = (map._cameraAnimation?.endZoom ?? map.targetContinuousZoom) + this.zoomOffset;
+        const clamp = z => Math.max(this.minNativeZoom, Math.min(z, this.maxNativeZoom));
+        const rawTarget = (map.targetZoom !== undefined)
+            ? map.targetZoom
+            : (map._cameraAnimation?.endZoom ?? map.targetContinuousZoom);
+        const target = rawTarget + this.zoomOffset;
         const cur = this._lastSourceZoom;
         if (cur >= 0 && Math.abs(target - cur) < 0.65) return cur;
         return clamp(Math.round(target));
@@ -986,7 +1014,7 @@ export class VectorTileLayer {
     _prefetchNextZoom(z) {
         const map = this._map;
         if (!map) return;
-        if (z < this.minZoom || z > this.maxSourceZoom) return;
+        if (z < this.minNativeZoom || z > this.maxNativeZoom) return;
 
         const visibleTiles = this._getVisibleTileKeys(z);
 
@@ -1024,7 +1052,7 @@ export class VectorTileLayer {
 
     addExclusionArea(collection, layers) {
         if (!this._map) {
-            throw new Error('VectorTileLayer.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
+            throw new Error('VectorTile.addExclusionArea: слой должен быть добавлен на карту (addTo) до вызова addExclusionArea');
         }
 
         const geometries = [];
@@ -1229,6 +1257,7 @@ _postUpdate(map) {
     this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
 
     const discreteZoom = map.currentDiscreteZoom;
+    // Видимость слоя — отдельно от доступности данных (minNativeZoom/maxNativeZoom).
     const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
 
     // ── Смена LOD ─────────────────────────────────────────────────
@@ -1299,7 +1328,8 @@ _postUpdate(map) {
 
     const sourceZoom = this._lastSourceZoom;
     const continuousZoom = map.continuousZoom;
-    const nextSourceZoom = Math.min(sourceZoom + 1, this.maxSourceZoom);
+    // Префетч следующего зума — не выходим за maxNativeZoom.
+    const nextSourceZoom = Math.min(sourceZoom + 1, this.maxNativeZoom);
     if (
         nextSourceZoom > sourceZoom &&
         continuousZoom > discreteZoom + 0.3 &&
@@ -1473,11 +1503,12 @@ _postUpdate(map) {
         const map = this._map;
 
         // LOD слоя может отличаться от дискретного зума карты — используем
-        // фактически загруженный sourceZoom.
+        // фактически загруженный sourceZoom; fallback считаем в диапазоне
+        // доступных данных источника.
         const sourceZoom = this._lastSourceZoom >= 0
             ? this._lastSourceZoom
-            : Math.max(this.minZoom,
-                       Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxSourceZoom));
+            : Math.max(this.minNativeZoom,
+                       Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxNativeZoom));
 
         const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
@@ -1775,3 +1806,6 @@ const msg = {
         return mat;
     }
 }
+
+// Обратная совместимость: старое имя остаётся валидным.
+export const VectorTileLayer = VectorTile;

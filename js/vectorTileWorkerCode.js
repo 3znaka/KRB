@@ -1,20 +1,4 @@
 // VectorTileWorkerCode.js
-/**
- * Модуль генерации кода воркера векторных тайлов.
- * Использует стили и порядок отрисовки из vectorTileDefaults.js.
- *
- * ИЗМЕНЕНИЯ:
- *  — `pickMatch` отделён от `resolveMatch` (нужен для resolveCurve).
- *  — `resolveCurve`/`curveKey`: ширина линии становится зависимостью от
- *    зума (число или {stops}), а не числом, посчитанным в момент сборки.
- *    Главный поток каждый кадр пересчитывает linewidth/dashScale —
- *    тайлы одного LOD и оба LOD на переходе выглядят одинаково.
- *  — `dash` считается на зуме тайла z; масштаб по continuousZoom
- *    докручивает LineMaterial через dashScale.
- *  — `styleZoom` (детерминированный = currentDiscreteZoom + zoomOffset)
- *    используется для резолвинга всех стилей, кроме собственно ширин
- *    линий и dash. Тайлы одного уровня получаются идентичными.
- */
 
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
 

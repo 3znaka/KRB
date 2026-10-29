@@ -141,7 +141,10 @@ if (options.zoomOffset !== undefined && this._tileLayer?.zoomOffset !== undefine
     );
 }
 
-const tileCrsCode = firstTileLayer?.crs ?? firstTileLayer?.projection ?? 'EPSG:3857';
+const tileCrsCode =
+    this._tileLayer?.crs ??
+    this._tileLayer?.projection ??
+    'EPSG:3857';
 this.tileCRS = Projections.get(tileCrsCode);
 
 // Линейная сетка тайлов работает только если тайлы и карта — обе в

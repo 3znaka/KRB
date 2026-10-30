@@ -330,8 +330,8 @@ export class VectorTile {
         this._canvasSizeVec = new THREE.Vector2();
         // ── Worker ───────────────────────────────────────────────────
         const rawScripts = options.workerScripts || [
-            'https://cdn.mapengine.ru/KRB/js_TP/tpb.js',
-            'https://cdn.mapengine.ru/KRB/js_TP/earcut.js',
+            './js/js_TP/tpb.js',
+            './js/js_TP/earcut.js',
         ];
         this._workerScriptUrls = rawScripts.map((s) => {
             if (/^https?:\/\//i.test(s) ||

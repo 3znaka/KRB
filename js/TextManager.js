@@ -204,15 +204,16 @@ export class TextManager {
 
         this.pane.appendChild(el);
 
-        const label = {
-            source,
-            element: el,
-            stableId,
-            t: 0,
-            width: 0,
-            height: 0,
-            hiddenByPriority: false,
-            priority: source.getPriority ? source.getPriority() : 0,
+js
+const label = {
+    source,
+    element: el,
+    stableId,
+    t: 0,
+    width: 0,
+    height: 0,
+    hiddenByPriority: true,  
+    priority: source.getPriority ? source.getPriority() : 0,
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
             _fontSize: parseFloat(styleObj.fontSize) || 12,
             _bbox: null,
@@ -726,10 +727,14 @@ export class TextManager {
         const isStable = this._stableFrameCount >= STABLE_FRAMES;
         this._wasStable = isStable;
 
-        if (isStable && (this._dirty || !wasStable)) {
-            this._dirty = false;
-            this._updateVisibility(zoom, true);
-        }
+if (isStable && !wasStable) {
+    this._dirty = true;
+}
+
+if (this._dirty) {
+    this._updateVisibility(zoom, isStable);
+    this._dirty = false;
+}
 
         this._applyTransforms();
     }

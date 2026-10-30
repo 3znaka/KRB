@@ -1,5 +1,6 @@
 // @ts-nocheck
-export { KrbMap as Map, View } from './Core.js';
+export { KrbMap as Map } from './Core.js';
+export { View } from './View.js';
 export { Tile } from './Tiles.js';
 export { initUI } from './Ui.js';
 export { Marker } from './Marker.js';

@@ -10,6 +10,11 @@ import { VectorLineLabelSource } from './LineLabelSource.js';
 // URL разделяется между всеми экземплярами VectorTile, использующими
 // одинаковые workerScripts.
 // -----------------------------------------------------------------------------
+const _MODULE_DIR = new URL('.', import.meta.url).href;
+const _DEFAULT_WORKER_SCRIPTS = [
+    new URL('./js_TP/tpb.js', _MODULE_DIR).href,
+    new URL('./js_TP/earcut.js', _MODULE_DIR).href,
+];
 const _workerBlobUrlCache = new Map();
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const key = tpbUrl + '|' + earcutUrl;
@@ -150,6 +155,7 @@ let _nextVectorLabelLayerId = 1;
 export class VectorTile {
     constructor(options = {}) {
         this.url = options.url;
+        const rawScripts = options.workerScripts || _DEFAULT_WORKER_SCRIPTS;
         this._crsCode = options.crs ?? null;
         this._crs = null;
         this._labelIdPrefix = `vt:${_nextVectorLabelLayerId++}:`;
@@ -329,17 +335,13 @@ export class VectorTile {
         this._tempVec3 = new THREE.Vector3();
         this._canvasSizeVec = new THREE.Vector2();
         // ── Worker ───────────────────────────────────────────────────
-        const rawScripts = options.workerScripts || [
-            './js/js_TP/tpb.js',
-            './js/js_TP/earcut.js',
-        ];
         this._workerScriptUrls = rawScripts.map((s) => {
             if (/^https?:\/\//i.test(s) ||
                 s.startsWith('/')) {
                 return s;
             }
             try {
-                return new URL(s, window.location.href).href;
+                return new URL(s, _MODULE_DIR).href;
             }
             catch (e) {
                 console.error('Invalid worker script URL:', s, e);

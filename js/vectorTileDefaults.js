@@ -160,7 +160,7 @@ export const DEFAULT_STYLES = {
         height: {
             type: 'field',
             keys: ['render_height', 'height'],
-            fallback: { type: 'levels', multiplier: 3 }
+            fallback: { type: 'levels', multiplier: 2 }
         },
         base: {
             type: 'field',

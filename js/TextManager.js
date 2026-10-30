@@ -159,16 +159,19 @@ export class TextManager {
         this._stableRefZoom = null;
     }
 
-    addLabel(source, stableId = null) {
+addLabel(source, stableId = null, owner = null) {
         if (stableId != null) {
             const existing = this._labelsById.get(stableId);
-            if (existing) {
+    if (existing) {
+                existing._vectorOwner = owner;
                 this._updateLabelSource(existing, source);
                 this._dirty = true;
                 return existing;
             }
+
         }
 
+                
         const type = source.getLabelType ? source.getLabelType() : 'point';
         const isCurved = type === 'line-curved';
 
@@ -221,6 +224,8 @@ const label = {
             _chosenT: null,
             _chosenIsFlipped: false
         };
+
+                label._vectorOwner = owner;
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
 
@@ -241,8 +246,10 @@ const label = {
         const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
 
         label.source = newSource;
-        label._chosenT = null;
-        label._chosenIsFlipped = false;
+        if (oldSource !== newSource) {
+            label._chosenT = null;
+            label._chosenIsFlipped = false;
+        }
 
         Object.assign(el.style, newStyle);
 
@@ -252,12 +259,12 @@ const label = {
         }
 
         const textChanged = oldText !== newText;
-        const fontChanged =
-            oldStyle.fontSize !== newStyle.fontSize ||
-            oldStyle.fontFamily !== newStyle.fontFamily ||
-            oldStyle.fontWeight !== newStyle.fontWeight;
+const fontChanged = [
+            'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
+            'letterSpacing', 'lineHeight', 'textTransform'
+        ].some(key => oldStyle[key] !== newStyle[key]);
 
-        if (textChanged) {
+if (textChanged || (newType === 'point' && fontChanged)) {
             if (newType === 'point') {
                 el.style.whiteSpace = 'pre-line';
                 el.textContent = this._wrapPointText(newText, el.style.fontSize);
@@ -288,18 +295,16 @@ const label = {
         label._queuedForMeasure = false;
         this._dirty = true;
     }
+    pruneStaleLabels(activeIds, owner = null) {
+        if (!activeIds) return;
+        const stale = [];
 
-    pruneStaleLabels(activeIds) {
-        if (!activeIds || this._labelsById.size === 0) return;
-        let toRemove = null;
         for (const [id, label] of this._labelsById) {
-            if (!activeIds.has(id)) {
-                if (!toRemove) toRemove = [];
-                toRemove.push(label);
-            }
+            if ((label._vectorOwner ?? null) !== owner) continue;
+            if (!activeIds.has(id)) stale.push(label);
         }
-        if (!toRemove) return;
-        for (let i = 0; i < toRemove.length; i++) this.removeLabel(toRemove[i]);
+
+        for (const label of stale) this.removeLabel(label);
     }
 
     _wrapPointText(text, fontSize) {
@@ -351,67 +356,40 @@ const label = {
         }
     }
 
-    _flushMeasurements() {
+       _flushMeasurements() {
         if (!this._measureScheduled) return;
         this._measureScheduled = false;
-        const queue = this._measureQueue;
-        if (queue.length === 0) return;
-        this._measureQueue = [];
 
-        let allMeasured = false;
-        let allRestored = false;
+        const queue = this._measureQueue;
+        this._measureQueue = [];
+        const states = [];
+
         try {
-            for (let i = 0; i < queue.length; i++) {
-                const el = queue[i].element;
-                if (!el) continue;
+            // Сначала все записи в DOM, затем все измерения.
+            for (const label of queue) {
+                label._queuedForMeasure = false;
+                const el = label.element;
+                if (!el || el.parentNode !== this.pane) continue;
+
+                states.push({ label, el, display: el.style.display, visibility: el.style.visibility });
                 el.style.display = 'block';
                 el.style.visibility = 'hidden';
             }
-            for (let i = 0; i < queue.length; i++) {
-                const label = queue[i];
-                const el = label.element;
-                if (!el) {
-                    label._needsMeasure = false;
-                    label._queuedForMeasure = false;
-                    continue;
-                }
+
+            for (const { label, el } of states) {
                 label.width = el.offsetWidth;
                 label.height = el.offsetHeight;
-                const cs = window.getComputedStyle(el);
-                label._fontSize = parseFloat(cs.fontSize) || 12;
+                label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
                 label._needsMeasure = false;
-                label._queuedForMeasure = false;
             }
-            allMeasured = true;
-            for (let i = 0; i < queue.length; i++) {
-                const el = queue[i].element;
-                if (!el) continue;
-                el.style.visibility = '';
-                el.style.display = 'none';
-            }
-            allRestored = true;
         } finally {
-            if (!allRestored) {
-                for (let i = 0; i < queue.length; i++) {
-                    const el = queue[i].element;
-                    if (!el) continue;
-                    el.style.visibility = '';
-                    el.style.display = 'none';
-                }
-            }
-            if (!allMeasured) {
-                for (let i = 0; i < queue.length; i++) {
-                    const label = queue[i];
-                    if (label._queuedForMeasure) this._measureQueue.push(label);
-                }
-                if (this._measureQueue.length > 0 && !this._measureScheduled) {
-                    this._measureScheduled = true;
-                    if (typeof requestAnimationFrame === 'function') {
-                        requestAnimationFrame(() => this._flushMeasurements());
-                    }
-                }
+            for (const { el, display, visibility } of states) {
+                el.style.display = display;
+                el.style.visibility = visibility;
             }
         }
+
+        if (states.length) this._dirty = true;
     }
 
     _setLabelVisible(label, visible) {

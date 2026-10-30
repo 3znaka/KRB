@@ -383,27 +383,26 @@ export class KrbMap {
         return crs === this.projection && this.projection.isMercator;
     }
 
+        _getLayersInOrder() {
+        return [...new Set([...this.layers, ...this._dynamicLayers])].filter(Boolean);
+    }
+
     _getLayerIndex(layer) {
-        const rasterIdx = this.layers.indexOf(layer);
-        if (rasterIdx >= 0) return rasterIdx;
-        const dynIdx = this._dynamicLayers.indexOf(layer);
-        if (dynIdx >= 0) return this.layers.length + dynIdx;
-        return -1;
+        return this._getLayersInOrder().indexOf(layer);
     }
 
     _getLayerRenderOrder(layer) {
-        let idx = this._getLayerIndex(layer);
-        if (idx < 0) idx = this.layers.length + this._dynamicLayers.length;
-        return idx * 1000;
+        const stack = this._getLayersInOrder();
+        const index = stack.indexOf(layer);
+        return (index < 0 ? stack.length : index) * 1000;
     }
 
     _getDynamicLayerRenderOrder(layer) {
-        let idx = this._dynamicLayers.indexOf(layer);
-        if (idx < 0) idx = this._dynamicLayers.length;
-        return (this.layers.length + idx) * 1000;
+        return this._getLayerRenderOrder(layer);
     }
 
     _applyLayerRenderOrder(layer, newBase) {
+        if (!layer) return;
         layer.baseRenderOrder = newBase;
 
         const mgr = this._tileManagers.find(m => m.layer === layer);
@@ -419,42 +418,39 @@ export class KrbMap {
     }
 
     _rebuildLayerStack() {
-        let order = 0;
-        for (const layer of this.layers) {
-            this._applyLayerRenderOrder(layer, order * 1000);
-            order++;
-        }
-        for (const layer of this._dynamicLayers) {
-            this._applyLayerRenderOrder(layer, order * 1000);
-            order++;
-        }
+        this._getLayersInOrder().forEach((layer, index) => {
+            this._applyLayerRenderOrder(layer, index * 1000);
+        });
     }
 
     setLayerOrder(layer, index) {
-        const rasterIdx = this.layers.indexOf(layer);
-        const dynIdx = this._dynamicLayers.indexOf(layer);
-        if (rasterIdx < 0 && dynIdx < 0) return;
+        if (this._disposed || !Number.isFinite(index)) return;
 
-        const currentIdx = rasterIdx >= 0 ? rasterIdx : (this.layers.length + dynIdx);
-        const totalLen = this.layers.length + this._dynamicLayers.length;
-        const clamped = Math.max(0, Math.min(index, totalLen - 1));
-        if (currentIdx === clamped) return;
+        const stack = this._getLayersInOrder();
+        const currentIndex = stack.indexOf(layer);
+        if (currentIndex < 0) return;
 
-        if (rasterIdx >= 0) this.layers.splice(rasterIdx, 1);
-        else this._dynamicLayers.splice(dynIdx, 1);
-
-        if (clamped < this.layers.length) {
-            this.layers.splice(clamped, 0, layer);
-        } else {
-            this._dynamicLayers.splice(clamped - this.layers.length, 0, layer);
+        const targetIndex = Math.max(0, Math.min(Math.trunc(index), stack.length - 1));
+        if (currentIndex === targetIndex) {
+            this._rebuildLayerStack();
+            return;
         }
+
+        // Сохраняем прежнюю модель: общий порядок задаётся двумя массивами.
+        // Одновременно удаляем повторные ссылки на один и тот же слой.
+        const primaryCount = new Set(this.layers.filter(Boolean)).size;
+        stack.splice(currentIndex, 1);
+        stack.splice(targetIndex, 0, layer);
+
+        this.layers.splice(0, this.layers.length, ...stack.slice(0, primaryCount));
+        this._dynamicLayers.splice(0, this._dynamicLayers.length, ...stack.slice(primaryCount));
 
         this._rebuildLayerStack();
         this.maybeUpdateVisibleTiles(true);
     }
 
     bringToFront(layer) {
-        this.setLayerOrder(layer, this.layers.length + this._dynamicLayers.length - 1);
+        this.setLayerOrder(layer, this._getLayersInOrder().length - 1);
     }
 
     sendToBack(layer) {
@@ -462,13 +458,16 @@ export class KrbMap {
     }
 
     setLayerVisible(layer, visible) {
-        const v = !!visible;
-        layer.visible = v;
+        if (this._disposed || !layer) return;
+        const value = !!visible;
+
+        // Сеттер слоя сам меняет visible и выполняет побочные действия.
+        // Нельзя присваивать layer.visible перед его вызовом.
+        if (typeof layer.setVisible === 'function') layer.setVisible(value);
+        else layer.visible = value;
 
         const mgr = this._tileManagers.find(m => m.layer === layer);
-        if (mgr) mgr.setVisible(v);
-
-        if (typeof layer.setVisible === 'function') layer.setVisible(v);
+        if (mgr) mgr.setVisible(value);
 
         this.maybeUpdateVisibleTiles(true);
     }
@@ -1174,14 +1173,21 @@ export class KrbMap {
 
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;
+
         const now = performance.now();
-        if (!force && now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
+        const newZoom = this.peekIdealZoom(this.continuousZoom);
+        const zoomChanged = newZoom !== this.currentDiscreteZoom;
+        this.currentDiscreteZoom = newZoom;
+
+        if (!force && !zoomChanged &&
+            now - this.lastVisibleUpdateTime < this.VISIBLE_UPDATE_THROTTLE) return;
+
         this.lastVisibleUpdateTime = now;
+        if (!this._tileManagers.length) return;
 
-        const newZ = this.peekIdealZoom(this.continuousZoom);
-        if (newZ !== this.currentDiscreteZoom) this.currentDiscreteZoom = newZ;
-
-        if (this._tileManagers.length === 0) return;
+        // TileManager может использовать frustum, project() или raycast.
+        this.camera.updateMatrixWorld(true);
+        this.worldGroup.updateMatrixWorld(true);
 
         for (const mgr of this._tileManagers) {
             mgr.update(this.camera, this.controls.target, this.continuousZoom, this.worldGroup.position);
@@ -1975,7 +1981,11 @@ export class KrbMap {
         const intersects = this._tempRaycaster.intersectObjects(meshes, false);
         if (intersects.length > 0) elevation = intersects[0].point.y;
 
-        const identLayers = this._dynamicLayers.filter(l => typeof l.identify === 'function');
+        const identLayers = this._getLayersInOrder().filter(layer =>
+            layer.visible !== false &&
+            (!layer._map || layer._map === this) &&
+            typeof layer.identify === 'function'
+        );
         if (identLayers.length === 0) {
             console.log(
                 `[shift-click] Lon ${lon.toFixed(6)}, Lat ${lat.toFixed(6)}` +
@@ -2186,6 +2196,15 @@ export class KrbMap {
             this._abortController = null;
         }
 
+        for (const layer of this._getLayersInOrder()) {
+            if (layer._map !== this || typeof layer.removeFromMap !== 'function') continue;
+            try {
+                layer.removeFromMap();
+            } catch (err) {
+                console.warn('KrbMap.dispose: layer.removeFromMap() failed', err);
+            }
+        }
+
         for (const mgr of this._tileManagers) {
             if (!mgr) continue;
             try { if (mgr.worker && mgr.worker.terminate) mgr.worker.terminate(); }
@@ -2280,6 +2299,7 @@ export class KrbMap {
     animate() {
         if (this._disposed || this._paused) return;
         this._rafId = requestAnimationFrame(() => this.animate());
+
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
         this._currentDeltaTime = deltaTime;
 
@@ -2295,20 +2315,21 @@ export class KrbMap {
 
         this.controls.update();
         this._wrapLongitudeIfNeeded();
-
         if (!this._cameraAnimation) this.applyZoomDistance();
 
+        // Обновляем до расчёта покрытия и подписей, а не только внутри render().
+        this.camera.updateMatrixWorld(true);
+        this.worldGroup.updateMatrixWorld(true);
         this.maybeUpdateVisibleTiles();
 
-        for (const layer of this.layers) {
-            if (layer._postUpdate) layer._postUpdate(this);
-        }
-        for (const layer of this._dynamicLayers) {
-            if (layer._postUpdate) layer._postUpdate(this);
+        // Снимок объединённого стека: каждый объект обновляется один раз.
+        for (const layer of this._getLayersInOrder()) {
+            if (typeof layer._postUpdate !== 'function') continue;
+            if (layer._map && layer._map !== this) continue;
+            layer._postUpdate(this);
         }
 
         if (this.textManager) this.textManager.update();
-
         this.renderer.render(this.scene, this.camera);
     }
 }

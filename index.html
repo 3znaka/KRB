@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <link href="/KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+import * as KRB from '/js/KRB.js';
+
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [],
+    view: new KRB.View({
+        centerLonLat: [37.6178, 55.7558],
+        zoom: 12,
+        maxZoom: 22
+    }),
+
+});
+
+map.moveCameraTo(37.6178, 55.7558);
+
+const vectorLayer = new KRB.VectorTile({
+    url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
+    maxSourceZoom: 14,                     // тайлы до 14-го уровня, дальше растягиваются
+    minZoom: 2,                            // показываем с 2-го зума
+    maxZoom: 22,
+                    zoomOffset: -2,
+                        buildings3dOpacity: 0.7,       // ← полупрозрачные
+    buildings3dEdgeOpacity: 0.9,   // грани чуть плотнее
+}).addTo(map);
+
+
+</script>
+</body>
+</html>

@@ -155,7 +155,7 @@ export const DEFAULT_STYLES = {
     // ─────────────────────────────────────────────────────────────────
     building: {
         filter: { type: 'geometry', in: [3] },
-        color: { type: 'zoom', stops: [[15.5, 0xf2eae2], [16, 0xdfdbd7]] },
+        color: { type: 'zoom', stops: [[15.5, 0xf2eae2], [16, 0xf2eae2]] },
         stroke: 0xaaaaaa,
         height: {
             type: 'field',
@@ -307,7 +307,7 @@ export const DEFAULT_STYLES = {
             by: ['maritime', 'admin_level'],
             values: {
                 1: { type: 'zoom', stops: [[0, 0.6], [4, 1.4], [5, 2], [12, 8]] },
-                2: { type: 'zoom', stops: [[0, 0.6], [4, 1.4], [5, 2], [12, 8]] },
+                2: { type: 'zoom', stops: [[0, 0.6], [4, 1.4], [5, 2], [12, 2]] },
                 _default: { type: 'zoom', stops: [[4, 0.4], [5, 1], [12, 3]] }
             }
         },

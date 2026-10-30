@@ -1,12 +1,11 @@
+// @ts-nocheck
 // Projections.js
-import proj4 from '../js_TP/proj4.js';
-
+import proj4 from './js_TP/proj4.js';
 const HARDCODED = {
     'EPSG:4326': '+proj=longlat +datum=WGS84 +no_defs +type=crs',
     'EPSG:3857': '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs +type=crs',
     'EPSG:3395': '+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs',
 };
-
 /**
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
@@ -37,21 +36,16 @@ export class Projection {
         /** @type {string} */ this.code = code;
         /** @type {string} */ this.def = def;
         /** @type {boolean} */ this.isGeographic = /\+proj=longlat/.test(def);
-
         const projMatch = def.match(/\+proj=(\w+)/);
         /** @type {string|null} */
         this.projName = projMatch ? projMatch[1].toLowerCase() : null;
-
         /** @type {boolean} */
         this.isMercator = this.projName === 'merc';
-
         // Осевой меридиан: +lon_0=… либо из +zone=N (UTM/GK).
         this.lon0 = this._parseLon0(def);
-
         /** Предельная широта для Mercator. null — не ограничиваем.
          *  @type {number|null} */
         this.maxLatDeg = this.isMercator ? 85.05112878 : null;
-
         /**
          * Порог «мусора» для спроецированных координат (метры).
          *
@@ -65,12 +59,11 @@ export class Projection {
          */
         this.maxAbsCoord = 2.5e7;
     }
-
     /** @private */
     _parseLon0(def) {
         const lon0Match = def.match(/\+lon_0=(-?[\d.]+)/);
-        if (lon0Match) return parseFloat(lon0Match[1]);
-
+        if (lon0Match)
+            return parseFloat(lon0Match[1]);
         const zoneMatch = def.match(/\+zone=(\d+)/);
         if (zoneMatch) {
             const zone = parseInt(zoneMatch[1], 10);
@@ -79,7 +72,6 @@ export class Projection {
         }
         return 0;
     }
-
     /**
      * Валидны ли географические координаты.
      *
@@ -96,56 +88,61 @@ export class Projection {
      * @returns {boolean}
      */
     isValidLonLat(lonLat) {
-        if (!lonLat || lonLat.length < 2) return false;
+        if (!lonLat || lonLat.length < 2)
+            return false;
         const lon = lonLat[0], lat = lonLat[1];
-        if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
-        if (Math.abs(lon) > 180.0001) return false;
-        if (Math.abs(lat) > 90.0001) return false;
+        if (!Number.isFinite(lon) || !Number.isFinite(lat))
+            return false;
+        if (Math.abs(lon) > 180.0001)
+            return false;
+        if (Math.abs(lat) > 90.0001)
+            return false;
         return true;
     }
-
     /**
      * Конечны ли спроецированные координаты и не «мусор» ли это.
      * @param {Array<number>} coord @returns {boolean}
      */
     isValidCoord(coord) {
-        if (!coord || coord.length < 2) return false;
+        if (!coord || coord.length < 2)
+            return false;
         const x = coord[0], y = coord[1];
-        if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-        if (Math.abs(x) > this.maxAbsCoord || Math.abs(y) > this.maxAbsCoord) return false;
+        if (!Number.isFinite(x) || !Number.isFinite(y))
+            return false;
+        if (Math.abs(x) > this.maxAbsCoord || Math.abs(y) > this.maxAbsCoord)
+            return false;
         return true;
     }
-
     /**
      * Прижимает широту к пределу (только для Mercator).
      * @param {Array<number>} lonLat @returns {Array<number>}
      */
     clampLonLat(lonLat) {
-        if (this.maxLatDeg === null) return lonLat;
+        if (this.maxLatDeg === null)
+            return lonLat;
         const lon = lonLat[0], lat = lonLat[1];
-        if (!Number.isFinite(lat)) return lonLat;
-        if (Math.abs(lat) <= this.maxLatDeg) return lonLat;
+        if (!Number.isFinite(lat))
+            return lonLat;
+        if (Math.abs(lat) <= this.maxLatDeg)
+            return lonLat;
         return [lon, Math.sign(lat) * this.maxLatDeg];
     }
-
     /** @param {Projection} other @param {Array<number>} coord */
     convertTo(other, coord) { return proj4(this.def, other.def, coord); }
-
     /** «Сырой» proj4 (может вернуть NaN/Infinity). */
     fromLonLat(coord) { return proj4(HARDCODED['EPSG:4326'], this.def, coord); }
-    toLonLat(coord)   { return proj4(this.def, HARDCODED['EPSG:4326'], coord); }
-
+    toLonLat(coord) { return proj4(this.def, HARDCODED['EPSG:4326'], coord); }
     /**
      * Безопасная проекция: кламп широты + отсев мусора.
      * @param {Array<number>} coord @returns {Array<number>|null}
      */
     fromLonLatSafe(coord) {
-        if (!this.isValidLonLat(coord)) return null;
+        if (!this.isValidLonLat(coord))
+            return null;
         const clamped = this.clampLonLat(coord);
         const out = this.fromLonLat(clamped);
         return this.isValidCoord(out) ? out : null;
     }
-
     /**
      * Безопасное обратное преобразование.
      *
@@ -161,17 +158,18 @@ export class Projection {
      * @param {Array<number>} coord @returns {Array<number>|null}
      */
     toLonLatSafe(coord) {
-        if (!this.isValidCoord(coord)) return null;
+        if (!this.isValidCoord(coord))
+            return null;
         const out = this.toLonLat(coord);
-        if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1])) return null;
-        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001) return null;
+        if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1]))
+            return null;
+        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001)
+            return null;
         return out;
     }
 }
-
 /** Канонический WGS84. @type {Projection} */
 export const WGS84 = new Projection('EPSG:4326', HARDCODED['EPSG:4326']);
-
 /**
  * Реестр проекций: get/has/ensure/ensureMany + загрузка из epsg_defs.json.
  */
@@ -181,40 +179,36 @@ class ProjectionRegistry {
         this._map = new Map();
         /** @private @type {Promise<Object>|null} */
         this._defsPromise = null;
-
         this.register(WGS84);
         for (const [code, def] of Object.entries(HARDCODED)) {
-            if (!this._map.has(code)) this.register(new Projection(code, def));
+            if (!this._map.has(code))
+                this.register(new Projection(code, def));
         }
     }
-
     /** @param {Projection} p @returns {Projection} */
     register(p) { this._map.set(p.code, p); return p; }
-
     /** @param {string} code @returns {boolean} */
     has(code) { return this._map.has(code); }
-
     /** @param {string} code @returns {Projection} */
     get(code) {
         const p = this._map.get(code);
-        if (!p) throw new Error(
-            `CRS ${code} не загружен. Сначала вызовите await Projections.ensure('${code}')`
-        );
+        if (!p)
+            throw new Error(`CRS ${code} не загружен. Сначала вызовите await Projections.ensure('${code}')`);
         return p;
     }
-
     /** @param {string} code @returns {Promise<Projection>} */
     async ensure(code) {
-        if (this._map.has(code)) return this._map.get(code);
+        if (this._map.has(code))
+            return this._map.get(code);
         const defs = await this._loadDefs();
         const def = defs[code];
-        if (!def) throw new Error(`CRS ${code} не найден в epsg_defs.json`);
+        if (!def)
+            throw new Error(`CRS ${code} не найден в epsg_defs.json`);
         return this.register(new Projection(code, def));
     }
-
     /** @param {Array<string>} codes @returns {Promise<void>} */
-    async ensureMany(codes) { for (const c of codes) await this.ensure(c); }
-
+    async ensureMany(codes) { for (const c of codes)
+        await this.ensure(c); }
     /** @private @returns {Promise<Object>} */
     _loadDefs() {
         if (!this._defsPromise) {
@@ -224,6 +218,5 @@ class ProjectionRegistry {
         return this._defsPromise;
     }
 }
-
 /** Глобальный реестр. @type {ProjectionRegistry} */
 export const Projections = new ProjectionRegistry();

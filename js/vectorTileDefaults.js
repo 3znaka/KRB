@@ -1,7 +1,6 @@
+// @ts-nocheck
 // vectorTileDefaults.js
-
 export const DEFAULT_STYLES = {
-
     // ─────────────────────────────────────────────────────────────────
     // LANDCOVER
     // ─────────────────────────────────────────────────────────────────
@@ -11,28 +10,27 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: ['class', 'subclass'],
             values: {
-                glacier:   0xffffff,
+                glacier: 0xffffff,
                 ice_shelf: 0xffffff,
-                wood:      0x66aa44,
-                grass:     0xd8e8c8,
-                sand:      0xf5eebc,
-                _default:  0xffffff
+                wood: 0x66aa44,
+                grass: 0xd8e8c8,
+                sand: 0xf5eebc,
+                _default: 0xffffff
             }
         },
         opacity: {
             type: 'match',
             by: ['class', 'subclass'],
             values: {
-                glacier:   { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
+                glacier: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
                 ice_shelf: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
-                wood:      0.1,
-                grass:     1,
-                sand:      1,
-                _default:  0.3
+                wood: 0.1,
+                grass: 1,
+                sand: 1,
+                _default: 0.3
             }
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // LANDUSE
     // ─────────────────────────────────────────────────────────────────
@@ -42,40 +40,39 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                residential:   0xeee6dd,
-                suburb:        0xeee6dd,
+                residential: 0xeee6dd,
+                suburb: 0xeee6dd,
                 neighbourhood: 0xeee6dd,
-                commercial:    0xf2cccc,
-                industrial:    0xffeec2,
-                garages:       0xffeec2,
-                dam:           0xffeec2,
-                cemetery:      0xe0e4dd,
-                hospital:      0xffddee,
-                school:        0xf0e8f8,
-                railway:       0xeee6dd,
-                _default:      undefined
+                commercial: 0xf2cccc,
+                industrial: 0xffeec2,
+                garages: 0xffeec2,
+                dam: 0xffeec2,
+                cemetery: 0xe0e4dd,
+                hospital: 0xffddee,
+                school: 0xf0e8f8,
+                railway: 0xeee6dd,
+                _default: undefined
             }
         },
         opacity: {
             type: 'match',
             by: 'class',
             values: {
-                residential:   { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
-                suburb:        { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
+                residential: { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
+                suburb: { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
                 neighbourhood: { type: 'zoom', stops: [[12, 0.4], [16, 0.2]] },
-                commercial:    0.23,
-                industrial:    0.34,
-                garages:       0.34,
-                dam:           0.34,
-                cemetery:      1,
-                hospital:      1,
-                school:        1,
-                railway:       0.4,
-                _default:      1
+                commercial: 0.23,
+                industrial: 0.34,
+                garages: 0.34,
+                dam: 0.34,
+                cemetery: 1,
+                hospital: 1,
+                school: 1,
+                railway: 0.4,
+                _default: 1
             }
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // PARK
     // ─────────────────────────────────────────────────────────────────
@@ -90,7 +87,6 @@ export const DEFAULT_STYLES = {
         color: 0xd8e8c8,
         opacity: 0.8
     },
-
     // ─────────────────────────────────────────────────────────────────
     // WATERWAY
     //
@@ -105,9 +101,9 @@ export const DEFAULT_STYLES = {
             by: ['brunnel', 'class'],
             values: {
                 tunnel: { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
-                river:  { type: 'zoom', stops: [[10, 0.8], [20, 6]] },
+                river: { type: 'zoom', stops: [[10, 0.8], [20, 6]] },
                 stream: { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
-                canal:  { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
+                canal: { type: 'zoom', stops: [[13, 0.5], [20, 6]] },
                 _default: { type: 'zoom', stops: [[13, 0.5], [20, 2]] }
             }
         },
@@ -116,7 +112,7 @@ export const DEFAULT_STYLES = {
             by: ['brunnel', 'intermittent'],
             values: {
                 tunnel: [2, 4],
-                1:      [4, 3],
+                1: [4, 3],
                 _default: undefined
             }
         },
@@ -133,7 +129,6 @@ export const DEFAULT_STYLES = {
         textVerticalAlign: 'top',
         textOffset: [0, -2],
     },
-
     // ─────────────────────────────────────────────────────────────────
     // WATER
     // ─────────────────────────────────────────────────────────────────
@@ -149,7 +144,6 @@ export const DEFAULT_STYLES = {
             }
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // BUILDING
     // ─────────────────────────────────────────────────────────────────
@@ -168,7 +162,6 @@ export const DEFAULT_STYLES = {
             fallback: 0
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // TRANSPORTATION
     //
@@ -192,22 +185,22 @@ export const DEFAULT_STYLES = {
                     values: {
                         tunnel: 0xfff4c6,
                         bridge: 0xffeaaa,
-                        motorway:  0xffcc88,
-                        trunk:     0xffeaaa,
-                        primary:   0xffeaaa,
+                        motorway: 0xffcc88,
+                        trunk: 0xffeaaa,
+                        primary: 0xffeaaa,
                         secondary: 0xffeaaa,
-                        tertiary:  0xffeaaa,
-                        minor:     0xffffff,
-                        service:   0xffffff,
-                        track:     0xffffff,
-                        path:      0xccbbaa,
-                        steps:     0xffffff,
-                        rail:      0xbbbbbb,
-                        transit:   0xbbbbbb,
-                        ferry:     0x6c9fb6,
-                        pier:      0xf8f4f0,
+                        tertiary: 0xffeaaa,
+                        minor: 0xffffff,
+                        service: 0xffffff,
+                        track: 0xffffff,
+                        path: 0xccbbaa,
+                        steps: 0xffffff,
+                        rail: 0xbbbbbb,
+                        transit: 0xbbbbbb,
+                        ferry: 0x6c9fb6,
+                        pier: 0xf8f4f0,
                         motorway_construction: 0xffffff,
-                        _default:  0xcccccc
+                        _default: 0xcccccc
                     }
                 }
             },
@@ -217,32 +210,32 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                motorway:   { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
-                trunk:      { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
-                primary:    { type: 'zoom', stops: [[8.5, 0], [9, 0.25], [20, 9]] },
-                secondary:  { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
-                tertiary:   { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
-                minor:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
-                service:    { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
-                track:      { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
-                path:       { type: 'zoom', stops: [[15, 0.6], [20, 2]] },
-                steps:      { type: 'zoom', stops: [[13.5, 0], [14, 0.625], [20, 2.875]] },
-                rail:       { type: 'zoom', stops: [[14, 0.2], [15, 0.375], [20, 1]] },
-                transit:    { type: 'zoom', stops: [[14, 0.2], [20, 0.5]] },
-                ferry:      0.55,
-                pier:       { type: 'zoom', stops: [[15, 0.5], [17, 2]] },
+                motorway: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
+                trunk: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
+                primary: { type: 'zoom', stops: [[8.5, 0], [9, 0.25], [20, 9]] },
+                secondary: { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
+                tertiary: { type: 'zoom', stops: [[6.5, 0], [8, 0.25], [20, 6.5]] },
+                minor: { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                service: { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                track: { type: 'zoom', stops: [[13.5, 0], [14, 1.25], [20, 5.75]] },
+                path: { type: 'zoom', stops: [[15, 0.6], [20, 2]] },
+                steps: { type: 'zoom', stops: [[13.5, 0], [14, 0.625], [20, 2.875]] },
+                rail: { type: 'zoom', stops: [[14, 0.2], [15, 0.375], [20, 1]] },
+                transit: { type: 'zoom', stops: [[14, 0.2], [20, 0.5]] },
+                ferry: 0.55,
+                pier: { type: 'zoom', stops: [[15, 0.5], [17, 2]] },
                 motorway_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
-                _default:   0.5
+                _default: 0.5
             }
         },
         dash: {
             type: 'match',
             by: 'class',
             values: {
-                rail:   [2, 2],
-                path:   [1.5, 0.75],
-                steps:  [0.5, 0.25],
-                ferry:  [2, 2],
+                rail: [2, 2],
+                path: [1.5, 0.75],
+                steps: [0.5, 0.25],
+                ferry: [2, 2],
                 _default: undefined
             }
         },
@@ -262,7 +255,6 @@ export const DEFAULT_STYLES = {
             _default: 1
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // AEROWAY
     // ─────────────────────────────────────────────────────────────────
@@ -271,7 +263,7 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                runway:  0xcccccc,
+                runway: 0xcccccc,
                 taxiway: 0xdddddd,
                 _default: 0xcccccc
             }
@@ -280,13 +272,12 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                runway:  { type: 'zoom', stops: [[11, 4], [17, 50]] },
+                runway: { type: 'zoom', stops: [[11, 4], [17, 50]] },
                 taxiway: { type: 'zoom', stops: [[11, 1], [17, 10]] },
                 _default: 1
             }
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // BOUNDARY
     // ─────────────────────────────────────────────────────────────────
@@ -329,7 +320,6 @@ export const DEFAULT_STYLES = {
             }
         }
     },
-
     // ─────────────────────────────────────────────────────────────────
     // WATER_NAME
     //
@@ -353,7 +343,6 @@ export const DEFAULT_STYLES = {
         textVerticalAlign: 'top',
         textOffset: [0, -2],
     },
-
     // ─────────────────────────────────────────────────────────────────
     // POI
     // ─────────────────────────────────────────────────────────────────
@@ -377,7 +366,6 @@ export const DEFAULT_STYLES = {
         textZoomMax: 24,
         textPriority: 60
     },
-
     // ─────────────────────────────────────────────────────────────────
     // TRANSPORTATION_NAME
     //
@@ -406,16 +394,16 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                motorway:  100,
-                trunk:      95,
-                primary:    90,
-                secondary:  85,
-                tertiary:   80,
-                minor:      75,
-                service:    70,
-                rail:       65,
-                path:       60,
-                _default:   65
+                motorway: 100,
+                trunk: 95,
+                primary: 90,
+                secondary: 85,
+                tertiary: 80,
+                minor: 75,
+                service: 70,
+                rail: 65,
+                path: 60,
+                _default: 65
             }
         },
         textMinSegmentLength: 0.05,
@@ -423,7 +411,6 @@ export const DEFAULT_STYLES = {
         textVerticalAlign: 'middle',
         textOffset: [0, 0],
     },
-
     // ─────────────────────────────────────────────────────────────────
     // AERODROME_LABEL
     // ─────────────────────────────────────────────────────────────────
@@ -447,7 +434,6 @@ export const DEFAULT_STYLES = {
         textZoomMax: 24,
         textPriority: 110
     },
-
     // ─────────────────────────────────────────────────────────────────
     // PLACE
     // ─────────────────────────────────────────────────────────────────
@@ -467,28 +453,28 @@ export const DEFAULT_STYLES = {
             type: 'match',
             by: 'class',
             values: {
-                city:       '#333333',
-                town:       '#333333',
-                village:    '#333333',
-                hamlet:     '#333333',
-                state:      '#663333',
-                country:    '#333344',
-                continent:  '#333344',
-                _default:   '#663333'
+                city: '#333333',
+                town: '#333333',
+                village: '#333333',
+                hamlet: '#333333',
+                state: '#663333',
+                country: '#333344',
+                continent: '#333344',
+                _default: '#663333'
             }
         },
         fontSize: {
             type: 'match',
             by: 'class',
             values: {
-                city:      { type: 'zoom', stops: [[7, 14], [11, 24]] },
-                town:      { type: 'zoom', stops: [[10, 14], [15, 24]] },
-                village:   { type: 'zoom', stops: [[10, 12], [15, 22]] },
-                hamlet:    { type: 'zoom', stops: [[10, 11], [15, 18]] },
-                state:     { type: 'zoom', stops: [[12, 10], [15, 14]] },
-                country:   { type: 'zoom', stops: [[3, 11], [7, 17]] },
+                city: { type: 'zoom', stops: [[7, 14], [11, 24]] },
+                town: { type: 'zoom', stops: [[10, 14], [15, 24]] },
+                village: { type: 'zoom', stops: [[10, 12], [15, 22]] },
+                hamlet: { type: 'zoom', stops: [[10, 11], [15, 18]] },
+                state: { type: 'zoom', stops: [[12, 10], [15, 14]] },
+                country: { type: 'zoom', stops: [[3, 11], [7, 17]] },
                 continent: 14,
-                _default:  { type: 'zoom', stops: [[10, 10], [15, 14]] }
+                _default: { type: 'zoom', stops: [[10, 10], [15, 14]] }
             }
         },
         fontWeight: {
@@ -540,23 +526,22 @@ export const DEFAULT_STYLES = {
         }
     }
 };
-
 // ────────────────────────────────────────────────────────────────────────
 // Порядок отрисовки слоёв
 // ────────────────────────────────────────────────────────────────────────
 export const LAYER_RENDER_ORDER = {
-    landcover:            10,
-    landuse:              20,
-    park:                110,
-    waterway:            120,
-    water:               190,
-    building:            250,
-    transportation:      270,
-    aeroway:             470,
-    boundary:            980,
-    water_name:         1030,
-    poi:                1080,
-    transportation_name:1120,
-    aerodrome_label:    1180,
-    place:              1190
+    landcover: 10,
+    landuse: 20,
+    park: 110,
+    waterway: 120,
+    water: 190,
+    building: 250,
+    transportation: 270,
+    aeroway: 470,
+    boundary: 980,
+    water_name: 1030,
+    poi: 1080,
+    transportation_name: 1120,
+    aerodrome_label: 1180,
+    place: 1190
 };

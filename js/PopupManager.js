@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль управления всплывающими подсказками (popup) на карте.
  * Предоставляет единый механизм для отображения HTML-тултипов, привязанных
@@ -6,9 +7,6 @@
  *
  * @module PopupManager
  */
-
-import { THREE } from '../js_TP/tpb.js';
-
 /**
  * Менеджер всплывающих подсказок.
  * Создаёт единый HTML-элемент тултипа, добавляет его в DOM карты и
@@ -49,26 +47,21 @@ export class PopupManager {
      */
     constructor(map, options = {}) {
         /** @private */ this._map = map;
-        /** @private */ this._activeObject = null;   // объект, к которому привязан текущий тултип
+        /** @private */ this._activeObject = null; // объект, к которому привязан текущий тултип
         /** @private */ this._animationFrameId = null;
         /** @private */ this._tooltipElement = null;
         /** @private */ this._isLoopRunning = false;
-
         // Кэш последней позиции — чтобы не трогать DOM, если ничего не изменилось.
         /** @private */ this._lastX = NaN;
         /** @private */ this._lastY = NaN;
         /** @private */ this._lastHtml = null;
-
         /** @private */ this._pointerEvents = options.pointerEvents ?? 'none';
         /** @private */ this._zIndex = String(options.zIndex ?? 1200);
-
         // Привязанный обработчик для возможности удаления.
         /** @private */ this._onDocumentPointerDown = null;
-
         this._createTooltipElement();
         this._bindOutsideClickHandlers();
     }
-
     /**
      * Создаёт DOM-элемент тултипа и добавляет его в контейнер карты.
      *
@@ -100,7 +93,6 @@ export class PopupManager {
         this._map.targetElement.appendChild(el);
         this._tooltipElement = el;
     }
-
     /**
      * Привязывает обработчик события pointerdown на документе.
      * Использование pointerdown (а не mousedown/touchstart по отдельности)
@@ -113,7 +105,6 @@ export class PopupManager {
         this._onDocumentPointerDown = (event) => this._handleDocumentPointerDown(event);
         document.addEventListener('pointerdown', this._onDocumentPointerDown);
     }
-
     /**
      * Обработчик pointerdown на документе.
      * Если тултип активен и клик/касание было вне его прямоугольника, скрывает тултип.
@@ -122,22 +113,18 @@ export class PopupManager {
      * @private
      */
     _handleDocumentPointerDown(event) {
-        if (!this._activeObject || !this._tooltipElement) return;
-
+        if (!this._activeObject || !this._tooltipElement)
+            return;
         const rect = this._tooltipElement.getBoundingClientRect();
         const { clientX, clientY } = event;
-
-        const isInside =
-            clientX >= rect.left &&
+        const isInside = clientX >= rect.left &&
             clientX <= rect.right &&
             clientY >= rect.top &&
             clientY <= rect.bottom;
-
         if (!isInside) {
             this.hide();
         }
     }
-
     /**
      * Запускает цикл обновления позиции. Идемпотентен: повторный вызов
      * при активном цикле ничего не делает.
@@ -145,14 +132,16 @@ export class PopupManager {
      * @private
      */
     _startLoop() {
-        if (this._isLoopRunning) return;
+        if (this._isLoopRunning)
+            return;
         this._isLoopRunning = true;
-
         const tick = () => {
-            if (!this._isLoopRunning) return;
+            if (!this._isLoopRunning)
+                return;
             if (this._activeObject) {
                 this._updatePosition();
-            } else {
+            }
+            else {
                 // Нет активного объекта — дальше крутить цикл нет смысла.
                 this._stopLoop();
                 return;
@@ -161,7 +150,6 @@ export class PopupManager {
         };
         this._animationFrameId = requestAnimationFrame(tick);
     }
-
     /**
      * Останавливает цикл обновления позиции, если он запущен.
      *
@@ -174,7 +162,6 @@ export class PopupManager {
             this._animationFrameId = null;
         }
     }
-
     /**
      * Обновляет позицию тултипа на основе экранных координат активного объекта.
      * Если объект невидим или координаты недоступны, тултип временно прячется
@@ -192,7 +179,6 @@ export class PopupManager {
             this._hide();
             return;
         }
-
         // Не трогаем DOM, если позиция не изменилась (типично для статичной карты).
         if (screenPos.x === this._lastX && screenPos.y === this._lastY) {
             if (this._tooltipElement.style.display !== 'block') {
@@ -202,14 +188,13 @@ export class PopupManager {
         }
         this._lastX = screenPos.x;
         this._lastY = screenPos.y;
-
         const el = this._tooltipElement;
-        if (el.style.display !== 'block') el.style.display = 'block';
+        if (el.style.display !== 'block')
+            el.style.display = 'block';
         // translate3d + центрирующий translate(-50%, -100%) — оба в transform.
         el.style.transform =
             `translate3d(${screenPos.x}px, ${screenPos.y}px, 0) translate(-50%, -100%)`;
     }
-
     /**
      * Показывает тултип с заданным HTML-содержимым, привязанный к указанному объекту.
      * Если HTML пустой или после установки не содержит видимого текста,
@@ -224,15 +209,12 @@ export class PopupManager {
             this.hide();
             return;
         }
-
         this._activeObject = object;
-
         // innerHTML перезаписываем только если он реально изменился —
         // иначе лишний parse-HTML и вызовы textContent.
         if (this._lastHtml !== html) {
             this._tooltipElement.innerHTML = html;
             this._lastHtml = html;
-
             // Проверяем, есть ли видимое содержимое после установки innerHTML.
             if (!this._tooltipElement.textContent ||
                 this._tooltipElement.textContent.trim() === '') {
@@ -240,19 +222,15 @@ export class PopupManager {
                 return;
             }
         }
-
         // Сброс кэша позиции, чтобы первый _updatePosition гарантированно
         // применил transform (даже если координаты совпали со «старыми»).
         this._lastX = NaN;
         this._lastY = NaN;
-
         this._tooltipElement.style.display = 'block';
         // Немедленно обновляем позицию, чтобы не ждать следующего кадра.
         this._updatePosition();
-
         this._startLoop();
     }
-
     /**
      * Скрывает тултип и сбрасывает активный объект.
      * Также уведомляет объект о скрытии через метод `_onPopupHide()`, если он существует.
@@ -264,7 +242,8 @@ export class PopupManager {
         if (this._activeObject && typeof this._activeObject._onPopupHide === 'function') {
             try {
                 this._activeObject._onPopupHide();
-            } catch (e) {
+            }
+            catch (e) {
                 console.warn('[PopupManager] _onPopupHide threw:', e);
             }
         }
@@ -272,7 +251,6 @@ export class PopupManager {
         this._hide();
         this._stopLoop();
     }
-
     /**
      * Скрывает DOM-элемент тултипа, не сбрасывая активный объект
      * и не останавливая цикл обновления. Используется внутри _updatePosition(),
@@ -285,7 +263,6 @@ export class PopupManager {
             this._tooltipElement.style.display = 'none';
         }
     }
-
     /**
      * Уничтожает менеджер: останавливает цикл, удаляет обработчики,
      * удаляет DOM-элемент и очищает ссылки. Идемпотентен.
@@ -294,12 +271,10 @@ export class PopupManager {
      */
     destroy() {
         this._stopLoop();
-
         if (this._onDocumentPointerDown) {
             document.removeEventListener('pointerdown', this._onDocumentPointerDown);
             this._onDocumentPointerDown = null;
         }
-
         if (this._tooltipElement) {
             if (this._tooltipElement.parentNode) {
                 this._tooltipElement.parentNode.removeChild(this._tooltipElement);

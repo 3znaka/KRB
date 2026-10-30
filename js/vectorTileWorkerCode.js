@@ -1,7 +1,5 @@
 // VectorTileWorkerCode.js
-
 import { DEFAULT_STYLES, LAYER_RENDER_ORDER } from './vectorTileDefaults.js';
-
 /** Преобразует строку в base64 (для data: URL). */
 export function stringToBase64(str) {
     const bytes = new TextEncoder().encode(str);
@@ -11,7 +9,6 @@ export function stringToBase64(str) {
     }
     return btoa(binary);
 }
-
 /** Генерирует код модульного воркера с внедрёнными data: URL библиотек. */
 export function createWorkerCode(tpbDataURL, earcutDataURL) {
     return `

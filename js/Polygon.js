@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль для рисования полигонов (многоугольников) на карте.
  * Предоставляет класс Polygon, использующий триангуляцию Earcut
@@ -9,17 +10,10 @@
  * {@link InteractionManager} — единому менеджеру карты. Полигон лишь
  * регистрирует колбэки при `_attach` и снимает регистрацию в `remove`.
  */
-
 import { Projections } from './Projections.js';
-import {
-  THREE,
-  Line2,
-  LineMaterial,
-  LineGeometry,
-} from '../js_TP/tpb.js';
+import { THREE, Line2, LineMaterial, LineGeometry, } from './js_TP/tpb.js';
 import { Layer } from './Layers.js';
-import earcut from '../js_TP/earcut.js';
-
+import earcut from './js_TP/earcut.js';
 /**
  * Порядок отрисовки мешей полигона.
  *
@@ -27,11 +21,10 @@ import earcut from '../js_TP/earcut.js';
  */
 export const POLYGON_RENDER_ORDER = {
     BOTTOM: 900,
-    SIDE:   901,
-    TOP:    902,
+    SIDE: 901,
+    TOP: 902,
     STROKE: 903
 };
-
 /**
  * Доля от `WORLD_SIZE`, которая считается «нормальной» длиной ребра.
  * Если ребро кольца длиннее `WORLD_SIZE / 8` (≈ 5000 км), это почти
@@ -43,7 +36,6 @@ export const POLYGON_RENDER_ORDER = {
  * @private
  */
 const INVALID_EDGE_FRACTION = 8;
-
 /**
  * Y-компонента векторного произведения (p1 - p0) × (p2 - p0) для
  * треугольника в плоскости XZ. Используется для согласования winding
@@ -60,7 +52,6 @@ function crossY(p0, p1, p2) {
     const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
     return dz1 * dx2 - dx1 * dz2;
 }
-
 /**
  * Полигон на карте.
  *
@@ -138,138 +129,112 @@ export class Polygon {
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
             throw new Error('Polygon: options.rings required with at least one ring');
         }
-
         /** @private @type {Array.<Array.<Array.<number>>>} */ this._rings = options.rings;
         /** @private @type {string|null} */ this._crsCode = options.crs ?? null;
         /** @private @type {import('./Projections.js').Projection|null} */ this._crs = null;
-
-        /** @private @type {string} */  this._fillColor = options.fillColor || '#3388ff';
-        /** @private @type {number} */  this._fillOpacity = options.fillOpacity ?? 0.5;
-        /** @private @type {string} */  this._strokeColor = options.strokeColor || '#000000';
-        /** @private @type {number} */  this._strokeWidth = options.strokeWidth ?? 2;
-        /** @private @type {number} */  this._strokeOpacity = options.strokeOpacity ?? 1;
-        /** @private @type {string} */  this._altitudeMode = options.altitudeMode || 'clampToGround';
-        /** @private @type {number} */  this._altitudeOffset = options.altitudeOffset ?? 10;
-
+        /** @private @type {string} */ this._fillColor = options.fillColor || '#3388ff';
+        /** @private @type {number} */ this._fillOpacity = options.fillOpacity ?? 0.5;
+        /** @private @type {string} */ this._strokeColor = options.strokeColor || '#000000';
+        /** @private @type {number} */ this._strokeWidth = options.strokeWidth ?? 2;
+        /** @private @type {number} */ this._strokeOpacity = options.strokeOpacity ?? 1;
+        /** @private @type {string} */ this._altitudeMode = options.altitudeMode || 'clampToGround';
+        /** @private @type {number} */ this._altitudeOffset = options.altitudeOffset ?? 10;
         // Экструзия
         /** @private @type {boolean} */ this._extruded = options.extruded ?? false;
-        /** @private @type {number} */  this._height = options.height ?? 0;
-        /** @private @type {number} */  this._minHeight = options.minHeight ?? 0;
+        /** @private @type {number} */ this._height = options.height ?? 0;
+        /** @private @type {number} */ this._minHeight = options.minHeight ?? 0;
         if (this._extruded && (typeof this._height !== 'number' || this._height <= 0)) {
             throw new Error('Polygon: options.height must be a positive number when extruded is true');
         }
-
         /** @private @type {boolean} */ this._depthTest = options.depthTest ?? this._extruded;
         /** @private @type {boolean} */ this._depthWrite = options.depthWrite ?? this._extruded;
-
-        /** @private @type {number} */  this._minZoom = options.minZoom ?? -Infinity;
-        /** @private @type {number} */  this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private @type {number} */ this._minZoom = options.minZoom ?? -Infinity;
+        /** @private @type {number} */ this._maxZoom = options.maxZoom ?? Infinity;
         /** @private @type {boolean} */ this._useSimpleStroke = options.useSimpleStroke ?? false;
         /** @private @type {boolean} */ this._useWorkerForTriangulation = options.useWorkerForTriangulation ?? false;
-
         /** @private @type {boolean} */ this._castShadow = options.castShadow ?? true;
         /** @private @type {boolean} */ this._receiveShadow = options.receiveShadow ?? true;
-        /** @private @type {number} */  this._roughness = options.roughness ?? 0.8;
-        /** @private @type {number} */  this._metalness = options.metalness ?? 0.0;
-
+        /** @private @type {number} */ this._roughness = options.roughness ?? 0.8;
+        /** @private @type {number} */ this._metalness = options.metalness ?? 0.0;
         // Подпись
-        /** @private @type {string} */  this._title = options.title || '';
+        /** @private @type {string} */ this._title = options.title || '';
         /** @private @type {Array.<number>} */ this._titleOffset = options.titleOffset || [0, 0];
-        /** @private @type {string} */  this._titleAlign = options.titleAlign || 'center';
-        /** @private @type {Object} */  this._titleStyle = options.titleStyle || {};
-        /** @private @type {number} */  this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private @type {number} */  this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        /** @private @type {string} */ this._titleAlign = options.titleAlign || 'center';
+        /** @private @type {Object} */ this._titleStyle = options.titleStyle || {};
+        /** @private @type {number} */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        /** @private @type {number} */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         /** @private @type {boolean} */ this._titleAllowOverflow = options.titleAllowOverflow || false;
-        /** @private @type {number} */  this._titlePriority = options.titlePriority ?? 0;
-
+        /** @private @type {number} */ this._titlePriority = options.titlePriority ?? 0;
         // События
         /** @private @type {Function|null} */ this._onClick = options.onClick || null;
         /** @private @type {Function|null} */ this._onHover = options.onHover || null;
         /** @private @type {boolean} */ this._isHovered = false;
         /** @private @type {string} */ this._tooltipText = options.tooltip || '';
-
         // Структуры
         /** @private @type {import('./KrbMap.js').KrbMap|null} */ this._map = null;
         /** @private @type {Layer|null} */ this._layer = null;
         /** @private @type {THREE.Group} */ this._group = new THREE.Group();
-
         // Верхняя крышка
-        /** @private @type {THREE.Mesh|null} */           this._fillMesh = null;
+        /** @private @type {THREE.Mesh|null} */ this._fillMesh = null;
         /** @private @type {THREE.BufferGeometry|null} */ this._fillGeometry = null;
-        /** @private @type {THREE.Material|null} */       this._fillMaterial = null;
-
+        /** @private @type {THREE.Material|null} */ this._fillMaterial = null;
         // Нижняя крышка
-        /** @private @type {THREE.Mesh|null} */           this._bottomMesh = null;
+        /** @private @type {THREE.Mesh|null} */ this._bottomMesh = null;
         /** @private @type {THREE.BufferGeometry|null} */ this._bottomGeometry = null;
-        /** @private @type {THREE.Material|null} */       this._bottomMaterial = null;
-
+        /** @private @type {THREE.Material|null} */ this._bottomMaterial = null;
         // Боковые стенки
-        /** @private @type {THREE.Mesh|null} */           this._sideMesh = null;
+        /** @private @type {THREE.Mesh|null} */ this._sideMesh = null;
         /** @private @type {THREE.BufferGeometry|null} */ this._sideGeometry = null;
-        /** @private @type {THREE.Material|null} */       this._sideMaterial = null;
-        /** @private @type {number} */                   this._sideVertexCount = 0;
-
+        /** @private @type {THREE.Material|null} */ this._sideMaterial = null;
+        /** @private @type {number} */ this._sideVertexCount = 0;
         // Обводка
-        /** @private @type {THREE.Object3D|null} */       this._strokeLine = null;
+        /** @private @type {THREE.Object3D|null} */ this._strokeLine = null;
         /** @private @type {THREE.BufferGeometry|null} */ this._strokeGeometry = null;
-        /** @private @type {THREE.Material|null} */       this._strokeMaterial = null;
-
+        /** @private @type {THREE.Material|null} */ this._strokeMaterial = null;
         // Кэш высот и высоты узлов (третья координата).
         /** @private @type {Array.<number>} */ this._cachedHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
         /** @private @type {Array.<number>} */ this._cachedStrokeHeights = new Array(this._rings[0]?.length ?? 0).fill(0);
-
         /**
          * Высоты узлов (третья координата исходных колец) — параллельно
          * `_vertices2D` / `_worldCoords`. Заполняется в `_buildFillGeometry`.
          * @private @type {Array.<number>}
          */
         this._nodeHeights = [];
-
         /**
          * Высоты узлов обводки — параллельно `_strokeWorldCoords`.
          * Заполняется в `_buildStrokeGeometry`.
          * @private @type {Array.<number>}
          */
         this._strokeNodeHeights = [];
-
         /** @private @type {number} */ this._lastHeightUpdateTime = 0;
         /** @private @type {number} */ this._heightUpdateInterval = 500;
-
         /** @private @type {boolean} */ this._heightsFinalized = false;
         /** @private @type {boolean} */ this._invalidGeometry = false;
-
         // Центроид и вершины
         /** @private @type {Array.<THREE.Vector2>} */ this._vertices2D = [];
-        /** @private @type {THREE.Vector3} */         this._centroidWorld = new THREE.Vector3();
-        /** @private @type {number} */                this._cachedCentroidHeight = 0;
-        /** @private @type {number} */                this._lastCentroidHeightUpdateTime = 0;
-
+        /** @private @type {THREE.Vector3} */ this._centroidWorld = new THREE.Vector3();
+        /** @private @type {number} */ this._cachedCentroidHeight = 0;
+        /** @private @type {number} */ this._lastCentroidHeightUpdateTime = 0;
         /** @private @type {Array.<[number, number]>} */ this._worldCoords = [];
         /** @private @type {Array.<[number, number]>} */ this._strokeWorldCoords = [];
-
         /** @private @type {number} */ this._boundingSphereRadius = 0;
         /** @private @type {THREE.Vector3} */ this._boundingSphereWorldCenter = new THREE.Vector3();
         /** @private @type {THREE.Object3D[]|null} */ this._raycastMeshesCache = null;
         /** @private @type {(() => void)|null} */ this._unregisterInteraction = null;
-
         // Dirty-флаги
         /** @private @type {boolean} */ this._heightsDirty = true;
         /** @private @type {THREE.Vector3} */ this._lastWorldGroupPos = new THREE.Vector3();
         /** @private @type {number} */ this._lastDiscreteZoom = -1;
-
         /** @private @type {Object|null} */ this._centroidScreenPos = null;
         /** @private @type {Object|null} */ this._textLabel = null;
-
         // Переиспользуемые массивы
         /** @private @type {Array.<number>} */ this._strokePositionsArray = [];
         /** @private @type {Array.<number>} */ this._sidePositionsArray = [];
         /** @private @type {Array.<number>} */ this._sideIndicesArray = [];
     }
-
     /* ================================================================
        Публичные методы
        ================================================================ */
-
     /**
      * Создаёт персональный слой, добавляет его на карту и помещает в него
      * данный полигон.
@@ -278,67 +243,61 @@ export class Polygon {
      * @returns {Polygon} this
      */
     addTo(map) {
-        if (this._map) this.remove();
+        if (this._map)
+            this.remove();
         const personalLayer = new Layer();
         personalLayer.addTo(map);
         personalLayer.add(this);
         return this;
     }
-
     /**
      * Вызывается слоем при добавлении: строит геометрию, регистрирует
      * подпись и интерактивность.
      * @private
      */
     _attach(map, layer) {
-        if (this._map === map && this._layer === layer) return;
+        if (this._map === map && this._layer === layer)
+            return;
         this.remove();
         this._map = map;
         this._layer = layer;
-
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
-
         if (this._title && map.textManager) {
             this._textLabel = map.textManager.addLabel(this);
         }
-
         this._registerInteraction(map);
-
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
         this._heightsDirty = true;
         this._heightsFinalized = false;
     }
-
     /**
      * Регистрирует полигон в InteractionManager карты.
      * @private
      */
     _registerInteraction(map) {
-        if (!map.interaction || typeof map.interaction.register !== 'function') return;
+        if (!map.interaction || typeof map.interaction.register !== 'function')
+            return;
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-        if (this._invalidGeometry) return;
-        if (!this._onClick && !this._onHover && !this._tooltipText) return;
-
+        if (this._invalidGeometry)
+            return;
+        if (!this._onClick && !this._onHover && !this._tooltipText)
+            return;
         const callbacks = {
             getMeshes: () => this._getRaycastMeshes(),
             getBoundingSphere: () => {
-                if (this._boundingSphereRadius <= 0) return null;
+                if (this._boundingSphereRadius <= 0)
+                    return null;
                 const wgPos = map.worldGroup.position;
-                this._boundingSphereWorldCenter.set(
-                    this._group.position.x + wgPos.x,
-                    this._group.position.y + wgPos.y,
-                    this._group.position.z + wgPos.z
-                );
+                this._boundingSphereWorldCenter.set(this._group.position.x + wgPos.x, this._group.position.y + wgPos.y, this._group.position.z + wgPos.z);
                 return {
                     center: this._boundingSphereWorldCenter,
                     radius: this._boundingSphereRadius
@@ -346,34 +305,34 @@ export class Polygon {
             },
             isVisible: () => this._group.visible
         };
-
         if (this._onHover) {
             callbacks.onHover = (isHovered) => {
                 this._isHovered = isHovered;
                 this._onHover(isHovered);
             };
-        } else if (this._tooltipText) {
+        }
+        else if (this._tooltipText) {
             callbacks.getTooltip = () => this._tooltipText;
         }
-
         if (this._onClick) {
             callbacks.onClick = (event) => this._onClick(event, this);
         }
-
         this._unregisterInteraction = map.interaction.register(this, callbacks);
     }
-
     /** @private */
     _getRaycastMeshes() {
-        if (this._raycastMeshesCache) return this._raycastMeshesCache;
+        if (this._raycastMeshesCache)
+            return this._raycastMeshesCache;
         const meshes = [];
-        if (this._fillMesh) meshes.push(this._fillMesh);
-        if (this._sideMesh) meshes.push(this._sideMesh);
-        if (this._bottomMesh) meshes.push(this._bottomMesh);
+        if (this._fillMesh)
+            meshes.push(this._fillMesh);
+        if (this._sideMesh)
+            meshes.push(this._sideMesh);
+        if (this._bottomMesh)
+            meshes.push(this._bottomMesh);
         this._raycastMeshesCache = meshes;
         return meshes;
     }
-
     /** @private */
     _getTitleTransform() {
         switch (this._titleAlign) {
@@ -382,11 +341,9 @@ export class Polygon {
             default: return 'translate(-50%, 0)';
         }
     }
-
     /** @private */
     _createSurfaceMaterial() {
         const isTransparent = this._fillOpacity < 1;
-
         if (this._extruded) {
             return new THREE.MeshStandardMaterial({
                 color: this._fillColor,
@@ -414,19 +371,19 @@ export class Polygon {
             polygonOffsetUnits: -1
         });
     }
-
     /** @private */
     _applyShadowFlags(mesh) {
-        if (!mesh) return;
+        if (!mesh)
+            return;
         if (this._extruded) {
             mesh.castShadow = this._castShadow;
             mesh.receiveShadow = this._receiveShadow;
-        } else {
+        }
+        else {
             mesh.castShadow = false;
             mesh.receiveShadow = false;
         }
     }
-
     /** @private */
     _flipIndices(indices) {
         const result = new Array(indices.length);
@@ -437,32 +394,34 @@ export class Polygon {
         }
         return result;
     }
-
     /**
      * Есть ли в исходных кольцах переход через антимеридиан.
      * @private
      * @returns {boolean}
      */
     _hasAntimeridianWrap() {
-        if (!this._crs || !this._crs.isGeographic) return false;
+        if (!this._crs || !this._crs.isGeographic)
+            return false;
         const rings = this._rings;
-        if (!rings) return false;
-
+        if (!rings)
+            return false;
         for (let r = 0; r < rings.length; r++) {
             const ring = rings[r];
-            if (!ring || ring.length < 2) continue;
+            if (!ring || ring.length < 2)
+                continue;
             const n = ring.length;
             for (let i = 0; i < n; i++) {
                 const a = ring[i];
                 const b = ring[(i + 1) % n];
-                if (!a || !b || a.length < 2 || b.length < 2) continue;
+                if (!a || !b || a.length < 2 || b.length < 2)
+                    continue;
                 const dLon = b[0] - a[0];
-                if (Math.abs(dLon) > 180) return true;
+                if (Math.abs(dLon) > 180)
+                    return true;
             }
         }
         return false;
     }
-
     /**
      * Проверяет, не «разъехалась» ли геометрия после проекции.
      * @private
@@ -471,28 +430,29 @@ export class Polygon {
         const maxEdge = worldSize / INVALID_EDGE_FRACTION;
         const maxEdgeSq = maxEdge * maxEdge;
         const wc = this._worldCoords;
-
         for (let ringIdx = 0; ringIdx < ringStartIndices.length; ringIdx++) {
             const start = ringStartIndices[ringIdx];
-            if (start === undefined) continue;
+            if (start === undefined)
+                continue;
             const nextStart = (ringIdx + 1 < ringStartIndices.length)
                 ? ringStartIndices[ringIdx + 1]
                 : wc.length;
             const count = nextStart - start;
-            if (count < 2) continue;
-
+            if (count < 2)
+                continue;
             for (let i = 0; i < count; i++) {
                 const a = wc[start + i];
                 const b = wc[start + ((i + 1) % count)];
-                if (!a || !b) continue;
+                if (!a || !b)
+                    continue;
                 const dx = b[0] - a[0];
                 const dz = b[1] - a[1];
-                if (dx * dx + dz * dz > maxEdgeSq) return true;
+                if (dx * dx + dz * dz > maxEdgeSq)
+                    return true;
             }
         }
         return false;
     }
-
     /**
      * Строит геометрию заливки (и, при экструзии, нижнюю крышку и
      * боковые стенки). Попутно заполняет `_nodeHeights` — третью
@@ -507,26 +467,22 @@ export class Polygon {
             console.warn('Polygon: rings[0] must have at least 3 points');
             return;
         }
-
         this._worldCoords.length = 0;
         this._nodeHeights.length = 0;
         const coords = [];
         const points2D = [];
         const holeIndices = [];
         const ringStartIndices = [];
-
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
             const ring = rings[ringIdx];
             if (ring.length < 3) {
                 console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
                 continue;
             }
-
             ringStartIndices.push(points2D.length);
             if (ringIdx > 0) {
                 holeIndices.push(coords.length / 2);
             }
-
             let firstPoint = null;
             for (let i = 0; i < ring.length; i++) {
                 const pt = ring[i];
@@ -540,18 +496,15 @@ export class Polygon {
                 coords.push(absX, absZ);
                 points2D.push(new THREE.Vector2(absX, absZ));
                 this._worldCoords.push([absX, absZ]);
-
                 // Третья координата (высота узла). Отсутствующая/невалидная — 0.
                 const h = pt?.[2];
                 this._nodeHeights.push(Number.isFinite(h) ? h : 0);
             }
         }
-
         if (points2D.length < 3) {
             console.warn('Polygon: after processing rings, less than 3 vertices');
             return;
         }
-
         // Детект «полос через весь мир».
         if (!this._hasAntimeridianWrap()
             && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {
@@ -562,29 +515,25 @@ export class Polygon {
             return;
         }
         this._invalidGeometry = false;
-
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
-
         // Триангуляция.
         let indices;
         if (this._useWorkerForTriangulation && typeof Worker !== 'undefined') {
             console.warn('Worker triangulation is experimental, falling back to sync');
             indices = earcut(coords, holeIndices, 2);
-        } else {
+        }
+        else {
             indices = earcut(coords, holeIndices, 2);
         }
-
         if (indices.length === 0) {
             console.warn('Polygon: Earcut returned no triangles');
             return;
         }
-
         // Согласуем winding Earcut-вывода.
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
-
         // Центроид.
         let cx = 0, cy = 0;
         for (const pt of points2D) {
@@ -593,22 +542,19 @@ export class Polygon {
         }
         cx /= points2D.length;
         cy /= points2D.length;
-
         this._centroidWorld.set(cx, 0, cy);
         this._group.position.copy(this._centroidWorld);
-
         for (let i = 0; i < points2D.length; i++) {
             points2D[i].x -= cx;
             points2D[i].y -= cy;
         }
-
         let maxRadiusSq = 0;
         for (const pt of points2D) {
             const rSq = pt.x * pt.x + pt.y * pt.y;
-            if (rSq > maxRadiusSq) maxRadiusSq = rSq;
+            if (rSq > maxRadiusSq)
+                maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-
         // === Верхняя крышка ===
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
@@ -620,14 +566,12 @@ export class Polygon {
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
         topGeometry.setIndex(topIndices);
-
         const topNormals = new Float32Array(points2D.length * 3);
-        for (let i = 0; i < points2D.length; i++) topNormals[i * 3 + 1] = 1;
+        for (let i = 0; i < points2D.length; i++)
+            topNormals[i * 3 + 1] = 1;
         topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
         topGeometry.computeBoundingSphere();
-
         const topMaterial = this._createSurfaceMaterial();
-
         const topMesh = new THREE.Mesh(topGeometry, topMaterial);
         topMesh.renderOrder = POLYGON_RENDER_ORDER.TOP;
         topMesh.frustumCulled = true;
@@ -637,7 +581,6 @@ export class Polygon {
         this._fillGeometry = topGeometry;
         this._fillMaterial = topMaterial;
         this._group.add(topMesh);
-
         // === Экструзия ===
         if (this._extruded) {
             // Нижняя крышка
@@ -651,14 +594,12 @@ export class Polygon {
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
             bottomGeometry.setIndex(bottomIndices);
-
             const bottomNormals = new Float32Array(points2D.length * 3);
-            for (let i = 0; i < points2D.length; i++) bottomNormals[i * 3 + 1] = -1;
+            for (let i = 0; i < points2D.length; i++)
+                bottomNormals[i * 3 + 1] = -1;
             bottomGeometry.setAttribute('normal', new THREE.BufferAttribute(bottomNormals, 3));
             bottomGeometry.computeBoundingSphere();
-
             const bottomMaterial = this._createSurfaceMaterial();
-
             const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
             bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
             bottomMesh.frustumCulled = true;
@@ -668,54 +609,43 @@ export class Polygon {
             this._bottomGeometry = bottomGeometry;
             this._bottomMaterial = bottomMaterial;
             this._group.add(bottomMesh);
-
             // Боковые стенки
             const sidePositions = this._sidePositionsArray;
             const sideIndices = this._sideIndicesArray;
             sidePositions.length = 0;
             sideIndices.length = 0;
-
             const initialHeight = this._height;
-
             for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-                if (ringStartIndices[ringIdx] === undefined) continue;
-
+                if (ringStartIndices[ringIdx] === undefined)
+                    continue;
                 const start = ringStartIndices[ringIdx];
                 const nextRingStart = (ringIdx + 1 < ringStartIndices.length)
                     ? ringStartIndices[ringIdx + 1]
                     : points2D.length;
                 const count = nextRingStart - start;
-
-                if (count < 2) continue;
-
+                if (count < 2)
+                    continue;
                 for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
                     const idxI = start + i;
                     const idxJ = start + j;
-
                     const topI = points2D[idxI];
                     const topJ = points2D[idxJ];
-
                     const baseIndex = sidePositions.length / 3;
-
                     sidePositions.push(topI.x, initialHeight, topI.y);
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topJ.x, initialHeight, topJ.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
-
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
                     sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
                 }
             }
-
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
             sideGeometry.setIndex(sideIndices);
             sideGeometry.computeVertexNormals();
             sideGeometry.computeBoundingSphere();
-
             const sideMaterial = this._createSurfaceMaterial();
-
             const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
             sideMesh.renderOrder = POLYGON_RENDER_ORDER.SIDE;
             sideMesh.frustumCulled = true;
@@ -727,22 +657,20 @@ export class Polygon {
             this._sideVertexCount = sidePositions.length / 3;
             this._group.add(sideMesh);
         }
-
         this._raycastMeshesCache = null;
     }
-
     /**
      * Строит геометрию обводки внешнего кольца. Попутно заполняет
      * `_strokeNodeHeights` — высоты узлов обводки.
      * @private
      */
     _buildStrokeGeometry(map) {
-        if (this._invalidGeometry) return;
-        if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
-
+        if (this._invalidGeometry)
+            return;
+        if (this._strokeWidth <= 0 || this._strokeOpacity <= 0)
+            return;
         const canvas = map.renderer.domElement;
         const outerRing = this._rings[0];
-
         this._strokeWorldCoords.length = 0;
         this._strokeNodeHeights.length = 0;
         let firstStrokePoint = null;
@@ -751,16 +679,15 @@ export class Polygon {
             const [absX, absZ] = map.project(pt, this._crs);
             if (i === 0) {
                 firstStrokePoint = [absX, absZ];
-            } else if (absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) {
+            }
+            else if (absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) {
                 continue;
             }
             this._strokeWorldCoords.push([absX, absZ]);
             const h = pt?.[2];
             this._strokeNodeHeights.push(Number.isFinite(h) ? h : 0);
         }
-
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
-
         if (this._useSimpleStroke) {
             const positions = [];
             for (let i = 0; i < this._strokeWorldCoords.length; i++) {
@@ -771,14 +698,9 @@ export class Polygon {
                 const first = this._strokeWorldCoords[0];
                 positions.push(first[0], 0, first[1]);
             }
-
             const lineGeometry = new THREE.BufferGeometry();
-            lineGeometry.setAttribute(
-                'position',
-                new THREE.BufferAttribute(new Float32Array(positions), 3)
-            );
+            lineGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
             lineGeometry.computeBoundingSphere();
-
             const lineMaterial = new THREE.LineBasicMaterial({
                 color: this._strokeColor,
                 opacity: this._strokeOpacity,
@@ -792,9 +714,9 @@ export class Polygon {
             this._strokeGeometry = lineGeometry;
             this._strokeMaterial = lineMaterial;
             this._group.add(line);
-        } else {
+        }
+        else {
             this._strokeGeometry = new LineGeometry();
-
             this._strokeMaterial = new LineMaterial({
                 color: this._strokeColor,
                 linewidth: this._strokeWidth,
@@ -810,7 +732,6 @@ export class Polygon {
             this._group.add(line);
         }
     }
-
     /**
      * Удаляет полигон с карты, освобождает ресурсы и удаляет подпись.
      */
@@ -819,7 +740,6 @@ export class Polygon {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-
         if (this._group) {
             this._group.parent?.remove(this._group);
             this._fillGeometry?.dispose();
@@ -858,27 +778,23 @@ export class Polygon {
         this._isHovered = false;
         this._raycastMeshesCache = null;
         this._invalidGeometry = false;
-
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
         this._crs = null;
     }
-
     /**
      * Обновление состояния полигона на кадре.
      * @private
      */
     _update(map) {
-        if (!this._map || !this._group) return;
-
+        if (!this._map || !this._group)
+            return;
         if (this._invalidGeometry) {
             this._group.visible = false;
             return;
         }
-
         const zoom = this._map.continuousZoom;
-
         if (this._layer && !this._layer.visible) {
             this._group.visible = false;
             return;
@@ -887,12 +803,10 @@ export class Polygon {
             this._group.visible = false;
             return;
         }
-
         if (this._group.parent !== this._map.worldGroup) {
             this._group.parent?.remove(this._group);
             this._map.worldGroup.add(this._group);
         }
-
         if (this._strokeMaterial && this._strokeMaterial.resolution) {
             const canvas = this._map.renderer.domElement;
             const res = this._strokeMaterial.resolution;
@@ -900,7 +814,6 @@ export class Polygon {
                 res.set(canvas.width, canvas.height);
             }
         }
-
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
@@ -914,33 +827,27 @@ export class Polygon {
                 }
             }
         }
-
         this._group.visible = true;
-
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;
-
         if (worldGroupPosChanged || discreteZoomChanged) {
             this._heightsDirty = true;
             this._lastWorldGroupPos.copy(map.worldGroup.position);
             this._lastDiscreteZoom = map.currentDiscreteZoom;
         }
-
         const isDynamicHeight = map.hasElevation && this._altitudeMode === 'clampToGround';
         const timeExpired = isDynamicHeight
             && (now - this._lastHeightUpdateTime) >= this._heightUpdateInterval;
-
         if (this._heightsDirty || timeExpired) {
             const changed = this._updateHeights();
-            if (changed) this._updateStroke();
+            if (changed)
+                this._updateStroke();
             this._heightsDirty = false;
             this._lastHeightUpdateTime = now;
         }
-
         this._updateCentroidScreenPos();
     }
-
     /**
      * Обновляет высоты вершин всех геометрий.
      *
@@ -956,19 +863,20 @@ export class Polygon {
      * @private
      */
     _updateHeights() {
-        if (this._invalidGeometry) return false;
-        if (!this._fillGeometry || !this._vertices2D.length) return false;
+        if (this._invalidGeometry)
+            return false;
+        if (!this._fillGeometry || !this._vertices2D.length)
+            return false;
         const map = this._map;
-
         const isDynamic = map.hasElevation && this._altitudeMode === 'clampToGround';
-        if (!isDynamic && this._heightsFinalized) return false;
-
+        if (!isDynamic && this._heightsFinalized)
+            return false;
         const wgPos = map.worldGroup.position;
         const extrude = this._extruded ? this._height : 0;
-
         for (let i = 0; i < this._vertices2D.length; i++) {
             const worldCoord = this._worldCoords[i];
-            if (!worldCoord) continue;
+            if (!worldCoord)
+                continue;
             let base = this._altitudeOffset;
             if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
@@ -979,7 +887,6 @@ export class Polygon {
             const nodeH = this._nodeHeights[i] ?? 0;
             this._cachedHeights[i] = base + nodeH + this._minHeight + extrude;
         }
-
         // Обводка: длина массива = _strokeWorldCoords.length.
         const strokeLen = this._strokeWorldCoords.length;
         if (this._cachedStrokeHeights.length !== strokeLen) {
@@ -987,7 +894,8 @@ export class Polygon {
         }
         for (let i = 0; i < strokeLen; i++) {
             const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord) continue;
+            if (!worldCoord)
+                continue;
             let base = this._altitudeOffset;
             if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
@@ -998,7 +906,6 @@ export class Polygon {
             const nodeH = this._strokeNodeHeights[i] ?? 0;
             this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
         }
-
         // Верхняя крышка.
         const topPos = this._fillGeometry.attributes.position.array;
         for (let i = 0; i < this._vertices2D.length; i++) {
@@ -1006,7 +913,6 @@ export class Polygon {
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
-
         // Нижняя крышка.
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
@@ -1016,7 +922,6 @@ export class Polygon {
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
-
         // Боковые стенки.
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
@@ -1027,46 +932,48 @@ export class Polygon {
                 const upperJ = this._cachedHeights[j];
                 const lowerI = upperI - this._height;
                 const lowerJ = upperJ - this._height;
-
-                sidePos[idx * 3 + 1] = upperI; idx++;
-                sidePos[idx * 3 + 1] = lowerI; idx++;
-                sidePos[idx * 3 + 1] = upperJ; idx++;
-                sidePos[idx * 3 + 1] = lowerJ; idx++;
+                sidePos[idx * 3 + 1] = upperI;
+                idx++;
+                sidePos[idx * 3 + 1] = lowerI;
+                idx++;
+                sidePos[idx * 3 + 1] = upperJ;
+                idx++;
+                sidePos[idx * 3 + 1] = lowerJ;
+                idx++;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
             this._sideGeometry.computeVertexNormals();
             this._sideGeometry.computeBoundingSphere();
         }
-
-        if (!isDynamic) this._heightsFinalized = true;
+        if (!isDynamic)
+            this._heightsFinalized = true;
         return true;
     }
-
     /**
      * Обновляет позиции вершин обводки.
      * @private
      */
     _updateStroke() {
-        if (this._invalidGeometry) return;
-        if (!this._strokeLine || !this._strokeGeometry) return;
+        if (this._invalidGeometry)
+            return;
+        if (!this._strokeLine || !this._strokeGeometry)
+            return;
         const positions = this._strokePositionsArray;
         positions.length = 0;
         const groupPos = this._group.position;
         const strokeLen = this._strokeWorldCoords.length;
-
         for (let i = 0; i < strokeLen; i++) {
             const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord) continue;
+            if (!worldCoord)
+                continue;
             const y = this._cachedStrokeHeights[i] ?? this._altitudeOffset;
             positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
         }
-
         if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
             const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
             positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);
         }
-
         if (this._useSimpleStroke) {
             const count = positions.length / 3;
             const existing = this._strokeGeometry.getAttribute('position');
@@ -1074,19 +981,17 @@ export class Polygon {
                 existing.array.set(positions);
                 existing.needsUpdate = true;
                 this._strokeGeometry.computeBoundingSphere();
-            } else {
-                this._strokeGeometry.setAttribute(
-                    'position',
-                    new THREE.BufferAttribute(new Float32Array(positions), 3)
-                );
+            }
+            else {
+                this._strokeGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
                 this._strokeGeometry.computeBoundingSphere();
             }
-        } else {
+        }
+        else {
             this._strokeGeometry.setPositions(positions);
             this._strokeLine.computeLineDistances();
         }
     }
-
     /**
      * Пересчитывает экранную позицию центроида для подписи. К высоте
      * центроида добавляется средняя высота узлов (`_nodeHeights`).
@@ -1105,7 +1010,6 @@ export class Polygon {
         const wgPos = map.worldGroup.position;
         const worldX = this._centroidWorld.x + wgPos.x;
         const worldZ = this._centroidWorld.z + wgPos.z;
-
         let worldY = this._altitudeOffset;
         if (this._altitudeMode === 'clampToGround' && map.hasElevation) {
             const now = performance.now();
@@ -1116,24 +1020,23 @@ export class Polygon {
             }
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
         }
-
         // Средняя высота узлов (третья координата) — сдвигает подпись
         // вслед за «подъёмом» вершин.
         let avgNodeH = 0;
         if (this._nodeHeights.length > 0) {
             let sum = 0;
-            for (let i = 0; i < this._nodeHeights.length; i++) sum += this._nodeHeights[i] ?? 0;
+            for (let i = 0; i < this._nodeHeights.length; i++)
+                sum += this._nodeHeights[i] ?? 0;
             avgNodeH = sum / this._nodeHeights.length;
         }
         worldY += avgNodeH;
-
         worldY += this._minHeight + (this._extruded ? this._height : 0);
-
         const screenPos = map.getVec3().set(worldX, worldY + wgPos.y, worldZ);
         screenPos.project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;
-        } else {
+        }
+        else {
             const canvas = map.renderer.domElement;
             this._centroidScreenPos = {
                 x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
@@ -1141,11 +1044,8 @@ export class Polygon {
             };
         }
     }
-
     // ---------- Интерфейс для TextManager ----------
-
     getText() { return this._title; }
-
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
@@ -1154,7 +1054,6 @@ export class Polygon {
             textAlign: this._titleAlign
         }, this._titleStyle);
     }
-
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
     getLabelType() { return 'polygon'; }
     isVisible() { return this._group?.visible ?? false; }
@@ -1164,9 +1063,7 @@ export class Polygon {
     getTitleVerticalAlign() { return 'center'; }
     getAllowOverflow() { return this._titleAllowOverflow; }
     getPriority() { return this._titlePriority; }
-
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
-
     /**
      * Bounding box по всем точкам колец (только x/y).
      *
@@ -1174,40 +1071,47 @@ export class Polygon {
      * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]] или null.
      */
     getBounds(crs = 'EPSG:4326') {
-        if (!this._rings || !this._rings.length) return null;
-
+        if (!this._rings || !this._rings.length)
+            return null;
         const src = this._crs
             ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
         const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
-        if (!src || !dst) return null;
-
+        if (!src || !dst)
+            return null;
         const sameProjection = src === dst;
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let count = 0;
-
         for (const ring of this._rings) {
-            if (!ring) continue;
+            if (!ring)
+                continue;
             for (let i = 0; i < ring.length; i++) {
                 const pt = ring[i];
-                if (!pt || pt.length < 2) continue;
+                if (!pt || pt.length < 2)
+                    continue;
                 let x, y;
                 if (sameProjection) {
                     x = pt[0];
                     y = pt[1];
-                } else {
+                }
+                else {
                     const lonLat = src.toLonLat(pt);
                     const converted = dst.fromLonLat(lonLat);
                     x = converted[0];
                     y = converted[1];
                 }
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
+                if (x < minX)
+                    minX = x;
+                if (x > maxX)
+                    maxX = x;
+                if (y < minY)
+                    minY = y;
+                if (y > maxY)
+                    maxY = y;
                 count++;
             }
         }
-        if (count === 0 || !isFinite(minX)) return null;
+        if (count === 0 || !isFinite(minX))
+            return null;
         return [[minX, minY], [maxX, maxY]];
     }
 }

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль слоёв картографической библиотеки.
  * Предоставляет базовый класс {@link Layer} для группировки объектов
@@ -5,12 +6,8 @@
  *
  * @module layers
  */
-
 import { _getPanes } from './Marker.js';
-import {
-  THREE
-} from '../js_TP/tpb.js';
-
+import { THREE } from './js_TP/tpb.js';
 /**
  * Базовый слой, управляющий коллекцией объектов карты.
  * Объекты могут быть маркерами, линиями, полигонами и т. д.
@@ -38,7 +35,6 @@ import {
  * layer.remove(marker);
  * layer.removeFromMap();
  */
-
 export class Layer {
     constructor() {
         /** @private */ this._objects = [];
@@ -46,7 +42,6 @@ export class Layer {
         this.visible = true;
         /** @private */ this._map = null;
     }
-
     /**
      * Добавляет слой на карту. Если слой уже добавлен на другую карту,
      * он будет сначала удалён оттуда.
@@ -55,7 +50,8 @@ export class Layer {
      * @returns {Layer} this
      */
     addTo(map) {
-        if (this._map === map) return this;
+        if (this._map === map)
+            return this;
         this.removeFromMap();
         this._map = map;
         if (map._dynamicLayers && !map._dynamicLayers.includes(this)) {
@@ -63,23 +59,23 @@ export class Layer {
         }
         return this;
     }
-
     /**
      * Удаляет слой с карты, уничтожая все связанные объекты.
      */
     removeFromMap() {
-        if (!this._map) return;
+        if (!this._map)
+            return;
         for (const obj of [...this._objects]) {
             obj.remove();
         }
         this._objects = [];
         if (this._map && this._map._dynamicLayers) {
             const idx = this._map._dynamicLayers.indexOf(this);
-            if (idx > -1) this._map._dynamicLayers.splice(idx, 1);
+            if (idx > -1)
+                this._map._dynamicLayers.splice(idx, 1);
         }
         this._map = null;
     }
-
     /**
      * Добавляет один или несколько объектов на слой.
      * Объекты будут автоматически прикреплены к карте.
@@ -93,13 +89,13 @@ export class Layer {
             return this;
         }
         for (const obj of objects) {
-            if (obj._map) obj.remove();
+            if (obj._map)
+                obj.remove();
             obj._attach(this._map, this);
             this._objects.push(obj);
         }
         return this;
     }
-
     /**
      * Удаляет указанный объект со слоя.
      *
@@ -108,10 +104,10 @@ export class Layer {
      */
     remove(object) {
         const idx = this._objects.indexOf(object);
-        if (idx > -1) object.remove();
+        if (idx > -1)
+            object.remove();
         return this;
     }
-
     /**
      * Удаляет ссылку на объект из внутреннего массива (вызывается при удалении объекта).
      *
@@ -120,9 +116,9 @@ export class Layer {
      */
     _removeRef(obj) {
         const idx = this._objects.indexOf(obj);
-        if (idx > -1) this._objects.splice(idx, 1);
+        if (idx > -1)
+            this._objects.splice(idx, 1);
     }
-
     /**
      * Устанавливает видимость слоя.
      *
@@ -133,22 +129,22 @@ export class Layer {
         this.visible = visible;
         return this;
     }
-/**
- * Вызывается картой на каждом кадре для обновления всех объектов слоя.
- *
- * @param {Object} map - Экземпляр карты.
- * @param {number} deltaTime - Время с прошлого кадра, сек.
- * @private
- */
-_postUpdate(map, deltaTime) {
-    if (!this.visible) return;
-    for (const obj of this._objects) {
-        if (obj._update) obj._update(map, deltaTime);
+    /**
+     * Вызывается картой на каждом кадре для обновления всех объектов слоя.
+     *
+     * @param {Object} map - Экземпляр карты.
+     * @param {number} deltaTime - Время с прошлого кадра, сек.
+     * @private
+     */
+    _postUpdate(map, deltaTime) {
+        if (!this.visible)
+            return;
+        for (const obj of this._objects) {
+            if (obj._update)
+                obj._update(map, deltaTime);
+        }
     }
-}
-
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
-
     /**
      * Возвращает объединённый прямоугольник (bounding box),
      * охватывающий все объекты слоя, у которых есть метод `getBounds(crs)`.
@@ -169,29 +165,34 @@ _postUpdate(map, deltaTime) {
     getBounds(crs = 'EPSG:4326') {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let count = 0;
-
         for (const obj of this._objects) {
-            if (!obj || typeof obj.getBounds !== 'function') continue;
+            if (!obj || typeof obj.getBounds !== 'function')
+                continue;
             let b;
             try {
                 b = obj.getBounds(crs);
-            } catch (err) {
+            }
+            catch (err) {
                 console.warn('Layer.getBounds(): getBounds() threw an error for', obj, err);
                 continue;
             }
-            if (!b || !b[0] || !b[1]) continue;
-            if (b[0][0] < minX) minX = b[0][0];
-            if (b[0][1] < minY) minY = b[0][1];
-            if (b[1][0] > maxX) maxX = b[1][0];
-            if (b[1][1] > maxY) maxY = b[1][1];
+            if (!b || !b[0] || !b[1])
+                continue;
+            if (b[0][0] < minX)
+                minX = b[0][0];
+            if (b[0][1] < minY)
+                minY = b[0][1];
+            if (b[1][0] > maxX)
+                maxX = b[1][0];
+            if (b[1][1] > maxY)
+                maxY = b[1][1];
             count++;
         }
-
-        if (count === 0 || !isFinite(minX)) return null;
+        if (count === 0 || !isFinite(minX))
+            return null;
         return [[minX, minY], [maxX, maxY]];
     }
 }
-
 /**
  * Слой с поддержкой кластеризации маркеров.
  * Группирует близко расположенные маркеры в кластеры, отображаемые
@@ -264,7 +265,6 @@ export class ClusterLayer extends Layer {
         this.clusterStyleFunction = options.clusterStyleFunction || null;
         this.updateThrottle = options.updateThrottle ?? 0;
         this.clusterZoomOnClick = options.clusterZoomOnClick ?? 1.5;
-
         /** @private */ this._clusterElements = [];
         /** @private */ this._clusterGroups = [];
         /** @private */ this._lastUpdateTime = 0;
@@ -272,7 +272,6 @@ export class ClusterLayer extends Layer {
         /** @private */ this._clusterVisibleMarkers = new Set();
         /** @private */ this._clickHandler = null;
     }
-
     /**
      * Добавляет слой на карту и инициализирует обработчик кликов по кластерам.
      *
@@ -282,15 +281,17 @@ export class ClusterLayer extends Layer {
     addTo(map) {
         super.addTo(map);
         this._panes = _getPanes(map);
-
         if (!this._clickHandler) {
             this._clickHandler = (e) => {
-                if (e.pointerType === 'mouse' && e.button !== 0) return;
+                if (e.pointerType === 'mouse' && e.button !== 0)
+                    return;
                 const clusterEl = e.target.closest('[data-cluster-id]');
-                if (!clusterEl) return;
+                if (!clusterEl)
+                    return;
                 const clusterId = parseInt(clusterEl.dataset.clusterId, 10);
                 const group = this._clusterGroups[clusterId];
-                if (!group) return;
+                if (!group)
+                    return;
                 e.preventDefault();
                 e.stopPropagation();
                 this._handleClusterClick(group, this._map);
@@ -299,7 +300,6 @@ export class ClusterLayer extends Layer {
         }
         return this;
     }
-
     /**
      * Удаляет слой с карты, очищает кластеры и удаляет обработчики.
      */
@@ -311,7 +311,6 @@ export class ClusterLayer extends Layer {
         this._clearClusters();
         super.removeFromMap();
     }
-
     /**
      * Удаляет все DOM-элементы кластеров и сбрасывает состояние.
      *
@@ -326,24 +325,23 @@ export class ClusterLayer extends Layer {
         this._clusterActive = false;
         this._clusterVisibleMarkers.clear();
     }
-
-/**
- * Обновляет состояние кластеров на каждом кадре с учётом троттлинга.
- *
- * @param {Object} map - Экземпляр карты.
- * @param {number} deltaTime - Время с прошлого кадра, сек.
- *     Пробрасывается в базовый `_postUpdate`, чтобы подписанные
- *     на слой объекты (включая анимированные `Vector3D`) получали
- *     корректный таймстеп. Сама кластеризация `deltaTime` не использует —
- *     ей хватает `updateThrottle` в мс.
- * @private
- */
-_postUpdate(map, deltaTime) {
-    super._postUpdate(map, deltaTime);
-    const now = performance.now();
-    if (now - this._lastUpdateTime < this.updateThrottle) return;
-    this._lastUpdateTime = now;
-
+    /**
+     * Обновляет состояние кластеров на каждом кадре с учётом троттлинга.
+     *
+     * @param {Object} map - Экземпляр карты.
+     * @param {number} deltaTime - Время с прошлого кадра, сек.
+     *     Пробрасывается в базовый `_postUpdate`, чтобы подписанные
+     *     на слой объекты (включая анимированные `Vector3D`) получали
+     *     корректный таймстеп. Сама кластеризация `deltaTime` не использует —
+     *     ей хватает `updateThrottle` в мс.
+     * @private
+     */
+    _postUpdate(map, deltaTime) {
+        super._postUpdate(map, deltaTime);
+        const now = performance.now();
+        if (now - this._lastUpdateTime < this.updateThrottle)
+            return;
+        this._lastUpdateTime = now;
         // Скрываем все существующие кластеры (не удаляем для переиспользования)
         for (const el of this._clusterElements) {
             el.style.display = 'none';
@@ -351,23 +349,23 @@ _postUpdate(map, deltaTime) {
         this._clusterGroups = [];
         this._clusterActive = false;
         this._clusterVisibleMarkers.clear();
-
-        if (!this.visible) return;
-
+        if (!this.visible)
+            return;
         const zoom = map.continuousZoom;
         if (zoom >= this.clusterMaxZoom) {
             this._clusterActive = false;
             this._clusterVisibleMarkers.clear();
             return;
         }
-
         // Сбор видимых маркеров, участвующих в кластеризации
         const screenPoints = [];
         for (const marker of this._objects) {
-            if (!marker._clusterable) continue;
-            if (zoom < marker._minZoom || zoom > marker._maxZoom) continue;
-            if (!marker._element) continue;
-
+            if (!marker._clusterable)
+                continue;
+            if (zoom < marker._minZoom || zoom > marker._maxZoom)
+                continue;
+            if (!marker._element)
+                continue;
             // Координаты маркера → метры проекции карты.
             // Работает для любой зарегистрированной СК, заданной у маркера.
             const [wx, wz] = map.project(marker._coord, marker._crs);
@@ -380,26 +378,27 @@ _postUpdate(map, deltaTime) {
             }
             const worldPos = new THREE.Vector3(worldX, worldY, worldZ);
             const screenPos = worldPos.clone().project(map.camera);
-            if (screenPos.z > 1) continue;
-
+            if (screenPos.z > 1)
+                continue;
             const canvas = map.renderer.domElement;
             const sx = (screenPos.x * 0.5 + 0.5) * canvas.clientWidth;
             const sy = (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight;
             screenPoints.push({ marker, sx, sy, worldPos });
         }
-
-        if (screenPoints.length === 0) return;
-
+        if (screenPoints.length === 0)
+            return;
         // Простая кластеризация на основе расстояния в пикселях
         const clustered = new Set();
         const clusters = [];
         for (let i = 0; i < screenPoints.length; i++) {
-            if (clustered.has(i)) continue;
+            if (clustered.has(i))
+                continue;
             const pt = screenPoints[i];
             const group = [pt];
             clustered.add(i);
             for (let j = i + 1; j < screenPoints.length; j++) {
-                if (clustered.has(j)) continue;
+                if (clustered.has(j))
+                    continue;
                 const other = screenPoints[j];
                 const dx = pt.sx - other.sx;
                 const dy = pt.sy - other.sy;
@@ -410,12 +409,10 @@ _postUpdate(map, deltaTime) {
             }
             clusters.push(group);
         }
-
         this._clusterActive = true;
         const visibleMarkers = new Set();
         const markerPane = this._panes.markerPane;
         let clusterIndex = 0;
-
         for (const group of clusters) {
             // Проверка дистанции от камеры до центра кластера
             if (map.view.objectDistanceFactor > 0) {
@@ -426,40 +423,41 @@ _postUpdate(map, deltaTime) {
                     avgZ += pt.worldPos.z;
                 }
                 const n = group.length;
-                avgX /= n; avgY /= n; avgZ /= n;
+                avgX /= n;
+                avgY /= n;
+                avgZ /= n;
                 const center = new THREE.Vector3(avgX, avgY, avgZ);
                 if (map.camera.position.distanceTo(center) > map.maxObjectDistance) {
                     continue; // кластер слишком далеко, маркеры не показываем
                 }
             }
-
             if (group.length < this.clusterMinSize) {
                 for (const { marker } of group) {
                     visibleMarkers.add(marker);
                 }
                 continue;
             }
-
             const count = group.length;
             const avgX = group.reduce((s, p) => s + p.sx, 0) / count;
             const avgY = group.reduce((s, p) => s + p.sy, 0) / count;
-
             let iconUrl = this.clusterIconUrl;
             let iconSize = this.clusterIconSize;
             let anchor = this.clusterAnchor;
             let htmlContent = null;
-
             if (this.clusterStyleFunction) {
                 const style = this.clusterStyleFunction({
                     count,
                     markers: group.map(g => g.marker)
                 });
-                if (style.iconUrl !== undefined) iconUrl = style.iconUrl;
-                if (style.iconSize) iconSize = style.iconSize;
-                if (style.anchor) anchor = style.anchor;
-                if (style.html !== undefined) htmlContent = style.html;
+                if (style.iconUrl !== undefined)
+                    iconUrl = style.iconUrl;
+                if (style.iconSize)
+                    iconSize = style.iconSize;
+                if (style.anchor)
+                    anchor = style.anchor;
+                if (style.html !== undefined)
+                    htmlContent = style.html;
             }
-
             // Переиспользуем или создаём элемент кластера
             let el = this._clusterElements[clusterIndex];
             if (!el) {
@@ -471,7 +469,6 @@ _postUpdate(map, deltaTime) {
                 markerPane.appendChild(el);
                 this._clusterElements.push(el);
             }
-
             el.style.display = 'block';
             el.style.left = avgX + 'px';
             el.style.top = avgY + 'px';
@@ -479,11 +476,11 @@ _postUpdate(map, deltaTime) {
             el.style.height = iconSize[1] + 'px';
             el.style.transform = `translate(${-anchor[0] * 100}%, ${-anchor[1] * 100}%)`;
             el.dataset.clusterId = clusterIndex;
-
             // Формирование внешнего вида
             if (htmlContent) {
                 el.innerHTML = htmlContent;
-            } else if (iconUrl) {
+            }
+            else if (iconUrl) {
                 el.innerHTML = '';
                 el.style.backgroundColor = '';
                 el.style.borderRadius = '';
@@ -493,7 +490,6 @@ _postUpdate(map, deltaTime) {
                 el.style.color = '';
                 el.style.fontWeight = '';
                 el.style.fontSize = '';
-
                 const img = document.createElement('img');
                 img.src = iconUrl;
                 img.style.width = '100%';
@@ -510,7 +506,8 @@ _postUpdate(map, deltaTime) {
                 span.style.font = this.clusterTextStyle.font || 'bold 12px sans-serif';
                 span.style.textShadow = this.clusterTextStyle.textShadow || '1px 1px 2px black';
                 el.appendChild(span);
-            } else {
+            }
+            else {
                 el.innerHTML = '';
                 el.style.backgroundColor = '#3388ff';
                 el.style.borderRadius = '50%';
@@ -522,19 +519,15 @@ _postUpdate(map, deltaTime) {
                 el.style.fontSize = '12px';
                 el.textContent = count;
             }
-
             this._clusterGroups[clusterIndex] = group;
             clusterIndex++;
         }
-
         // Скрываем лишние элементы
         for (let i = clusterIndex; i < this._clusterElements.length; i++) {
             this._clusterElements[i].style.display = 'none';
         }
-
         this._clusterVisibleMarkers = visibleMarkers;
     }
-
     /**
      * Обрабатывает клик по кластеру: перемещает камеру к центру кластера
      * и увеличивает зум, чтобы разгруппировать маркеры.
@@ -556,12 +549,9 @@ _postUpdate(map, deltaTime) {
         }
         avgX /= group.length;
         avgZ /= group.length;
-
         const [lon, lat] = map.unprojectToLonLat(avgX, avgZ);
-
         const currentZoom = map.continuousZoom;
         const targetZoom = Math.min(currentZoom + this.clusterZoomOnClick, this.clusterMaxZoom);
-
         map.moveCameraToSlow(lon, lat, 0.6, targetZoom);
     }
 }

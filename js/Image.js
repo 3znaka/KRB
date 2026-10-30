@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль для отображения плоских изображений на карте.
  * Поддерживает позиционирование по четырём угловым точкам (узлам)
@@ -16,17 +17,14 @@
  *
  * @module Image
  */
-
-import { THREE } from '../js_TP/tpb.js';
+import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
-
 /**
  * Рендерит изображения поверх тайлов с высоким приоритетом.
  * @private
  */
 const IMAGE_RENDER_ORDER = 997;
-
 /**
  * Величина `polygonOffsetFactor`/`polygonOffsetUnits` по умолчанию.
  *
@@ -38,7 +36,6 @@ const IMAGE_RENDER_ORDER = 997;
  * @private
  */
 const DEFAULT_POLYGON_OFFSET = -4;
-
 /**
  * Класс, представляющий плоское изображение на карте.
  *
@@ -130,7 +127,6 @@ export class Image {
         if (!options.source) {
             throw new Error('Image: options.source is required');
         }
-
         /** @private */ this._source = options.source;
         /** @private */ this._nodes = options.nodes || null;
         /** @private */ this._position = options.position || null;
@@ -146,7 +142,6 @@ export class Image {
          * @type {import('./Projections.js').Projection|null}
          */
         this._crs = null;
-
         /** @private */ this._size = options.size || [100, 100];
         /** @private */ this._anchor = options.anchor || [0.5, 0.5];
         /** @private */ this._rotation = options.rotation || [0, 0, 0];
@@ -154,7 +149,6 @@ export class Image {
         /** @private */ this._blending = options.blending || 'normal';
         /** @private */ this._minZoom = options.minZoom ?? -Infinity;
         /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-
         // --- Z-fighting / рендер над тайлами ---
         /**
          * Не проверять depth-буфер: изображение всегда поверх сцены.
@@ -176,7 +170,6 @@ export class Image {
         this._polygonOffset = Number.isFinite(options.polygonOffset)
             ? options.polygonOffset
             : DEFAULT_POLYGON_OFFSET;
-
         // Подпись
         /** @private */ this._title = options.title || '';
         /** @private */ this._titleStyle = options.titleStyle || {};
@@ -186,15 +179,12 @@ export class Image {
         /** @private */ this._titleOffset = options.titleOffset || [0, 0];
         /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
         /** @private */ this._titlePriority = options.titlePriority ?? 0;
-
         // События
         /** @private */ this._onClick = options.onClick || null;
         /** @private */ this._onHover = options.onHover || null;
         /** @private */ this._isHovered = false;
-
         // Тултип
         /** @private */ this._tooltipText = options.tooltip || '';
-
         // Внутреннее состояние
         /** @private */ this._map = null;
         /** @private */ this._layer = null;
@@ -213,21 +203,17 @@ export class Image {
         /** @private */ this._boundingSphereWorld = new THREE.Sphere();
         /** @private */ this._tempVec3 = new THREE.Vector3();
         /** @private */ this._dirtyGeometry = true; // флаг, что геометрию нужно перестроить
-
         // Регистрация в реестре интерактивных объектов, если есть обработчики
         if (this._onClick || this._onHover || this._tooltipText) {
             Image._registerInteractive(this);
         }
     }
-
     /* ================================================================
        Статический реестр интерактивных изображений и делегирование событий
        ================================================================ */
-
     /** @private */ static _interactiveImages = new Set();
     /** @private */ static _eventListenersAttached = false;
     /** @private */ static _delegatedHandlers = null;
-
     /**
      * Координаты последнего pointerdown и флаг его активности.
      * Используются, чтобы отличить реальный клик от отпускания мыши
@@ -240,7 +226,6 @@ export class Image {
     /** @private */ static _pointerDownY = 0;
     /** @private */ static _pointerDownActive = false;
     /** @private */ static _clickMoveThreshold = 5;
-
     /**
      * Регистрирует изображение для обработки событий мыши.
      * @param {Image} image - Экземпляр изображения.
@@ -252,7 +237,6 @@ export class Image {
             Image._attachGlobalListeners();
         }
     }
-
     /**
      * Удаляет изображение из реестра интерактивных.
      * @param {Image} image - Экземпляр изображения.
@@ -264,7 +248,6 @@ export class Image {
             Image._detachGlobalListeners();
         }
     }
-
     /**
      * Добавляет глобальные обработчики событий на canvas.
      *
@@ -280,35 +263,32 @@ export class Image {
      */
     static _attachGlobalListeners() {
         const canvas = Image._getCanvas();
-        if (!canvas) return;
-
+        if (!canvas)
+            return;
         Image._delegatedHandlers = {
             pointerdown: (e) => Image._handleGlobalPointerDown(e),
             mousemove: (e) => Image._handleGlobalMouseMove(e),
             click: (e) => Image._handleGlobalClick(e)
         };
-
         canvas.addEventListener('pointerdown', Image._delegatedHandlers.pointerdown, true);
         canvas.addEventListener('mousemove', Image._delegatedHandlers.mousemove, true);
         canvas.addEventListener('click', Image._delegatedHandlers.click, true);
         Image._eventListenersAttached = true;
     }
-
     /**
      * Удаляет глобальные обработчики.
      * @private
      */
     static _detachGlobalListeners() {
         const canvas = Image._getCanvas();
-        if (!canvas || !Image._delegatedHandlers) return;
-
+        if (!canvas || !Image._delegatedHandlers)
+            return;
         canvas.removeEventListener('pointerdown', Image._delegatedHandlers.pointerdown, true);
         canvas.removeEventListener('mousemove', Image._delegatedHandlers.mousemove, true);
         canvas.removeEventListener('click', Image._delegatedHandlers.click, true);
         Image._delegatedHandlers = null;
         Image._eventListenersAttached = false;
     }
-
     /**
      * Возвращает canvas, к которому привязаны обработчики.
      * @returns {HTMLCanvasElement|null}
@@ -322,7 +302,6 @@ export class Image {
         }
         return null;
     }
-
     /**
      * Запоминает точку нажатия. Нужен, чтобы в `_handleGlobalClick`
      * отличить реальный клик от отпускания мыши после панорамирования.
@@ -335,7 +314,6 @@ export class Image {
         Image._pointerDownY = event.clientY;
         Image._pointerDownActive = true;
     }
-
     /**
      * Глобальный обработчик mousemove.
      * @param {MouseEvent} event - Событие мыши.
@@ -346,7 +324,6 @@ export class Image {
             img._handleMouseMove(event);
         }
     }
-
     /**
      * Глобальный обработчик click.
      *
@@ -371,29 +348,26 @@ export class Image {
                 return; // было панорамирование, не клик
             }
         }
-
         for (const img of Image._interactiveImages) {
             img._handleClick(event);
         }
     }
-
     /* ================================================================
        Публичные методы
        ================================================================ */
-
     /**
      * Добавляет изображение на карту в персональный слой.
      * @param {Object} map - Экземпляр карты.
      * @returns {Image} Текущий экземпляр.
      */
     addTo(map) {
-        if (this._map) this.remove();
+        if (this._map)
+            this.remove();
         const personalLayer = new Layer();
         personalLayer.addTo(map);
         personalLayer.add(this);
         return this;
     }
-
     /**
      * Присоединяет изображение к карте и слою, строит геометрию.
      * @param {Object} map - Экземпляр карты.
@@ -401,34 +375,29 @@ export class Image {
      * @private
      */
     _attach(map, layer) {
-        if (this._map === map && this._layer === layer) return;
+        if (this._map === map && this._layer === layer)
+            return;
         this.remove();
         this._map = map;
         this._layer = layer;
-
         // Резолвим проекцию изображения: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-
         this._loadTexture();
         this._buildGeometry(map);
         map.worldGroup.add(this._group);
-
         if (this._title && map.textManager) {
             this._textLabel = map.textManager.addLabel(this);
         }
-
         if (this._onClick || this._onHover || this._tooltipText) {
             if (!Image._eventListenersAttached) {
                 Image._attachGlobalListeners();
             }
         }
-
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
     }
-
     /**
      * Удаляет изображение с карты и освобождает ресурсы.
      * @returns {void}
@@ -437,19 +406,15 @@ export class Image {
         if (this._map) {
             Image._unregisterInteractive(this);
         }
-
         if (this._group.parent) {
             this._group.parent.remove(this._group);
         }
-
         this._disposeGeometry();
         this._disposeTexture();
-
         if (this._textLabel && this._map?.textManager) {
             this._map.textManager.removeLabel(this._textLabel);
             this._textLabel = null;
         }
-
         this._layer?._removeRef(this);
         this._layer = null;
         this._map = null;
@@ -457,7 +422,6 @@ export class Image {
         this._isVisible = false;
         this._worldPositions.length = 0;
     }
-
     /**
      * Обновляет источник изображения (URL, HTMLImageElement или Canvas).
      * @param {string|HTMLImageElement|HTMLCanvasElement} source - Новый источник.
@@ -479,7 +443,6 @@ export class Image {
         }
         return this;
     }
-
     /**
      * Устанавливает прозрачность.
      * @param {number} opacity - Прозрачность (0..1).
@@ -493,7 +456,6 @@ export class Image {
         }
         return this;
     }
-
     /**
      * Устанавливает режим смешивания.
      * @param {string|THREE.Blending} blending - Строка ('normal', 'additive', 'multiply', 'subtract') или константа THREE.Blending.
@@ -506,7 +468,6 @@ export class Image {
         }
         return this;
     }
-
     /**
      * Устанавливает новые узлы (углы) изображения.
      * @param {Array.<Object>} nodes - Массив из 3 или 4 узлов.
@@ -523,54 +484,53 @@ export class Image {
         }
         return this;
     }
-
     /**
      * Устанавливает альтернативное позиционирование (позиция, размер, якорь, поворот).
      * @param {Object} params - Параметры: { position, size, anchor, rotation }.
      * @returns {Image} Текущий экземпляр.
      */
     setPositionRotation(params = {}) {
-        if (params.position) this._position = params.position;
-        if (params.size) this._size = params.size;
-        if (params.anchor) this._anchor = params.anchor;
-        if (params.rotation) this._rotation = params.rotation;
+        if (params.position)
+            this._position = params.position;
+        if (params.size)
+            this._size = params.size;
+        if (params.anchor)
+            this._anchor = params.anchor;
+        if (params.rotation)
+            this._rotation = params.rotation;
         this._dirtyGeometry = true;
         if (this._map) {
             this._buildGeometry(this._map);
         }
         return this;
     }
-
     /* ================================================================
        Внутренние методы
        ================================================================ */
-
     /**
      * Загружает текстуру из источника.
      * @private
      */
     _loadTexture() {
-        if (!this._source) return;
-
+        if (!this._source)
+            return;
         if (this._source instanceof HTMLCanvasElement) {
             this._texture = new THREE.CanvasTexture(this._source);
-        } else if (this._source instanceof HTMLImageElement) {
+        }
+        else if (this._source instanceof HTMLImageElement) {
             this._texture = new THREE.Texture(this._source);
             this._texture.needsUpdate = true;
-        } else if (typeof this._source === 'string') {
+        }
+        else if (typeof this._source === 'string') {
             const loader = new THREE.TextureLoader();
             loader.setCrossOrigin('anonymous');
-            this._texture = loader.load(
-                this._source,
-                () => { if (this._material) this._material.needsUpdate = true; },
-                undefined,
-                (err) => console.warn('Image: failed to load texture', err)
-            );
-        } else {
+            this._texture = loader.load(this._source, () => { if (this._material)
+                this._material.needsUpdate = true; }, undefined, (err) => console.warn('Image: failed to load texture', err));
+        }
+        else {
             console.warn('Image: unsupported source type', this._source);
         }
     }
-
     /**
      * Освобождает текущую текстуру.
      * @private
@@ -581,7 +541,6 @@ export class Image {
             this._texture = null;
         }
     }
-
     /**
      * Освобождает геометрию и материал.
      * @private
@@ -599,7 +558,6 @@ export class Image {
             this._mesh = null;
         }
     }
-
     /**
      * Преобразует строковый режим смешивания в константу THREE.
      * @param {string|THREE.Blending} blending - Входной режим.
@@ -607,7 +565,8 @@ export class Image {
      * @private
      */
     _normalizeBlending(blending) {
-        if (typeof blending === 'number') return blending;
+        if (typeof blending === 'number')
+            return blending;
         switch (blending.toLowerCase()) {
             case 'additive':
                 return THREE.AdditiveBlending;
@@ -620,7 +579,6 @@ export class Image {
                 return THREE.NormalBlending;
         }
     }
-
     /**
      * Вычисляет мировые координаты (без worldGroup) для заданных узлов.
      * Координаты узлов интерпретируются в СК `this._crs`.
@@ -634,8 +592,8 @@ export class Image {
      * @private
      */
     _computeWorldPositionsFromNodes() {
-        if (!this._nodes || this._nodes.length < 3) return [];
-
+        if (!this._nodes || this._nodes.length < 3)
+            return [];
         const map = this._map;
         const yOffset = this._elevationOffset;
         const positions = this._nodes.map(node => {
@@ -644,7 +602,6 @@ export class Image {
             const y = (node.alt || 0) + yOffset;
             return new THREE.Vector3(x, y, z);
         });
-
         // Если задано 4 узла и они не компланарны, проецируем 4-й на плоскость первых трёх
         if (positions.length === 4) {
             const [p0, p1, p2, p3] = positions;
@@ -660,10 +617,8 @@ export class Image {
                 }
             }
         }
-
         return positions;
     }
-
     /**
      * Вычисляет мировые координаты узлов из альтернативного позиционирования (anchor, rotation, size).
      * Первые два элемента `_position` интерпретируются в СК `this._crs`,
@@ -673,54 +628,38 @@ export class Image {
      * @private
      */
     _computeWorldPositionsFromAnchor() {
-        if (!this._position) return [];
-
+        if (!this._position)
+            return [];
         const [lon, lat, alt] = this._position;
         const [width, height] = this._size;
         const [ax, ay] = this._anchor;
         const [rx, ry, rz] = this._rotation;
-
         const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
         // Подъём применяем к центру — все 4 угла получат его же
         // (в локальных координатах они лежат в плоскости XZ).
         const center = new THREE.Vector3(worldX, (alt || 0) + this._elevationOffset, worldZ);
-
         const halfW = width / 2;
         const halfH = height / 2;
-
         // Локальные координаты углов в плоскости XZ (Y=0), центр в (0,0,0)
         const cornersLocal = [
             new THREE.Vector3(-halfW, 0, -halfH),
-            new THREE.Vector3( halfW, 0, -halfH),
-            new THREE.Vector3(-halfW, 0,  halfH),
-            new THREE.Vector3( halfW, 0,  halfH)
+            new THREE.Vector3(halfW, 0, -halfH),
+            new THREE.Vector3(-halfW, 0, halfH),
+            new THREE.Vector3(halfW, 0, halfH)
         ];
-
         // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
-        const anchorOffset = new THREE.Vector3(
-            (0.5 - ax) * width,
-            0,
-            (0.5 - ay) * height
-        );
+        const anchorOffset = new THREE.Vector3((0.5 - ax) * width, 0, (0.5 - ay) * height);
         cornersLocal.forEach(c => c.add(anchorOffset));
-
         // Применяем вращение
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const quaternion = new THREE.Quaternion().setFromEuler(euler);
         const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
-
         // Добавляем к центру в мировых координатах (без перестановки осей)
         const worldCorners = rotatedCorners.map(local => {
-            return new THREE.Vector3(
-                center.x + local.x,
-                center.y + local.y,
-                center.z + local.z
-            );
+            return new THREE.Vector3(center.x + local.x, center.y + local.y, center.z + local.z);
         });
-
         return worldCorners;
     }
-
     /**
      * Строит геометрию плоскости с вершинами в мировых координатах (локально относительно центроида).
      *
@@ -736,31 +675,28 @@ export class Image {
     _buildGeometry(map) {
         // Очищаем старую геометрию и материал, но не трогаем текстуру (она загружается отдельно)
         this._disposeGeometry();
-
         // Получаем мировые позиции узлов (без учёта worldGroup)
         let worldPositions;
         if (this._nodes) {
             worldPositions = this._computeWorldPositionsFromNodes();
-        } else if (this._position) {
+        }
+        else if (this._position) {
             worldPositions = this._computeWorldPositionsFromAnchor();
-        } else {
+        }
+        else {
             console.warn('Image: neither nodes nor position provided');
             return;
         }
-
         if (worldPositions.length < 3) {
             console.warn('Image: not enough positions to build geometry');
             return;
         }
-
         this._worldPositions = worldPositions;
-
         // Вычисляем центроид (среднее по всем точкам)
         const centroid = new THREE.Vector3();
         worldPositions.forEach(p => centroid.add(p));
         centroid.divideScalar(worldPositions.length);
         this._centroidWorld.copy(centroid);
-
         // Создаём PlaneGeometry с 4 вершинами (для треугольника можно использовать также, но 4-я вершина будет продублирована)
         // Если узлов 3, создадим треугольную геометрию: используем три первые вершины, четвёртую ставим в ту же точку, что и третью?
         // Но текстура будет искажена. Лучше создать геометрию с 3 вершинами и индексами.
@@ -770,7 +706,7 @@ export class Image {
             geometry = new THREE.BufferGeometry();
             const vertices = new Float32Array(9);
             worldPositions.forEach((p, i) => {
-                vertices[i * 3]     = p.x - centroid.x;
+                vertices[i * 3] = p.x - centroid.x;
                 vertices[i * 3 + 1] = p.y - centroid.y;
                 vertices[i * 3 + 2] = p.z - centroid.z;
             });
@@ -780,7 +716,8 @@ export class Image {
             // Для простоты установим UV: (0,0), (1,0), (0,1) в порядке вершин.
             const uvs = new Float32Array([0, 0, 1, 0, 0, 1]);
             geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-        } else {
+        }
+        else {
             // Четырёхугольник (PlaneGeometry с переопределёнными вершинами)
             geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
             const pos = geometry.attributes.position;
@@ -792,7 +729,6 @@ export class Image {
             pos.needsUpdate = true;
             geometry.computeVertexNormals();
         }
-
         // Материал с polygonOffset — против z-fighting с coplanar-тайлами.
         const onTop = this._alwaysOnTop;
         const material = new THREE.MeshBasicMaterial({
@@ -801,30 +737,25 @@ export class Image {
             transparent: this._opacity < 1,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
-
             // depthTest выключается только при alwaysOnTop. В обычном
             // режиме изображение корректно окклюдируется рельефом,
             // стоящим перед камерой, но перекрывает coplanar-тайлы
             // за счёт polygonOffset.
-            depthTest:  !onTop,
+            depthTest: !onTop,
             depthWrite: false,
-            polygonOffset:       !onTop,
+            polygonOffset: !onTop,
             polygonOffsetFactor: this._polygonOffset,
-            polygonOffsetUnits:  this._polygonOffset
+            polygonOffsetUnits: this._polygonOffset
         });
-
         const mesh = new THREE.Mesh(geometry, material);
         mesh.renderOrder = IMAGE_RENDER_ORDER;
-
         // Добавляем в группу
         this._group.clear();
         this._group.add(mesh);
         this._group.position.copy(centroid); // позиция группы в координатах worldGroup
-
         this._geometry = geometry;
         this._material = material;
         this._mesh = mesh;
-
         // Вычисляем ограничивающую сферу
         let maxRadiusSq = 0;
         worldPositions.forEach(p => {
@@ -832,13 +763,12 @@ export class Image {
             const dy = p.y - centroid.y;
             const dz = p.z - centroid.z;
             const rSq = dx * dx + dy * dy + dz * dz;
-            if (rSq > maxRadiusSq) maxRadiusSq = rSq;
+            if (rSq > maxRadiusSq)
+                maxRadiusSq = rSq;
         });
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-
         this._dirtyGeometry = false;
     }
-
     /**
      * Пересобирает геометрию, если изменились узлы или позиционирование.
      * @param {Object} map - Экземпляр карты.
@@ -849,52 +779,55 @@ export class Image {
             this._buildGeometry(map);
         }
     }
-
     /**
      * Обрабатывает mousemove для делегированного события.
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     _handleMouseMove(event) {
-        if (!this._map || !this._isVisible) return;
+        if (!this._map || !this._isVisible)
+            return;
         const hit = this._raycastImage(event);
         if (hit) {
             if (!this._isHovered) {
                 this._isHovered = true;
                 if (this._onHover) {
                     this._onHover(true);
-                } else if (this._tooltipText && this._map.popupManager) {
+                }
+                else if (this._tooltipText && this._map.popupManager) {
                     this._map.popupManager.show(this, this._tooltipText);
                 }
             }
-        } else {
+        }
+        else {
             if (this._isHovered) {
                 this._isHovered = false;
                 if (this._onHover) {
                     this._onHover(false);
-                } else if (this._tooltipText && this._map.popupManager) {
+                }
+                else if (this._tooltipText && this._map.popupManager) {
                     this._map.popupManager.hide();
                 }
             }
         }
     }
-
     /**
      * Обрабатывает click для делегированного события.
      * @param {MouseEvent} event - Событие мыши.
      * @private
      */
     _handleClick(event) {
-        if (!this._map || !this._isVisible) return;
+        if (!this._map || !this._isVisible)
+            return;
         if (this._raycastImage(event)) {
             if (this._onClick) {
                 this._onClick(event, this);
-            } else if (this._tooltipText && this._map.popupManager) {
+            }
+            else if (this._tooltipText && this._map.popupManager) {
                 this._map.popupManager.show(this, this._tooltipText);
             }
         }
     }
-
     /**
      * Проверяет, находится ли точка экрана над изображением.
      *
@@ -907,30 +840,24 @@ export class Image {
      * @private
      */
     _raycastImage(event) {
-        if (!this._mesh || !this._mesh.visible) return false;
-
+        if (!this._mesh || !this._mesh.visible)
+            return false;
         const rect = this._map.renderer.domElement.getBoundingClientRect();
-        const mouse = new THREE.Vector2(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
-            -((event.clientY - rect.top) / rect.height) * 2 + 1
-        );
-
+        const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, this._map.camera);
-
         const intersects = raycaster.intersectObject(this._mesh, false);
         return intersects.length > 0;
     }
-
     /**
      * Обновляет состояние изображения: видимость, геометрию, подпись.
      * @param {Object} map - Экземпляр карты.
      * @private
      */
     _update(map) {
-        if (!this._map || !this._group) return;
+        if (!this._map || !this._group)
+            return;
         const zoom = this._map.continuousZoom;
-
         if (this._layer && !this._layer.visible) {
             this._group.visible = false;
             this._isVisible = false;
@@ -941,10 +868,8 @@ export class Image {
             this._isVisible = false;
             return;
         }
-
         // Пересобираем геометрию, если нужно
         this._rebuildGeometryIfNeeded(map);
-
         // Проверка расстояния через ограничивающую сферу
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
@@ -958,24 +883,19 @@ export class Image {
                 }
             }
         }
-
         this._group.visible = true;
         this._isVisible = true;
-
         // Обновляем подпись
         if (this._textLabel) {
             // Обновление подписи происходит в TextManager через getScreenPosition
         }
     }
-
     // ---------- Интерфейс для TextManager ----------
-
     /**
      * Возвращает текст подписи.
      * @returns {string}
      */
     getText() { return this._title; }
-
     /**
      * Возвращает стили подписи.
      * @returns {Object}
@@ -988,75 +908,66 @@ export class Image {
             textAlign: this._titleAlign
         }, this._titleStyle);
     }
-
     /**
      * Возвращает границы зума для подписи.
      * @returns {Object}
      */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
-
     /**
      * Возвращает тип подписи.
      * @returns {string}
      */
     getLabelType() { return 'image'; }
-
     /**
      * Проверяет видимость изображения.
      * @returns {boolean}
      */
     isVisible() { return this._isVisible; }
-
     /**
      * Возвращает экранную позицию для подписи (центр изображения).
      * @returns {Object|null}
      */
     getScreenPosition() {
-        if (!this._isVisible || !this._group) return null;
+        if (!this._isVisible || !this._group)
+            return null;
         const worldPos = this._tempVec3.copy(this._group.position).add(this._map.worldGroup.position);
         // Добавляем небольшую высоту, чтобы подпись была над изображением
         worldPos.y += this._boundingSphereRadius * 0.1;
         const screenPos = worldPos.clone().project(this._map.camera);
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) return null;
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
+            return null;
         const canvas = this._map.renderer.domElement;
         return {
             x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
             y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
         };
     }
-
     /**
      * Возвращает горизонтальное выравнивание подписи.
      * @returns {string}
      */
     getTitleAlign() { return this._titleAlign; }
-
     /**
      * Возвращает смещение подписи.
      * @returns {Array.<number>}
      */
     getTitleOffset() { return this._titleOffset; }
-
     /**
      * Возвращает вертикальное выравнивание подписи.
      * @returns {string}
      */
     getTitleVerticalAlign() { return 'bottom'; }
-
     /**
      * Проверяет разрешение выхода подписи за границы.
      * @returns {boolean}
      */
     getAllowOverflow() { return this._titleAllowOverflow; }
-
     /**
      * Возвращает приоритет подписи.
      * @returns {number}
      */
     getPriority() { return this._titlePriority; }
-
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
-
     /**
      * Возвращает прямоугольник (bounding box), охватывающий изображение.
      *
@@ -1087,34 +998,43 @@ export class Image {
         const srcCrs = this._crs
             ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
         const dstCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
-        if (!srcCrs || !dstCrs) return null;
-
+        if (!srcCrs || !dstCrs)
+            return null;
         // --- Режим 1: nodes — считаем по «сырым» координатам ---
         if (this._nodes && this._nodes.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let count = 0;
             for (const node of this._nodes) {
-                if (!node) continue;
+                if (!node)
+                    continue;
                 const px = node.lon, py = node.lat;
-                if (!isFinite(px) || !isFinite(py)) continue;
+                if (!isFinite(px) || !isFinite(py))
+                    continue;
                 let x, y;
                 if (srcCrs === dstCrs) {
-                    x = px; y = py;
-                } else {
+                    x = px;
+                    y = py;
+                }
+                else {
                     const lonLat = srcCrs.toLonLat([px, py]);
                     const converted = dstCrs.fromLonLat(lonLat);
-                    x = converted[0]; y = converted[1];
+                    x = converted[0];
+                    y = converted[1];
                 }
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
+                if (x < minX)
+                    minX = x;
+                if (x > maxX)
+                    maxX = x;
+                if (y < minY)
+                    minY = y;
+                if (y > maxY)
+                    maxY = y;
                 count++;
             }
-            if (count === 0 || !isFinite(minX)) return null;
+            if (count === 0 || !isFinite(minX))
+                return null;
             return [[minX, minY], [maxX, maxY]];
         }
-
         // --- Режим 2: position + size + anchor + rotation ---
         if (this._position) {
             if (this._map) {
@@ -1125,11 +1045,16 @@ export class Image {
                     let count = 0;
                     for (const v of worldCorners) {
                         const coord = this._map.unproject([v.x, v.z], dstCrs);
-                        if (!coord || !isFinite(coord[0]) || !isFinite(coord[1])) continue;
-                        if (coord[0] < minX) minX = coord[0];
-                        if (coord[0] > maxX) maxX = coord[0];
-                        if (coord[1] < minY) minY = coord[1];
-                        if (coord[1] > maxY) maxY = coord[1];
+                        if (!coord || !isFinite(coord[0]) || !isFinite(coord[1]))
+                            continue;
+                        if (coord[0] < minX)
+                            minX = coord[0];
+                        if (coord[0] > maxX)
+                            maxX = coord[0];
+                        if (coord[1] < minY)
+                            minY = coord[1];
+                        if (coord[1] > maxY)
+                            maxY = coord[1];
                         count++;
                     }
                     if (count > 0 && isFinite(minX)) {
@@ -1139,18 +1064,21 @@ export class Image {
             }
             // Fallback: карта ещё не привязана — возвращаем точку position.
             const px = this._position[0], py = this._position[1];
-            if (!isFinite(px) || !isFinite(py)) return null;
+            if (!isFinite(px) || !isFinite(py))
+                return null;
             let x, y;
             if (srcCrs === dstCrs) {
-                x = px; y = py;
-            } else {
+                x = px;
+                y = py;
+            }
+            else {
                 const lonLat = srcCrs.toLonLat([px, py]);
                 const converted = dstCrs.fromLonLat(lonLat);
-                x = converted[0]; y = converted[1];
+                x = converted[0];
+                y = converted[1];
             }
             return [[x, y], [x, y]];
         }
-
         return null;
     }
 }

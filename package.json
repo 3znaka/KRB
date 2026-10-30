@@ -1,0 +1,20 @@
+{
+  "name": "krb",
+  "version": "1.0.0",
+  "description": "KOROBOK — 3D map rendering library",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/3znaka/KRB.git"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "esbuild": "^0.25.0"
+  }
+}

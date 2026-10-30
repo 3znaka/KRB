@@ -1,7 +1,7 @@
+// @ts-nocheck
 // geojson.js — слой GeoJSON (Point, LineString, MultiLineString, Polygon, MultiPolygon).
 // Координаты по умолчанию интерпретируются как WGS84 (EPSG:4326); при необходимости
 // задайте options.crs или переопределите CRS точечно в коллбэках (свойство crs).
-
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
 import { Marker3D } from './Marker3D.js';
@@ -9,7 +9,6 @@ import { Area3D } from './Area3D.js';
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
 import { Vector3D } from './Vector3D.js';
-
 /**
  * Слой, создающий маркеры, линии и полигоны из GeoJSON.
  *
@@ -86,33 +85,27 @@ export class GeoJSONLayer extends Layer {
      */
     constructor(options = {}) {
         super();
-
         this.url = options.url || null;
         this.data = options.data || null;
         this.crs = options.crs || null;
         this.filter = options.filter || null;
         this.onEachFeature = options.onEachFeature || null;
-
         this.pointToOptions = options.pointToOptions || null;
         this.point3DToOptions = options.point3DToOptions || null;
         this.lineToOptions = options.lineToOptions || null;
         this.polygonToOptions = options.polygonToOptions || null;
         this.polygon3DToOptions = options.polygon3DToOptions || null;
-
-this.vectorToOptions = options.vectorToOptions || null;
-
+        this.vectorToOptions = options.vectorToOptions || null;
         // Обычные маркеры.
         this.defaultIconUrl = options.defaultIconUrl || 'marker.png';
         this.defaultIconSize = options.defaultIconSize || [16, 16];
         this.defaultAnchor = options.defaultAnchor || [0.5, 1.0];
-
         // 3D-маркеры.
         this.default3DPrimitiveType = options.default3DPrimitiveType || 'box';
         this.default3DSize = options.default3DSize || [100, 100, 100];
         this.default3DAnchor = options.default3DAnchor || [0.5, 0, 0.5];
         this.default3DAltitude = options.default3DAltitude ?? 0;
         this.default3DAltitudeMode = options.default3DAltitudeMode || 'clampToGround';
-
         // Линии.
         this.defaultLineColor = options.defaultLineColor || '#3388ff';
         this.defaultLineWidth = options.defaultLineWidth || 2;
@@ -123,7 +116,6 @@ this.vectorToOptions = options.vectorToOptions || null;
         this.defaultLineDepthWrite = options.defaultLineDepthWrite ?? false;
         this.defaultLineMinZoom = options.defaultLineMinZoom ?? -Infinity;
         this.defaultLineMaxZoom = options.defaultLineMaxZoom ?? Infinity;
-
         // Полигоны.
         this.defaultFillColor = options.defaultFillColor || '#3388ff';
         this.defaultFillOpacity = options.defaultFillOpacity ?? 0.5;
@@ -139,7 +131,6 @@ this.vectorToOptions = options.vectorToOptions || null;
         this.defaultPolygonExtruded = options.defaultPolygonExtruded ?? false;
         this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
         this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
-
         // Area3D (3D-площадные).
         this.defaultPolygon3DPrimitiveType = options.defaultPolygon3DPrimitiveType || 'box';
         this.defaultPolygon3DSize = options.defaultPolygon3DSize || null;
@@ -151,37 +142,38 @@ this.vectorToOptions = options.vectorToOptions || null;
         this.defaultPolygon3DModelUrl = options.defaultPolygon3DModelUrl || null;
         this.defaultPolygon3DDepthTest = options.defaultPolygon3DDepthTest ?? true;
         this.defaultPolygon3DDepthWrite = options.defaultPolygon3DDepthWrite ?? true;
-
         this._loaded = false;
     }
-
     /**
      * Добавляет слой на карту и при необходимости запускает загрузку.
      * @param {KrbMap} map @returns {this}
      */
     addTo(map) {
         super.addTo(map);
-        if (!this._loaded) this._load();
+        if (!this._loaded)
+            this._load();
         return this;
     }
-
     /** Полная перезагрузка: удаляет объекты, сбрасывает флаг, загружает заново. */
     reload() {
-        for (const obj of [...this._objects]) obj.remove();
+        for (const obj of [...this._objects])
+            obj.remove();
         this._objects = [];
         this._loaded = false;
-        if (this._map) this._load();
+        if (this._map)
+            this._load();
     }
-
     /** @private */
     async _load() {
         let geojson = null;
         try {
             if (this.data) {
                 geojson = this.data;
-            } else if (this.url) {
+            }
+            else if (this.url) {
                 const resp = await fetch(this.url);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                if (!resp.ok)
+                    throw new Error(`HTTP ${resp.status}`);
                 geojson = await resp.json();
             }
             if (!geojson) {
@@ -190,86 +182,83 @@ this.vectorToOptions = options.vectorToOptions || null;
             }
             this._parse(geojson);
             this._loaded = true;
-        } catch (err) {
+        }
+        catch (err) {
             console.error('GeoJSONLayer: ошибка загрузки/парсинга', err);
         }
     }
-
     /** @private */
     _parse(geojson) {
         const type = geojson.type;
         if (type === 'FeatureCollection') {
-            for (const feature of geojson.features) this._addFeature(feature);
-        } else if (type === 'Feature') {
+            for (const feature of geojson.features)
+                this._addFeature(feature);
+        }
+        else if (type === 'Feature') {
             this._addFeature(geojson);
-        } else if (type === 'Point'
+        }
+        else if (type === 'Point'
             || type === 'LineString'
             || type === 'MultiLineString'
             || type === 'Polygon'
             || type === 'MultiPolygon') {
             this._addFeature({ type: 'Feature', geometry: geojson, properties: {} });
-        } else {
+        }
+        else {
             console.debug(`GeoJSONLayer: тип "${type}" пока не поддерживается`);
         }
     }
-
-/** @private */
-_addFeature(feature) {
-    const props = feature.properties || {};      // ← вот эта строка была пропущена
-
-    if (this.filter && !this.filter(feature)) return;
-
-    const geom = feature.geometry;
-    if (!geom) return;
-
-    switch (geom.type) {
-        case 'Point':
-            // Для точки развилка тройная (Marker / Marker3D / Vector3D),
-            // поэтому требуется явный флаг props.vector === true.
-            if (this.vectorToOptions && props.vector === true) {
-                this._addVectorFeature(feature);
-            } else {
-                this._addPointFeature(feature);
-            }
-            break;
-
-        case 'LineString':
-        case 'MultiLineString':
-            // Для линий развилка двойная: либо Polyline, либо Vector3D.
-            // Наличие vectorToOptions — уже достаточный сигнал, что автор
-            // слоя хочет видеть линии векторами.
-            if (this.vectorToOptions || props.vector === true) {
-                this._addVectorFeature(feature);
-            } else {
-                this._addLineFeature(feature);
-            }
-            break;
-
-        case 'Polygon':
-        case 'MultiPolygon':
-            this._addPolygonFeature(feature);
-            break;
-
-        default:
-            console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
+    /** @private */
+    _addFeature(feature) {
+        const props = feature.properties || {}; // ← вот эта строка была пропущена
+        if (this.filter && !this.filter(feature))
+            return;
+        const geom = feature.geometry;
+        if (!geom)
+            return;
+        switch (geom.type) {
+            case 'Point':
+                // Для точки развилка тройная (Marker / Marker3D / Vector3D),
+                // поэтому требуется явный флаг props.vector === true.
+                if (this.vectorToOptions && props.vector === true) {
+                    this._addVectorFeature(feature);
+                }
+                else {
+                    this._addPointFeature(feature);
+                }
+                break;
+            case 'LineString':
+            case 'MultiLineString':
+                // Для линий развилка двойная: либо Polyline, либо Vector3D.
+                // Наличие vectorToOptions — уже достаточный сигнал, что автор
+                // слоя хочет видеть линии векторами.
+                if (this.vectorToOptions || props.vector === true) {
+                    this._addVectorFeature(feature);
+                }
+                else {
+                    this._addLineFeature(feature);
+                }
+                break;
+            case 'Polygon':
+            case 'MultiPolygon':
+                this._addPolygonFeature(feature);
+                break;
+            default:
+                console.debug(`GeoJSONLayer: тип "${geom.type}" пока не поддерживается`);
+        }
     }
-}
-
     /** @private */
     _addPointFeature(feature) {
         const props = feature.properties || {};
         const coords = feature.geometry.coordinates;
-
         const is3D = (this.point3DToOptions && this.point3DToOptions(feature, props))
             || props['3d'] === true
             || props.type === '3d'
             || props.markerType === '3d';
-
         if (is3D) {
             const options = this.point3DToOptions
                 ? (this.point3DToOptions(feature, props) || {})
                 : this._default3DPointOptions(feature, props);
-
             const marker3DOptions = {
                 position: coords,
                 crs: options.crs ?? this.crs,
@@ -295,15 +284,15 @@ _addFeature(feature) {
                 color: options.color || props.color,
                 clusterable: options.clusterable !== undefined ? options.clusterable : false
             };
-
             const marker3D = new Marker3D(marker3DOptions);
             this.add(marker3D);
-            if (this.onEachFeature) this.onEachFeature(feature, marker3D);
-        } else {
+            if (this.onEachFeature)
+                this.onEachFeature(feature, marker3D);
+        }
+        else {
             const options = this.pointToOptions
                 ? (this.pointToOptions(feature, props) || {})
                 : this._defaultPointOptions(feature, props);
-
             const markerOptions = {
                 position: coords,
                 crs: options.crs ?? this.crs,
@@ -323,73 +312,69 @@ _addFeature(feature) {
                 onHover: options.onHover,
                 onClick: options.onClick
             };
-
             const marker = new Marker(markerOptions);
             this.add(marker);
-            if (this.onEachFeature) this.onEachFeature(feature, marker);
+            if (this.onEachFeature)
+                this.onEachFeature(feature, marker);
         }
     }
-
-/**
- * Создаёт Vector3D из фичи. Для LineString/MultiLineString дефолтные
- * `positions` берутся из геометрии; для Point — только из `vectorToOptions`.
- *
- * @private
- */
-_addVectorFeature(feature) {
-    const props = feature.properties || {};
-    const geom = feature.geometry;
-
-    // Наборы координат по умолчанию (используются, если vectorToOptions
-    // не задал positions). Для Point дефолта нет.
-    let coordSets;
-    if (geom.type === 'LineString')        coordSets = [geom.coordinates];
-    else if (geom.type === 'MultiLineString') coordSets = geom.coordinates;
-    else                                   coordSets = [null];
-
-    for (const coords of coordSets) {
-        const opts = this.vectorToOptions
-            ? (this.vectorToOptions(feature, props) || {})
-            : this._defaultVectorOptions(feature, props, coords);
-
-        const positions = opts.positions ?? coords;
-        if (!positions || positions.length < 2) continue;
-
-        const vectorOptions = {
-            ...opts,
-            positions,
-            crs: opts.crs ?? this.crs,
-            title:              opts.title              ?? props.title ?? props.name ?? '',
-            titleStyle:         opts.titleStyle         ?? props.titleStyle ?? {},
-            titleOffset:        opts.titleOffset        ?? this._parsePair(props.titleOffset) ?? undefined,
-            titleAlign:         opts.titleAlign         ?? props.titleAlign ?? 'center',
-            titleVerticalAlign: opts.titleVerticalAlign ?? props.titleVerticalAlign ?? 'bottom',
-            titleMinZoom:       opts.titleMinZoom       ?? props.titleMinZoom ?? -Infinity,
-            titleMaxZoom:       opts.titleMaxZoom       ?? props.titleMaxZoom ?? Infinity,
-            titlePlacement:     opts.titlePlacement     ?? props.titlePlacement ?? 'start',
-            tooltip:            opts.tooltip            ?? props.tooltip ?? props.description ?? '',
-            minZoom:            opts.minZoom            ?? props.minZoom ?? -Infinity,
-            maxZoom:            opts.maxZoom            ?? props.maxZoom ?? Infinity,
-        };
-
-        const vector = new Vector3D(vectorOptions);
-        this.add(vector);
-        if (this.onEachFeature) this.onEachFeature(feature, vector);
+    /**
+     * Создаёт Vector3D из фичи. Для LineString/MultiLineString дефолтные
+     * `positions` берутся из геометрии; для Point — только из `vectorToOptions`.
+     *
+     * @private
+     */
+    _addVectorFeature(feature) {
+        const props = feature.properties || {};
+        const geom = feature.geometry;
+        // Наборы координат по умолчанию (используются, если vectorToOptions
+        // не задал positions). Для Point дефолта нет.
+        let coordSets;
+        if (geom.type === 'LineString')
+            coordSets = [geom.coordinates];
+        else if (geom.type === 'MultiLineString')
+            coordSets = geom.coordinates;
+        else
+            coordSets = [null];
+        for (const coords of coordSets) {
+            const opts = this.vectorToOptions
+                ? (this.vectorToOptions(feature, props) || {})
+                : this._defaultVectorOptions(feature, props, coords);
+            const positions = opts.positions ?? coords;
+            if (!positions || positions.length < 2)
+                continue;
+            const vectorOptions = {
+                ...opts,
+                positions,
+                crs: opts.crs ?? this.crs,
+                title: opts.title ?? props.title ?? props.name ?? '',
+                titleStyle: opts.titleStyle ?? props.titleStyle ?? {},
+                titleOffset: opts.titleOffset ?? this._parsePair(props.titleOffset) ?? undefined,
+                titleAlign: opts.titleAlign ?? props.titleAlign ?? 'center',
+                titleVerticalAlign: opts.titleVerticalAlign ?? props.titleVerticalAlign ?? 'bottom',
+                titleMinZoom: opts.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
+                titleMaxZoom: opts.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
+                titlePlacement: opts.titlePlacement ?? props.titlePlacement ?? 'start',
+                tooltip: opts.tooltip ?? props.tooltip ?? props.description ?? '',
+                minZoom: opts.minZoom ?? props.minZoom ?? -Infinity,
+                maxZoom: opts.maxZoom ?? props.maxZoom ?? Infinity,
+            };
+            const vector = new Vector3D(vectorOptions);
+            this.add(vector);
+            if (this.onEachFeature)
+                this.onEachFeature(feature, vector);
+        }
     }
-}
-
-/** @private */
-_defaultVectorOptions(feature, props, coords) {
-    return {
-        positions: coords,
-        color:     props.stroke || props.color || '#3388ff',
-        width:     props.width     ?? 2,
-        arrowSize: props.arrowSize ?? 10,
-        opacity:   props['stroke-opacity'] ?? props.opacity ?? 1,
-    };
-}
-
-
+    /** @private */
+    _defaultVectorOptions(feature, props, coords) {
+        return {
+            positions: coords,
+            color: props.stroke || props.color || '#3388ff',
+            width: props.width ?? 2,
+            arrowSize: props.arrowSize ?? 10,
+            opacity: props['stroke-opacity'] ?? props.opacity ?? 1,
+        };
+    }
     /** @private */
     _defaultPointOptions(feature, props) {
         return {
@@ -402,7 +387,6 @@ _defaultVectorOptions(feature, props, coords) {
             altitudeMode: props.altitudeMode || 'ground'
         };
     }
-
     /** @private */
     _default3DPointOptions(feature, props) {
         return {
@@ -420,20 +404,17 @@ _defaultVectorOptions(feature, props, coords) {
             titleMaxZoom: props.titleMaxZoom
         };
     }
-
     /** @private */
     _addLineFeature(feature) {
         const props = feature.properties || {};
         const geom = feature.geometry;
         const coordSets = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
-
         for (const coords of coordSets) {
-            if (coords.length < 2) continue;
-
+            if (coords.length < 2)
+                continue;
             const options = this.lineToOptions
                 ? (this.lineToOptions(feature, props) || {})
                 : this._defaultLineOptions(feature, props);
-
             const lineOptions = {
                 positions: coords,
                 ...options,
@@ -446,13 +427,12 @@ _defaultVectorOptions(feature, props, coords) {
                 titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity,
                 titlePlacement: options.titlePlacement ?? props.titlePlacement ?? 'center'
             };
-
             const polyline = new Polyline(lineOptions);
             this.add(polyline);
-            if (this.onEachFeature) this.onEachFeature(feature, polyline);
+            if (this.onEachFeature)
+                this.onEachFeature(feature, polyline);
         }
     }
-
     /** @private */
     _defaultLineOptions(feature, props) {
         return {
@@ -467,26 +447,22 @@ _defaultVectorOptions(feature, props, coords) {
             maxZoom: props.maxZoom ?? this.defaultLineMaxZoom
         };
     }
-
     /** @private */
     _addPolygonFeature(feature) {
         const props = feature.properties || {};
         const geom = feature.geometry;
         const polygonSets = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
-
         for (const rings of polygonSets) {
-            if (!rings.length || !rings[0].length) continue;
-
+            if (!rings.length || !rings[0].length)
+                continue;
             const is3D = (this.polygon3DToOptions && this.polygon3DToOptions(feature, props))
                 || props['3d'] === true
                 || props.type === '3d'
                 || props.markerType === '3d';
-
             if (is3D) {
                 const options3D = this.polygon3DToOptions
                     ? (this.polygon3DToOptions(feature, props) || {})
                     : this._defaultPolygon3DOptions(feature, props);
-
                 const areaOptions = {
                     rings,
                     crs: options3D.crs ?? this.crs,
@@ -514,15 +490,15 @@ _defaultVectorOptions(feature, props, coords) {
                     onHover: options3D.onHover,
                     onClick: options3D.onClick
                 };
-
                 const area = new Area3D(areaOptions);
                 this.add(area);
-                if (this.onEachFeature) this.onEachFeature(feature, area);
-            } else {
+                if (this.onEachFeature)
+                    this.onEachFeature(feature, area);
+            }
+            else {
                 const options = this.polygonToOptions
                     ? (this.polygonToOptions(feature, props) || {})
                     : this._defaultPolygonOptions(feature, props);
-
                 const polygonOptions = {
                     rings,
                     ...options,
@@ -534,14 +510,13 @@ _defaultVectorOptions(feature, props, coords) {
                     titleMinZoom: options.titleMinZoom ?? props.titleMinZoom ?? -Infinity,
                     titleMaxZoom: options.titleMaxZoom ?? props.titleMaxZoom ?? Infinity
                 };
-
                 const polygon = new Polygon(polygonOptions);
                 this.add(polygon);
-                if (this.onEachFeature) this.onEachFeature(feature, polygon);
+                if (this.onEachFeature)
+                    this.onEachFeature(feature, polygon);
             }
         }
     }
-
     /** @private */
     _defaultPolygonOptions(feature, props) {
         return {
@@ -561,7 +536,6 @@ _defaultVectorOptions(feature, props, coords) {
             minHeight: props.minHeight ?? this.defaultPolygonMinHeight
         };
     }
-
     /** @private */
     _defaultPolygon3DOptions(feature, props) {
         return {
@@ -590,47 +564,55 @@ _defaultVectorOptions(feature, props, coords) {
             onClick: props.onClick
         };
     }
-
     /** @private */
     _parseSize(raw) {
-        if (!raw) return null;
-        if (Array.isArray(raw)) return raw;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 2 && parts.every(v => !isNaN(v))) return parts;
+            if (parts.length === 2 && parts.every(v => !isNaN(v)))
+                return parts;
         }
         return null;
     }
-
     /** @private */
     _parsePair(raw) {
-        if (!raw) return null;
-        if (Array.isArray(raw)) return raw;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 2 && parts.every(v => !isNaN(v))) return parts;
+            if (parts.length === 2 && parts.every(v => !isNaN(v)))
+                return parts;
         }
         return null;
     }
-
     /** @private */
     _parseAnchor(raw) {
-        if (!raw) return null;
-        if (Array.isArray(raw)) return raw;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 2 && parts.every(v => !isNaN(v))) return parts;
+            if (parts.length === 2 && parts.every(v => !isNaN(v)))
+                return parts;
         }
         return null;
     }
-
     /** @private */
     _parseTriple(raw) {
-        if (!raw) return null;
-        if (Array.isArray(raw)) return raw;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 3 && parts.every(v => !isNaN(v))) return parts;
+            if (parts.length === 3 && parts.every(v => !isNaN(v)))
+                return parts;
         }
         return null;
     }

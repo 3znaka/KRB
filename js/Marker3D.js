@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль 3D-маркера.
  * Поддерживает примитивы (куб, сфера, цилиндр, конус) и GLB-модели.
@@ -8,11 +9,9 @@
  *
  * @module Marker3D
  */
-
-import { THREE, GLTFLoader, DRACOLoader } from '../js_TP/tpb.js';
+import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
-
 /**
  * Render order, при котором 3D-маркеры рисуются поверх тайлов любого уровня.
  *
@@ -20,7 +19,6 @@ import { Layer } from './Layers.js';
  * @type {number}
  */
 const MARKER_RENDER_ORDER = 1000;
-
 /**
  * 3D-маркер на карте.
  *
@@ -116,46 +114,40 @@ export class Marker3D {
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker3D: options.position is required [x, y]');
         }
-
         /**
          * Координаты маркера в собственной СК.
          * @private
          * @type {[number, number]}
          */
         this._coord = [options.position[0], options.position[1]];
-
         /**
          * Код СК маркера; `null` — использовать `map.inputCRS`.
          * @private
          * @type {string|null}
          */
         this._crsCode = options.crs ?? null;
-
         /**
          * Зарезолвленный объект Projection. Устанавливается в `_attach`.
          * @private
          * @type {import('./Projections.js').Projection|null}
          */
         this._crs = null;
-
-        /** @private @type {string} */        this._primitiveType = options.primitiveType || 'box';
+        /** @private @type {string} */ this._primitiveType = options.primitiveType || 'box';
         /** @private @type {number|Array<number>|null} */ this._size = options.size || null;
-        /** @private @type {string|null} */   this._modelUrl = options.modelUrl || null;
-        /** @private @type {number} */        this._altitude = options.altitude || 0;
-        /** @private @type {string} */        this._altitudeMode = options.altitudeMode || 'clampToGround';
+        /** @private @type {string|null} */ this._modelUrl = options.modelUrl || null;
+        /** @private @type {number} */ this._altitude = options.altitude || 0;
+        /** @private @type {string} */ this._altitudeMode = options.altitudeMode || 'clampToGround';
         /** @private @type {[number, number, number]} */ this._rotation = options.rotation || [0, 0, 0];
         /** @private @type {[number, number, number]} */ this._anchor = options.anchor || [0.5, 0, 0.5];
-        /** @private @type {number} */        this._minZoom = options.minZoom ?? -Infinity;
-        /** @private @type {number} */        this._maxZoom = options.maxZoom ?? Infinity;
-        /** @private @type {boolean} */       this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
-
+        /** @private @type {number} */ this._minZoom = options.minZoom ?? -Infinity;
+        /** @private @type {number} */ this._maxZoom = options.maxZoom ?? Infinity;
+        /** @private @type {boolean} */ this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
         // Подпись
-        /** @private @type {string} */        this._title = options.title || '';
-        /** @private @type {Object} */        this._titleStyle = options.titleStyle || {};
-        /** @private @type {number} */        this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private @type {number} */        this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        /** @private @type {string} */        this._titlePlacement = options.titlePlacement || 'top';
-
+        /** @private @type {string} */ this._title = options.title || '';
+        /** @private @type {Object} */ this._titleStyle = options.titleStyle || {};
+        /** @private @type {number} */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        /** @private @type {number} */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        /** @private @type {string} */ this._titlePlacement = options.titlePlacement || 'top';
         /**
          * Горизонтальное выравнивание подписи. По умолчанию — по `titlePlacement`.
          * @private
@@ -163,16 +155,24 @@ export class Marker3D {
          */
         if (options.titleAlign !== undefined) {
             this._titleAlign = options.titleAlign;
-        } else {
+        }
+        else {
             switch (this._titlePlacement) {
-                case 'top': this._titleAlign = 'center'; break;
-                case 'bottom': this._titleAlign = 'center'; break;
-                case 'left': this._titleAlign = 'right'; break;
-                case 'right': this._titleAlign = 'left'; break;
+                case 'top':
+                    this._titleAlign = 'center';
+                    break;
+                case 'bottom':
+                    this._titleAlign = 'center';
+                    break;
+                case 'left':
+                    this._titleAlign = 'right';
+                    break;
+                case 'right':
+                    this._titleAlign = 'left';
+                    break;
                 default: this._titleAlign = 'center';
             }
         }
-
         /**
          * Смещение подписи в пикселях. По умолчанию — по `titlePlacement`.
          * @private
@@ -180,26 +180,32 @@ export class Marker3D {
          */
         if (options.titleOffset !== undefined) {
             this._titleOffset = options.titleOffset;
-        } else {
+        }
+        else {
             switch (this._titlePlacement) {
-                case 'top': this._titleOffset = [0, -10]; break;
-                case 'bottom': this._titleOffset = [0, 10]; break;
-                case 'left': this._titleOffset = [-10, 0]; break;
-                case 'right': this._titleOffset = [10, 0]; break;
+                case 'top':
+                    this._titleOffset = [0, -10];
+                    break;
+                case 'bottom':
+                    this._titleOffset = [0, 10];
+                    break;
+                case 'left':
+                    this._titleOffset = [-10, 0];
+                    break;
+                case 'right':
+                    this._titleOffset = [10, 0];
+                    break;
                 default: this._titleOffset = [0, -10];
             }
         }
-
-        /** @private @type {number} */        this._height = 0;
-        /** @private @type {string} */        this._tooltipText = options.tooltip || '';
-        /** @private @type {Function|null} */  this._onClick = options.onClick || null;
-        /** @private @type {Function|null} */  this._onHover = options.onHover || null;
-        /** @private @type {boolean} */       this._clusterable = options.clusterable !== undefined ? options.clusterable : false;
+        /** @private @type {number} */ this._height = 0;
+        /** @private @type {string} */ this._tooltipText = options.tooltip || '';
+        /** @private @type {Function|null} */ this._onClick = options.onClick || null;
+        /** @private @type {Function|null} */ this._onHover = options.onHover || null;
+        /** @private @type {boolean} */ this._clusterable = options.clusterable !== undefined ? options.clusterable : false;
         /** @private @type {string|number} */ this._color = options.color || 0x3388ff;
-
         /** @private @type {import('./KrbMap.js').KrbMap|null} */ this._map = null;
         /** @private @type {Layer|null} */ this._layer = null;
-
         /**
          * Корневой объект маркера, добавляемый в `map.worldGroup`.
          * Для примитива — это `THREE.Mesh`, для GLB-модели — постоянная
@@ -209,7 +215,6 @@ export class Marker3D {
          * @type {THREE.Object3D|null}
          */
         this._object3D = null;
-
         /**
          * Ссылка на загруженный `gltf.scene` (только для GLB-моделей).
          * Является ребёнком `this._object3D`. К нему применяются
@@ -218,16 +223,14 @@ export class Marker3D {
          * @type {THREE.Object3D|null}
          */
         this._modelRoot = null;
-
         /** @private @type {THREE.BufferGeometry|null} */ this._geometry = null;
-        /** @private @type {THREE.Material|null} */       this._material = null;
-        /** @private @type {Object|null} */               this._textLabel = null;
-        /** @private @type {boolean} */                   this._isVisible = false;
-        /** @private @type {number} */                    this._lastHeightUpdateTime = 0;
-        /** @private @type {number} */                    this._cachedWorldY = 0;
-        /** @private @type {boolean} */                   this._isModelLoading = false;
-        /** @private @type {Promise<void>|null} */        this._modelPromise = null;
-
+        /** @private @type {THREE.Material|null} */ this._material = null;
+        /** @private @type {Object|null} */ this._textLabel = null;
+        /** @private @type {boolean} */ this._isVisible = false;
+        /** @private @type {number} */ this._lastHeightUpdateTime = 0;
+        /** @private @type {number} */ this._cachedWorldY = 0;
+        /** @private @type {boolean} */ this._isModelLoading = false;
+        /** @private @type {Promise<void>|null} */ this._modelPromise = null;
         /**
          * Мировая позиция маркера (с учётом `map.worldGroup.position`).
          * Обновляется каждый кадр в {@link Marker3D#_update}. Используется
@@ -236,14 +239,12 @@ export class Marker3D {
          * @type {THREE.Vector3}
          */
         this._worldPosition = new THREE.Vector3();
-
-        /** @private @type {THREE.Box3|null} */           this._localBox = null;
-        /** @private @type {THREE.Vector3|null} */        this._originalModelSize = null;
-        /** @private @type {THREE.Vector3|null} */        this._originalModelScale = null;
-        /** @private @type {THREE.Vector3|null} */        this._originalModelPosition = null;
-        /** @private @type {boolean} */                   this._isModel = !!this._modelUrl;
-        /** @private @type {Object|null} */               this._sizeAnimation = null;
-
+        /** @private @type {THREE.Box3|null} */ this._localBox = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelSize = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelScale = null;
+        /** @private @type {THREE.Vector3|null} */ this._originalModelPosition = null;
+        /** @private @type {boolean} */ this._isModel = !!this._modelUrl;
+        /** @private @type {Object|null} */ this._sizeAnimation = null;
         /**
          * Радиус bounding-сферы в локальных единицах геометрии (метрах мира).
          * Используется в InteractionManager для broad-phase.
@@ -251,7 +252,6 @@ export class Marker3D {
          * @type {number}
          */
         this._boundingRadius = 0;
-
         /**
          * Кэш массива мешей для raycast. Для примитива — `[mesh]`,
          * для GLB-модели — все дочерние `Mesh`. Инвалидируется в
@@ -260,7 +260,6 @@ export class Marker3D {
          * @type {THREE.Object3D[]|null}
          */
         this._raycastMeshesCache = null;
-
         /**
          * Функция отмены регистрации в `map.interaction`. Устанавливается
          * в `_registerInteraction`, вызывается в `remove`.
@@ -268,17 +267,14 @@ export class Marker3D {
          * @type {(() => void)|null}
          */
         this._unregisterInteraction = null;
-
         // Анимации GLB
         /** @private @type {THREE.AnimationMixer|null} */ this._mixer = null;
-        /** @private @type {THREE.Clock|null} */          this._mixerClock = null;
-
+        /** @private @type {THREE.Clock|null} */ this._mixerClock = null;
         // Переиспользуемые объекты для проверки попадания в frustum.
-        /** @private @type {THREE.Box3} */      this._tempBox = new THREE.Box3();
-        /** @private @type {THREE.Frustum} */   this._tempFrustum = new THREE.Frustum();
-        /** @private @type {THREE.Matrix4} */   this._tempProjScreenMatrix = new THREE.Matrix4();
+        /** @private @type {THREE.Box3} */ this._tempBox = new THREE.Box3();
+        /** @private @type {THREE.Frustum} */ this._tempFrustum = new THREE.Frustum();
+        /** @private @type {THREE.Matrix4} */ this._tempProjScreenMatrix = new THREE.Matrix4();
     }
-
     /**
      * Добавляет маркер на карту, создавая для него персональный слой.
      *
@@ -286,13 +282,13 @@ export class Marker3D {
      * @returns {Marker3D} this
      */
     addTo(map) {
-        if (this._map) this.remove();
+        if (this._map)
+            this.remove();
         const personalLayer = new Layer();
         personalLayer.addTo(map);
         personalLayer.add(this);
         return this;
     }
-
     /**
      * Внутренняя привязка маркера к карте и слою.
      *
@@ -301,16 +297,15 @@ export class Marker3D {
      * @param {Layer} layer - Слой, которому принадлежит маркер.
      */
     _attach(map, layer) {
-        if (this._map === map && this._layer === layer) return;
+        if (this._map === map && this._layer === layer)
+            return;
         this.remove();
         this._map = map;
         this._layer = layer;
-
         // Резолвим проекцию маркера: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-
         if (this._modelUrl) {
             // Group-обёртка создаётся один раз и никогда не подменяется.
             // Сам gltf.scene кладётся в неё как this._modelRoot (см. _loadModel).
@@ -318,19 +313,17 @@ export class Marker3D {
             this._isModelLoading = true;
             this._loadModel();
             // rotation / scale / anchor применяются к modelRoot внутри _loadModel.
-        } else {
+        }
+        else {
             this._createPrimitive();
             this._object3D.rotation.set(...this._rotation);
         }
         map.worldGroup.add(this._object3D);
-
         this._registerInteraction(map);
-
         if (this._title && this._map.textManager) {
             this._textLabel = this._map.textManager.addLabel(this);
         }
     }
-
     /**
      * Регистрирует маркер в общем InteractionManager карты.
      *
@@ -341,17 +334,19 @@ export class Marker3D {
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      */
     _registerInteraction(map) {
-        if (!map.interaction || typeof map.interaction.register !== 'function') return;
+        if (!map.interaction || typeof map.interaction.register !== 'function')
+            return;
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-        if (!this._onClick && !this._onHover && !this._tooltipText) return;
-
+        if (!this._onClick && !this._onHover && !this._tooltipText)
+            return;
         this._unregisterInteraction = map.interaction.register(this, {
             getMeshes: () => this._getRaycastMeshes(),
             getBoundingSphere: () => {
-                if (this._boundingRadius <= 0) return null;
+                if (this._boundingRadius <= 0)
+                    return null;
                 return {
                     center: this._worldPosition,
                     radius: this._boundingRadius
@@ -363,7 +358,6 @@ export class Marker3D {
             isVisible: () => this._isVisible
         });
     }
-
     /**
      * Возвращает массив мешей для raycast.
      *
@@ -374,20 +368,23 @@ export class Marker3D {
      * @returns {THREE.Object3D[]} Массив мешей (может быть пустым).
      */
     _getRaycastMeshes() {
-        if (this._raycastMeshesCache) return this._raycastMeshesCache;
-        if (!this._object3D) return [];
+        if (this._raycastMeshesCache)
+            return this._raycastMeshesCache;
+        if (!this._object3D)
+            return [];
         const meshes = [];
         if (!this._isModel) {
             meshes.push(this._object3D);
-        } else {
+        }
+        else {
             this._object3D.traverse((child) => {
-                if (child.isMesh) meshes.push(child);
+                if (child.isMesh)
+                    meshes.push(child);
             });
         }
         this._raycastMeshesCache = meshes;
         return meshes;
     }
-
     /**
      * Создаёт примитив (Mesh) по заданным параметрам.
      *
@@ -398,38 +395,37 @@ export class Marker3D {
         this._height = h;
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
-            case 'sphere':   geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
-            case 'cylinder': geometry = new THREE.CylinderGeometry(w / 2, w / 2, h, 32); break;
-            case 'cone':     geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
+            case 'sphere':
+                geometry = new THREE.SphereGeometry(w / 2, 32, 32);
+                break;
+            case 'cylinder':
+                geometry = new THREE.CylinderGeometry(w / 2, w / 2, h, 32);
+                break;
+            case 'cone':
+                geometry = new THREE.ConeGeometry(w / 2, h, 32);
+                break;
             case 'box':
-            default:         geometry = new THREE.BoxGeometry(w, h, d); break;
+            default:
+                geometry = new THREE.BoxGeometry(w, h, d);
+                break;
         }
         const material = new THREE.MeshStandardMaterial({ color: this._color, roughness: 0.5 });
         const mesh = new THREE.Mesh(geometry, material);
-
-        const offset = new THREE.Vector3(
-            (0.5 - this._anchor[0]) * w,
-            (0.5 - this._anchor[1]) * h,
-            (0.5 - this._anchor[2]) * d
-        );
+        const offset = new THREE.Vector3((0.5 - this._anchor[0]) * w, (0.5 - this._anchor[1]) * h, (0.5 - this._anchor[2]) * d);
         geometry.translate(offset.x, offset.y, offset.z);
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
-
         this._localBox = geometry.boundingBox.clone();
         this._boundingRadius = geometry.boundingSphere
             ? geometry.boundingSphere.radius
             : 0.5 * Math.sqrt(w * w + h * h + d * d);
-
         mesh.renderOrder = MARKER_RENDER_ORDER;
         this._geometry = geometry;
         this._material = material;
         this._object3D = mesh;
-
         // Геометрия сменилась — кэш мешей невалиден.
         this._raycastMeshesCache = null;
     }
-
     /**
      * Приводит `size` к каноническому виду `[width, height, depth]`.
      *
@@ -439,8 +435,10 @@ export class Marker3D {
      * @throws {Error} Если массив имеет больше 3 элементов или тип неверный.
      */
     _normalizePrimitiveSize(size) {
-        if (!size) return [100, 100, 100];
-        if (typeof size === 'number') return [size, size, size];
+        if (!size)
+            return [100, 100, 100];
+        if (typeof size === 'number')
+            return [size, size, size];
         if (Array.isArray(size)) {
             switch (size.length) {
                 case 1: return [size[0], size[0], size[0]];
@@ -451,7 +449,6 @@ export class Marker3D {
         }
         throw new Error('Marker3D: invalid size type');
     }
-
     /**
      * Асинхронно загружает GLB-модель.
      *
@@ -465,19 +462,17 @@ export class Marker3D {
      * @returns {Promise<void>} Промис завершения загрузки.
      */
     async _loadModel() {
-        if (this._modelPromise) return this._modelPromise;
+        if (this._modelPromise)
+            return this._modelPromise;
         this._modelPromise = (async () => {
             try {
                 const loader = new GLTFLoader();
-
                 const dracoLoader = new DRACOLoader();
                 dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
                 dracoLoader.setDecoderConfig({ type: 'wasm' });
                 loader.setDRACOLoader(dracoLoader);
-
                 const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
-
                 // --- Настройка анимаций (если включены и есть в модели) ---
                 if (this._playAnimation && gltf.animations && gltf.animations.length > 0) {
                     this._mixer = new THREE.AnimationMixer(model);
@@ -487,14 +482,11 @@ export class Marker3D {
                     }
                     this._mixerClock = new THREE.Clock();
                 }
-
                 const originalBox = new THREE.Box3().setFromObject(model);
                 this._originalModelSize = originalBox.getSize(new THREE.Vector3());
                 this._originalModelScale = model.scale.clone();
                 this._originalModelPosition = model.position.clone();
-
                 this._applyModelSizeAndAnchor(model);
-
                 model.traverse((child) => {
                     if (child.isMesh) {
                         child.renderOrder = MARKER_RENDER_ORDER;
@@ -502,23 +494,21 @@ export class Marker3D {
                         child.receiveShadow = true;
                     }
                 });
-
                 this._modelRoot = model;
                 if (this._object3D) {
                     this._object3D.add(model);
                 }
                 this._isModelLoading = false;
-
                 // Модель появилась — кэш мешей для raycast нужно пересобрать.
                 this._raycastMeshesCache = null;
-            } catch (err) {
+            }
+            catch (err) {
                 console.warn('Marker3D: GLB model loading failed:', err);
                 this._isModelLoading = false;
             }
         })();
         return this._modelPromise;
     }
-
     /**
      * Применяет к GLB-модели размеры, поворот и смещение anchor.
      *
@@ -542,46 +532,35 @@ export class Marker3D {
         // Временно отсоединяем модель, чтобы bbox считался без учёта
         // мировых трансформаций Group/worldGroup.
         const prevParent = model.parent;
-        if (prevParent) prevParent.remove(model);
-
+        if (prevParent)
+            prevParent.remove(model);
         // Сброс к оригинальным значениям.
         model.scale.copy(this._originalModelScale);
         model.position.copy(this._originalModelPosition);
         model.rotation.set(...this._rotation);
-
         // Применяем масштаб по size.
         if (this._size) {
             const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
             model.scale.copy(scaleFactors);
         }
-
         // Обновляем мировые матрицы поддерева (родитель отсутствует → world = local).
         model.updateMatrixWorld(true);
-
         const box = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
         this._height = size.y;
-
         // Радиус bounding-сферы: полдиагонали AABB. Anchor лежит внутри AABB,
         // значит сфера с центром в anchor и таким радиусом гарантированно
         // покрывает модель.
         this._boundingRadius = 0.5 * size.length();
-
         // Точка привязки в локальных координатах Group.
-        const anchorPoint = new THREE.Vector3(
-            box.min.x + this._anchor[0] * size.x,
-            box.min.y + this._anchor[1] * size.y,
-            box.min.z + this._anchor[2] * size.z
-        );
-
+        const anchorPoint = new THREE.Vector3(box.min.x + this._anchor[0] * size.x, box.min.y + this._anchor[1] * size.y, box.min.z + this._anchor[2] * size.z);
         // Сдвигаем модель так, чтобы anchor оказался в начале координат Group.
         model.position.sub(anchorPoint);
         model.updateMatrix();
-
         // Возвращаем модель к прежнему родителю.
-        if (prevParent) prevParent.add(model);
+        if (prevParent)
+            prevParent.add(model);
     }
-
     /**
      * Вычисляет масштаб модели по спецификации `options.size`.
      *
@@ -614,11 +593,7 @@ export class Marker3D {
                     return new THREE.Vector3(scaleX, scaleY, scaleZ);
                 }
                 case 3: {
-                    return new THREE.Vector3(
-                        size[0] / originalSize.x,
-                        size[1] / originalSize.y,
-                        size[2] / originalSize.z
-                    );
+                    return new THREE.Vector3(size[0] / originalSize.x, size[1] / originalSize.y, size[2] / originalSize.z);
                 }
                 default:
                     throw new Error('Marker3D: size array must have 1, 2, or 3 elements');
@@ -626,7 +601,6 @@ export class Marker3D {
         }
         throw new Error('Marker3D: invalid size type');
     }
-
     /**
      * Меняет размер маркера.
      *
@@ -640,13 +614,16 @@ export class Marker3D {
      */
     setSize(size) {
         this._size = size;
-        if (!this._object3D) return this;
+        if (!this._object3D)
+            return this;
         if (this._modelUrl) {
             // Пока модель не загрузилась (или загрузка не удалась) —
             // просто запоминаем новый размер; он применится в _loadModel.
-            if (this._isModelLoading || !this._modelRoot) return this;
+            if (this._isModelLoading || !this._modelRoot)
+                return this;
             this._applyModelSizeAndAnchor(this._modelRoot);
-        } else {
+        }
+        else {
             if (this._object3D.parent) {
                 const oldObject = this._object3D;
                 const oldPosition = oldObject.position.clone();
@@ -660,7 +637,6 @@ export class Marker3D {
         }
         return this;
     }
-
     /**
      * Запускает анимацию изменения размера.
      *
@@ -673,12 +649,9 @@ export class Marker3D {
         let startSize = this._size;
         if (startSize === null) {
             if (this._isModel && this._originalModelSize) {
-                startSize = Math.max(
-                    this._originalModelSize.x,
-                    this._originalModelSize.y,
-                    this._originalModelSize.z
-                );
-            } else {
+                startSize = Math.max(this._originalModelSize.x, this._originalModelSize.y, this._originalModelSize.z);
+            }
+            else {
                 startSize = [100, 100, 100];
             }
         }
@@ -691,14 +664,12 @@ export class Marker3D {
         };
         return this;
     }
-
     /**
      * Возвращает текущую спецификацию размера.
      *
      * @returns {number|Array<number>|null} Размер.
      */
     getSize() { return this._size; }
-
     /**
      * Удаляет маркер с карты, освобождает ресурсы и сбрасывает состояние.
      *
@@ -710,18 +681,19 @@ export class Marker3D {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-
         // Останавливаем и очищаем анимации.
         if (this._mixer) {
             this._mixer.stopAllAction();
             this._mixer = null;
             this._mixerClock = null;
         }
-
         if (this._object3D) {
-            if (this._object3D.parent) this._object3D.parent.remove(this._object3D);
-            if (this._geometry) this._geometry.dispose();
-            if (this._material) this._material.dispose();
+            if (this._object3D.parent)
+                this._object3D.parent.remove(this._object3D);
+            if (this._geometry)
+                this._geometry.dispose();
+            if (this._material)
+                this._material.dispose();
             this._object3D = null;
             this._modelRoot = null;
             this._geometry = null;
@@ -743,7 +715,6 @@ export class Marker3D {
         this._boundingRadius = 0;
         this._raycastMeshesCache = null;
     }
-
     /**
      * Обновляет анимацию размера (если активна).
      *
@@ -751,17 +722,26 @@ export class Marker3D {
      * @param {number} now - Текущее время в мс (`performance.now()`).
      */
     _updateSizeAnimation(now) {
-        if (!this._sizeAnimation) return;
+        if (!this._sizeAnimation)
+            return;
         const anim = this._sizeAnimation;
         const elapsed = now - anim.startTime;
         const t = Math.min(elapsed / anim.duration, 1);
         let progress;
         switch (anim.easing) {
-            case 'easeIn':    progress = t * t; break;
-            case 'easeOut':   progress = 1 - Math.pow(1 - t, 2); break;
-            case 'easeInOut': progress = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; break;
+            case 'easeIn':
+                progress = t * t;
+                break;
+            case 'easeOut':
+                progress = 1 - Math.pow(1 - t, 2);
+                break;
+            case 'easeInOut':
+                progress = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                break;
             case 'linear':
-            default:          progress = t; break;
+            default:
+                progress = t;
+                break;
         }
         const currentSize = this._lerpSize(anim.startSize, anim.endSize, progress);
         this.setSize(currentSize);
@@ -770,7 +750,6 @@ export class Marker3D {
             this.setSize(anim.endSize);
         }
     }
-
     /**
      * Линейная интерполяция двух спецификаций размера.
      *
@@ -794,7 +773,6 @@ export class Marker3D {
         }
         return end;
     }
-
     /**
      * Ежекадровое обновление маркера: позиционирование, видимость,
      * проигрывание анимаций.
@@ -803,10 +781,10 @@ export class Marker3D {
      * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
      */
     _update(map) {
-        if (!this._map || !this._object3D) return;
+        if (!this._map || !this._object3D)
+            return;
         const mapInstance = this._map;
         const zoom = mapInstance.continuousZoom;
-
         // 1) Видимость слоя и диапазон зума.
         if (this._layer && !this._layer.visible) {
             this._object3D.visible = false;
@@ -818,14 +796,12 @@ export class Marker3D {
             this._isVisible = false;
             return;
         }
-
         // 2) Анимация размера и GLB-анимации.
         this._updateSizeAnimation(performance.now());
         if (this._mixer && this._mixerClock) {
             const delta = this._mixerClock.getDelta();
             this._mixer.update(delta);
         }
-
         // 3) Координаты маркера → мировые координаты карты.
         const [absWorldX, absWorldZ] = mapInstance.project(this._coord, this._crs);
         const wgPos = mapInstance.worldGroup.position;
@@ -840,16 +816,15 @@ export class Marker3D {
                 this._lastHeightUpdateTime = now;
             }
             worldY = this._cachedWorldY + this._altitude;
-        } else {
+        }
+        else {
             worldY = this._altitude;
         }
-
         // Позиция Group-обёртки (или Mesh для примитива) — чисто географическая.
         // Anchor-offset для моделей уже применён к _modelRoot внутри Group,
         // для примитивов — к геометрии.
         this._object3D.position.set(absWorldX, worldY, absWorldZ);
         this._worldPosition.set(worldX, worldY, worldZ);
-
         // 4) Отсечение по дальности.
         if (mapInstance.view.objectRenderDistanceFactor > 0) {
             const dist = mapInstance.camera.position.distanceTo(this._worldPosition);
@@ -859,43 +834,35 @@ export class Marker3D {
                 return;
             }
         }
-
         // 5) Frustum culling.
         // Переиспользуем _tempProjScreenMatrix и _tempFrustum — без аллокаций.
-        this._tempProjScreenMatrix.multiplyMatrices(
-            mapInstance.camera.projectionMatrix,
-            mapInstance.camera.matrixWorldInverse
-        );
+        this._tempProjScreenMatrix.multiplyMatrices(mapInstance.camera.projectionMatrix, mapInstance.camera.matrixWorldInverse);
         this._tempFrustum.setFromProjectionMatrix(this._tempProjScreenMatrix);
-
         if (this._isModel) {
             this._tempBox.setFromObject(this._object3D);
-        } else if (this._localBox) {
+        }
+        else if (this._localBox) {
             this._object3D.updateWorldMatrix(true, false);
             this._tempBox.copy(this._localBox).applyMatrix4(this._object3D.matrixWorld);
-        } else {
+        }
+        else {
             this._object3D.visible = false;
             this._isVisible = false;
             return;
         }
-
         if (!this._tempFrustum.intersectsBox(this._tempBox)) {
             this._object3D.visible = false;
             this._isVisible = false;
             return;
         }
-
         this._object3D.visible = true;
         this._isVisible = true;
     }
-
     // ---------- Интерфейс для TextManager ----------
-
     /**
      * @returns {string} Текст подписи.
      */
     getText() { return this._title; }
-
     /**
      * @returns {Object} Стиль подписи.
      */
@@ -907,22 +874,18 @@ export class Marker3D {
             textAlign: this._titleAlign
         }, this._titleStyle);
     }
-
     /**
      * @returns {{min: number, max: number}} Границы зума для подписи.
      */
     getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
-
     /**
      * @returns {'point'} Тип метки для TextManager.
      */
     getLabelType() { return 'point'; }
-
     /**
      * @returns {boolean} Видим ли маркер в данный момент.
      */
     isVisible() { return this._isVisible; }
-
     /**
      * Возвращает экранные координаты точки привязки подписи.
      *
@@ -932,85 +895,90 @@ export class Marker3D {
      * @returns {{x: number, y: number}|null} Экранные координаты или null.
      */
     getScreenPosition() {
-        if (!this._isVisible || !this._object3D || !this._map) return null;
+        if (!this._isVisible || !this._object3D || !this._map)
+            return null;
         const map = this._map;
         const canvas = map.renderer.domElement;
-
         // Ветка «не удалось получить bounding box»: примитив без _localBox
         // или ещё не загруженная модель. Используем точечную вершину.
         if (!this._isModel && !this._localBox) {
-            const localTop = map.getVec3().set(
-                0,
-                this._height * (1 - this._anchor[1]),
-                0
-            );
+            const localTop = map.getVec3().set(0, this._height * (1 - this._anchor[1]), 0);
             this._object3D.updateWorldMatrix(false, false);
             localTop.applyMatrix4(this._object3D.matrixWorld);
             const screenPos = map.getVec3().copy(localTop).project(map.camera);
-            if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) return null;
+            if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
+                return null;
             return {
                 x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
                 y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
             };
         }
-
         // Иначе — стандартная ветка по 8 углам AABB.
         let box;
         if (this._isModel) {
             box = this._tempBox.setFromObject(this._object3D);
-        } else {
+        }
+        else {
             this._object3D.updateWorldMatrix(true, false);
             box = this._tempBox.copy(this._localBox).applyMatrix4(this._object3D.matrixWorld);
         }
-
         const corners = [];
         const { min, max } = box;
         for (let i = 0; i < 8; i++) {
-            const corner = map.getVec3().set(
-                (i & 1) ? max.x : min.x,
-                (i & 2) ? max.y : min.y,
-                (i & 4) ? max.z : min.z
-            );
+            const corner = map.getVec3().set((i & 1) ? max.x : min.x, (i & 2) ? max.y : min.y, (i & 4) ? max.z : min.z);
             corner.project(map.camera);
-            if (corner.z > 1 || corner.z < -1) continue;
+            if (corner.z > 1 || corner.z < -1)
+                continue;
             corners.push({
                 x: (corner.x * 0.5 + 0.5) * canvas.clientWidth,
                 y: (-corner.y * 0.5 + 0.5) * canvas.clientHeight
             });
         }
-        if (corners.length === 0) return null;
-
+        if (corners.length === 0)
+            return null;
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (const c of corners) {
-            if (c.x < minX) minX = c.x;
-            if (c.x > maxX) maxX = c.x;
-            if (c.y < minY) minY = c.y;
-            if (c.y > maxY) maxY = c.y;
+            if (c.x < minX)
+                minX = c.x;
+            if (c.x > maxX)
+                maxX = c.x;
+            if (c.y < minY)
+                minY = c.y;
+            if (c.y > maxY)
+                maxY = c.y;
         }
         const centerX = (minX + maxX) / 2;
         const centerY = (minY + maxY) / 2;
-
         let x, y;
         switch (this._titlePlacement) {
-            case 'bottom': x = centerX; y = maxY; break;
-            case 'left':   x = minX;   y = centerY; break;
-            case 'right':  x = maxX;   y = centerY; break;
+            case 'bottom':
+                x = centerX;
+                y = maxY;
+                break;
+            case 'left':
+                x = minX;
+                y = centerY;
+                break;
+            case 'right':
+                x = maxX;
+                y = centerY;
+                break;
             case 'top':
-            default:       x = centerX; y = minY; break;
+            default:
+                x = centerX;
+                y = minY;
+                break;
         }
         return { x, y };
     }
-
     /**
      * @returns {string} Горизонтальное выравнивание подписи.
      */
     getTitleAlign() { return this._titleAlign; }
-
     /**
      * @returns {[number, number]} Смещение подписи в пикселях.
      */
     getTitleOffset() { return this._titleOffset; }
-
     /**
      * @returns {'top'|'bottom'|'center'} Вертикальное выравнивание подписи.
      */
@@ -1023,22 +991,18 @@ export class Marker3D {
             default: return 'bottom';
         }
     }
-
     /**
      * @returns {boolean} Разрешать ли переполнение подписи за границы карты.
      */
     getAllowOverflow() { return false; }
-
     /**
      * @returns {number} Приоритет подписи (для разрешения коллизий).
      */
     getPriority() { return 0; }
-
     /**
      * @returns {boolean} Участвует ли маркер в кластеризации.
      */
     getClusterable() { return this._clusterable; }
-
     /**
      * Устанавливает цвет примитива или всех материалов модели.
      *
@@ -1049,7 +1013,8 @@ export class Marker3D {
         this._color = color;
         if (this._object3D && this._object3D.material) {
             this._object3D.material.color.set(color);
-        } else if (this._object3D) {
+        }
+        else if (this._object3D) {
             this._object3D.traverse((child) => {
                 if (child.isMesh && child.material) {
                     child.material.color.set(color);
@@ -1057,9 +1022,7 @@ export class Marker3D {
             });
         }
     }
-
     // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
-
     /**
      * Возвращает прямоугольник (bounding box), охватывающий 3D-маркер.
      *
@@ -1086,13 +1049,14 @@ export class Marker3D {
         const src = this._crs
             ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
         const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
-        if (!src || !dst) return null;
-
+        if (!src || !dst)
+            return null;
         let x, y;
         if (src === dst) {
             x = this._coord[0];
             y = this._coord[1];
-        } else {
+        }
+        else {
             const lonLat = src.toLonLat(this._coord);
             const converted = dst.fromLonLat(lonLat);
             x = converted[0];

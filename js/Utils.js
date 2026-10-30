@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Вспомогательные утилиты для картографической библиотеки:
  * формирование ключей тайлов, геометрия тайловой сетки и глобальные
@@ -9,7 +10,6 @@
  *
  * @module utils
  */
-
 /**
  * Глобальные значения по умолчанию, используемые в библиотеке.
  *
@@ -61,7 +61,6 @@ export const DEFAULTS = {
     STATIC_BG_ZOOM: 2,
     TILE_PIXELS: 256
 };
-
 /**
  * Вычисляет координату Z начала тайла (северная граница) в мировой системе.
  *
@@ -80,7 +79,6 @@ export const DEFAULTS = {
 export function getOriginZ(y, tileSize, maxMercator) {
     return -maxMercator + y * tileSize;
 }
-
 /**
  * Формирует строковый ключ тайла в формате "z,x,y".
  *
@@ -99,7 +97,6 @@ export function getOriginZ(y, tileSize, maxMercator) {
 export function getVirtKey(z, x, y) {
     return `${z},${x},${y}`;
 }
-
 /**
  * Формирует строковый ключ для исходного тайла.
  *

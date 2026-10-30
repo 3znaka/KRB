@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * VectorLineLayer.js — устаревший фасад для Vector3D.
  *
@@ -11,11 +12,8 @@
  *
  * @module VectorLineLayer
  */
-
 import { GeoJSONLayer } from './Geojson.js';
-
 export { ecefToGeodetic, enuToEcefDelta, isEcefCrs, ECEF_CODES } from './Vector3D.js';
-
 /**
  * @deprecated Используйте {@link GeoJSONLayer} с `vectorToOptions`.
  */
@@ -54,22 +52,21 @@ export class VectorLineLayer extends GeoJSONLayer {
                 };
             },
         });
-
-        this.pointsFn       = opts.pointsFn || null;
-        this.styleFn        = opts.style || null;
-        this.heightScale    = opts.heightScale ?? 1;
+        this.pointsFn = opts.pointsFn || null;
+        this.styleFn = opts.style || null;
+        this.heightScale = opts.heightScale ?? 1;
         this.altitudeOffset = opts.altitudeOffset ?? 0;
     }
-
     /**
      * Все поддерживаемые геометрии трактуются как векторы.
      * @private
      */
     _addFeature(feature) {
         const props = feature.properties || {};
-        if (this.filter && !this.filter(feature, props)) return;
-        if (!feature.geometry) return;
-
+        if (this.filter && !this.filter(feature, props))
+            return;
+        if (!feature.geometry)
+            return;
         const t = feature.geometry.type;
         if (t === 'Point' || t === 'LineString' || t === 'MultiLineString') {
             this._addVectorFeature(feature);

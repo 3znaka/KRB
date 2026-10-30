@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Модуль для экспорта 3D-объектов карты в формат GLB.
  * Позволяет передать массив объектов KRB (например, KRB.Image),
@@ -6,8 +7,7 @@
  *
  * @module Exporter
  */
-import { THREE, GLTFExporter } from '../js_TP/tpb.js';
-
+import { THREE, GLTFExporter } from './js_TP/tpb.js';
 /**
  * Извлекает мировую позицию объекта.
  * Приоритет: _centroidWorld (готовое свойство), затем среднее _worldPositions,
@@ -38,7 +38,6 @@ function getObjectWorldPosition(obj, mesh) {
     mesh.getWorldPosition(worldPos);
     return worldPos;
 }
-
 /**
  * Нормализует позиции объектов, сдвигая их так, чтобы центроид оказался в начале координат.
  * Возвращает новые позиции в виде массива Vector3.
@@ -48,17 +47,15 @@ function getObjectWorldPosition(obj, mesh) {
  * @private
  */
 function computeNormalizedPositions(items) {
-    if (!items.length) return [];
-
+    if (!items.length)
+        return [];
     const center = new THREE.Vector3();
     for (const { worldPos } of items) {
         center.add(worldPos);
     }
     center.divideScalar(items.length);
-
     return items.map(({ worldPos }) => worldPos.clone().sub(center));
 }
-
 /**
  * Экспортирует переданные объекты в GLB-файл и автоматически скачивает его.
  *
@@ -84,21 +81,13 @@ function computeNormalizedPositions(items) {
  * });
  */
 export async function exportToGLB(objects, options = {}) {
-    const {
-        normalize = true,
-        filename = 'exported.glb',
-        binary = true,
-        onProgress = null,
-        onSuccess = null,
-        onError = null
-    } = options;
-
+    const { normalize = true, filename = 'exported.glb', binary = true, onProgress = null, onSuccess = null, onError = null } = options;
     if (!Array.isArray(objects) || objects.length === 0) {
         const error = new Error('exportToGLB: objects должен быть непустым массивом');
-        if (onError) onError(error);
+        if (onError)
+            onError(error);
         throw error;
     }
-
     // 1. Собираем меши и корректные мировые позиции
     const items = [];
     for (const obj of objects) {
@@ -107,62 +96,48 @@ export async function exportToGLB(objects, options = {}) {
             console.warn('exportToGLB: пропущен объект без _mesh или isObject3D', obj);
             continue;
         }
-
         const worldPos = getObjectWorldPosition(obj, mesh);
         items.push({ mesh, worldPos });
     }
-
     if (!items.length) {
         const error = new Error('exportToGLB: ни один объект не содержит валидный Three.js меш');
-        if (onError) onError(error);
+        if (onError)
+            onError(error);
         throw error;
     }
-
     // 2. Нормализация позиций (если требуется)
     let adjustedPositions;
     if (normalize) {
         adjustedPositions = computeNormalizedPositions(items);
-    } else {
+    }
+    else {
         adjustedPositions = items.map(({ worldPos }) => worldPos.clone());
     }
-
     // 3. Создаём сцену и добавляем клоны
     const exportScene = new THREE.Scene();
     let exportedCount = 0;
-
     for (let i = 0; i < items.length; i++) {
         const { mesh } = items[i];
         const clone = mesh.clone(true);
-
         clone.position.copy(adjustedPositions[i]);
         clone.quaternion.copy(mesh.quaternion);
         clone.scale.copy(mesh.scale);
         clone.updateMatrixWorld(true);
-
         exportScene.add(clone);
         exportedCount++;
     }
-
     // 4. Экспорт через GLTFExporter
     const exporter = new GLTFExporter();
-
     try {
         const result = await new Promise((resolve, reject) => {
-            exporter.parse(
-                exportScene,
-                resolve,
-                reject,
-                {
-                    binary,
-                    // Можно передать onProgress, если поддерживается
-                    ...(onProgress ? { onProgress } : {})
-                }
-            );
+            exporter.parse(exportScene, resolve, reject, {
+                binary,
+                // Можно передать onProgress, если поддерживается
+                ...(onProgress ? { onProgress } : {})
+            });
         });
-
         // 5. Создание Blob, скачивание и вызов onSuccess
         const blob = new Blob([result], { type: binary ? 'model/gltf-binary' : 'model/gltf+json' });
-
         // Всегда скачиваем файл
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -172,16 +147,16 @@ export async function exportToGLB(objects, options = {}) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-
         if (onSuccess) {
             onSuccess(blob);
         }
-
         console.log(`exportToGLB: успешно экспортировано ${exportedCount} объектов`);
         return blob;
-    } catch (error) {
+    }
+    catch (error) {
         console.error('exportToGLB: ошибка экспорта', error);
-        if (onError) onError(error);
+        if (onError)
+            onError(error);
         throw error;
     }
 }

@@ -204,7 +204,6 @@ export class TextManager {
 
         this.pane.appendChild(el);
 
-js
 const label = {
     source,
     element: el,

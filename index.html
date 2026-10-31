@@ -17,25 +17,24 @@ import * as KRB from '/js/KRB.js';
 
 const map = new KRB.Map({
     target: 'map',
-    layers: [],
+    layers: [
+        new KRB.VectorTile({
+            url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
+            maxNativeZoom: 14,
+            minZoom: 2,
+            maxZoom: 24,
+            zoomOffset: -2
+        }),
+    ],
     view: new KRB.View({
         centerLonLat: [37.6178, 55.7558],
         zoom: 12,
-        maxZoom: 22
     }),
-
 });
 
 map.moveCameraTo(37.6178, 55.7558);
 
-const vectorLayer = new KRB.VectorTile({
-    url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
-    maxSourceZoom: 14,                     // тайлы до 14-го уровня, дальше растягиваются
-    minZoom: 2,                            // показываем с 2-го зума
-    maxZoom: 22,
-                    zoomOffset: -2,
 
-}).addTo(map);
 
 
 </script>

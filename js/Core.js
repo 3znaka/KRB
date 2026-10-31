@@ -278,6 +278,24 @@ export class KrbMap {
                     this._surfaceMaxHeightCache.clear();
             });
         }
+        // ── NEW: attach dynamic layers (VectorTile и т.п.) ─────────────────
+        for (const layer of this.layers) {
+            if (!layer)
+                continue;
+            if (layer.texture || layer.elevation)
+                continue; // растровые/рельефные — через TileManager
+            if (typeof layer.addTo !== 'function')
+                continue; // не динамический слой — пропускаем
+            if (layer._map === this)
+                continue; // уже привязан к этой карте
+            try {
+                layer.addTo(this);
+            }
+            catch (err) {
+                console.warn('KrbMap: layer.addTo() failed', layer, err);
+            }
+        }
+        // ── END NEW ────────────────────────────────────────────────────────
         this._rebuildLayerStack();
         if (this._elevationLayer && !this._rasterLayers.includes(this._elevationLayer)) {
             const primary = this._tileManagers[0];

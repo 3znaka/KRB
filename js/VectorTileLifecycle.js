@@ -56,8 +56,12 @@ export const VectorTileLifecycleMixin = {
         this._rootGroup.renderOrder = this._tileGroupRenderOrder;
         this._rootGroup.visible = this.visible;
         map.worldGroup.add(this._rootGroup);
-        if (!map._dynamicLayers.includes(this))
+        // NEW: не дублируем, если слой уже лежит в map.layers
+        const alreadyInLayers = Array.isArray(map.layers) && map.layers.includes(this);
+        if (!alreadyInLayers && !map._dynamicLayers.includes(this)) {
             map._dynamicLayers.push(this);
+        }
+        // END NEW
         if (map.textManager && map.textManager.setMaxLabels)
             map.textManager.setMaxLabels(this.maxTextLabels);
         this._labelsDirty = true;
@@ -80,9 +84,16 @@ export const VectorTileLifecycleMixin = {
         this._pendingWorkerRequests.clear();
         this._clearAllTiles();
         this._rootGroup.parent?.remove(this._rootGroup);
+        // NEW: снять с учёта в обоих массивах карты
+        if (Array.isArray(this._map.layers)) {
+            const li = this._map.layers.indexOf(this);
+            if (li > -1)
+                this._map.layers.splice(li, 1);
+        }
         const index = this._map._dynamicLayers.indexOf(this);
         if (index > -1)
             this._map._dynamicLayers.splice(index, 1);
+        // END NEW
         this._map = null;
         this._crs = null;
         this._fillMaterialCache.forEach((m) => m.dispose());

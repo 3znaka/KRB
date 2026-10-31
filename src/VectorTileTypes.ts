@@ -37,6 +37,10 @@ export interface VectorTileOptions {
     labelMaxPerTileClose?: number;
     labelCullMargin?: number;
     labelMaxCameraDistance?: number;
+    /** Размер ячейки экранной сетки подписей в CSS-пикселях. По умолчанию 256. */
+    labelScreenGridSize?: number;
+    /** Максимум подписей в одной ячейке экранной сетки. По умолчанию 3. */
+    labelMaxPerCell?: number;
     lineLabelTracking?: number;
     lineLabelPriorityMode?: string;
     lineLabelHysteresisPx?: number;

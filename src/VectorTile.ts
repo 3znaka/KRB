@@ -53,6 +53,8 @@ export class VectorTile {
     labelMaxPerTileClose: number;
     labelCullMargin: number;
     labelMaxCameraDistance: number;
+    labelScreenGridSize: number;
+    labelMaxPerCell: number;
     lineLabelTracking: number;
     lineLabelPriorityMode: string;
     lineLabelHysteresisPx: number;
@@ -133,6 +135,7 @@ export class VectorTile {
     private _workerReady: Promise<void>;
     private _requestId = 0;
     private _pendingWorkerRequests = new Map<number, any>();
+    private _lastSelectedLabelIds = new Set<string>();
 
     constructor(options: VectorTileOptions = {}) {
         this.url = options.url;
@@ -169,13 +172,18 @@ this.depthTest = options.depthTest ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
 
-        this.maxTextLabels = options.maxTextLabels ?? 500;
+        this.maxTextLabels = options.maxTextLabels ?? 150;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;
         this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 500;
         this.labelDistanceSortZoom = options.labelDistanceSortZoom ?? 17;
         this.labelMaxPerTileClose = options.labelMaxPerTileClose ?? 20;
         this.labelCullMargin = options.labelCullMargin ?? 250;
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
+
+        // Ограничение плотности подписей по экранной сетке
+        this.labelScreenGridSize = options.labelScreenGridSize ?? 256;
+        this.labelMaxPerCell = Math.max(1, options.labelMaxPerCell ?? 3);
+        this._lastSelectedLabelIds = new Set<string>();
 
         this.lineLabelTracking = options.lineLabelTracking ?? 1.35;
         this.lineLabelPriorityMode = options.lineLabelPriorityMode ?? 'tile';
@@ -225,6 +233,7 @@ export interface VectorTile {
     _removeTextLabelsForGroup(group: THREE.Group | null | undefined): void;
     _refreshTextLabelsForVisibleTiles(): void;
     _collectLabelCandidates(): { candidates: any[]; isClose: boolean };
+    _selectCandidatesByScreenGrid(candidates: any[]): any[];
 
     // --- materials ---
     _getFillMaterial(styleKey: string): THREE.Material;

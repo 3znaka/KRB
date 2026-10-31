@@ -3,8 +3,25 @@ import { THREE } from './js_TP/tpb.js';
 import { VectorLineLabelSource } from './LineLabelSource.js';
 import type { WorkerTextPoint, WorkerTextLine } from './VectorTileTypes.js';
 
+/**
+ * Бонус к приоритету для подписей, выбранных в прошлый refresh.
+ *
+ * Это даёт «липкость»: подпись, уже показанная в своей экранной
+ * ячейке, не будет вытеснена новичком с тем же или близким
+ * приоритетом — только заметно более важным.
+ *
+ * Значение 50 подобрано так, чтобы:
+ *   - City (priority 200) / Town (170) вытесняли POI (60), road-name (100);
+ *   - POI (60) не вытеснялся другим POI (60–100);
+ *   - метки одной категории не «перетасовывались» при догрузке тайлов.
+ *
+ * Если понадобится ещё жёстче — увеличь; если наоборот, хочешь
+ * быстрее подстраиваться под новые приоритеты — уменьши.
+ */
+const STICKY_PRIORITY_BONUS = 50;
+
 // ============================================================================
-// Point label source (было в VectorTile.ts, используется только здесь)
+// Point label source
 // ============================================================================
 
 class VectorPointLabelSource {
@@ -56,7 +73,7 @@ class VectorPointLabelSource {
 }
 
 // ============================================================================
-// Candidate types (использовались только в label-методах)
+// Candidate types
 // ============================================================================
 
 interface LabelCandidatePoint {
@@ -78,6 +95,8 @@ interface LabelCandidateLine {
     id: string;
     camDistSq: number;
     priority: number;
+    sx: number;
+    sy: number;
 }
 
 type LabelCandidate = LabelCandidatePoint | LabelCandidateLine;
@@ -86,10 +105,6 @@ type LabelCandidate = LabelCandidatePoint | LabelCandidateLine;
 // Mixin
 // ============================================================================
 
-/**
- * Примесь VectorTile — текстовые подписи.
- * Применяется через applyMixin(VectorTile.prototype, VectorTileLabelsMixin).
- */
 export const VectorTileLabelsMixin = {
     _forEachShownGroup(this: any, cb: (group: THREE.Group) => void): void {
         this._tileCache.forEach((g: THREE.Group) => { if (g.visible) cb(g); });
@@ -117,6 +132,46 @@ export const VectorTileLabelsMixin = {
         group.userData.textLabels = [];
     },
 
+    /**
+     * Отбор кандидатов по экранной сетке.
+     *
+     * Кандидаты уже отсортированы (см. _refreshTextLabelsForVisibleTiles)
+     * по «эффективному приоритету», где sticky-подписи получили бонус.
+     * Поэтому в каждой ячейке первыми занимают места либо уже показанные
+     * подписи, либо заметно более приоритетные новички.
+     *
+     * Также ограничивает общее количество до maxTextLabels.
+     */
+    _selectCandidatesByScreenGrid(this: any, candidates: LabelCandidate[]): LabelCandidate[] {
+        const cellSize = this.labelScreenGridSize > 0 ? this.labelScreenGridSize : 256;
+        const maxPerCell = this.labelMaxPerCell > 0 ? this.labelMaxPerCell : 6;
+        const limit = this.maxTextLabels;
+
+        const cellCounts = new Map<string, number>();
+        const result: LabelCandidate[] = [];
+
+        for (let i = 0; i < candidates.length; i++) {
+            if (result.length >= limit) break;
+            const cand = candidates[i];
+
+            const sx = (cand as any).sx;
+            const sy = (cand as any).sy;
+            if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+
+            const col = Math.floor(sx / cellSize);
+            const row = Math.floor(sy / cellSize);
+            const key = col + ',' + row;
+
+            const count = cellCounts.get(key) || 0;
+            if (count >= maxPerCell) continue;
+
+            cellCounts.set(key, count + 1);
+            result.push(cand);
+        }
+
+        return result;
+    },
+
     _refreshTextLabelsForVisibleTiles(this: any): void {
         if (!this._map || !this._map.textManager) return;
         const textManager = this._map.textManager;
@@ -126,15 +181,27 @@ export const VectorTileLabelsMixin = {
         if (candidates.length === 0) {
             selected = [];
         } else {
+            // ── Sticky-сортировка ──────────────────────────────────
+            // Подписи, выбранные в прошлый refresh, получают бонус
+            // к приоритету. Если новичок их не «перебивает» с запасом
+            // STICKY_PRIORITY_BONUS — старая остаётся на месте.
+            const sticky = this._lastSelectedLabelIds || new Set<string>();
+
             candidates.sort((a: LabelCandidate, b: LabelCandidate) => {
-                if (a.priority !== b.priority) return b.priority - a.priority;
+                const aBonus = sticky.has(a.id) ? STICKY_PRIORITY_BONUS : 0;
+                const bBonus = sticky.has(b.id) ? STICKY_PRIORITY_BONUS : 0;
+                const aEff = a.priority + aBonus;
+                const bEff = b.priority + bBonus;
+
+                if (aEff !== bEff) return bEff - aEff;
+                // Линии — приоритетнее точек при равном priority.
                 const aL = a.type === 'line' ? 1 : 0;
                 const bL = b.type === 'line' ? 1 : 0;
                 if (aL !== bL) return bL - aL;
-                return a.camDistSq - b.camDistSq;
+                // Стабильный tiebreaker.
+                return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
             });
-            const limit = Math.min(candidates.length, this.maxTextLabels);
-            selected = candidates.slice(0, limit);
+            selected = this._selectCandidatesByScreenGrid(candidates);
         }
 
         const activeIds = new Set<string>();
@@ -184,7 +251,12 @@ export const VectorTileLabelsMixin = {
             labels.push(label);
         }
 
-        textManager.pruneStaleLabels(activeIds, this);
+        // Мягкое удаление точечных подписей (fade-out, без «застывания»).
+        textManager.pruneStaleLabels(activeIds, this, { fade: true, graceMs: 200 });
+
+        // Запоминаем выборку — на следующем refresh эти id будут sticky.
+        this._lastSelectedLabelIds = activeIds;
+
         this._tileCache.forEach((g: THREE.Group) => { g.userData.textLabels = groupLabels.get(g) || []; });
         this._oldTileGroups?.forEach((g: THREE.Group) => { g.userData.textLabels = groupLabels.get(g) || []; });
     },
@@ -284,10 +356,16 @@ export const VectorTileLabelsMixin = {
                     if (!onScreen) continue;
                     if (minDistSq > maxLabelDistSq) continue;
 
+                    const cxNdc = (minTx + maxTx) * 0.5;
+                    const cyNdc = (minTy + maxTy) * 0.5;
+                    const lSx = (cxNdc * 0.5 + 0.5) * rectW;
+                    const lSy = (-cyNdc * 0.5 + 0.5) * rectH;
+
                     candidates.push({
                         type: 'line', ln, lnIndex: i, group,
                         id: groupIdPrefix + i,
                         camDistSq: minDistSq, priority: ln.priority || 0,
+                        sx: lSx, sy: lSy,
                     });
                 }
             }

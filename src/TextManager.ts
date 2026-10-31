@@ -63,7 +63,7 @@ class _GridIndex {
  * Сколько кадров подряд камера должна быть неподвижна, чтобы
  * считаться «стабильной» и показать линейные подписи.
  */
-const STABLE_FRAMES = 10;
+const STABLE_FRAMES = 5;
 
 export class TextManager {
     constructor(map) {
@@ -165,6 +165,11 @@ addLabel(source, stableId = null, owner = null) {
             const existing = this._labelsById.get(stableId);
     if (existing) {
                 existing._vectorOwner = owner;
+                // Если подпись возвращается в активный набор — снимаем stale-метку.
+                // Реальная «видимость» определится в _updateVisibility.
+                if (existing._staleAt != null) {
+                    existing._staleAt = null;
+                }
                 this._updateLabelSource(existing, source);
                 this._dirty = true;
                 return existing;
@@ -196,7 +201,7 @@ addLabel(source, stableId = null, owner = null) {
         });
         const styleObj = source.getTextStyle ? source.getTextStyle() : {};
         Object.assign(el.style, styleObj);
-        el.style.transition = 'opacity 0.08s linear';
+        el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
         if (type === 'point') {
@@ -223,7 +228,13 @@ const label = {
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
             _chosenT: null,
-            _chosenIsFlipped: false
+            _chosenIsFlipped: false,
+                        _chosenT: null,
+            _chosenIsFlipped: false,
+            _pendingChosenT: null,
+            _pendingChosenIsFlipped: false,
+
+            _staleAt: null,
         };
 
                 label._vectorOwner = owner;
@@ -283,6 +294,7 @@ if (textChanged || (newType === 'point' && fontChanged)) {
     removeLabel(label) {
         if (!label) return;
         if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
+        label._staleAt = null;
         const idx = this.labels.indexOf(label);
         if (idx > -1) {
             this.labels.splice(idx, 1);
@@ -296,16 +308,65 @@ if (textChanged || (newType === 'point' && fontChanged)) {
         label._queuedForMeasure = false;
         this._dirty = true;
     }
-    pruneStaleLabels(activeIds, owner = null) {
+
+    /**
+     * Удалить подписи, которых нет в activeIds.
+     *
+     * @param activeIds Set активных id
+     * @param owner     владелец (например, VectorTile)
+     * @param opts      { fade?: boolean, graceMs?: number }
+     *
+     * При opts.fade === true не удаляем точечные подписи сразу: помечаем
+     * их stale, даём исчезнуть с fade, а окончательно убираем только
+     * после graceMs. Если за это время подпись снова попадёт в activeIds —
+     * она вернётся без потери DOM-узла и плавно проявится.
+     *
+     * line-curved подписи всегда удаляются мгновенно: они пересобираются
+     * из глифов на каждом кадре, fade для них бессмыслен.
+     *
+     * Поведение по умолчанию (fade:false) совпадает со старым — мгновенное
+     * удаление (используется при setVisible(false) и _clearAllTiles).
+     */
+    pruneStaleLabels(activeIds, owner = null, opts = {}) {
         if (!activeIds) return;
-        const stale = [];
+        const fade = opts.fade === true;
+        const graceMs = opts.graceMs ?? 10;
+        const now = performance.now();
+        const toRemove = [];
+        let changed = false;
 
         for (const [id, label] of this._labelsById) {
             if ((label._vectorOwner ?? null) !== owner) continue;
-            if (!activeIds.has(id)) stale.push(label);
+
+            if (activeIds.has(id)) {
+                // Подпись снова активна — отменяем запланированное удаление.
+                if (label._staleAt != null) {
+                    label._staleAt = null;
+                    changed = true;
+                }
+                continue;
+            }
+
+            // Подпись не попала в активный набор.
+            if (!fade || label.source.getLabelType() === 'line-curved') {
+                toRemove.push(label);
+                continue;
+            }
+
+            // Мягкое удаление: помечаем stale и запускаем fade-out.
+            if (label._staleAt == null) {
+                label._staleAt = now;
+                label.hiddenByPriority = true;
+                this._setLabelVisible(label, false);
+                changed = true;
+            }
+            if (now - label._staleAt > graceMs) {
+                toRemove.push(label);
+            }
         }
 
-        for (const label of stale) this.removeLabel(label);
+        for (const label of toRemove) this.removeLabel(label);
+        if (changed || toRemove.length > 0) this._dirty = true;
     }
 
     _wrapPointText(text, fontSize) {
@@ -416,25 +477,26 @@ if (textChanged || (newType === 'point' && fontChanged)) {
         }
     }
 
-    _hideAllLineLabels() {
-        for (let i = 0; i < this.labels.length; i++) {
-            const label = this.labels[i];
-            if (label.source.getLabelType() !== 'line-curved') continue;
-            const el = label.element;
-            if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
-            if (el.style.display !== 'none') {
-                el.style.transition = 'none';
-                el.style.opacity = '0';
-                el.style.display = 'none';
-                void el.offsetWidth;
-                el.style.transition = 'opacity 0.08s linear';
-            }
-            label.hiddenByPriority = true;
-            // Сбрасываем позицию, чтобы при следующей стабилизации
-            // подпись выбрала новое место (ближе к центру экрана).
-            label._chosenT = null;
+_hideAllLineLabels() {
+    for (let i = 0; i < this.labels.length; i++) {
+        const label = this.labels[i];
+        if (label.source.getLabelType() !== 'line-curved') continue;
+        const el = label.element;
+        if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
+        if (el.style.display !== 'none') {
+            el.style.opacity = '0';
+            el.style.display = 'none';
+            void el.offsetWidth;
+            el.style.transition = 'opacity 0.2s linear';
         }
+        label.hiddenByPriority = true;
+        // Сбрасываем позицию, чтобы при следующей стабилизации
+        // подпись выбрала новое место (ближе к центру экрана).
+        label._chosenT = null;
+        label._pendingChosenT = null;
+        label._pendingChosenIsFlipped = false;
     }
+}
 
     _computeAnchor(label, rotationDeg) {
         const src = label.source;
@@ -687,10 +749,18 @@ if (textChanged || (newType === 'point' && fontChanged)) {
             dZoom > 0.01 ||
             dQ > 1e-5;
 
+        // Смена зума — единственный случай, когда линейные подписи
+        // пропадают вплоть до стабильного экрана. При панорамировании
+        // и повороте камеры они остаются видимыми и перерисовываются
+        // каждый кадр через _applyTransforms, следуя за картой.
+        // Когда экран успокоится, _updateVisibility(zoom, true) вызовет
+        // _placeLineLabels, и тот может найти позицию получше.
+        const zoomChanged = dZoom > 0.01;
+
         const wasStable = this._wasStable;
 
         if (moved) {
-            if (this._stableFrameCount > 0 || wasStable) {
+            if (zoomChanged && (this._stableFrameCount > 0 || wasStable)) {
                 this._hideAllLineLabels();
             }
             this._stableFrameCount = 0;
@@ -733,6 +803,16 @@ if (this._dirty) {
 
             const type = src.getLabelType();
             if (type === 'line-curved') continue;
+
+            // ── Подпись помечена как stale владельцем ──────────────
+            // Не даём ей снова стать видимой: даём fade-out спокойно
+            // доиграть. Если владелец вернёт её в activeIds, _staleAt
+            // сбросится, и на следующей итерации она снова попадёт
+            // в обычную обработку.
+            if (label._staleAt != null) {
+                label.hiddenByPriority = true;
+                continue;
+            }
 
             label.priority = src.getPriority ? src.getPriority() : 0;
             label.allowOverflow = src.getAllowOverflow ? src.getAllowOverflow() : false;
@@ -804,6 +884,24 @@ if (this._dirty) {
         }
         for (let i = 0; i < this.labels.length; i++) {
             const lbl = this.labels[i];
+            const isCurved = lbl.source.getLabelType() === 'line-curved';
+
+            if (isCurved && !placeLines) {
+                const zb = lbl.source.getTextZoomBounds();
+                const stillValid =
+                    lbl._chosenT != null &&
+                    lbl.source.isVisible() &&
+                    zoom >= zb.min && zoom <= zb.max;
+                if (!stillValid) {
+                    lbl.hiddenByPriority = true;
+                    this._setLabelVisible(lbl, false);
+                }
+                continue;
+            }
+                        if (isCurved && lbl._pendingChosenT != null) {
+                continue;
+            }
+
             const shouldBeVisible = visibleSet.has(lbl) && !lbl.hiddenByPriority;
             this._setLabelVisible(lbl, shouldBeVisible);
         }
@@ -825,7 +923,6 @@ if (this._dirty) {
             const bp = b.source.getPriority ? b.source.getPriority() : 0;
             return bp - ap;
         });
-
         for (let i = 0; i < lineLabels.length; i++) {
             const lbl = lineLabels[i];
             const src = lbl.source;
@@ -847,13 +944,44 @@ if (this._dirty) {
             }
 
             if (chosen) {
-                lbl._chosenT = chosen.t;
-                lbl._chosenIsFlipped = chosen.isFlipped;
                 lbl._bbox = chosen.bbox;
                 this._gridIndex.insert(chosen.bbox, lbl);
                 lbl.hiddenByPriority = false;
+
+                if (lbl._chosenT == null) {
+                    // Раньше подписи не было — ставим сразу, fade-in
+                    // произойдёт через _setLabelVisible(true).
+                    lbl._chosenT = chosen.t;
+                    lbl._chosenIsFlipped = chosen.isFlipped;
+                    lbl._pendingChosenT = null;
+                    lbl._pendingChosenIsFlipped = false;
+                } else {
+                    const sameAsCurrent =
+                        lbl._chosenT === chosen.t &&
+                        lbl._chosenIsFlipped === chosen.isFlipped;
+                    const sameAsPending =
+                        lbl._pendingChosenT != null &&
+                        lbl._pendingChosenT === chosen.t &&
+                        lbl._pendingChosenIsFlipped === chosen.isFlipped;
+
+                    if (sameAsCurrent) {
+                        // Позиция вернулась к прежней — отменяем pending
+                        // (если был) и fade-out, если он уже начался.
+                        lbl._pendingChosenT = null;
+                        lbl._pendingChosenIsFlipped = false;
+                    } else if (sameAsPending) {
+                        // Уже ждём этого места — ничего не меняем.
+                    } else {
+                        // Новая позиция — fade-out на старой, затем
+                        // fade-in на новой (см. _applyTransforms).
+                        lbl._pendingChosenT = chosen.t;
+                        lbl._pendingChosenIsFlipped = chosen.isFlipped;
+                    }
+                }
             } else {
                 lbl._chosenT = null;
+                lbl._pendingChosenT = null;
+                lbl._pendingChosenIsFlipped = false;
                 lbl._bbox = null;
                 lbl.hiddenByPriority = true;
             }
@@ -869,19 +997,58 @@ _applyTransforms() {
         const type = src.getLabelType();
         const isCurved = type === 'line-curved';
 
-        // ── 1. Дешёвая per-frame видимость (source-authoritative) ──
+        // ── 1. Должна ли подпись быть видимой ─────────────────────
         const zb = src.getTextZoomBounds();
         const sourceVisible =
             src.isVisible() &&
             zoom >= zb.min && zoom <= zb.max;
+        const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
-        if (!sourceVisible || label.hiddenByPriority) {
-            this._setLabelVisible(label, false);
-            continue;
+        // ── 2. Подпись должна быть скрыта ─────────────────────────
+        if (!shouldBeVisible) {
+            const isFadingOut = label._hideTimeout != null;
+            if (!isFadingOut) {
+                // Если скрываемся, пока была запланирована смена
+                // позиции, — отменяем pending: оба состояния
+                // одновременно не имеют смысла.
+                if (isCurved && label._pendingChosenT != null) {
+                    label._pendingChosenT = null;
+                    label._pendingChosenIsFlipped = false;
+                }
+                this._setLabelVisible(label, false);
+                continue;
+            }
+            if (isCurved) {
+                // Идёт fade-out (в т.ч. из-за pending position change).
+                // Пока не доиграет — не рендерим.
+                continue;
+            }
+            // Точечные: продолжаем обновлять transform, чтобы
+            // «умирающая» подпись не застывала.
         }
 
-        // ── 2. Линейные кривые идут своим путём ──────────────────
+        // ── 3. Линейные кривые ────────────────────────────────────
         if (isCurved) {
+            // Pending position change: fade-out на старой позиции,
+            // затем swap на новую и fade-in.
+            if (label._pendingChosenT != null) {
+                const el = label.element;
+                const fadeOutDone =
+                    label._hideTimeout == null && el.style.display === 'none';
+                if (!fadeOutDone) {
+                    if (label._hideTimeout == null) {
+                        // Ещё не начинали fade-out — запускаем.
+                        this._setLabelVisible(label, false);
+                    }
+                    continue;
+                }
+                // Fade-out завершён — применяем новую позицию.
+                label._chosenT = label._pendingChosenT;
+                label._chosenIsFlipped = label._pendingChosenIsFlipped;
+                label._pendingChosenT = null;
+                label._pendingChosenIsFlipped = false;
+            }
+
             if (label._chosenT == null) {
                 this._setLabelVisible(label, false);
                 continue;
@@ -898,12 +1065,13 @@ _applyTransforms() {
             continue;
         }
 
-        // ── 3. Точечные/обычные линии: позиция ──────────────────
+        // ── 4. Точечные/обычные линии: пересчитываем позицию ─────
         let pos;
         if (type === 'line') pos = src.getScreenPositionAt(label.t);
         else                  pos = src.getScreenPosition();
 
         if (!pos) {
+            if (!shouldBeVisible) continue;
             this._setLabelVisible(label, false);
             continue;
         }
@@ -918,7 +1086,10 @@ _applyTransforms() {
             transform += ` rotate(${rotation}deg)`;
         }
         label.element.style.transform = transform;
-        this._setLabelVisible(label, true);
+
+        if (shouldBeVisible) {
+            this._setLabelVisible(label, true);
+        }
     }
 }
 }

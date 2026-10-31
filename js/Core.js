@@ -313,7 +313,7 @@ export class KrbMap {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
         this.camera = new THREE.PerspectiveCamera(45, this.targetElement.clientWidth / this.targetElement.clientHeight, 1, 200000000);
-        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance' });
+        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance', logarithmicDepthBuffer: true, });
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);

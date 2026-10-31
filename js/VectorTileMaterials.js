@@ -18,8 +18,9 @@ export const VectorTileMaterialsMixin = {
             side: THREE.DoubleSide,
             transparent: opacity < 1.0,
             opacity,
-            depthTest: this.depthTest === true,
-            depthWrite: false,
+            depthTest: this.depthTest, // true
+            depthWrite: false, // ← ВСЕГДА false, без вариантов
+            polygonOffset: false, // ← отключить, с depthWrite:false он бессмыслен
         });
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);
@@ -41,8 +42,11 @@ export const VectorTileMaterialsMixin = {
             color,
             linewidth: width,
             resolution: new THREE.Vector2(this._map.renderer.domElement.clientWidth, this._map.renderer.domElement.clientHeight),
-            depthTest: this.depthTest === true,
+            depthTest: this.depthTest,
             depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 2,
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;
@@ -78,8 +82,11 @@ export const VectorTileMaterialsMixin = {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-            depthTest: this.depthTest === true,
+            depthTest: this.depthTest,
             depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 2,
         };
         if (line.dash && Array.isArray(line.dash) && line.dash.length >= 2) {
             opts.dashed = true;

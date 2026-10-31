@@ -124,12 +124,12 @@ export interface PendingWorkerRequest {
 // ============================================================================
 
 export const VECTOR_TILE_RENDER_ORDER = {
-    FILL: 10,
-    LINE: 20,
-    STROKE: 25,
-    POINT: 30,
-    BUILDING: 5000,
-    EDGE: 5001,
+    BUILDING: 5,
+    EDGE:     6,
+    FILL:     10,
+    LINE:     20,
+    STROKE:   25,
+    POINT:    30,
 } as const;
 
 export const FLAT_Y_OFFSET = 0.5;

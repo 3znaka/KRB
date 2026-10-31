@@ -127,7 +127,7 @@ export class VectorTile {
         this.maxNativeZoom = options.maxNativeZoom ?? options.maxSourceZoom ?? 14;
         this.lineWidthMultiplier = options.lineWidthMultiplier ?? 1.0;
         this.fillOpacity = options.fillOpacity ?? 1.0;
-        this.depthTest = options.depthTest ?? false;
+        this.depthTest = options.depthTest ?? true;
         this.visibleLayers = options.visibleLayers || null;
         this.zoomOffset = options.zoomOffset ?? 0;
         this.buildings3d = options.buildings3d ?? true;

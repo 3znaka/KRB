@@ -7,27 +7,29 @@ import type { WorkerLine, WidthSpec } from './VectorTileTypes.js';
  * Применяется через applyMixin(VectorTile.prototype, VectorTileMaterialsMixin).
  */
 export const VectorTileMaterialsMixin = {
-    _getFillMaterial(this: any, styleKey: string): THREE.Material {
-        const cached = this._fillMaterialCache.get(styleKey);
-        if (cached) return cached;
+_getFillMaterial(this: any, styleKey: string): THREE.Material {
+    const cached = this._fillMaterialCache.get(styleKey);
+    if (cached) return cached;
 
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const rawOpacity = parseFloat(parts[3]);
-        const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
+    const parts = styleKey.split(':');
+    const color = parseInt(parts[2], 16);
+    const rawOpacity = parseFloat(parts[3]);
+    const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
 
-        const mat = new THREE.MeshBasicMaterial({
-            color,
-            side: THREE.DoubleSide,
-            transparent: opacity < 1.0,
-            opacity,
-            depthTest: this.depthTest === true,
-            depthWrite: false,
-        });
-        this._fillMaterialCache.set(styleKey, mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    },
+    const mat = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.DoubleSide,
+        transparent: opacity < 1.0,
+        opacity,
+        depthTest:  this.depthTest,   // true
+        depthWrite: false,            // ← ВСЕГДА false, без вариантов
+        polygonOffset: false,         // ← отключить, с depthWrite:false он бессмыслен
+    });
+
+    this._fillMaterialCache.set(styleKey, mat);
+    this._managedMaterials.add(mat);
+    return mat;
+},
 
     _getFillMaterialFromData(this: any, layerName: string, color: number, opacity: number | undefined): THREE.Material {
         const op = opacity ?? 1;
@@ -49,8 +51,11 @@ export const VectorTileMaterialsMixin = {
                 this._map.renderer.domElement.clientWidth,
                 this._map.renderer.domElement.clientHeight,
             ),
-            depthTest: this.depthTest === true,
-            depthWrite: false,
+    depthTest: this.depthTest,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 2,    
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;
@@ -88,8 +93,11 @@ export const VectorTileMaterialsMixin = {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-            depthTest: this.depthTest === true,
-            depthWrite: false,
+   depthTest: this.depthTest,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 2,
         };
         if (line.dash && Array.isArray(line.dash) && line.dash.length >= 2) {
             opts.dashed = true;

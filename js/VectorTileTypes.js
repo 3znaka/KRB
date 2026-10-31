@@ -2,12 +2,12 @@
 // Render order & constants
 // ============================================================================
 export const VECTOR_TILE_RENDER_ORDER = {
+    BUILDING: 5,
+    EDGE: 6,
     FILL: 10,
     LINE: 20,
     STROKE: 25,
     POINT: 30,
-    BUILDING: 5000,
-    EDGE: 5001,
 };
 export const FLAT_Y_OFFSET = 0.5;
 export const FLAT_Y_STEP = 0.002;

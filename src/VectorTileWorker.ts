@@ -127,7 +127,7 @@ export const VectorTileWorkerMixin = {
             const mesh = new THREE.Mesh(geom, mat);
             const ro = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
             mesh.renderOrder = ro;
-            mesh.position.y = flatY(ro);
+mesh.position.y = 0; 
             group.add(mesh);
         }
 
@@ -182,7 +182,7 @@ export const VectorTileWorkerMixin = {
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
             const ro = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
-            mesh.position.set(pt.x, flatY(ro), pt.z);
+mesh.position.set(pt.x, 0, pt.z); 
             mesh.renderOrder = ro;
             group.add(mesh);
         }
@@ -233,7 +233,7 @@ export const VectorTileWorkerMixin = {
         }
 
         lineObj.renderOrder = renderOrder ?? VECTOR_TILE_RENDER_ORDER.LINE;
-        lineObj.position.y = flatY(lineObj.renderOrder);
+lineObj.position.y = 0; 
         lineObj.frustumCulled = false;
         group.add(lineObj);
     },

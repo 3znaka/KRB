@@ -419,7 +419,7 @@ export class KrbMap {
             1,
             200000000
         );
-        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance' });
+        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance',  logarithmicDepthBuffer: true,  });
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);

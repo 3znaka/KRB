@@ -2,7 +2,7 @@
 import { THREE, Line2, LineSegmentsGeometry } from './js_TP/tpb.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import type { WorkerResult, PendingWorkerRequest } from './VectorTileTypes.js';
-import { VECTOR_TILE_RENDER_ORDER, flatY } from './VectorTileTypes.js';
+import { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
 
 // ============================================================================
 // Module-level shared blob cache
@@ -14,6 +14,15 @@ export const _DEFAULT_WORKER_SCRIPTS = [
     new URL('./js_TP/earcut.js', _MODULE_DIR).href,
 ];
 
+/**
+ * Fix #4: сознательно «вечный» кэш blob URL.
+ *
+ * Ключ — пара (tpbUrl, earcutUrl). Количество ключей ограничено числом
+ * уникальных пар; blob URL не revoke'ается, т.к. разделяется всеми
+ * экземплярами VectorTile с одинаковыми скриптами. Если когда-либо
+ * понадобится динамическая смена скриптов — добавьте refcount:
+ *   acquireWorkerBlobUrl(urls) / releaseWorkerBlobUrl(urls).
+ */
 const _workerBlobUrlCache = new Map<string, Promise<string>>();
 
 function _getSharedWorkerBlobUrl(tpbUrl: string, earcutUrl: string): Promise<string> {
@@ -43,14 +52,24 @@ function _getSharedWorkerBlobUrl(tpbUrl: string, earcutUrl: string): Promise<str
 // ============================================================================
 
 export const VectorTileWorkerMixin = {
+    // ── Fix #2: токен против «осиротевшего» воркера ───────────────────────
     async _initWorker(this: any): Promise<void> {
+        const token = (this._workerInitToken || 0) + 1;
+        this._workerInitToken = token;
+
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
         try {
             const blobUrl = await _getSharedWorkerBlobUrl(tpbUrl, earcutUrl);
-            this._worker = new Worker(blobUrl, { type: 'module' });
-            this._worker.onmessage = (e: MessageEvent) => this._onWorkerMessage(e.data);
-            this._worker.onerror = (err: any) => console.error('VectorTile worker error:', err);
-            this._worker.postMessage({ type: 'config', styles: this._styles });
+
+            // Пока ждали fetch — слой мог быть снят с карты (removeFromMap).
+            if (this._workerInitToken !== token) return;
+            if (!this._map) return;
+
+            const worker = new Worker(blobUrl, { type: 'module' });
+            this._worker = worker;
+            worker.onmessage = (e: MessageEvent) => this._onWorkerMessage(e.data);
+            worker.onerror = (err: any) => console.error('VectorTile worker error:', err);
+            worker.postMessage({ type: 'config', styles: this._styles });
         } catch (err) {
             console.error('Failed to initialize worker:', err);
         }
@@ -115,7 +134,10 @@ export const VectorTileWorkerMixin = {
         while (group.children.length) {
             const child = group.children[0] as any;
             if (child.geometry && !this._managedGeometries.has(child.geometry)) child.geometry.dispose();
-            if (child.material && !this._managedMaterials.has(child.material)) child.material.dispose?.();
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const m of mats) {
+                if (m && !this._managedMaterials.has(m)) m.dispose?.();
+            }
             group.remove(child);
         }
 
@@ -125,9 +147,8 @@ export const VectorTileWorkerMixin = {
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
-            const ro = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
-            mesh.renderOrder = ro;
-mesh.position.y = 0; 
+            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
+            mesh.position.y = 0;
             group.add(mesh);
         }
 
@@ -157,7 +178,7 @@ mesh.position.y = 0;
                     edgeGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
                     const lines = new THREE.LineSegments(
                         edgeGeom,
-                        this._getBuildingEdgeMaterial(g.stroke || 0x555555, isTransparent ? opacity * 0.35 : 1)
+                        this._getBuildingEdgeMaterial(g.stroke || 0x555555, isTransparent ? opacity * 0.35 : 1),
                     );
                     lines.renderOrder = VECTOR_TILE_RENDER_ORDER.EDGE;
                     group.add(lines);
@@ -181,9 +202,8 @@ mesh.position.y = 0;
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
-            const ro = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
-mesh.position.set(pt.x, 0, pt.z); 
-            mesh.renderOrder = ro;
+            mesh.position.set(pt.x, 0, pt.z);
+            mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
 
@@ -194,18 +214,34 @@ mesh.position.set(pt.x, 0, pt.z);
         group.userData.is3d = !!result.is3d;
     },
 
+    // ── Fix #8: два прохода, без промежуточного JS-массива ────────────────
     _fatLineSegmentsFromPositions(this: any, positions: Float32Array | ArrayLike<number> | undefined): Float32Array | null {
         if (!positions || positions.length < 6) return null;
-        const out: number[] = [];
+
+        let segCount = 0;
         let havePrev = false;
+        for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i];
+            if (Number.isNaN(x)) { havePrev = false; continue; }
+            if (havePrev) segCount++;
+            havePrev = true;
+        }
+        if (segCount === 0) return null;
+
+        const out = new Float32Array(segCount * 6);
+        let k = 0;
+        havePrev = false;
         let px = 0, py = 0, pz = 0;
         for (let i = 0; i < positions.length; i += 3) {
             const x = positions[i], y = positions[i + 1], z = positions[i + 2];
             if (Number.isNaN(x)) { havePrev = false; continue; }
-            if (havePrev) out.push(px, py, pz, x, y, z);
+            if (havePrev) {
+                out[k++] = px; out[k++] = py; out[k++] = pz;
+                out[k++] = x;  out[k++] = y;  out[k++] = z;
+            }
             px = x; py = y; pz = z; havePrev = true;
         }
-        return out.length > 0 ? new Float32Array(out) : null;
+        return out;
     },
 
     _addFatLineFromPositions(
@@ -218,7 +254,7 @@ mesh.position.set(pt.x, 0, pt.z);
         const segs = this._fatLineSegmentsFromPositions(positions);
         if (!segs) return;
 
-   const lGeo = new LineSegmentsGeometry();
+        const lGeo = new LineSegmentsGeometry();
         lGeo.setPositions(segs as unknown as number[]);
         const lineObj = new Line2(lGeo, material);
 
@@ -233,7 +269,7 @@ mesh.position.set(pt.x, 0, pt.z);
         }
 
         lineObj.renderOrder = renderOrder ?? VECTOR_TILE_RENDER_ORDER.LINE;
-lineObj.position.y = 0; 
+        lineObj.position.y = 0;
         lineObj.frustumCulled = false;
         group.add(lineObj);
     },
@@ -257,6 +293,14 @@ lineObj.position.y = 0;
             ? styleZoom
             : this._getCurrentTileStyleZoom(map);
 
+        // ── Fix #3: не клонируем exclusion-данные, если их нет ─────────────
+        // (полное решение — отправка один раз через config — требует
+        //  поддержки со стороны воркера; частичный фикс — убрать клон
+        //  в самом частом случае, когда exclusion не используются.)
+        const hasExclusions = this._exclusionAreas && this._exclusionAreas.length > 0;
+        const exclusionPolygons = hasExclusions ? this._exclusionAreas : [];
+        const exclusionLayers = hasExclusions ? this._exclusionLayersArray : [];
+
         const msg = {
             type: 'process', id, buffer, z, x, y, tileSize,
             maxMerc: map.MAX_MERCATOR,
@@ -265,8 +309,8 @@ lineObj.position.y = 0;
             styleZoom: effectiveStyleZoom,
             visibleLayers: this.visibleLayers,
             buildingEdges: this.buildingEdges,
-            exclusionPolygons: this._exclusionAreas,
-            exclusionLayers: Array.from(this._exclusionLayers),
+            exclusionPolygons,
+            exclusionLayers,
             maxTextPointsPerTile: this.maxTextPointsPerTile,
             maxTextLinesPerTile: this.maxTextLinesPerTile,
         };

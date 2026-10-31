@@ -5,9 +5,17 @@ export const VectorTileLoadingMixin = {
     _prefetchNextZoom(this: any, z: number): void {
         const map = this._map;
         if (!map) return;
+        if (this._disposed) return;
         if (z < this.minNativeZoom || z > this.maxNativeZoom) return;
 
+        // Ограничиваем параллельные префетч-запросы. Если лимит упёрся —
+        // прогресс продолжится на следующем тике (метод дёргается из _postUpdate).
+        const maxPrefetch = this._maxPrefetchInFlight
+            ?? Math.min(this._maxConcurrent ?? 4, 2);
+
         for (const key of this._getVisibleTileKeys(z)) {
+            if (this._prefetchInFlight.size >= maxPrefetch) break;
+
             const c1 = key.indexOf(',');
             const c2 = key.indexOf(',', c1 + 1);
             const pz = +key.slice(0, c1);
@@ -17,11 +25,16 @@ export const VectorTileLoadingMixin = {
             if (this._tileDataCache.has(dataKey)) continue;
             if (this._prefetchInFlight.has(dataKey)) continue;
 
-            const url = this.url!.replaceAll('{z}', String(pz)).replaceAll('{x}', String(px)).replaceAll('{y}', String(py));
+            const url = this.url!
+                .replaceAll('{z}', String(pz))
+                .replaceAll('{x}', String(px))
+                .replaceAll('{y}', String(py));
             const promise = fetch(url)
-                .then((r) => r.ok ? r.arrayBuffer() : null)
+                .then((r) => (r.ok ? r.arrayBuffer() : null))
                 .then((buf) => {
-                    if (buf && this._map) this._setTileDataCache(dataKey, buf.slice(0));
+                    if (buf && this._map && !this._disposed) {
+                        this._setTileDataCache(dataKey, buf.slice(0));
+                    }
                     return buf;
                 })
                 .catch(() => null)
@@ -33,6 +46,7 @@ export const VectorTileLoadingMixin = {
 
     _processQueue(this: any): void {
         if (!this.visible) return;
+        if (this._disposed) return;
         if (this._activeLoads >= this._maxConcurrent) return;
         if (this._sortedLoadQueue.length === 0) return;
 
@@ -58,13 +72,15 @@ export const VectorTileLoadingMixin = {
 
         const map = this._map;
         if (!map) return;
+        if (this._disposed) return;
 
         const requestGeneration = this._generation;
         const requestStyleZoom = this._transitionStyleZoom;
         const requestSourceZoom = this._lastSourceZoom;
 
         const isCurrent = () =>
-            this._isTileRequestCurrent(map, requestGeneration, z, requestStyleZoom)
+            !this._disposed
+            && this._isTileRequestCurrent(map, requestGeneration, z, requestStyleZoom)
             && requestSourceZoom === z;
 
         if (!isCurrent()) return;
@@ -191,7 +207,6 @@ export const VectorTileLoadingMixin = {
         const camTargetDist = camera.position.distanceTo(map.controls.target);
         const maxLoadDist = Math.max(camTargetDist * 6, tileSize * 48);
         const maxLoadDistSq = maxLoadDist * maxLoadDist;
-        const minRayY = Math.sin(3 * Math.PI / 180);
         const grid = 5;
         let hitsCount = 0;
 
@@ -201,7 +216,11 @@ export const VectorTileLoadingMixin = {
                 const ny = (j / (grid - 1)) * 2 - 1;
                 ndc.set(nx, ny);
                 ray.setFromCamera(ndc, camera);
-                if (Math.abs(ray.ray.direction.y) < minRayY) continue;
+                // Раньше отсекали |dy| < sin(3°), из-за чего при сильном наклоне
+                // верхние лучи не попадали в bbox. Теперь пропускаем только
+                // действительно параллельные плоскости; остальные отсекаются
+                // по расстоянию ниже.
+                if (Math.abs(ray.ray.direction.y) < 1e-6) continue;
                 if (!ray.ray.intersectPlane(plane, hit)) continue;
 
                 const dxCam = hit.x - camera.position.x;
@@ -219,6 +238,7 @@ export const VectorTileLoadingMixin = {
         }
 
         if (hitsCount < 4) {
+            // Fallback для экстремальных наклонов, когда почти все лучи уходят в небо.
             const target = map.controls.target;
             const distance = camera.position.distanceTo(target);
             const vFov = camera.fov * Math.PI / 180;
@@ -252,12 +272,27 @@ export const VectorTileLoadingMixin = {
     },
 
     _setTileDataCache(this: any, key: string, buffer: ArrayBuffer): void {
-        this._tileDataCache.delete(key);
+        const existing = this._tileDataCache.get(key);
+        let bytes = this._tileDataCacheBytes ?? 0;
+        if (existing) {
+            bytes -= existing.byteLength;
+            this._tileDataCache.delete(key);
+        }
         this._tileDataCache.set(key, buffer);
-        while (this._tileDataCache.size > this._tileDataCacheMaxSize) {
+        bytes += buffer.byteLength;
+
+        const maxSize = this._tileDataCacheMaxSize ?? 200;
+        const maxBytes = this._tileDataCacheMaxBytes ?? 100 * 1024 * 1024;
+        while (
+            (this._tileDataCache.size > maxSize || bytes > maxBytes)
+            && this._tileDataCache.size > 1
+        ) {
             const oldestKey = this._tileDataCache.keys().next().value as string;
+            const removed = this._tileDataCache.get(oldestKey);
+            if (removed) bytes -= removed.byteLength;
             this._tileDataCache.delete(oldestKey);
         }
+        this._tileDataCacheBytes = bytes;
     },
 
     _getTileDataCache(this: any, key: string): ArrayBuffer | undefined {
@@ -303,9 +338,20 @@ export const VectorTileLoadingMixin = {
         group.traverse((child: any) => {
             if (child === group) return;
             if (child.geometry && !this._managedGeometries.has(child.geometry)) child.geometry.dispose();
-            if (child.material && !this._managedMaterials.has(child.material)) child.material.dispose?.();
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const m of mats) {
+                    if (m && !this._managedMaterials.has(m)) m.dispose?.();
+                }
+            }
         });
-        while (group.children.length) group.remove(group.children[0]);
+        // O(1) вместо while(remove(children[0])) — та была O(n) с memmove
+        // массива на каждой итерации (заметно при массовом диспоузе).
+        if (typeof (group as any).clear === 'function') {
+            (group as any).clear();
+        } else {
+            while (group.children.length) group.remove(group.children[0]);
+        }
         this._rootGroup.remove(group);
     },
 
@@ -313,6 +359,7 @@ export const VectorTileLoadingMixin = {
         this._clearAllTiles();
         this._clearGroupCache();
         this._tileDataCache.clear();
+        this._tileDataCacheBytes = 0;
         this._prefetchInFlight.clear();
         this._lastSourceZoom = -1;
         this._lastDiscreteZoom = -1;

@@ -10,6 +10,15 @@ export const _DEFAULT_WORKER_SCRIPTS = [
     new URL('./js_TP/tpb.js', _MODULE_DIR).href,
     new URL('./js_TP/earcut.js', _MODULE_DIR).href,
 ];
+/**
+ * Fix #4: сознательно «вечный» кэш blob URL.
+ *
+ * Ключ — пара (tpbUrl, earcutUrl). Количество ключей ограничено числом
+ * уникальных пар; blob URL не revoke'ается, т.к. разделяется всеми
+ * экземплярами VectorTile с одинаковыми скриптами. Если когда-либо
+ * понадобится динамическая смена скриптов — добавьте refcount:
+ *   acquireWorkerBlobUrl(urls) / releaseWorkerBlobUrl(urls).
+ */
 const _workerBlobUrlCache = new Map();
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const key = tpbUrl + '|' + earcutUrl;
@@ -36,14 +45,23 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
 // Mixin
 // ============================================================================
 export const VectorTileWorkerMixin = {
+    // ── Fix #2: токен против «осиротевшего» воркера ───────────────────────
     async _initWorker() {
+        const token = (this._workerInitToken || 0) + 1;
+        this._workerInitToken = token;
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
         try {
             const blobUrl = await _getSharedWorkerBlobUrl(tpbUrl, earcutUrl);
-            this._worker = new Worker(blobUrl, { type: 'module' });
-            this._worker.onmessage = (e) => this._onWorkerMessage(e.data);
-            this._worker.onerror = (err) => console.error('VectorTile worker error:', err);
-            this._worker.postMessage({ type: 'config', styles: this._styles });
+            // Пока ждали fetch — слой мог быть снят с карты (removeFromMap).
+            if (this._workerInitToken !== token)
+                return;
+            if (!this._map)
+                return;
+            const worker = new Worker(blobUrl, { type: 'module' });
+            this._worker = worker;
+            worker.onmessage = (e) => this._onWorkerMessage(e.data);
+            worker.onerror = (err) => console.error('VectorTile worker error:', err);
+            worker.postMessage({ type: 'config', styles: this._styles });
         }
         catch (err) {
             console.error('Failed to initialize worker:', err);
@@ -107,8 +125,11 @@ export const VectorTileWorkerMixin = {
             const child = group.children[0];
             if (child.geometry && !this._managedGeometries.has(child.geometry))
                 child.geometry.dispose();
-            if (child.material && !this._managedMaterials.has(child.material))
-                child.material.dispose?.();
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const m of mats) {
+                if (m && !this._managedMaterials.has(m))
+                    m.dispose?.();
+            }
             group.remove(child);
         }
         for (const fill of result.fills || []) {
@@ -118,8 +139,7 @@ export const VectorTileWorkerMixin = {
             if (fill.indices)
                 geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
-            const ro = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
-            mesh.renderOrder = ro;
+            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
             mesh.position.y = 0;
             group.add(mesh);
         }
@@ -168,9 +188,8 @@ export const VectorTileWorkerMixin = {
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
-            const ro = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             mesh.position.set(pt.x, 0, pt.z);
-            mesh.renderOrder = ro;
+            mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
         group.userData.textPointsData = result.textPoints || [];
@@ -179,11 +198,27 @@ export const VectorTileWorkerMixin = {
         group.userData.textLabels = [];
         group.userData.is3d = !!result.is3d;
     },
+    // ── Fix #8: два прохода, без промежуточного JS-массива ────────────────
     _fatLineSegmentsFromPositions(positions) {
         if (!positions || positions.length < 6)
             return null;
-        const out = [];
+        let segCount = 0;
         let havePrev = false;
+        for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i];
+            if (Number.isNaN(x)) {
+                havePrev = false;
+                continue;
+            }
+            if (havePrev)
+                segCount++;
+            havePrev = true;
+        }
+        if (segCount === 0)
+            return null;
+        const out = new Float32Array(segCount * 6);
+        let k = 0;
+        havePrev = false;
         let px = 0, py = 0, pz = 0;
         for (let i = 0; i < positions.length; i += 3) {
             const x = positions[i], y = positions[i + 1], z = positions[i + 2];
@@ -191,14 +226,20 @@ export const VectorTileWorkerMixin = {
                 havePrev = false;
                 continue;
             }
-            if (havePrev)
-                out.push(px, py, pz, x, y, z);
+            if (havePrev) {
+                out[k++] = px;
+                out[k++] = py;
+                out[k++] = pz;
+                out[k++] = x;
+                out[k++] = y;
+                out[k++] = z;
+            }
             px = x;
             py = y;
             pz = z;
             havePrev = true;
         }
-        return out.length > 0 ? new Float32Array(out) : null;
+        return out;
     },
     _addFatLineFromPositions(group, positions, material, renderOrder) {
         const segs = this._fatLineSegmentsFromPositions(positions);
@@ -237,6 +278,13 @@ export const VectorTileWorkerMixin = {
         const effectiveStyleZoom = Number.isFinite(styleZoom)
             ? styleZoom
             : this._getCurrentTileStyleZoom(map);
+        // ── Fix #3: не клонируем exclusion-данные, если их нет ─────────────
+        // (полное решение — отправка один раз через config — требует
+        //  поддержки со стороны воркера; частичный фикс — убрать клон
+        //  в самом частом случае, когда exclusion не используются.)
+        const hasExclusions = this._exclusionAreas && this._exclusionAreas.length > 0;
+        const exclusionPolygons = hasExclusions ? this._exclusionAreas : [];
+        const exclusionLayers = hasExclusions ? this._exclusionLayersArray : [];
         const msg = {
             type: 'process', id, buffer, z, x, y, tileSize,
             maxMerc: map.MAX_MERCATOR,
@@ -245,8 +293,8 @@ export const VectorTileWorkerMixin = {
             styleZoom: effectiveStyleZoom,
             visibleLayers: this.visibleLayers,
             buildingEdges: this.buildingEdges,
-            exclusionPolygons: this._exclusionAreas,
-            exclusionLayers: Array.from(this._exclusionLayers),
+            exclusionPolygons,
+            exclusionLayers,
             maxTextPointsPerTile: this.maxTextPointsPerTile,
             maxTextLinesPerTile: this.maxTextLinesPerTile,
         };

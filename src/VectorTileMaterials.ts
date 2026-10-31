@@ -7,29 +7,29 @@ import type { WorkerLine, WidthSpec } from './VectorTileTypes.js';
  * Применяется через applyMixin(VectorTile.prototype, VectorTileMaterialsMixin).
  */
 export const VectorTileMaterialsMixin = {
-_getFillMaterial(this: any, styleKey: string): THREE.Material {
-    const cached = this._fillMaterialCache.get(styleKey);
-    if (cached) return cached;
+    _getFillMaterial(this: any, styleKey: string): THREE.Material {
+        const cached = this._fillMaterialCache.get(styleKey);
+        if (cached) return cached;
 
-    const parts = styleKey.split(':');
-    const color = parseInt(parts[2], 16);
-    const rawOpacity = parseFloat(parts[3]);
-    const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
+        const parts = styleKey.split(':');
+        const color = parseInt(parts[2], 16);
+        const rawOpacity = parseFloat(parts[3]);
+        const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
 
-    const mat = new THREE.MeshBasicMaterial({
-        color,
-        side: THREE.DoubleSide,
-        transparent: opacity < 1.0,
-        opacity,
-        depthTest:  this.depthTest,   // true
-        depthWrite: false,            // ← ВСЕГДА false, без вариантов
-        polygonOffset: false,         // ← отключить, с depthWrite:false он бессмыслен
-    });
+        const mat = new THREE.MeshBasicMaterial({
+            color,
+            side: THREE.DoubleSide,
+            transparent: opacity < 1.0,
+            opacity,
+            depthTest: this.depthTest,   // true
+            depthWrite: false,           // ← ВСЕГДА false, без вариантов
+            polygonOffset: false,        // ← отключён, с depthWrite:false бессмыслен
+        });
 
-    this._fillMaterialCache.set(styleKey, mat);
-    this._managedMaterials.add(mat);
-    return mat;
-},
+        this._fillMaterialCache.set(styleKey, mat);
+        this._managedMaterials.add(mat);
+        return mat;
+    },
 
     _getFillMaterialFromData(this: any, layerName: string, color: number, opacity: number | undefined): THREE.Material {
         const op = opacity ?? 1;
@@ -51,11 +51,11 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
                 this._map.renderer.domElement.clientWidth,
                 this._map.renderer.domElement.clientHeight,
             ),
-    depthTest: this.depthTest,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 2,    
+            depthTest: this.depthTest,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 2,
         };
         if (dash && Array.isArray(dash) && dash.length >= 2) {
             matOpts.dashed = true;
@@ -83,7 +83,12 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
             : JSON.stringify((line.width && (line.width as any).stops) || line.width);
         const add = line.widthAdd || 0;
         const dashKey = line.dash ? line.dash.join(',') : 'none';
-        const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}`;
+        // hideBelow и dashZ влияют на поведение материала (видимость/масштаб штриха),
+        // поэтому обязаны входить в ключ — иначе линии с одинаковыми
+        // color/width/dash, но разными порогами, делили бы один материал.
+        const hideKey = line.hideBelow ?? 'none';
+        const dzKey = line.dashZ ?? 'none';
+        const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}:${hideKey}:${dzKey}`;
 
         let mat = this._lineMaterialCache.get(key) as LineMaterial | undefined;
         if (mat) return mat;
@@ -93,11 +98,11 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-   depthTest: this.depthTest,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 2,
+            depthTest: this.depthTest,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 2,
         };
         if (line.dash && Array.isArray(line.dash) && line.dash.length >= 2) {
             opts.dashed = true;
@@ -134,6 +139,8 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
     },
 
     _updateDynamicLineMaterials(this: any, zoom: number): void {
+        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
+        if (!this._map) return;
         if (Math.abs(zoom - this._lastStyleZoom) < 0.005) return;
         this._lastStyleZoom = zoom;
         for (const mat of this._lineMaterialsSet) {

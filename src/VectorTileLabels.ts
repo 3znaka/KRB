@@ -5,18 +5,7 @@ import type { WorkerTextPoint, WorkerTextLine } from './VectorTileTypes.js';
 
 /**
  * Бонус к приоритету для подписей, выбранных в прошлый refresh.
- *
- * Это даёт «липкость»: подпись, уже показанная в своей экранной
- * ячейке, не будет вытеснена новичком с тем же или близким
- * приоритетом — только заметно более важным.
- *
- * Значение 50 подобрано так, чтобы:
- *   - City (priority 200) / Town (170) вытесняли POI (60), road-name (100);
- *   - POI (60) не вытеснялся другим POI (60–100);
- *   - метки одной категории не «перетасовывались» при догрузке тайлов.
- *
- * Если понадобится ещё жёстче — увеличь; если наоборот, хочешь
- * быстрее подстраиваться под новые приоритеты — уменьши.
+ * См. комментарий в исходной версии — значение 50 подобрано эмпирически.
  */
 const STICKY_PRIORITY_BONUS = 50;
 
@@ -76,30 +65,37 @@ class VectorPointLabelSource {
 // Candidate types
 // ============================================================================
 
-interface LabelCandidatePoint {
-    type: 'point';
-    pt: WorkerTextPoint;
+interface LabelCandidateBase {
     group: THREE.Group;
     id: string;
     camDistSq: number;
     priority: number;
+    /** priority + sticky-бонус. Считается один раз в _collectLabelCandidates. */
+    effPriority: number;
     sx: number;
     sy: number;
 }
 
-interface LabelCandidateLine {
+interface LabelCandidatePoint extends LabelCandidateBase {
+    type: 'point';
+    pt: WorkerTextPoint;
+}
+
+interface LabelCandidateLine extends LabelCandidateBase {
     type: 'line';
     ln: WorkerTextLine;
     lnIndex: number;
-    group: THREE.Group;
-    id: string;
-    camDistSq: number;
-    priority: number;
-    sx: number;
-    sy: number;
 }
 
 type LabelCandidate = LabelCandidatePoint | LabelCandidateLine;
+
+interface LabelRefreshState {
+    zoom: number;
+    cam: THREE.Vector3;
+    off: THREE.Vector3;
+    w: number;
+    h: number;
+}
 
 // ============================================================================
 // Mixin
@@ -111,37 +107,31 @@ export const VectorTileLabelsMixin = {
         this._oldTileGroups?.forEach((g: THREE.Group) => { if (g.visible) cb(g); });
     },
 
+    // ── Fix #6: string concat вместо JSON.stringify ───────────────────────
     _getPointLabelId(this: any, pt: WorkerTextPoint, group: THREE.Group): string {
         const layer = pt.layerName ?? pt.sourceLayer ?? '';
         const featureId = pt.featureId ?? pt.id;
         if (featureId != null) {
-            return this._labelIdPrefix + JSON.stringify(['point', layer, featureId, pt.text]);
+            return this._labelIdPrefix + 'p:' + layer + ':' + featureId + ':' + pt.text;
         }
-        const x = Number((pt.x + group.position.x).toPrecision(12));
-        const z = Number((pt.z + group.position.z).toPrecision(12));
-        return this._labelIdPrefix + JSON.stringify(['point', layer, pt.text, x, z]);
+        const x = (pt.x + group.position.x).toFixed(4);
+        const z = (pt.z + group.position.z).toFixed(4);
+        return this._labelIdPrefix + 'p:' + layer + ':' + x + ':' + z + ':' + pt.text;
     },
 
+    // ── Fix #1: реально удаляем метки группы ──────────────────────────────
     _removeTextLabelsForGroup(this: any, group: THREE.Group | null | undefined): void {
         if (!group?.userData) return;
         const manager = this._map?.textManager;
-        for (const label of group.userData.textLabels || []) {
-            if (label._vectorOwner === this) continue;
-            manager?.removeLabel(label);
+        const labels = group.userData.textLabels;
+        if (labels && labels.length > 0 && manager) {
+            for (let i = 0; i < labels.length; i++) {
+                manager.removeLabel(labels[i]);
+            }
         }
         group.userData.textLabels = [];
     },
 
-    /**
-     * Отбор кандидатов по экранной сетке.
-     *
-     * Кандидаты уже отсортированы (см. _refreshTextLabelsForVisibleTiles)
-     * по «эффективному приоритету», где sticky-подписи получили бонус.
-     * Поэтому в каждой ячейке первыми занимают места либо уже показанные
-     * подписи, либо заметно более приоритетные новички.
-     *
-     * Также ограничивает общее количество до maxTextLabels.
-     */
     _selectCandidatesByScreenGrid(this: any, candidates: LabelCandidate[]): LabelCandidate[] {
         const cellSize = this.labelScreenGridSize > 0 ? this.labelScreenGridSize : 256;
         const maxPerCell = this.labelMaxPerCell > 0 ? this.labelMaxPerCell : 6;
@@ -154,8 +144,8 @@ export const VectorTileLabelsMixin = {
             if (result.length >= limit) break;
             const cand = candidates[i];
 
-            const sx = (cand as any).sx;
-            const sy = (cand as any).sy;
+            const sx = cand.sx;
+            const sy = cand.sy;
             if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
 
             const col = Math.floor(sx / cellSize);
@@ -172,33 +162,61 @@ export const VectorTileLabelsMixin = {
         return result;
     },
 
-    _refreshTextLabelsForVisibleTiles(this: any): void {
+    // ── Fix #7: параметр `force` + ранний выход по состоянию ──────────────
+    _refreshTextLabelsForVisibleTiles(this: any, force = true): void {
         if (!this._map || !this._map.textManager) return;
-        const textManager = this._map.textManager;
+        const map = this._map;
+
+        // Fix #7: пропускаем повторный refresh, если ничего значимо не менялось.
+        if (!force) {
+            const last: LabelRefreshState | undefined = this._lastLabelState;
+            if (last) {
+                const cam = map.camera.position;
+                const off = map.worldGroup.position;
+                const zoom = map.continuousZoom;
+                const w = map.renderer.domElement.clientWidth;
+                const h = map.renderer.domElement.clientHeight;
+                if (Math.abs(zoom - last.zoom) < 0.05 &&
+                    cam.distanceToSquared(last.cam) < 4 &&
+                    off.distanceToSquared(last.off) < 4 &&
+                    last.w === w && last.h === h) {
+                    return;
+                }
+            }
+        }
+
+        // Запоминаем состояние ДО refresh (даже если ниже кандидатов 0).
+        if (!this._lastLabelState) {
+            this._lastLabelState = {
+                zoom: 0,
+                cam: new THREE.Vector3(),
+                off: new THREE.Vector3(),
+                w: 0,
+                h: 0,
+            };
+        }
+        {
+            const st: LabelRefreshState = this._lastLabelState;
+            st.zoom = map.continuousZoom;
+            st.cam.copy(map.camera.position);
+            st.off.copy(map.worldGroup.position);
+            st.w = map.renderer.domElement.clientWidth;
+            st.h = map.renderer.domElement.clientHeight;
+        }
+
+        const textManager = map.textManager;
         const { candidates } = this._collectLabelCandidates();
 
         let selected: LabelCandidate[];
         if (candidates.length === 0) {
             selected = [];
         } else {
-            // ── Sticky-сортировка ──────────────────────────────────
-            // Подписи, выбранные в прошлый refresh, получают бонус
-            // к приоритету. Если новичок их не «перебивает» с запасом
-            // STICKY_PRIORITY_BONUS — старая остаётся на месте.
-            const sticky = this._lastSelectedLabelIds || new Set<string>();
-
+            // Fix #6: effPriority уже посчитан в collection (с учётом sticky).
             candidates.sort((a: LabelCandidate, b: LabelCandidate) => {
-                const aBonus = sticky.has(a.id) ? STICKY_PRIORITY_BONUS : 0;
-                const bBonus = sticky.has(b.id) ? STICKY_PRIORITY_BONUS : 0;
-                const aEff = a.priority + aBonus;
-                const bEff = b.priority + bBonus;
-
-                if (aEff !== bEff) return bEff - aEff;
-                // Линии — приоритетнее точек при равном priority.
+                if (a.effPriority !== b.effPriority) return b.effPriority - a.effPriority;
                 const aL = a.type === 'line' ? 1 : 0;
                 const bL = b.type === 'line' ? 1 : 0;
                 if (aL !== bL) return bL - aL;
-                // Стабильный tiebreaker.
                 return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
             });
             selected = this._selectCandidatesByScreenGrid(candidates);
@@ -218,7 +236,7 @@ export const VectorTileLabelsMixin = {
                 if (!group.userData.lineLabelSources) group.userData.lineLabelSources = [];
                 let cached = group.userData.lineLabelSources[cand.lnIndex];
                 if (!cached) {
-                    cached = new VectorLineLabelSource(this._map, cand.ln, group, {
+                    cached = new VectorLineLabelSource(map, cand.ln, group, {
                         tracking: this.lineLabelTracking,
                         priorityMode: this.lineLabelPriorityMode,
                         hysteresisPx: this.lineLabelHysteresisPx,
@@ -230,7 +248,7 @@ export const VectorTileLabelsMixin = {
             } else {
                 const pt = cand.pt;
                 source = new VectorPointLabelSource(
-                    this._map,
+                    map,
                     pt.x + group.position.x,
                     pt.z + group.position.z,
                     pt.text,
@@ -251,10 +269,7 @@ export const VectorTileLabelsMixin = {
             labels.push(label);
         }
 
-        // Мягкое удаление точечных подписей (fade-out, без «застывания»).
         textManager.pruneStaleLabels(activeIds, this, { fade: true, graceMs: 200 });
-
-        // Запоминаем выборку — на следующем refresh эти id будут sticky.
         this._lastSelectedLabelIds = activeIds;
 
         this._tileCache.forEach((g: THREE.Group) => { g.userData.textLabels = groupLabels.get(g) || []; });
@@ -288,6 +303,9 @@ export const VectorTileLabelsMixin = {
         const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
         const screenMarginY = rectH > 0 ? cullMargin / rectH : 0;
 
+        // Fix #6: sticky set читаем один раз.
+        const sticky: Set<string> = this._lastSelectedLabelIds || new Set<string>();
+
         this._forEachShownGroup((group: THREE.Group) => {
             const gx = group.position.x + worldOffset.x;
             const gz = group.position.z + worldOffset.z;
@@ -310,17 +328,20 @@ export const VectorTileLabelsMixin = {
                     const sy = (-tempVec.y * 0.5 + 0.5) * rectH;
                     if (sx < -cullMargin || sx > rectW + cullMargin || sy < -cullMargin || sy > rectH + cullMargin) continue;
 
+                    const id = this._getPointLabelId(pt, group);
+                    const priority = pt.priority || 0;
+                    const effPriority = priority + (sticky.has(id) ? STICKY_PRIORITY_BONUS : 0);
+
                     candidates.push({
-                        type: 'point', pt, group,
-                        id: this._getPointLabelId(pt, group),
-                        camDistSq: d2, priority: pt.priority || 0, sx, sy,
+                        type: 'point', pt, group, id,
+                        camDistSq: d2, priority, effPriority, sx, sy,
                     });
                 }
             }
 
             const lineData: WorkerTextLine[] = group.userData.textLinesData;
             if (lineData && lineData.length > 0) {
-                const groupIdPrefix = this._labelIdPrefix + group.uuid + ':L';
+                const groupIdPrefix = this._labelIdPrefix + 'L:' + group.uuid + ':';
                 for (let i = 0; i < lineData.length; i++) {
                     const ln = lineData[i];
                     const zb = ln.zoomBounds || { min: 0, max: 24 };
@@ -361,10 +382,13 @@ export const VectorTileLabelsMixin = {
                     const lSx = (cxNdc * 0.5 + 0.5) * rectW;
                     const lSy = (-cyNdc * 0.5 + 0.5) * rectH;
 
+                    const id = groupIdPrefix + i;
+                    const priority = ln.priority || 0;
+                    const effPriority = priority + (sticky.has(id) ? STICKY_PRIORITY_BONUS : 0);
+
                     candidates.push({
-                        type: 'line', ln, lnIndex: i, group,
-                        id: groupIdPrefix + i,
-                        camDistSq: minDistSq, priority: ln.priority || 0,
+                        type: 'line', ln, lnIndex: i, group, id,
+                        camDistSq: minDistSq, priority, effPriority,
                         sx: lSx, sy: lSy,
                     });
                 }

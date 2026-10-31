@@ -20,7 +20,7 @@ export const VectorTileMaterialsMixin = {
             opacity,
             depthTest: this.depthTest, // true
             depthWrite: false, // ← ВСЕГДА false, без вариантов
-            polygonOffset: false, // ← отключить, с depthWrite:false он бессмыслен
+            polygonOffset: false, // ← отключён, с depthWrite:false бессмыслен
         });
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);
@@ -73,7 +73,12 @@ export const VectorTileMaterialsMixin = {
             : JSON.stringify((line.width && line.width.stops) || line.width);
         const add = line.widthAdd || 0;
         const dashKey = line.dash ? line.dash.join(',') : 'none';
-        const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}`;
+        // hideBelow и dashZ влияют на поведение материала (видимость/масштаб штриха),
+        // поэтому обязаны входить в ключ — иначе линии с одинаковыми
+        // color/width/dash, но разными порогами, делили бы один материал.
+        const hideKey = line.hideBelow ?? 'none';
+        const dzKey = line.dashZ ?? 'none';
+        const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}:${hideKey}:${dzKey}`;
         let mat = this._lineMaterialCache.get(key);
         if (mat)
             return mat;
@@ -124,6 +129,9 @@ export const VectorTileMaterialsMixin = {
         return stops[stops.length - 1][1];
     },
     _updateDynamicLineMaterials(zoom) {
+        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
+        if (!this._map)
+            return;
         if (Math.abs(zoom - this._lastStyleZoom) < 0.005)
             return;
         this._lastStyleZoom = zoom;

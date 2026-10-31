@@ -46,54 +46,60 @@ export const VectorTileLifecycleMixin = {
         return merged;
     },
 
-addTo(this: any, map: any): any {
-    if (this._map) this.removeFromMap();
-    this._map = map;
-    this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+    addTo(this: any, map: any): any {
+        if (this._map) this.removeFromMap();
+        this._map = map;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
 
-    if (typeof map._getDynamicLayerRenderOrder === 'function') {
-        this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
-    }
-    this._rootGroup.renderOrder = this._tileGroupRenderOrder;
-    this._rootGroup.visible = this.visible;
-    map.worldGroup.add(this._rootGroup);
+        if (typeof map._getDynamicLayerRenderOrder === 'function') {
+            this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
+        }
+        this._rootGroup.renderOrder = this._tileGroupRenderOrder;
+        this._rootGroup.visible = this.visible;
+        map.worldGroup.add(this._rootGroup);
 
-    // NEW: не дублируем, если слой уже лежит в map.layers
-    const alreadyInLayers = Array.isArray(map.layers) && map.layers.includes(this);
-    if (!alreadyInLayers && !map._dynamicLayers.includes(this)) {
-        map._dynamicLayers.push(this);
-    }
-    // END NEW
+        const alreadyInLayers = Array.isArray(map.layers) && map.layers.includes(this);
+        if (!alreadyInLayers && !map._dynamicLayers.includes(this)) {
+            map._dynamicLayers.push(this);
+        }
 
-    if (map.textManager && map.textManager.setMaxLabels) map.textManager.setMaxLabels(this.maxTextLabels);
+        if (map.textManager && map.textManager.setMaxLabels) {
+            map.textManager.setMaxLabels(this.maxTextLabels);
+        }
 
-    this._labelsDirty = true;
-    this._lastCheckInit = false;
-    return this;
-},
+        // ── Fix #2: реинициализация воркера при повторном addTo ──────────
+        if (!this._worker) {
+            this._workerReady = this._initWorker();
+        }
 
-removeFromMap(this: any): void {
-    if (!this._map) return;
-    if (this._queueTimer) { clearTimeout(this._queueTimer); this._queueTimer = null; }
+        this._labelsDirty = true;
+        this._lastCheckInit = false;
+        return this;
+    },
 
-    for (const pending of this._pendingWorkerRequests.values()) {
-        try { pending.reject(new Error('Layer removed')); } catch { /* noop */ }
-    }
-    this._pendingWorkerRequests.clear();
-    this._clearAllTiles();
-    this._rootGroup.parent?.remove(this._rootGroup);
+    removeFromMap(this: any): void {
+        if (!this._map) return;
+        if (this._queueTimer) { clearTimeout(this._queueTimer); this._queueTimer = null; }
 
-    // NEW: снять с учёта в обоих массивах карты
-    if (Array.isArray(this._map.layers)) {
-        const li = this._map.layers.indexOf(this);
-        if (li > -1) this._map.layers.splice(li, 1);
-    }
-    const index = this._map._dynamicLayers.indexOf(this);
-    if (index > -1) this._map._dynamicLayers.splice(index, 1);
-    // END NEW
+        // ── Fix #2: инвалидируем любой pending _initWorker ────────────────
+        this._workerInitToken = (this._workerInitToken || 0) + 1;
 
-    this._map = null;
-    this._crs = null;
+        for (const pending of this._pendingWorkerRequests.values()) {
+            try { pending.reject(new Error('Layer removed')); } catch { /* noop */ }
+        }
+        this._pendingWorkerRequests.clear();
+        this._clearAllTiles();
+        this._rootGroup.parent?.remove(this._rootGroup);
+
+        if (Array.isArray(this._map.layers)) {
+            const li = this._map.layers.indexOf(this);
+            if (li > -1) this._map.layers.splice(li, 1);
+        }
+        const index = this._map._dynamicLayers.indexOf(this);
+        if (index > -1) this._map._dynamicLayers.splice(index, 1);
+
+        this._map = null;
+        this._crs = null;
 
         this._fillMaterialCache.forEach((m: THREE.Material) => m.dispose());
         this._lineMaterialCache.forEach((m: THREE.Material) => m.dispose());
@@ -112,6 +118,7 @@ removeFromMap(this: any): void {
 
         this._lastCheckInit = false;
         this._transitionStyleZoom = NaN;
+        this._lastLabelState = undefined;
     },
 
     addExclusionArea(this: any, collection: any, layers: string[]): any {
@@ -150,6 +157,9 @@ removeFromMap(this: any): void {
 
         this._exclusionAreas = worldPolygons;
         this._exclusionLayers = new Set(layers);
+        // ── Fix #3: кэшируем массив слоёв, чтобы не делать Array.from на каждый тайл.
+        this._exclusionLayersArray = layers.slice();
+
         this._invalidateAllTiles();
         return this;
     },
@@ -186,7 +196,10 @@ removeFromMap(this: any): void {
             this._lastMovementTime = performance.now();
         }
 
-        this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
+        // ── Fix #9: пропускаем цикл по материалам, если линий нет ────────
+        if (this._lineMaterialsSet.size > 0) {
+            this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
+        }
 
         const discreteZoom = map.currentDiscreteZoom;
         const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
@@ -208,17 +221,27 @@ removeFromMap(this: any): void {
 
         if (this._coverageDirty) this._resolveCoverage();
 
+        // ── Fix #7: refresh подписей с учётом факта «что-то изменилось» ──
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
-        const periodicUpdateDue = isMoving && labelNow - this._lastLabelUpdateTime > 1000;
-        const settleUpdateDue = timeSinceLastMove > 300 && this._lastLabelUpdateTime < this._lastMovementTime;
+
+        const zoomNow = map.continuousZoom + this.zoomOffset;
+        const lastRefreshZoom = this._lastLabelRefreshZoom ?? -Infinity;
+        const zoomChangedForLabels = Math.abs(zoomNow - lastRefreshZoom) > 0.1;
+
+        const periodicUpdateDue = isMoving && zoomChangedForLabels
+            && labelNow - this._lastLabelUpdateTime > 1000;
+        const settleUpdateDue = timeSinceLastMove > 300
+            && this._lastLabelUpdateTime < this._lastMovementTime;
 
         if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue)
             && (this._tileCache.size > 0 || this._oldTileGroups)) {
+            const force = !!this._labelsDirty;
             this._labelsDirty = false;
             this._lastLabelUpdateTime = labelNow;
-            this._refreshTextLabelsForVisibleTiles();
+            this._lastLabelRefreshZoom = zoomNow;
+            this._refreshTextLabelsForVisibleTiles(force);
         }
 
         const now = performance.now();
@@ -313,8 +336,8 @@ removeFromMap(this: any): void {
         const newKeys = unsortedNewKeys.map((it) => it.key);
         this._sortedLoadQueue = newKeys.concat(
             this._sortedLoadQueue.filter((key: string) =>
-                !this._tileCache.has(key) && !this._pendingLoads.has(key) && visibleTiles.has(key)
-            )
+                !this._tileCache.has(key) && !this._pendingLoads.has(key) && visibleTiles.has(key),
+            ),
         );
 
         this._processQueue();

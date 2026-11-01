@@ -169,7 +169,7 @@ this.depthTest = options.depthTest ?? true;
         this.visibleLayers = options.visibleLayers || null;
         this.zoomOffset = options.zoomOffset ?? 0;
         this.buildings3d = options.buildings3d ?? true;
-        this.buildings3dMinZoom = options.buildings3dMinZoom ?? 16;
+        this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
 
         this.maxTextLabels = options.maxTextLabels ?? 150;

@@ -49,6 +49,10 @@ export const CoreLifecycleMixin = {
         if (this._pauseReasons.size === 0)
             this._doResume();
     },
+    _resetInertia() {
+        this._panVelX = 0;
+        this._panVelZ = 0;
+    },
     _doPause() {
         if (this._disposed || this._paused)
             return;
@@ -65,6 +69,7 @@ export const CoreLifecycleMixin = {
         this._cameraAnimations.pitch = null;
         this._cameraAnimations.bearing = null;
         this._currentDeltaTime = 0;
+        this._resetInertia();
     },
     _doResume() {
         if (this._disposed || !this._paused)
@@ -113,6 +118,7 @@ export const CoreLifecycleMixin = {
         }
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
+        this._resetInertia();
         if (this._abortController) {
             try {
                 this._abortController.abort();
@@ -256,12 +262,47 @@ export const CoreLifecycleMixin = {
         if (typeof root.clear === 'function')
             root.clear();
     },
+    /* ================================================================
+       Инерция
+       ================================================================ */
+    _processPanInertia(dt) {
+        if (!this.panInertia)
+            return;
+        if (this._cameraAnimation) {
+            this._panVelX = 0;
+            this._panVelZ = 0;
+            return;
+        }
+        if (this.isDragging || this.touchDragActive)
+            return;
+        if (this._panVelX === 0 && this._panVelZ === 0)
+            return;
+        const camDist = this.camera.position.distanceTo(this.controls.target);
+        const minSpeed = camDist * 0.001;
+        const speed = Math.hypot(this._panVelX, this._panVelZ);
+        if (speed < minSpeed) {
+            this._panVelX = 0;
+            this._panVelZ = 0;
+            return;
+        }
+        this.worldGroup.position.x += this._panVelX * dt;
+        this.worldGroup.position.z += this._panVelZ * dt;
+        const decay = Math.pow(this.panFriction, dt);
+        this._panVelX *= decay;
+        this._panVelZ *= decay;
+        this.maybeUpdateVisibleTiles();
+    },
+    /* ================================================================
+       Animation loop
+       ================================================================ */
     animate() {
         if (this._disposed || this._paused)
             return;
         this._rafId = requestAnimationFrame(() => this.animate());
         const deltaTime = Math.min(this.clock.getDelta(), 0.1);
         this._currentDeltaTime = deltaTime;
+        // ── инерция (до пересчёта камеры/зума) ──
+        this._processPanInertia(deltaTime);
         if (!this._cameraAnimation) {
             const diff = this.targetContinuousZoom - this.continuousZoom;
             if (Math.abs(diff) > 0.001) {

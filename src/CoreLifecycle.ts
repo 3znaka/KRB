@@ -12,6 +12,10 @@ export interface CoreLifecycleMethods {
     dispose(): void;
     _disposeObject3D(root: any): void;
     animate(): void;
+
+    // ── инерция ──
+    _processPanInertia(deltaTime: number): void;
+    _resetInertia(): void;
 }
 
 export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
@@ -56,6 +60,11 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         if (this._pauseReasons.size === 0) this._doResume();
     },
 
+    _resetInertia() {
+        this._panVelX = 0;
+        this._panVelZ = 0;
+    },
+
     _doPause() {
         if (this._disposed || this._paused) return;
         this._paused = true;
@@ -65,6 +74,7 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         this._cameraAnimations.pitch = null;
         this._cameraAnimations.bearing = null;
         this._currentDeltaTime = 0;
+        this._resetInertia();
     },
 
     _doResume() {
@@ -98,6 +108,7 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         if (this._cameraAnimFrame !== null) { cancelAnimationFrame(this._cameraAnimFrame); this._cameraAnimFrame = null; }
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };
+        this._resetInertia();
         if (this._abortController) {
             try { this._abortController.abort(); } catch (e) { console.warn(e); }
             this._abortController = null;
@@ -187,30 +198,73 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         if (typeof root.clear === 'function') root.clear();
     },
 
-animate() {
-    if (this._disposed || this._paused) return;
-    this._rafId = requestAnimationFrame(() => this.animate());
-    const deltaTime = Math.min(this.clock.getDelta(), 0.1);
-    this._currentDeltaTime = deltaTime;
+    /* ================================================================
+       Инерция
+       ================================================================ */
 
-    if (!this._cameraAnimation) {
-        const diff = this.targetContinuousZoom - this.continuousZoom;
-        if (Math.abs(diff) > 0.001) {
-            this.continuousZoom += diff * Math.min(1, 10 * deltaTime);
-            this.continuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.continuousZoom));
-        } else {
-            this.continuousZoom = this.targetContinuousZoom;
+    _processPanInertia(dt) {
+        if (!this.panInertia) return;
+        if (this._cameraAnimation) {
+            this._panVelX = 0;
+            this._panVelZ = 0;
+            return;
         }
-    }
+        if (this.isDragging || this.touchDragActive) return;
+        if (this._panVelX === 0 && this._panVelZ === 0) return;
 
-    if (!this._zoomPivotActive) this.controls.update();
+        const camDist = this.camera.position.distanceTo(this.controls.target);
+        const minSpeed = camDist * 0.001;
+        const speed = Math.hypot(this._panVelX, this._panVelZ);
+        if (speed < minSpeed) {
+            this._panVelX = 0;
+            this._panVelZ = 0;
+            return;
+        }
 
-    if (!this._zoomPivotActive) this._wrapLongitudeIfNeeded();
-    if (!this._cameraAnimation) this.applyZoomDistance();
+        this.worldGroup.position.x += this._panVelX * dt;
+        this.worldGroup.position.z += this._panVelZ * dt;
 
-    this.camera.updateMatrixWorld(true);
-    this.worldGroup.updateMatrixWorld(true);
-    this.maybeUpdateVisibleTiles();
+        const decay = Math.pow(this.panFriction, dt);
+        this._panVelX *= decay;
+        this._panVelZ *= decay;
+
+        this.maybeUpdateVisibleTiles();
+    },
+
+
+
+    /* ================================================================
+       Animation loop
+       ================================================================ */
+
+    animate() {
+        if (this._disposed || this._paused) return;
+        this._rafId = requestAnimationFrame(() => this.animate());
+        const deltaTime = Math.min(this.clock.getDelta(), 0.1);
+        this._currentDeltaTime = deltaTime;
+
+        // ── инерция (до пересчёта камеры/зума) ──
+        this._processPanInertia(deltaTime);
+
+        if (!this._cameraAnimation) {
+            const diff = this.targetContinuousZoom - this.continuousZoom;
+            if (Math.abs(diff) > 0.001) {
+                this.continuousZoom += diff * Math.min(1, 10 * deltaTime);
+                this.continuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.continuousZoom));
+            } else {
+                this.continuousZoom = this.targetContinuousZoom;
+            }
+        }
+
+        if (!this._zoomPivotActive) this.controls.update();
+
+        if (!this._zoomPivotActive) this._wrapLongitudeIfNeeded();
+        if (!this._cameraAnimation) this.applyZoomDistance();
+
+        this.camera.updateMatrixWorld(true);
+        this.worldGroup.updateMatrixWorld(true);
+        this.maybeUpdateVisibleTiles();
+
         for (const layer of this._getLayersInOrder()) {
             if (typeof layer._postUpdate !== 'function') continue;
             if (layer._map && layer._map !== this) continue;

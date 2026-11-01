@@ -51,6 +51,12 @@ export interface KrbMapOptions {
     cameraTerrainClearance?: number;
     minCameraHeightOffset?: number;
     autoPause?: boolean;
+
+
+    panInertia?: boolean;
+
+    panFriction?: number;
+
 }
 
 interface TouchState {
@@ -88,7 +94,7 @@ interface TouchState {
  *   - CoreCoordinates — проекции, тайловые индексы, URL-ы
  *   - CoreLayers      — порядок и видимость слоёв, tileManager, статичный фон
  *   - CoreInput       — мышь, тач, resize, shift-click
- *   - CoreLifecycle   — pause/resume, dispose, animation loop
+ *   - CoreLifecycle   — pause/resume, dispose, animation loop, инерция
  *
  * Класс ниже содержит только свойства, конструктор и несколько
  * самодостаточных вспомогательных методов (инициализация Three.js,
@@ -133,6 +139,18 @@ export class KrbMap {
     deformedTiles: boolean;
 
     globalElevCache: Map<any, any>;
+
+    // --- Инерция ---
+    panInertia: boolean;
+    panFriction: number;
+
+    _panVelX: number;
+    _panVelZ: number;
+    _panLastMoveTime: number;
+    _panLastWorldX: number;
+    _panLastWorldZ: number;
+
+
 
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene: any;
@@ -210,15 +228,15 @@ export class KrbMap {
     _mouseMoved: boolean;
     touchState: TouchState;
 
-       _zoomPivotActive: boolean;
+    _zoomPivotActive: boolean;
     _zoomPivotX: number;
     _zoomPivotY: number;
 
-        _rotatePivotActive: boolean;
-    _rotatePivot: any;         // THREE.Vector3 — мировая точка под курсором (или null → fallback на target)
-    _rotatePivotX: number;     // screen X, где был пивот при старте
-    _rotatePivotY: number;     // screen Y
-    _rotateLastX: number;      // текущая screen X курсора
+    _rotatePivotActive: boolean;
+    _rotatePivot: any;
+    _rotatePivotX: number;
+    _rotatePivotY: number;
+    _rotateLastX: number;
     _rotateLastY: number;
 
     constructor(options: KrbMapOptions) {
@@ -325,6 +343,16 @@ export class KrbMap {
         this.targetContinuousZoom = this.view.zoom;
         this.currentDiscreteZoom = this.view.zoom;
 
+        // ── инерция ──
+        this.panInertia     = options.panInertia    ?? true;
+        this.panFriction    = options.panFriction   ?? 0.002;
+
+        this._panVelX = 0;
+        this._panVelZ = 0;
+        this._panLastMoveTime = 0;
+        this._panLastWorldX = 0;
+        this._panLastWorldZ = 0;
+
         this._disposed = false;
         this._paused = false;
         this._pauseReasons = new Set();
@@ -341,16 +369,16 @@ export class KrbMap {
         this.touchDragLocalPoint = new THREE.Vector3();
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
-          this._zoomPivotActive = false;
+        this._zoomPivotActive = false;
         this._zoomPivotX = 0;
         this._zoomPivotY = 0;
 
-           this._rotatePivotActive = false;
-    this._rotatePivot = null;
-    this._rotatePivotX = 0;
-    this._rotatePivotY = 0;
-    this._rotateLastX = 0;
-    this._rotateLastY = 0;
+        this._rotatePivotActive = false;
+        this._rotatePivot = null;
+        this._rotatePivotX = 0;
+        this._rotatePivotY = 0;
+        this._rotateLastX = 0;
+        this._rotateLastY = 0;
 
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
@@ -396,29 +424,29 @@ export class KrbMap {
         this.popupManager = new PopupManager(this);
         this.interaction = new InteractionManager(this);
 
-this._tileManagers = this._rasterLayers.map((layer: any) => new TileManager(this, layer));
+        this._tileManagers = this._rasterLayers.map((layer: any) => new TileManager(this, layer));
 
-for (const mgr of this._tileManagers) {
-    mgr.onTileHeightAppliedCallbacks.push(() => {
-        if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
-    });
-}
+        for (const mgr of this._tileManagers) {
+            mgr.onTileHeightAppliedCallbacks.push(() => {
+                if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
+            });
+        }
 
-// ── NEW: attach dynamic layers (VectorTile и т.п.) ─────────────────
-for (const layer of this.layers) {
-    if (!layer) continue;
-    if (layer.texture || layer.elevation) continue;      // растровые/рельефные — через TileManager
-    if (typeof layer.addTo !== 'function') continue;     // не динамический слой — пропускаем
-    if (layer._map === this) continue;                   // уже привязан к этой карте
-    try {
-        layer.addTo(this);
-    } catch (err) {
-        console.warn('KrbMap: layer.addTo() failed', layer, err);
-    }
-}
-// ── END NEW ────────────────────────────────────────────────────────
+        // ── NEW: attach dynamic layers (VectorTile и т.п.) ─────────────────
+        for (const layer of this.layers) {
+            if (!layer) continue;
+            if (layer.texture || layer.elevation) continue;
+            if (typeof layer.addTo !== 'function') continue;
+            if (layer._map === this) continue;
+            try {
+                layer.addTo(this);
+            } catch (err) {
+                console.warn('KrbMap: layer.addTo() failed', layer, err);
+            }
+        }
+        // ── END NEW ────────────────────────────────────────────────────────
 
-this._rebuildLayerStack();
+        this._rebuildLayerStack();
 
         if (this._elevationLayer && !this._rasterLayers.includes(this._elevationLayer)) {
             const primary = this._tileManagers[0];

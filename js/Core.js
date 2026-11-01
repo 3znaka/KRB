@@ -27,7 +27,7 @@ import { CoreLifecycleMixin } from './CoreLifecycle.js';
  *   - CoreCoordinates — проекции, тайловые индексы, URL-ы
  *   - CoreLayers      — порядок и видимость слоёв, tileManager, статичный фон
  *   - CoreInput       — мышь, тач, resize, shift-click
- *   - CoreLifecycle   — pause/resume, dispose, animation loop
+ *   - CoreLifecycle   — pause/resume, dispose, animation loop, инерция
  *
  * Класс ниже содержит только свойства, конструктор и несколько
  * самодостаточных вспомогательных методов (инициализация Three.js,
@@ -71,6 +71,14 @@ export class KrbMap {
     tileCRS;
     deformedTiles;
     globalElevCache;
+    // --- Инерция ---
+    panInertia;
+    panFriction;
+    _panVelX;
+    _panVelZ;
+    _panLastMoveTime;
+    _panLastWorldX;
+    _panLastWorldZ;
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene;
     camera;
@@ -139,10 +147,10 @@ export class KrbMap {
     _zoomPivotX;
     _zoomPivotY;
     _rotatePivotActive;
-    _rotatePivot; // THREE.Vector3 — мировая точка под курсором (или null → fallback на target)
-    _rotatePivotX; // screen X, где был пивот при старте
-    _rotatePivotY; // screen Y
-    _rotateLastX; // текущая screen X курсора
+    _rotatePivot;
+    _rotatePivotX;
+    _rotatePivotY;
+    _rotateLastX;
     _rotateLastY;
     constructor(options) {
         if (!options)
@@ -232,6 +240,14 @@ export class KrbMap {
         this.continuousZoom = this.view.zoom;
         this.targetContinuousZoom = this.view.zoom;
         this.currentDiscreteZoom = this.view.zoom;
+        // ── инерция ──
+        this.panInertia = options.panInertia ?? true;
+        this.panFriction = options.panFriction ?? 0.002;
+        this._panVelX = 0;
+        this._panVelZ = 0;
+        this._panLastMoveTime = 0;
+        this._panLastWorldX = 0;
+        this._panLastWorldZ = 0;
         this._disposed = false;
         this._paused = false;
         this._pauseReasons = new Set();
@@ -301,11 +317,11 @@ export class KrbMap {
             if (!layer)
                 continue;
             if (layer.texture || layer.elevation)
-                continue; // растровые/рельефные — через TileManager
+                continue;
             if (typeof layer.addTo !== 'function')
-                continue; // не динамический слой — пропускаем
+                continue;
             if (layer._map === this)
-                continue; // уже привязан к этой карте
+                continue;
             try {
                 layer.addTo(this);
             }

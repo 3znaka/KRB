@@ -345,6 +345,18 @@ export const DEFAULT_STYLES = {
     },
     // ─────────────────────────────────────────────────────────────────
     // POI
+    //
+    // NEW: iconImage — имена спрайтов в OMT-стиле (MapTiler/OpenMapTiles).
+    // TextManager._resolveIconStyle() -> map.sprite.cssStyle(name, scale).
+    // Если спрайта нет в атласе — вернётся null, рендер будет text-only.
+    //
+    // iconImage можно задавать:
+    //   • строкой  — 'airport_11';
+    //   • match    — { type: 'match', by: 'class', values: {...}, _default: ... }
+    //                (см. VectorTileWorker._evalIconImageSpec).
+    //
+    // Воркер (vectorTileWorkerCode) icon-image пока не парсит; резолв
+    // делает VectorTileWorkerMixin._enrichTextPointsWithIcons() по style.
     // ─────────────────────────────────────────────────────────────────
     poi: {
         filter: {
@@ -356,6 +368,89 @@ export const DEFAULT_STYLES = {
         },
         color: 0xcccccc,
         radius: 3,
+        iconImage: {
+            type: 'match',
+            by: 'class',
+            values: {
+                // ── Транспорт ──
+                airport: 'airport',
+                bus: 'bus_stop',
+                railway: 'railway', // было 'rail'
+                ferry_terminal: 'ferry_terminal',
+                // ── Инфраструктура ──
+                hospital: 'hospital',
+                school: 'school',
+                college: 'college',
+                town_hall: 'town_hall', // было 'townhall'
+                library: 'library',
+                museum: 'museum',
+                theatre: 'theatre',
+                cinema: 'cinema',
+                attraction: 'attraction',
+                viewpoint: 'viewpoint',
+                park: 'park',
+                playground: 'playground',
+                garden: 'garden',
+                stadium: 'stadium',
+                sports_centre: 'sports_centre',
+                monument: 'monument',
+                castle: 'castle',
+                cemetery: 'cemetery',
+                zoo: 'zoo',
+                golf: 'golf',
+                place_of_worship: 'place_of_worship',
+                // ── Еда / напитки ──
+                restaurant: 'restaurant',
+                cafe: 'cafe',
+                bar: 'bar',
+                pub: 'bar',
+                beer: 'beer',
+                fast_food: 'fast_food',
+                ice_cream: 'ice_cream',
+                // ── Магазины / сервис ──
+                supermarket: 'supermarket',
+                grocery: 'grocery',
+                convenience: 'convenience',
+                bakery: 'bakery',
+                butcher: 'butcher',
+                shop: 'shop',
+                clothing_store: 'clothing_store', // было 'clothes'
+                alcohol_shop: 'alcohol_shop',
+                florist: 'florist',
+                hairdresser: 'hairdresser',
+                laundry: 'laundry',
+                // ── Финансы / здоровье ──
+                bank: 'bank',
+                pharmacy: 'pharmacy',
+                dentist: 'dentist',
+                doctors: 'doctors',
+                veterinary: 'veterinary',
+                // ── Проживание ──
+                lodging: 'lodging', // было 'hotel'
+                // ── Утилиты ──
+                parking: 'parking',
+                fuel: 'fuel',
+                toilets: 'toilets',
+                post: 'post', // было 'post_office'
+                police: 'police',
+                fire_station: 'fire_station',
+                // ── Развлечения / прочее ──
+                art_gallery: 'art_gallery',
+                music: 'music',
+                bicycle: 'bicycle',
+                information: 'information',
+                gate: 'gate',
+                car: 'car',
+                volleyball: 'volleyball',
+                // ── Дипломатия (прямой иконки нет — ближайшее) ──
+                embassy: 'diplomatic',
+                // ── Кастомный OMT-класс (прямой иконки нет — ближайшее) ──
+                escape_game: 'video_games',
+                _default: 'marker'
+            }
+        },
+        iconScale: 1,
+        iconOffset: [0, 0],
         textColor: '#666666',
         fontSize: '12px',
         fontWeight: 'normal',
@@ -364,7 +459,9 @@ export const DEFAULT_STYLES = {
         textVerticalAlign: 'center',
         textZoomMin: 13,
         textZoomMax: 24,
-        textPriority: 60
+        textPriority: 60,
+        iconCircleScale: 1,
+        iconGlyphRatio: 1,
     },
     // ─────────────────────────────────────────────────────────────────
     // TRANSPORTATION_NAME
@@ -413,6 +510,7 @@ export const DEFAULT_STYLES = {
     },
     // ─────────────────────────────────────────────────────────────────
     // AERODROME_LABEL
+    //
     // ─────────────────────────────────────────────────────────────────
     aerodrome_label: {
         filter: {
@@ -424,6 +522,9 @@ export const DEFAULT_STYLES = {
         },
         color: 0xcccccc,
         radius: 3,
+        iconImage: 'airport',
+        iconScale: 1,
+        iconOffset: [0, 0],
         textColor: '#666666',
         fontSize: '12px',
         fontWeight: 'normal',

@@ -2,6 +2,7 @@
 import { THREE, LineMaterial } from './js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { VectorTileDiagnosticsMixin } from './VectorTileDiagnostics.js';
+import { Sprite } from './Sprite.js';
 
 import type {
     VectorTileOptions,
@@ -60,7 +61,8 @@ export class VectorTile {
     lineLabelPriorityMode: string;
     lineLabelHysteresisPx: number;
     lineLabelPlacement: string;
-
+sprite;
+    _needsDefaultSprite;
     // Internals
     private _debug: boolean;
     private _styles: Record<string, any>;
@@ -138,7 +140,8 @@ export class VectorTile {
     private _pendingWorkerRequests = new Map<number, any>();
     private _lastSelectedLabelIds = new Set<string>();
 
-    constructor(options: VectorTileOptions = {}) {
+  constructor(options: VectorTileOptions = {}) {
+
         this.url = options.url;
         const rawScripts = options.workerScripts ?? _DEFAULT_WORKER_SCRIPTS;
 
@@ -161,6 +164,15 @@ export class VectorTile {
             console.warn('VectorTile: опция minSourceZoom устарела, используйте minNativeZoom. ' +
                 'Значение minSourceZoom будет использовано как minNativeZoom.');
         }
+
+ if (options.sprite !== undefined) {
+            this.sprite = options.sprite; // null отключит иконки, Sprite - использует его
+            this._needsDefaultSprite = false;
+        } else {
+            this.sprite = null;
+            this._needsDefaultSprite = true;
+        }
+
 
         this.minNativeZoom = options.minNativeZoom ?? options.minSourceZoom ?? 0;
         this.maxNativeZoom = options.maxNativeZoom ?? options.maxSourceZoom ?? 14;
@@ -226,6 +238,20 @@ this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibl
         }
 
         this._workerReady = this._initWorker();
+    }
+
+    async _initDefaultSprite() {
+        try {
+            const s = new Sprite('/src/sprite/sprite.json', '/src/sprite/sprite.png');
+            await s.load();
+            this.sprite = s;
+            this._labelsDirty = true;
+            if (this._map && this._map.textManager) {
+                this._refreshTextLabelsForVisibleTiles();
+            }
+        } catch (err) {
+            console.warn('VectorTile: Не удалось загрузить дефолтный спрайт из /src/sprite/. Иконки будут отключены.', err);
+        }
     }
 }
 

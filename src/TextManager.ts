@@ -102,15 +102,17 @@ export class TextManager {
     }
 
     getDebugStats() {
-        let visible = 0, hidden = 0;
+        let visible = 0, hidden = 0, icons = 0;
         for (const l of this.labels) {
             if (l.hiddenByPriority) hidden++;
             else if (l.element && l.element.style.display !== 'none') visible++;
+            if (l._hasIcon) icons++; // NEW
         }
         return {
             total: this.labels.length,
             visible,
             hiddenByPriority: hidden,
+            withIcon: icons, // NEW
             maxLabels: this.maxLabels,
             stableIds: this._labelsById.size,
             stableFrames: this._stableFrameCount,
@@ -160,13 +162,90 @@ export class TextManager {
         this._stableRefZoom = null;
     }
 
-addLabel(source, stableId = null, owner = null) {
+    _resolveIconStyle(icon) {
+        if (!icon)
+            return null;
+        if (icon.cssStyle)
+            return icon.cssStyle;
+
+        const sprite = icon.sprite || (this.map && this.map.sprite);
+        
+        if (sprite && typeof sprite.cssStyle === 'function') {
+            return sprite.cssStyle(
+                icon.name, 
+                icon.scale || 1, 
+                icon.bgColor, 
+                icon.circleScale, 
+                icon.glyphRatio
+            );
+        }
+        return null;
+    }
+
+      _setupIcon(el, iconStyle, icon) {
+        let iconEl = el.querySelector('.krb-icon');
+        if (!iconEl) {
+            iconEl = document.createElement('span');
+            iconEl.className = 'krb-icon';
+            el.insertBefore(iconEl, el.firstChild);
+        }
+        const off = (icon && icon.offset) || [0, 0];
+        
+        if (iconStyle._inner) {
+            // Есть фон - настраиваем внешний круг
+            Object.assign(iconEl.style, {
+                display: iconStyle.display,
+                alignItems: iconStyle.alignItems,
+                justifyContent: iconStyle.justifyContent,
+                width: iconStyle.width,
+                height: iconStyle.height,
+                borderRadius: iconStyle.borderRadius,
+                backgroundColor: iconStyle.backgroundColor,
+                boxShadow: iconStyle.boxShadow,
+                boxSizing: iconStyle.boxSizing,
+                flex: '0 0 auto',
+                transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+            });
+
+            // Настраиваем внутреннюю иконку (она обрежет соседние иконки)
+            let innerEl = iconEl.querySelector('.krb-icon-inner');
+            if (!innerEl) {
+                innerEl = document.createElement('span');
+                innerEl.className = 'krb-icon-inner';
+                iconEl.appendChild(innerEl);
+            }
+            Object.assign(innerEl.style, iconStyle._inner);
+            
+        } else {
+            // Старое поведение (без фона)
+            const innerEl = iconEl.querySelector('.krb-icon-inner');
+            if (innerEl) innerEl.remove();
+
+            Object.assign(iconEl.style, {
+                display: 'inline-block',
+                flex: '0 0 auto',
+                backgroundRepeat: 'no-repeat',
+                backgroundImage: iconStyle.backgroundImage || '',
+                backgroundPosition: iconStyle.backgroundPosition || '',
+                backgroundSize: iconStyle.backgroundSize || '',
+                width: iconStyle.width || '',
+                height: iconStyle.height || '',
+                transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+            });
+        }
+    }
+
+    _removeIcon(el) {
+        const iconEl = el.querySelector('.krb-icon');
+        if (iconEl) iconEl.remove();
+    }
+
+    addLabel(source, stableId = null, owner = null) {
         if (stableId != null) {
             const existing = this._labelsById.get(stableId);
-    if (existing) {
+            if (existing) {
                 existing._vectorOwner = owner;
                 // Если подпись возвращается в активный набор — снимаем stale-метку.
-                // Реальная «видимость» определится в _updateVisibility.
                 if (existing._staleAt != null) {
                     existing._staleAt = null;
                 }
@@ -174,12 +253,15 @@ addLabel(source, stableId = null, owner = null) {
                 this._dirty = true;
                 return existing;
             }
-
         }
 
-                
         const type = source.getLabelType ? source.getLabelType() : 'point';
         const isCurved = type === 'line-curved';
+
+        // NEW: иконки поддерживаем только для point/line.
+        const icon = (!isCurved && source.getIcon) ? source.getIcon() : null;
+        const iconStyle = icon ? this._resolveIconStyle(icon) : null;
+        const hasIcon = !!iconStyle;
 
         const el = document.createElement('div');
         el.className = 'krb-text-label';
@@ -199,12 +281,30 @@ addLabel(source, stableId = null, owner = null) {
             top: '0',
             willChange: 'transform'
         });
+        if (hasIcon) {
+            // NEW: flex-контейнер с gap для icon+text.
+            el.style.alignItems = 'center';
+            el.style.gap = '4px';
+        }
         const styleObj = source.getTextStyle ? source.getTextStyle() : {};
         Object.assign(el.style, styleObj);
         el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
-        if (type === 'point') {
+        // NEW: рендер контента — иконка + текст, только иконка, или только текст.
+        if (hasIcon) {
+            this._setupIcon(el, iconStyle, icon);
+            const txt = source.getText ? source.getText() : '';
+            if (txt) {
+                const textSpan = document.createElement('span');
+                textSpan.className = 'krb-text';
+                textSpan.style.whiteSpace = type === 'point' ? 'pre-line' : 'nowrap';
+                textSpan.textContent = type === 'point'
+                    ? this._wrapPointText(txt, el.style.fontSize)
+                    : txt;
+                el.appendChild(textSpan);
+            }
+        } else if (type === 'point') {
             el.style.whiteSpace = 'pre-line';
             el.textContent = this._wrapPointText(source.getText(), el.style.fontSize);
         } else if (!isCurved) {
@@ -213,15 +313,15 @@ addLabel(source, stableId = null, owner = null) {
 
         this.pane.appendChild(el);
 
-const label = {
-    source,
-    element: el,
-    stableId,
-    t: 0,
-    width: 0,
-    height: 0,
-    hiddenByPriority: true,  
-    priority: source.getPriority ? source.getPriority() : 0,
+        const label = {
+            source,
+            element: el,
+            stableId,
+            t: 0,
+            width: 0,
+            height: 0,
+            hiddenByPriority: true,
+            priority: source.getPriority ? source.getPriority() : 0,
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
             _fontSize: parseFloat(styleObj.fontSize) || 12,
             _bbox: null,
@@ -229,15 +329,16 @@ const label = {
             _queuedForMeasure: false,
             _chosenT: null,
             _chosenIsFlipped: false,
-                        _chosenT: null,
-            _chosenIsFlipped: false,
             _pendingChosenT: null,
             _pendingChosenIsFlipped: false,
-
             _staleAt: null,
+            // NEW:
+            _display: hasIcon ? 'inline-flex' : 'block',
+            _hasIcon: hasIcon,
+            _icon: icon || null,
         };
 
-                label._vectorOwner = owner;
+        label._vectorOwner = owner;
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
 
@@ -271,12 +372,37 @@ const label = {
         }
 
         const textChanged = oldText !== newText;
-const fontChanged = [
+        const fontChanged = [
             'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
             'letterSpacing', 'lineHeight', 'textTransform'
         ].some(key => oldStyle[key] !== newStyle[key]);
 
-if (textChanged || (newType === 'point' && fontChanged)) {
+        // NEW: если у подписи есть иконка — текст живёт в <span class="krb-text">.
+        // Обновляем только этот span, не трогая .krb-icon.
+        if (label._hasIcon) {
+            if (textChanged || fontChanged) {
+                let textSpan = el.querySelector('.krb-text');
+                if (newText) {
+                    if (!textSpan) {
+                        textSpan = document.createElement('span');
+                        textSpan.className = 'krb-text';
+                        textSpan.style.whiteSpace = newType === 'point' ? 'pre-line' : 'nowrap';
+                        el.appendChild(textSpan);
+                    }
+                    textSpan.textContent = newType === 'point'
+                        ? this._wrapPointText(newText, el.style.fontSize)
+                        : newText;
+                } else if (textSpan) {
+                    textSpan.remove();
+                }
+                label._needsMeasure = true;
+                this._scheduleMeasure(label);
+            }
+            return;
+        }
+
+        // Обычный (без иконки) путь — как раньше.
+        if (textChanged || (newType === 'point' && fontChanged)) {
             if (newType === 'point') {
                 el.style.whiteSpace = 'pre-line';
                 el.textContent = this._wrapPointText(newText, el.style.fontSize);
@@ -311,21 +437,7 @@ if (textChanged || (newType === 'point' && fontChanged)) {
 
     /**
      * Удалить подписи, которых нет в activeIds.
-     *
-     * @param activeIds Set активных id
-     * @param owner     владелец (например, VectorTile)
-     * @param opts      { fade?: boolean, graceMs?: number }
-     *
-     * При opts.fade === true не удаляем точечные подписи сразу: помечаем
-     * их stale, даём исчезнуть с fade, а окончательно убираем только
-     * после graceMs. Если за это время подпись снова попадёт в activeIds —
-     * она вернётся без потери DOM-узла и плавно проявится.
-     *
-     * line-curved подписи всегда удаляются мгновенно: они пересобираются
-     * из глифов на каждом кадре, fade для них бессмыслен.
-     *
-     * Поведение по умолчанию (fade:false) совпадает со старым — мгновенное
-     * удаление (используется при setVisible(false) и _clearAllTiles).
+     * (Поведение не изменилось.)
      */
     pruneStaleLabels(activeIds, owner = null, opts = {}) {
         if (!activeIds) return;
@@ -339,7 +451,6 @@ if (textChanged || (newType === 'point' && fontChanged)) {
             if ((label._vectorOwner ?? null) !== owner) continue;
 
             if (activeIds.has(id)) {
-                // Подпись снова активна — отменяем запланированное удаление.
                 if (label._staleAt != null) {
                     label._staleAt = null;
                     changed = true;
@@ -347,13 +458,11 @@ if (textChanged || (newType === 'point' && fontChanged)) {
                 continue;
             }
 
-            // Подпись не попала в активный набор.
             if (!fade || label.source.getLabelType() === 'line-curved') {
                 toRemove.push(label);
                 continue;
             }
 
-            // Мягкое удаление: помечаем stale и запускаем fade-out.
             if (label._staleAt == null) {
                 label._staleAt = now;
                 label.hiddenByPriority = true;
@@ -418,7 +527,7 @@ if (textChanged || (newType === 'point' && fontChanged)) {
         }
     }
 
-       _flushMeasurements() {
+    _flushMeasurements() {
         if (!this._measureScheduled) return;
         this._measureScheduled = false;
 
@@ -434,7 +543,12 @@ if (textChanged || (newType === 'point' && fontChanged)) {
                 if (!el || el.parentNode !== this.pane) continue;
 
                 states.push({ label, el, display: el.style.display, visibility: el.style.visibility });
-                el.style.display = 'block';
+                // NEW: сохраняем правильный display (block или inline-flex).
+                // Раньше здесь жёстко ставился 'block', что сломало бы
+                // измерение flex-контейнера с gap.
+                if (el.style.display === 'none' || !el.style.display) {
+                    el.style.display = label._display || 'block';
+                }
                 el.style.visibility = 'hidden';
             }
 
@@ -459,7 +573,8 @@ if (textChanged || (newType === 'point' && fontChanged)) {
         if (visible) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
             if (el.style.display === 'none') {
-                el.style.display = 'block';
+                // NEW: восстанавливаем правильный display (block или inline-flex).
+                el.style.display = label._display || 'block';
                 el.style.opacity = '0';
                 void el.offsetWidth;
                 el.style.opacity = '1';
@@ -477,26 +592,24 @@ if (textChanged || (newType === 'point' && fontChanged)) {
         }
     }
 
-_hideAllLineLabels() {
-    for (let i = 0; i < this.labels.length; i++) {
-        const label = this.labels[i];
-        if (label.source.getLabelType() !== 'line-curved') continue;
-        const el = label.element;
-        if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
-        if (el.style.display !== 'none') {
-            el.style.opacity = '0';
-            el.style.display = 'none';
-            void el.offsetWidth;
-            el.style.transition = 'opacity 0.2s linear';
+    _hideAllLineLabels() {
+        for (let i = 0; i < this.labels.length; i++) {
+            const label = this.labels[i];
+            if (label.source.getLabelType() !== 'line-curved') continue;
+            const el = label.element;
+            if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
+            if (el.style.display !== 'none') {
+                el.style.opacity = '0';
+                el.style.display = 'none';
+                void el.offsetWidth;
+                el.style.transition = 'opacity 0.2s linear';
+            }
+            label.hiddenByPriority = true;
+            label._chosenT = null;
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
         }
-        label.hiddenByPriority = true;
-        // Сбрасываем позицию, чтобы при следующей стабилизации
-        // подпись выбрала новое место (ближе к центру экрана).
-        label._chosenT = null;
-        label._pendingChosenT = null;
-        label._pendingChosenIsFlipped = false;
     }
-}
 
     _computeAnchor(label, rotationDeg) {
         const src = label.source;
@@ -749,12 +862,6 @@ _hideAllLineLabels() {
             dZoom > 0.01 ||
             dQ > 1e-5;
 
-        // Смена зума — единственный случай, когда линейные подписи
-        // пропадают вплоть до стабильного экрана. При панорамировании
-        // и повороте камеры они остаются видимыми и перерисовываются
-        // каждый кадр через _applyTransforms, следуя за картой.
-        // Когда экран успокоится, _updateVisibility(zoom, true) вызовет
-        // _placeLineLabels, и тот может найти позицию получше.
         const zoomChanged = dZoom > 0.01;
 
         const wasStable = this._wasStable;
@@ -775,14 +882,14 @@ _hideAllLineLabels() {
         const isStable = this._stableFrameCount >= STABLE_FRAMES;
         this._wasStable = isStable;
 
-if (isStable && !wasStable) {
-    this._dirty = true;
-}
+        if (isStable && !wasStable) {
+            this._dirty = true;
+        }
 
-if (this._dirty) {
-    this._updateVisibility(zoom, isStable);
-    this._dirty = false;
-}
+        if (this._dirty) {
+            this._updateVisibility(zoom, isStable);
+            this._dirty = false;
+        }
 
         this._applyTransforms();
     }
@@ -804,11 +911,6 @@ if (this._dirty) {
             const type = src.getLabelType();
             if (type === 'line-curved') continue;
 
-            // ── Подпись помечена как stale владельцем ──────────────
-            // Не даём ей снова стать видимой: даём fade-out спокойно
-            // доиграть. Если владелец вернёт её в activeIds, _staleAt
-            // сбросится, и на следующей итерации она снова попадёт
-            // в обычную обработку.
             if (label._staleAt != null) {
                 label.hiddenByPriority = true;
                 continue;
@@ -898,7 +1000,7 @@ if (this._dirty) {
                 }
                 continue;
             }
-                        if (isCurved && lbl._pendingChosenT != null) {
+            if (isCurved && lbl._pendingChosenT != null) {
                 continue;
             }
 
@@ -949,8 +1051,6 @@ if (this._dirty) {
                 lbl.hiddenByPriority = false;
 
                 if (lbl._chosenT == null) {
-                    // Раньше подписи не было — ставим сразу, fade-in
-                    // произойдёт через _setLabelVisible(true).
                     lbl._chosenT = chosen.t;
                     lbl._chosenIsFlipped = chosen.isFlipped;
                     lbl._pendingChosenT = null;
@@ -965,15 +1065,11 @@ if (this._dirty) {
                         lbl._pendingChosenIsFlipped === chosen.isFlipped;
 
                     if (sameAsCurrent) {
-                        // Позиция вернулась к прежней — отменяем pending
-                        // (если был) и fade-out, если он уже начался.
                         lbl._pendingChosenT = null;
                         lbl._pendingChosenIsFlipped = false;
                     } else if (sameAsPending) {
                         // Уже ждём этого места — ничего не меняем.
                     } else {
-                        // Новая позиция — fade-out на старой, затем
-                        // fade-in на новой (см. _applyTransforms).
                         lbl._pendingChosenT = chosen.t;
                         lbl._pendingChosenIsFlipped = chosen.isFlipped;
                     }
@@ -988,108 +1084,93 @@ if (this._dirty) {
         }
     }
 
-_applyTransforms() {
-    const zoom = this.map.continuousZoom;
+    _applyTransforms() {
+        const zoom = this.map.continuousZoom;
 
-    for (let i = 0; i < this.labels.length; i++) {
-        const label = this.labels[i];
-        const src = label.source;
-        const type = src.getLabelType();
-        const isCurved = type === 'line-curved';
+        for (let i = 0; i < this.labels.length; i++) {
+            const label = this.labels[i];
+            const src = label.source;
+            const type = src.getLabelType();
+            const isCurved = type === 'line-curved';
 
-        // ── 1. Должна ли подпись быть видимой ─────────────────────
-        const zb = src.getTextZoomBounds();
-        const sourceVisible =
-            src.isVisible() &&
-            zoom >= zb.min && zoom <= zb.max;
-        const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
+            const zb = src.getTextZoomBounds();
+            const sourceVisible =
+                src.isVisible() &&
+                zoom >= zb.min && zoom <= zb.max;
+            const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
-        // ── 2. Подпись должна быть скрыта ─────────────────────────
-        if (!shouldBeVisible) {
-            const isFadingOut = label._hideTimeout != null;
-            if (!isFadingOut) {
-                // Если скрываемся, пока была запланирована смена
-                // позиции, — отменяем pending: оба состояния
-                // одновременно не имеют смысла.
-                if (isCurved && label._pendingChosenT != null) {
+            if (!shouldBeVisible) {
+                const isFadingOut = label._hideTimeout != null;
+                if (!isFadingOut) {
+                    if (isCurved && label._pendingChosenT != null) {
+                        label._pendingChosenT = null;
+                        label._pendingChosenIsFlipped = false;
+                    }
+                    this._setLabelVisible(label, false);
+                    continue;
+                }
+                if (isCurved) {
+                    continue;
+                }
+            }
+
+            if (isCurved) {
+                if (label._pendingChosenT != null) {
+                    const el = label.element;
+                    const fadeOutDone =
+                        label._hideTimeout == null && el.style.display === 'none';
+                    if (!fadeOutDone) {
+                        if (label._hideTimeout == null) {
+                            this._setLabelVisible(label, false);
+                        }
+                        continue;
+                    }
+                    label._chosenT = label._pendingChosenT;
+                    label._chosenIsFlipped = label._pendingChosenIsFlipped;
                     label._pendingChosenT = null;
                     label._pendingChosenIsFlipped = false;
                 }
-                this._setLabelVisible(label, false);
-                continue;
-            }
-            if (isCurved) {
-                // Идёт fade-out (в т.ч. из-за pending position change).
-                // Пока не доиграет — не рендерим.
-                continue;
-            }
-            // Точечные: продолжаем обновлять transform, чтобы
-            // «умирающая» подпись не застывала.
-        }
 
-        // ── 3. Линейные кривые ────────────────────────────────────
-        if (isCurved) {
-            // Pending position change: fade-out на старой позиции,
-            // затем swap на новую и fade-in.
-            if (label._pendingChosenT != null) {
-                const el = label.element;
-                const fadeOutDone =
-                    label._hideTimeout == null && el.style.display === 'none';
-                if (!fadeOutDone) {
-                    if (label._hideTimeout == null) {
-                        // Ещё не начинали fade-out — запускаем.
-                        this._setLabelVisible(label, false);
-                    }
+                if (label._chosenT == null) {
+                    this._setLabelVisible(label, false);
                     continue;
                 }
-                // Fade-out завершён — применяем новую позицию.
-                label._chosenT = label._pendingChosenT;
-                label._chosenIsFlipped = label._pendingChosenIsFlipped;
-                label._pendingChosenT = null;
-                label._pendingChosenIsFlipped = false;
+                const charLayout = src.getCharLayoutAtT(
+                    label._chosenT, label._chosenIsFlipped
+                );
+                if (!charLayout) {
+                    this._setLabelVisible(label, false);
+                    continue;
+                }
+                this._renderLineChars(label, charLayout);
+                this._setLabelVisible(label, true);
+                continue;
             }
 
-            if (label._chosenT == null) {
+            let pos;
+            if (type === 'line') pos = src.getScreenPositionAt(label.t);
+            else                  pos = src.getScreenPosition();
+
+            if (!pos) {
+                if (!shouldBeVisible) continue;
                 this._setLabelVisible(label, false);
                 continue;
             }
-            const charLayout = src.getCharLayoutAtT(
-                label._chosenT, label._chosenIsFlipped
-            );
-            if (!charLayout) {
-                this._setLabelVisible(label, false);
-                continue;
+
+            const rotation = type === 'line' ? src.getScreenAngleAt(label.t) : 0;
+            const a = this._computeAnchor(label, rotation);
+            const { dx, dy, offX, offY } = a;
+            const top = pos.y + dy + offY;
+
+            let transform = `translate3d(${pos.x + dx + offX}px, ${top}px, 0)`;
+            if (type === 'line' && src.getPlacement() === 'along') {
+                transform += ` rotate(${rotation}deg)`;
             }
-            this._renderLineChars(label, charLayout);
-            this._setLabelVisible(label, true);
-            continue;
-        }
+            label.element.style.transform = transform;
 
-        // ── 4. Точечные/обычные линии: пересчитываем позицию ─────
-        let pos;
-        if (type === 'line') pos = src.getScreenPositionAt(label.t);
-        else                  pos = src.getScreenPosition();
-
-        if (!pos) {
-            if (!shouldBeVisible) continue;
-            this._setLabelVisible(label, false);
-            continue;
-        }
-
-        const rotation = type === 'line' ? src.getScreenAngleAt(label.t) : 0;
-        const a = this._computeAnchor(label, rotation);
-        const { dx, dy, offX, offY } = a;
-        const top = pos.y + dy + offY;
-
-        let transform = `translate3d(${pos.x + dx + offX}px, ${top}px, 0)`;
-        if (type === 'line' && src.getPlacement() === 'along') {
-            transform += ` rotate(${rotation}deg)`;
-        }
-        label.element.style.transform = transform;
-
-        if (shouldBeVisible) {
-            this._setLabelVisible(label, true);
+            if (shouldBeVisible) {
+                this._setLabelVisible(label, true);
+            }
         }
     }
-}
 }

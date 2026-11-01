@@ -29,23 +29,38 @@ class VectorPointLabelSource {
     getText() { return this.text; }
     getLabelType() { return 'point'; }
 
-getScreenPosition() {
-    const map = this.map;
-    const cam = map.camera;
-    const v = map.getVec3().copy(this.worldPos).add(map.worldGroup.position);
+    getIcon() {
+        const name = this.options.iconName;
+        if (!name)
+            return null;
+        return {
+            name,
+            scale: this.options.iconScale ?? 1,
+            offset: this.options.iconOffset || [0, 0],
+            bgColor: this.options.iconColor || null,
+            circleScale: this.options.iconCircleScale,
+            glyphRatio: this.options.iconGlyphRatio,
+            sprite: this.options.sprite, 
+        };
+    }
 
-    // Если точка за near-плоскостью (в т.ч. за камерой) — проекция зеркалится,
-    // и подпись улетает в небо. Возвращаем null, чтобы TextManager скрыл её.
-    const vCam = map.getVec3().copy(v).applyMatrix4(cam.matrixWorldInverse);
-    if (vCam.z >= -cam.near) return null;
+    getScreenPosition() {
+        const map = this.map;
+        const cam = map.camera;
+        const v = map.getVec3().copy(this.worldPos).add(map.worldGroup.position);
 
-    v.project(cam);
-    const rect = map.renderer.domElement.getBoundingClientRect();
-    return {
-        x: (v.x * 0.5 + 0.5) * rect.width,
-        y: (-v.y * 0.5 + 0.5) * rect.height,
-    };
-}
+        // Если точка за near-плоскостью (в т.ч. за камерой) — проекция зеркалится,
+        // и подпись улетает в небо. Возвращаем null, чтобы TextManager скрыл её.
+        const vCam = map.getVec3().copy(v).applyMatrix4(cam.matrixWorldInverse);
+        if (vCam.z >= -cam.near) return null;
+
+        v.project(cam);
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        return {
+            x: (v.x * 0.5 + 0.5) * rect.width,
+            y: (-v.y * 0.5 + 0.5) * rect.height,
+        };
+    }
 
     getTextStyle() {
         const o = this.options;
@@ -87,6 +102,9 @@ interface LabelCandidateBase {
 interface LabelCandidatePoint extends LabelCandidateBase {
     type: 'point';
     pt: WorkerTextPoint;
+    // NEW: кэш подтипа, чтобы не пересчитывать в компараторе.
+    // 0 = icon+text, 1 = icon-only, 2 = text-only
+    rank: number;
 }
 
 interface LabelCandidateLine extends LabelCandidateBase {
@@ -106,6 +124,22 @@ interface LabelRefreshState {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+function _pointRank(pt: WorkerTextPoint): number {
+    const hasIcon = !!pt.iconName;
+    const hasText = !!(pt.text && pt.text.length);
+    if (hasIcon && hasText) return 0;
+    if (hasIcon) return 1;
+    return 2;
+}
+
+function _candRank(c: LabelCandidate): number {
+    return c.type === 'line' ? 3 : c.rank;
+}
+
+// ============================================================================
 // Mixin
 // ============================================================================
 
@@ -115,16 +149,19 @@ export const VectorTileLabelsMixin = {
         this._oldTileGroups?.forEach((g: THREE.Group) => { if (g.visible) cb(g); });
     },
 
-    // ── Fix #6: string concat вместо JSON.stringify ───────────────────────
-    _getPointLabelId(this: any, pt: WorkerTextPoint, group: THREE.Group): string {
+    _getPointLabelId(pt, group) {
         const layer = pt.layerName ?? pt.sourceLayer ?? '';
+        const icon = pt.iconName ?? '';
+        const text = pt.text ?? '';
+        const cs = pt.iconCircleScale ?? ''; // <--- добавили
+        const gr = pt.iconGlyphRatio ?? '';  // <--- добавили
         const featureId = pt.featureId ?? pt.id;
         if (featureId != null) {
-            return this._labelIdPrefix + 'p:' + layer + ':' + featureId + ':' + pt.text;
+            return this._labelIdPrefix + 'p:' + layer + ':' + featureId + ':' + icon + ':' + cs + ':' + gr + ':' + text;
         }
         const x = (pt.x + group.position.x).toFixed(4);
         const z = (pt.z + group.position.z).toFixed(4);
-        return this._labelIdPrefix + 'p:' + layer + ':' + x + ':' + z + ':' + pt.text;
+        return this._labelIdPrefix + 'p:' + layer + ':' + x + ':' + z + ':' + icon + ':' + cs + ':' + gr + ':' + text;
     },
 
     // ── Fix #1: реально удаляем метки группы ──────────────────────────────
@@ -175,6 +212,18 @@ export const VectorTileLabelsMixin = {
         if (!this._map || !this._map.textManager) return;
         const map = this._map;
 
+
+ if (this._needsDefaultSprite) {
+            this._needsDefaultSprite = false;
+            if (map.sprite) {
+                // Если спрайт задан на уровне карты — используем его
+                this.sprite = map.sprite; 
+            } else {
+                // Иначе грузим дефолтный
+                this._initDefaultSprite(); 
+            }
+        }
+
         // Fix #7: пропускаем повторный refresh, если ничего значимо не менялось.
         if (!force) {
             const last: LabelRefreshState | undefined = this._lastLabelState;
@@ -220,11 +269,13 @@ export const VectorTileLabelsMixin = {
             selected = [];
         } else {
             // Fix #6: effPriority уже посчитан в collection (с учётом sticky).
+            // NEW: при равном приоритете побеждает icon+text, потом icon-only,
+            // потом text-only, потом линии.
             candidates.sort((a: LabelCandidate, b: LabelCandidate) => {
                 if (a.effPriority !== b.effPriority) return b.effPriority - a.effPriority;
-                const aL = a.type === 'line' ? 1 : 0;
-                const bL = b.type === 'line' ? 1 : 0;
-                if (aL !== bL) return bL - aL;
+                const aR = _candRank(a);
+                const bR = _candRank(b);
+                if (aR !== bR) return aR - bR;
                 return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
             });
             selected = this._selectCandidatesByScreenGrid(candidates);
@@ -253,22 +304,24 @@ export const VectorTileLabelsMixin = {
                     group.userData.lineLabelSources[cand.lnIndex] = cached;
                 }
                 source = cached;
-            } else {
+            }             else {
                 const pt = cand.pt;
-                source = new VectorPointLabelSource(
-                    map,
-                    pt.x + group.position.x,
-                    pt.z + group.position.z,
-                    pt.text,
-                    {
-                        textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
-                        fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
-                        textFontStyle: pt.textFontStyle, textLetterSpacing: pt.textLetterSpacing,
-                        textOffset: pt.textOffset, textAlign: pt.textAlign,
-                        textVerticalAlign: pt.textVerticalAlign, priority: pt.priority,
-                        zoomBounds: pt.zoomBounds,
-                    },
-                );
+                source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
+                    textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
+                    fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
+                    textFontStyle: pt.textFontStyle, textLetterSpacing: pt.textLetterSpacing,
+                    textOffset: pt.textOffset, textAlign: pt.textAlign,
+                    textVerticalAlign: pt.textVerticalAlign, priority: pt.priority,
+                    zoomBounds: pt.zoomBounds,
+                    // NEW:
+                    iconName: pt.iconName,
+                    iconScale: pt.iconScale,
+                    iconOffset: pt.iconOffset,
+                    iconColor: pt.iconColor,
+                    iconCircleScale: pt.iconCircleScale, 
+                    iconGlyphRatio: pt.iconGlyphRatio,   
+                    sprite: this.sprite,
+                });
             }
 
             const label = textManager.addLabel(source, id, this);
@@ -321,6 +374,9 @@ export const VectorTileLabelsMixin = {
             const pointData: WorkerTextPoint[] = group.userData.textPointsData;
             if (pointData && pointData.length > 0) {
                 for (const pt of pointData) {
+                    // NEW: пропускаем только пустые точки (нет ни текста, ни иконки).
+                    if (!pt.text && !pt.iconName) continue;
+
                     const zb = pt.zoomBounds || { min: 0, max: 24 };
                     if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
@@ -343,6 +399,7 @@ export const VectorTileLabelsMixin = {
                     candidates.push({
                         type: 'point', pt, group, id,
                         camDistSq: d2, priority, effPriority, sx, sy,
+                        rank: _pointRank(pt), // NEW
                     });
                 }
             }

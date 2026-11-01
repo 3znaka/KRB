@@ -22,6 +22,20 @@ class VectorPointLabelSource {
     }
     getText() { return this.text; }
     getLabelType() { return 'point'; }
+    getIcon() {
+        const name = this.options.iconName;
+        if (!name)
+            return null;
+        return {
+            name,
+            scale: this.options.iconScale ?? 1,
+            offset: this.options.iconOffset || [0, 0],
+            bgColor: this.options.iconColor || null,
+            circleScale: this.options.iconCircleScale,
+            glyphRatio: this.options.iconGlyphRatio,
+            sprite: this.options.sprite,
+        };
+    }
     getScreenPosition() {
         const map = this.map;
         const cam = map.camera;
@@ -59,6 +73,21 @@ class VectorPointLabelSource {
     isVisible() { return this.options.visible !== false; }
 }
 // ============================================================================
+// Helpers
+// ============================================================================
+function _pointRank(pt) {
+    const hasIcon = !!pt.iconName;
+    const hasText = !!(pt.text && pt.text.length);
+    if (hasIcon && hasText)
+        return 0;
+    if (hasIcon)
+        return 1;
+    return 2;
+}
+function _candRank(c) {
+    return c.type === 'line' ? 3 : c.rank;
+}
+// ============================================================================
 // Mixin
 // ============================================================================
 export const VectorTileLabelsMixin = {
@@ -68,16 +97,19 @@ export const VectorTileLabelsMixin = {
         this._oldTileGroups?.forEach((g) => { if (g.visible)
             cb(g); });
     },
-    // ── Fix #6: string concat вместо JSON.stringify ───────────────────────
     _getPointLabelId(pt, group) {
         const layer = pt.layerName ?? pt.sourceLayer ?? '';
+        const icon = pt.iconName ?? '';
+        const text = pt.text ?? '';
+        const cs = pt.iconCircleScale ?? ''; // <--- добавили
+        const gr = pt.iconGlyphRatio ?? ''; // <--- добавили
         const featureId = pt.featureId ?? pt.id;
         if (featureId != null) {
-            return this._labelIdPrefix + 'p:' + layer + ':' + featureId + ':' + pt.text;
+            return this._labelIdPrefix + 'p:' + layer + ':' + featureId + ':' + icon + ':' + cs + ':' + gr + ':' + text;
         }
         const x = (pt.x + group.position.x).toFixed(4);
         const z = (pt.z + group.position.z).toFixed(4);
-        return this._labelIdPrefix + 'p:' + layer + ':' + x + ':' + z + ':' + pt.text;
+        return this._labelIdPrefix + 'p:' + layer + ':' + x + ':' + z + ':' + icon + ':' + cs + ':' + gr + ':' + text;
     },
     // ── Fix #1: реально удаляем метки группы ──────────────────────────────
     _removeTextLabelsForGroup(group) {
@@ -122,6 +154,17 @@ export const VectorTileLabelsMixin = {
         if (!this._map || !this._map.textManager)
             return;
         const map = this._map;
+        if (this._needsDefaultSprite) {
+            this._needsDefaultSprite = false;
+            if (map.sprite) {
+                // Если спрайт задан на уровне карты — используем его
+                this.sprite = map.sprite;
+            }
+            else {
+                // Иначе грузим дефолтный
+                this._initDefaultSprite();
+            }
+        }
         // Fix #7: пропускаем повторный refresh, если ничего значимо не менялось.
         if (!force) {
             const last = this._lastLabelState;
@@ -165,13 +208,15 @@ export const VectorTileLabelsMixin = {
         }
         else {
             // Fix #6: effPriority уже посчитан в collection (с учётом sticky).
+            // NEW: при равном приоритете побеждает icon+text, потом icon-only,
+            // потом text-only, потом линии.
             candidates.sort((a, b) => {
                 if (a.effPriority !== b.effPriority)
                     return b.effPriority - a.effPriority;
-                const aL = a.type === 'line' ? 1 : 0;
-                const bL = b.type === 'line' ? 1 : 0;
-                if (aL !== bL)
-                    return bL - aL;
+                const aR = _candRank(a);
+                const bR = _candRank(b);
+                if (aR !== bR)
+                    return aR - bR;
                 return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
             });
             selected = this._selectCandidatesByScreenGrid(candidates);
@@ -209,6 +254,14 @@ export const VectorTileLabelsMixin = {
                     textOffset: pt.textOffset, textAlign: pt.textAlign,
                     textVerticalAlign: pt.textVerticalAlign, priority: pt.priority,
                     zoomBounds: pt.zoomBounds,
+                    // NEW:
+                    iconName: pt.iconName,
+                    iconScale: pt.iconScale,
+                    iconOffset: pt.iconOffset,
+                    iconColor: pt.iconColor,
+                    iconCircleScale: pt.iconCircleScale,
+                    iconGlyphRatio: pt.iconGlyphRatio,
+                    sprite: this.sprite,
                 });
             }
             const label = textManager.addLabel(source, id, this);
@@ -257,6 +310,9 @@ export const VectorTileLabelsMixin = {
             const pointData = group.userData.textPointsData;
             if (pointData && pointData.length > 0) {
                 for (const pt of pointData) {
+                    // NEW: пропускаем только пустые точки (нет ни текста, ни иконки).
+                    if (!pt.text && !pt.iconName)
+                        continue;
                     const zb = pt.zoomBounds || { min: 0, max: 24 };
                     if (continuousZoom < zb.min || continuousZoom > zb.max)
                         continue;
@@ -278,6 +334,7 @@ export const VectorTileLabelsMixin = {
                     candidates.push({
                         type: 'point', pt, group, id,
                         camDistSq: d2, priority, effPriority, sx, sy,
+                        rank: _pointRank(pt), // NEW
                     });
                 }
             }

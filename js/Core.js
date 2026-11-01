@@ -36,6 +36,7 @@ import { CoreLifecycleMixin } from './CoreLifecycle.js';
 export class KrbMap {
     // --- Публичные свойства ---
     targetElement;
+    sprite;
     layers;
     view;
     projection;
@@ -159,6 +160,7 @@ export class KrbMap {
         if (!el)
             throw new Error('Target element not found');
         this.targetElement = el;
+        this.sprite = options.sprite ?? null;
         this.layers = options.layers || [];
         if (!options.view)
             throw new Error('View required');

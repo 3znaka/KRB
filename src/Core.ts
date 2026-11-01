@@ -24,6 +24,7 @@ import { CoreLifecycleMixin } from './CoreLifecycle.js';
 
 export interface KrbMapOptions {
     target: string;
+    sprite?: any;
     layers?: any[];
     view: View;
     crs?: string;
@@ -103,6 +104,7 @@ interface TouchState {
 export class KrbMap {
     // --- Публичные свойства ---
     targetElement: HTMLElement;
+    sprite: any;
     layers: any[];
     view: View;
     projection: any;
@@ -246,6 +248,8 @@ export class KrbMap {
         if (!el) throw new Error('Target element not found');
         this.targetElement = el;
 
+
+        this.sprite = options.sprite ?? null; 
         this.layers = options.layers || [];
         if (!options.view) throw new Error('View required');
         this.globalElevCache = new Map();

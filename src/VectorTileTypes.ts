@@ -1,13 +1,24 @@
 // VectorTileTypes.ts
 import type { THREE } from './js_TP/tpb.js';
+import type { Sprite } from './Sprite.js';
 
 // ============================================================================
 // Options
 // ============================================================================
 
 export interface VectorTileOptions {
+
+    sprite?: Sprite | null;
     url?: string;
     workerScripts?: string[];
+
+    // NEW: sprite atlas. `spriteUrl` — базовый URL без расширения; из него
+    // выводятся `.json` и `.png`. Явные `spriteJsonUrl` / `spritePngUrl`
+    // переопределяют соответствующую часть.
+    spriteUrl?: string;
+    spriteJsonUrl?: string;
+    spritePngUrl?: string;
+
     crs?: string | null;
     attributionTitle?: string;
     attributionUrl?: string;
@@ -84,7 +95,11 @@ export interface WorkerPoint {
     layerName: string; color: number; opacity: number;
     radius: number; x: number; z: number; renderOrder?: number;
 }
+
 export interface WorkerTextPoint {
+    iconGlyphRatio: any;
+    iconCircleScale: any;
+    iconColor: any;
     layerName?: string;
     sourceLayer?: string;
     featureId?: string | number;
@@ -94,12 +109,22 @@ export interface WorkerTextPoint {
     textShadow?: string; textTransform?: string; textFontStyle?: string; textLetterSpacing?: string;
     textOffset?: [number, number]; textAlign?: string; textVerticalAlign?: string;
     priority?: number; zoomBounds?: { min: number; max: number };
+properties?: Record<string, any>;
+    // NEW: icon support. `iconName` — ключ в sprite.json (например "coffee").
+    // Если `iconName` задан, а `text` пуст — будет показана только иконка.
+    iconName?: string;
+    /** Множитель размера иконки относительно её CSS-размера в атласе. */
+    iconScale?: number;
+    /** Смещение иконки в CSS-пикселях [dx, dy]. */
+    iconOffset?: [number, number];
 }
+
 export interface WorkerTextLine {
     points: Array<{ x: number; z: number }>;
     priority?: number;
     zoomBounds?: { min: number; max: number };
 }
+
 export interface WorkerResult {
     centerX?: number;
     centerZ?: number;

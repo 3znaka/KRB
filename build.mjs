@@ -11,6 +11,7 @@ execSync('npx tsc', { stdio: 'inherit' });
 console.log('STEP 3: copy assets');
 const assets = [
   ['src/img',            'js/img'],
+  ['src/sprite',            'js/sprite'],
   ['src/demotiles',      'js/demotiles'],
   ['src/js_TP',          'js/js_TP'],
   ['src/epsg_defs.json', 'js/epsg_defs.json'],

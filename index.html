@@ -15,6 +15,7 @@
 import * as KRB from '/js/KRB.js';
 
 
+// 2) создаём карту с готовым спрайтом
 const map = new KRB.Map({
     target: 'map',
     layers: [
@@ -36,9 +37,7 @@ const map = new KRB.Map({
 
 map.moveCameraTo(37.6178, 55.7558);
 
-
-
-
+window.krbMap = map;
 </script>
 </body>
 </html>

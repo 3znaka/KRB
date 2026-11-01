@@ -2,6 +2,7 @@
 import { THREE, Line2, LineSegmentsGeometry } from './js_TP/tpb.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
+import { POI_COLORS } from './poiColors.js';
 // ============================================================================
 // Module-level shared blob cache
 // ============================================================================
@@ -198,11 +199,103 @@ export const VectorTileWorkerMixin = {
             mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
-        group.userData.textPointsData = result.textPoints || [];
+        // NEW: обогащаем textPoints иконками из стиля (см. _enrichTextPointsWithIcons).
+        // Делаем это до присваивания group.userData.textPointsData, чтобы
+        // _refreshTextLabelsForVisibleTiles увидел уже готовые pt.iconName.
+        const textPoints = result.textPoints || [];
+        this._enrichTextPointsWithIcons(textPoints);
+        group.userData.textPointsData = textPoints;
         group.userData.textLinesData = result.textLines || [];
         group.userData.lineLabelSources = null;
         group.userData.textLabels = [];
         group.userData.is3d = !!result.is3d;
+    },
+    _enrichTextPointsWithIcons(points) {
+        if (!points || points.length === 0)
+            return;
+        const styles = this._styles;
+        if (!styles)
+            return;
+        // Локальный словарь удален — используем импортированный POI_COLORS
+        for (let i = 0; i < points.length; i++) {
+            const pt = points[i];
+            if (pt.iconName)
+                continue;
+            const layerName = pt.layerName ?? pt.sourceLayer;
+            if (!layerName)
+                continue;
+            const style = styles[layerName];
+            if (!style)
+                continue;
+            const iconSpec = style.iconImage ?? style['icon-image'];
+            if (iconSpec == null)
+                continue;
+            const iconName = this._evalIconImageSpec(iconSpec, pt);
+            if (!iconName)
+                continue;
+            pt.iconName = iconName;
+            if (pt.iconScale == null) {
+                pt.iconScale = style.iconScale ?? style['icon-scale'] ?? 1;
+            }
+            if (pt.iconOffset == null) {
+                pt.iconOffset = style.iconOffset ?? style['icon-offset'] ?? [0, 0];
+            }
+            if (pt.iconCircleScale == null) {
+                pt.iconCircleScale = style.iconCircleScale;
+            }
+            if (pt.iconGlyphRatio == null) {
+                pt.iconGlyphRatio = style.iconGlyphRatio;
+            }
+            // NEW: Привязываем цвет на основе класса (используя импорт)
+            if (pt.iconColor == null) {
+                const cls = pt.properties?.class || pt.class;
+                pt.iconColor = POI_COLORS[cls] || POI_COLORS._default;
+            }
+        }
+    },
+    /**
+     * Резолвит `iconImage`-спеку из стиля в конкретное имя спрайта.
+     *
+     * Поддерживается:
+     *   • 'restaurant_11' — прямое имя;
+     *   • { type: 'match', by, values, _default } — по ключам from `by`.
+     *
+     * В отличие от воркера, `by` может быть как строкой, так и массивом:
+     * перебираем ключи по очереди и берём первое совпадение. Это
+     * соответствует тому, как мы используем match для иконок, и не
+     * требует полной реализации OMT-семантики.
+     */
+    _evalIconImageSpec(spec, pt) {
+        if (spec == null)
+            return null;
+        if (typeof spec === 'string')
+            return spec;
+        if (typeof spec !== 'object')
+            return null;
+        if (spec.type === 'match') {
+            const by = spec.by;
+            const keys = Array.isArray(by) ? by : [by];
+            const values = spec.values || {};
+            for (let k = 0; k < keys.length; k++) {
+                const key = keys[k];
+                const v = (pt.properties && pt.properties[key] !== undefined)
+                    ? pt.properties[key]
+                    : pt[key]; // ← fallback: pt.class и т.п.
+                if (v == null)
+                    continue;
+                const entry = values[String(v)];
+                if (entry !== undefined) {
+                    const r = this._evalIconImageSpec(entry, pt);
+                    if (r != null)
+                        return r;
+                }
+            }
+            if (values._default !== undefined) {
+                return this._evalIconImageSpec(values._default, pt);
+            }
+            return null;
+        }
+        return null;
     },
     // ── Fix #8: два прохода, без промежуточного JS-массива ────────────────
     _fatLineSegmentsFromPositions(positions) {

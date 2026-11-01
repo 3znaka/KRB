@@ -1051,6 +1051,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     textPoints.push({
                         x: worldX, z: worldZ, text, layerName: name,
                         textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
+                        properties: props,
                         fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 12, geomType) + 'px',
                         fontFamily: resolveString(layerStyle.fontFamily, props, styleZoom, 'sans-serif', geomType),
                         fontWeight: resolveString(layerStyle.fontWeight, props, styleZoom, 'normal', geomType),
@@ -1317,8 +1318,9 @@ renderOrder: semanticOrder - 0.5,
                         textLines.push({
                             points: ring.map(p => ({ x: p.x, z: p.z })),
                             text: featureName, layerName: name,
+                            properties: props,
                             textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
-                            fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 11, geomType) + 'px',
+        fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 12, geomType) + 'px',
                             fontFamily: resolveString(layerStyle.fontFamily, props, styleZoom, 'sans-serif', geomType),
                             fontWeight: resolveString(layerStyle.fontWeight, props, styleZoom, 'normal', geomType),
                             textFontStyle: resolveString(layerStyle.textFontStyle, props, styleZoom, '', geomType),

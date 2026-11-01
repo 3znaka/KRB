@@ -2,6 +2,7 @@
 import { THREE } from './js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
 import { VectorTileDiagnosticsMixin } from './VectorTileDiagnostics.js';
+import { Sprite } from './Sprite.js';
 export { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
 import { VectorTileMaterialsMixin } from './VectorTileMaterials.js';
 import { VectorTileLabelsMixin } from './VectorTileLabels.js';
@@ -44,6 +45,8 @@ export class VectorTile {
     lineLabelPriorityMode;
     lineLabelHysteresisPx;
     lineLabelPlacement;
+    sprite;
+    _needsDefaultSprite;
     // Internals
     _debug;
     _styles;
@@ -127,6 +130,14 @@ export class VectorTile {
             console.warn('VectorTile: опция minSourceZoom устарела, используйте minNativeZoom. ' +
                 'Значение minSourceZoom будет использовано как minNativeZoom.');
         }
+        if (options.sprite !== undefined) {
+            this.sprite = options.sprite; // null отключит иконки, Sprite - использует его
+            this._needsDefaultSprite = false;
+        }
+        else {
+            this.sprite = null;
+            this._needsDefaultSprite = true;
+        }
         this.minNativeZoom = options.minNativeZoom ?? options.minSourceZoom ?? 0;
         this.maxNativeZoom = options.maxNativeZoom ?? options.maxSourceZoom ?? 14;
         this.lineWidthMultiplier = options.lineWidthMultiplier ?? 1.0;
@@ -184,6 +195,20 @@ export class VectorTile {
             console.warn('VectorTile: workerScripts должен содержать два URL (tpb.js и earcut.js).');
         }
         this._workerReady = this._initWorker();
+    }
+    async _initDefaultSprite() {
+        try {
+            const s = new Sprite('/src/sprite/sprite.json', '/src/sprite/sprite.png');
+            await s.load();
+            this.sprite = s;
+            this._labelsDirty = true;
+            if (this._map && this._map.textManager) {
+                this._refreshTextLabelsForVisibleTiles();
+            }
+        }
+        catch (err) {
+            console.warn('VectorTile: Не удалось загрузить дефолтный спрайт из /src/sprite/. Иконки будут отключены.', err);
+        }
     }
 }
 // ============================================================================

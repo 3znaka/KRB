@@ -60,6 +60,13 @@ interface TouchState {
     accumulatedLineAngle: number;
     id0: number | null;
     id1: number | null;
+    // новое:
+    prevDist: number;
+    prevAngle: number;
+    prevMidX: number;
+    prevMidY: number;
+    prevAzimuth: number;
+    prevPitch: number;
 }
 
 // =====================================================================
@@ -197,6 +204,17 @@ export class KrbMap {
     _mouseMoved: boolean;
     touchState: TouchState;
 
+       _zoomPivotActive: boolean;
+    _zoomPivotX: number;
+    _zoomPivotY: number;
+
+        _rotatePivotActive: boolean;
+    _rotatePivot: any;         // THREE.Vector3 — мировая точка под курсором (или null → fallback на target)
+    _rotatePivotX: number;     // screen X, где был пивот при старте
+    _rotatePivotY: number;     // screen Y
+    _rotateLastX: number;      // текущая screen X курсора
+    _rotateLastY: number;
+
     constructor(options: KrbMapOptions) {
         if (!options) throw new Error('Map constructor: options object is required');
 
@@ -317,6 +335,16 @@ export class KrbMap {
         this.touchDragLocalPoint = new THREE.Vector3();
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
+          this._zoomPivotActive = false;
+        this._zoomPivotX = 0;
+        this._zoomPivotY = 0;
+
+           this._rotatePivotActive = false;
+    this._rotatePivot = null;
+    this._rotatePivotX = 0;
+    this._rotatePivotY = 0;
+    this._rotateLastX = 0;
+    this._rotateLastY = 0;
 
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();

@@ -187,26 +187,30 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         if (typeof root.clear === 'function') root.clear();
     },
 
-    animate() {
-        if (this._disposed || this._paused) return;
-        this._rafId = requestAnimationFrame(() => this.animate());
-        const deltaTime = Math.min(this.clock.getDelta(), 0.1);
-        this._currentDeltaTime = deltaTime;
-        if (!this._cameraAnimation) {
-            const diff = this.targetContinuousZoom - this.continuousZoom;
-            if (Math.abs(diff) > 0.001) {
-                this.continuousZoom += diff * Math.min(1, 10 * deltaTime);
-                this.continuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.continuousZoom));
-            } else {
-                this.continuousZoom = this.targetContinuousZoom;
-            }
+animate() {
+    if (this._disposed || this._paused) return;
+    this._rafId = requestAnimationFrame(() => this.animate());
+    const deltaTime = Math.min(this.clock.getDelta(), 0.1);
+    this._currentDeltaTime = deltaTime;
+
+    if (!this._cameraAnimation) {
+        const diff = this.targetContinuousZoom - this.continuousZoom;
+        if (Math.abs(diff) > 0.001) {
+            this.continuousZoom += diff * Math.min(1, 10 * deltaTime);
+            this.continuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.continuousZoom));
+        } else {
+            this.continuousZoom = this.targetContinuousZoom;
         }
-        this.controls.update();
-        this._wrapLongitudeIfNeeded();
-        if (!this._cameraAnimation) this.applyZoomDistance();
-        this.camera.updateMatrixWorld(true);
-        this.worldGroup.updateMatrixWorld(true);
-        this.maybeUpdateVisibleTiles();
+    }
+
+    if (!this._zoomPivotActive) this.controls.update();
+
+    if (!this._zoomPivotActive) this._wrapLongitudeIfNeeded();
+    if (!this._cameraAnimation) this.applyZoomDistance();
+
+    this.camera.updateMatrixWorld(true);
+    this.worldGroup.updateMatrixWorld(true);
+    this.maybeUpdateVisibleTiles();
         for (const layer of this._getLayersInOrder()) {
             if (typeof layer._postUpdate !== 'function') continue;
             if (layer._map && layer._map !== this) continue;

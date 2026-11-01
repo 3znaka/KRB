@@ -135,6 +135,15 @@ export class KrbMap {
     _mouseDownY;
     _mouseMoved;
     touchState;
+    _zoomPivotActive;
+    _zoomPivotX;
+    _zoomPivotY;
+    _rotatePivotActive;
+    _rotatePivot; // THREE.Vector3 — мировая точка под курсором (или null → fallback на target)
+    _rotatePivotX; // screen X, где был пивот при старте
+    _rotatePivotY; // screen Y
+    _rotateLastX; // текущая screen X курсора
+    _rotateLastY;
     constructor(options) {
         if (!options)
             throw new Error('Map constructor: options object is required');
@@ -238,6 +247,15 @@ export class KrbMap {
         this.touchDragLocalPoint = new THREE.Vector3();
         this.touchMouse = new THREE.Vector2();
         this.initTouchState();
+        this._zoomPivotActive = false;
+        this._zoomPivotX = 0;
+        this._zoomPivotY = 0;
+        this._rotatePivotActive = false;
+        this._rotatePivot = null;
+        this._rotatePivotX = 0;
+        this._rotatePivotY = 0;
+        this._rotateLastX = 0;
+        this._rotateLastY = 0;
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();

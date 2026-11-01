@@ -1,26 +1,22 @@
 // CoreCamera.ts
-import { THREE, OrbitControls, TOUCH_MAP_CONTROLS } from './js_TP/tpb.js';
+import { THREE, OrbitControls } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 export const CoreCameraMixin = {
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.enableZoom = true;
+        this.controls.enableZoom = false;
         this.controls.enablePan = false;
         this.controls.mouseButtons = {
             LEFT: THREE.MOUSE.PAN,
             MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.ROTATE,
+            RIGHT: null, // ← было THREE.MOUSE.ROTATE — теперь вращаем сами
         };
-        this.controls.touches = {
-            ONE: THREE.TOUCH.PAN,
-            TWO: TOUCH_MAP_CONTROLS,
-        };
+        this.controls.touches = { ONE: null, TWO: null };
         this.controls.maxPolarAngle = (85 * Math.PI) / 180;
         this.controls.minPolarAngle = 0.001;
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.6;
         this.controls.rotateSpeed = 1;
-        this.renderer.domElement.removeEventListener('wheel', this.controls.onMouseWheel);
     },
     getTargetDistanceForZoom(z) {
         const canvas = this.renderer?.domElement;
@@ -46,7 +42,9 @@ export const CoreCameraMixin = {
     },
     _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
         let dist = desiredDist;
-        let pitch = Math.max(0.001, Math.min(Math.PI - 0.001, desiredPitch));
+        const minP = this.controls?.minPolarAngle ?? 0.001;
+        const maxP = this.controls?.maxPolarAngle ?? (Math.PI - 0.001);
+        let pitch = Math.max(minP, Math.min(maxP, desiredPitch)); // ← было Math.PI - 0.001
         if (this.hasElevation) {
             const clearance = this.CAMERA_TERRAIN_CLEARANCE;
             const targetTerrain = this.getSurfaceHeightAt(target.x, target.z);
@@ -67,8 +65,9 @@ export const CoreCameraMixin = {
                     break;
                 const requiredCosP = Math.min(1, requiredY / dist);
                 pitch = Math.acos(requiredCosP);
-                if (pitch <= 0.001) {
-                    pitch = 0.001;
+                pitch = Math.max(minP, Math.min(maxP, pitch));
+                if (pitch <= minP) {
+                    pitch = minP;
                     break;
                 }
             }
@@ -467,8 +466,22 @@ export const CoreCameraMixin = {
         return dRequired;
     },
     applyZoomDistance() {
-        if (this._cameraAnimation)
+        if (this._cameraAnimation) {
+            this._zoomPivotActive = false;
             return;
+        }
+        const zoomDiff = Math.abs(this.continuousZoom - this.targetContinuousZoom);
+        const pivotActive = this._zoomPivotActive && zoomDiff > 0.0005;
+        // Гарантируем, что matrixWorld соответствует текущей позиции/кватерниону.
+        this.camera.updateMatrixWorld(true);
+        let P_before = null;
+        let pivotSx = 0, pivotSy = 0;
+        if (pivotActive) {
+            pivotSx = this._zoomPivotX;
+            pivotSy = this._zoomPivotY;
+            P_before = this._raycastToGround(pivotSx, pivotSy, new THREE.Vector3());
+        }
+        // --- существующее перемещение камеры ---
         const target = this._tempTarget.copy(this.controls.target);
         const currentDir = this._tempDir.subVectors(this.camera.position, target);
         const d0 = currentDir.length();
@@ -481,6 +494,23 @@ export const CoreCameraMixin = {
         this._resolveCameraPlacement(target, desiredDist, pitch, azimuth, this._tempPlacementOut);
         this.camera.position.copy(this._tempPlacementOut);
         this.camera.lookAt(target);
+        // КРИТИЧНО: matrixWorld после lookAt хранит СТАРЫЙ кватернион.
+        // Для чистого зума это почти безвредно, но при малейшем изменении
+        // ориентации (например, если zoomToCursor идёт во время анимации
+        // или terrain-кламп чуть изменил pitch) raycast ошибается.
+        this.camera.updateMatrixWorld(true);
+        if (pivotActive && P_before) {
+            const P_after = this._raycastToGround(pivotSx, pivotSy, new THREE.Vector3());
+            if (P_after) {
+                this.worldGroup.position.x += P_after.x - P_before.x;
+                this.worldGroup.position.z += P_after.z - P_before.z;
+            }
+            if (window.__krbDebugZoom) {
+                console.log('[zoom] z=%s dist=%s shift=(%s,%s) frameDt=%s', this.continuousZoom.toFixed(3), this.camera.position.distanceTo(this.controls.target).toFixed(1), (P_after.x - P_before.x).toFixed(3), (P_after.z - P_before.z).toFixed(3), (this._currentDeltaTime * 1000).toFixed(1));
+            }
+            if (zoomDiff < 0.001)
+                this._zoomPivotActive = false;
+        }
     },
     applyZoomDelta(delta) {
         this.targetContinuousZoom += delta;
@@ -500,13 +530,36 @@ export const CoreCameraMixin = {
     peekIdealZoom(continuousZoom) {
         return Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, Math.round(continuousZoom)));
     },
+    /**
+     * Переносит controls.target вдоль текущего луча взгляда на плоскость y = 0
+     * и пересчитывает continuousZoom по новому расстоянию.
+     * Ориентация камеры не меняется, поэтому картинка не прыгает.
+     */
+    _retargetToGround() {
+        const cam = this.camera.position;
+        const dir = this._tempDir.subVectors(this.controls.target, cam);
+        const len = dir.length();
+        if (len < 1e-6)
+            return false;
+        dir.divideScalar(len);
+        if (dir.y > -1e-6)
+            return false; // луч не смотрит вниз, землю не пересекает
+        const t = -cam.y / dir.y; // расстояние вдоль луча до y = 0
+        if (!(t > 0) || !isFinite(t))
+            return false;
+        // сохраняем «недоеденный» зум от колеса, чтобы не обрывать инерцию
+        const pending = this.targetContinuousZoom - this.continuousZoom;
+        this.controls.target.copy(cam).addScaledVector(dir, t);
+        this.camera.lookAt(this.controls.target);
+        this.camera.updateMatrixWorld(true);
+        this.controls.update();
+        const z = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.getZoomForDistance(t)));
+        this.continuousZoom = z;
+        this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, z + pending));
+        return true;
+    },
     syncControlsTarget() {
-        this._tempMouse.set(0, 0);
-        this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
-        if (this._tempRaycaster.ray.intersectPlane(this.groundPlane, this._tempVec3a)) {
-            this.controls.target.copy(this._tempVec3a);
-            this.controls.update();
-        }
+        this._retargetToGround();
     },
     get targetZoom() {
         return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;

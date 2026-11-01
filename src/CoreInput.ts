@@ -10,6 +10,8 @@ export interface CoreInputMethods {
     onMouseUp(): void;
     onWheel(e: WheelEvent): void;
     getTouchDistance(touches: TouchList): number;
+    _raycastToGround(screenX: number, screenY: number, out: any): any | null;
+    _rotateAroundPivot(dxPixels: number, dyPixels: number, pivot: any): void;
     onTouchStart(e: TouchEvent): void;
     findTouchById(touches: TouchList, id: number | null): Touch | null;
     onTouchMove(e: TouchEvent): void;
@@ -21,43 +23,81 @@ export interface CoreInputMethods {
 }
 
 export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
-    initDragTools() {
-        this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        this.raycasterDragger = new THREE.Raycaster();
-        this.mouse = new THREE.Vector2();
-        this.intersection = new THREE.Vector3();
-        this.isDragging = false;
-        this.dragLocalPoint = new THREE.Vector3();
-        this._mouseDownX = 0;
-        this._mouseDownY = 0;
-        this._mouseMoved = false;
-    },
+initDragTools() {
+    this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    this.raycasterDragger = new THREE.Raycaster();
+    this.mouse = new THREE.Vector2();
+    this.intersection = new THREE.Vector3();
+    this.isDragging = false;
+    this.dragLocalPoint = new THREE.Vector3();
+    this._mouseDownX = 0;
+    this._mouseDownY = 0;
+    this._mouseMoved = false;
 
-    initTouchState() {
-        this.touchState = {
-            isPinching: false, startDist: 0, startZoom: 0,
-            accumulatedLineAngle: 0, id0: null, id1: null,
-        };
-    },
+    this._rotatePivotActive = false;
+    this._rotatePivot = null;
+    this._rotatePivotX = 0;
+    this._rotatePivotY = 0;
+    this._rotateLastX = 0;
+    this._rotateLastY = 0;
+},
 
-    onMouseDown(e) {
-        if (this._cameraAnimation) return;
-        if (e.button !== 0) return;
-        this._mouseDownX = e.clientX;
-        this._mouseDownY = e.clientY;
-        this._mouseMoved = false;
-        const rect = this.renderer.domElement.getBoundingClientRect();
-        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-        this.raycasterDragger.setFromCamera(this.mouse, this.camera);
-        if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
-            this.isDragging = true;
-            this.dragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
+initTouchState() {
+    this.touchState = {
+        isPinching: false, startDist: 0, startZoom: 0, accumulatedLineAngle: 0,
+        id0: null, id1: null,
+        prevDist: 0, prevAngle: 0, prevMidX: 0, prevMidY: 0,
+        prevAzimuth: 0, prevPitch: 0,
+    };
+},
+
+onMouseDown(e) {
+    if (this._cameraAnimation) return;
+    this._zoomPivotActive = false;
+
+    // NEW: right-click → rotate around pivot at cursor
+    if (e.button === 2) {
+        this._rotatePivotActive = true;
+        this._rotatePivotX = e.clientX;
+        this._rotatePivotY = e.clientY;
+        this._rotateLastX  = e.clientX;
+        this._rotateLastY  = e.clientY;
+        this._rotatePivot = this._raycastToGround(e.clientX, e.clientY, new THREE.Vector3());
+        if (!this._rotatePivot) {
+            // горизонт/небо — фолбэк на классическое вращение вокруг target
+            this._rotatePivot = this.controls.target.clone();
         }
-    },
+        return;
+    }
 
-    onMouseMove(e) {
-        if (this._cameraAnimation) return;
+    if (e.button !== 0) return;
+    this._mouseDownX = e.clientX;
+    this._mouseDownY = e.clientY;
+    this._mouseMoved = false;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycasterDragger.setFromCamera(this.mouse, this.camera);
+    if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
+        this.isDragging = true;
+        this.dragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
+    }
+},
+
+onMouseMove(e) {
+    if (this._cameraAnimation) return;
+
+    // NEW: right-drag → rotate around pivot
+    if (this._rotatePivotActive) {
+        const dx = e.clientX - this._rotateLastX;
+        const dy = e.clientY - this._rotateLastY;
+        this._rotateLastX = e.clientX;
+        this._rotateLastY = e.clientY;
+        if (dx !== 0 || dy !== 0) {
+            this._rotateAroundPivot(dx, dy, this._rotatePivot);
+        }
+        return;
+    }
         if (!this._mouseMoved) {
             const dx = e.clientX - this._mouseDownX;
             const dy = e.clientY - this._mouseDownY;
@@ -74,17 +114,31 @@ export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
         }
     },
 
-    onMouseUp() {
-        if (!this.isDragging) return;
-        this.isDragging = false;
-        if (this._cameraAnimation) return;
-        this.syncControlsTarget();
-    },
+onMouseUp(e?: MouseEvent) {
+    // завершение rotate-to-cursor
+    if (this._rotatePivotActive) {
+        this._rotatePivotActive = false;
+        this._rotatePivot = null;
 
-    onWheel(e) {
+        return;
+    }
+
+    if (!this.isDragging) return;
+    this.isDragging = false;
+    if (this._cameraAnimation) return;
+    this.syncControlsTarget();
+},
+
+    onWheel(e: WheelEvent) {
         if (this._cameraAnimation) return;
         e.preventDefault();
         const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
+
+        // запоминаем точку-пивот для zoom-to-cursor
+        this._zoomPivotActive = true;
+        this._zoomPivotX = e.clientX;
+        this._zoomPivotY = e.clientY;
+
         this.applyZoomDelta(delta);
     },
 
@@ -94,32 +148,135 @@ export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
         return Math.sqrt(dx * dx + dy * dy);
     },
 
-    onTouchStart(e) {
-        if (this._cameraAnimation) return;
-        if (e.touches.length === 1) {
-            const rect = this.renderer.domElement.getBoundingClientRect();
-            const touch = e.touches[0];
-            this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
-            this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
-            this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
-            if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
-                this.touchDragActive = true;
-                this.touchDragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
-            }
-            this.touchState.isPinching = false;
-        } else if (e.touches.length === 2) {
-            e.preventDefault();
-            if (this.touchDragActive) { this.touchDragActive = false; this.syncControlsTarget(); }
-            this.touchState.isPinching = true;
-            this.touchState.startDist = this.getTouchDistance(e.touches);
-            this.touchState.startZoom = this.targetContinuousZoom;
-            this.touchState.id0 = e.touches[0].identifier;
-            this.touchState.id1 = e.touches[1].identifier;
-            const dx = e.touches[0].clientX - e.touches[1].clientX;
-            const dy = e.touches[0].clientY - e.touches[1].clientY;
-            this.touchState.accumulatedLineAngle = Math.atan2(dy, dx);
-        }
-    },
+    _raycastToGround(screenX: number, screenY: number, out: any): any | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
+    this._tempMouse.set(ndcX, ndcY);
+    this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+
+    // начальное приближение — плоскость y = 0
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    if (!this._tempRaycaster.ray.intersectPlane(plane, out)) return null;
+
+    if (!this.hasElevation) return out;
+
+    // 3 итерации Ньютона по высоте
+    for (let i = 0; i < 3; i++) {
+        const h = this.getSurfaceHeightAt(out.x, out.z);
+        if (Math.abs(h) < 0.05) break;
+        plane.constant = -h;                       // плоскость y = h
+        if (!this._tempRaycaster.ray.intersectPlane(plane, out)) return null;
+    }
+    return out;
+},
+
+_rotateAroundPivot(dxPixels: number, dyPixels: number, pivot: any) {
+    const rotateSpeed = this.controls.rotateSpeed;
+    const H = this.renderer.domElement.clientHeight || 1;
+
+    // Знаки соответствуют конвенции OrbitControls:
+    //   rotateLeft(2π * dx * s / H)  → sphericalDelta.theta -= ...  → dTheta = -2π·dx·s/H
+    //   rotateUp  (2π * dy * s / H)  → sphericalDelta.phi   -= ...  → dPhi   = -2π·dy·s/H
+    const dTheta = -2 * Math.PI * dxPixels * rotateSpeed / H;
+    const dPhi   = -2 * Math.PI * dyPixels * rotateSpeed / H;
+
+    const cam    = this.camera.position.clone();
+    const target = this.controls.target.clone();
+    const dir    = cam.clone().sub(target);
+    const r      = dir.length();
+    if (r < 1e-6) return;
+
+    // Pre-clamp по phi, чтобы OrbitControls потом не «схлопывал» камеру
+    const phi0 = Math.acos(Math.max(-1, Math.min(1, dir.y / r)));
+    const phiAfter = phi0 + dPhi;
+    const minP = this.controls.minPolarAngle;
+    const maxP = this.controls.maxPolarAngle;
+    if (phiAfter < minP || phiAfter > maxP) return;   // упёрлись в зенит/надир — кадр пропускаем
+
+    const theta0 = Math.atan2(dir.x, dir.z);
+    const thetaAfter = theta0 + dTheta;
+
+    // R = qH(dPhi, h_afterAzimuth) * qY(dTheta, Y)
+    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dTheta);
+    const h  = new THREE.Vector3(Math.cos(thetaAfter), 0, -Math.sin(thetaAfter));
+    const qH = new THREE.Quaternion().setFromAxisAngle(h, dPhi);
+    const R  = new THREE.Quaternion().multiplyQuaternions(qH, qY);
+
+    // Вращаем C и T вокруг W
+    cam.sub(pivot).applyQuaternion(R).add(pivot);
+    target.sub(pivot).applyQuaternion(R).add(pivot);
+
+    this.camera.position.copy(cam);
+    this.controls.target.copy(target);
+    this.camera.lookAt(target);
+    this.camera.updateMatrixWorld(true);
+    this.controls.update();
+
+    if ((window as any).__krbDebugRotate) {
+        // sanity-check: пивот должен проецироваться туда же, куда в начале драга
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const p = pivot.clone().project(this.camera);
+        const sx = ( p.x * 0.5 + 0.5) * rect.width  + rect.left;
+        const sy = (-p.y * 0.5 + 0.5) * rect.height + rect.top;
+        console.log('[rotate] pivot=(%s,%s) start=(%s,%s) diff=(%s,%s)',
+            sx.toFixed(1), sy.toFixed(1),
+            this._rotatePivotX, this._rotatePivotY,
+            (sx - this._rotatePivotX).toFixed(2),
+            (sy - this._rotatePivotY).toFixed(2));
+    }
+    // target после наклона вокруг пивота ушёл с плоскости земли — возвращаем
+    this._retargetToGround();
+    this.maybeUpdateVisibleTiles();
+},
+
+onTouchStart(e: TouchEvent) {
+    if (this._cameraAnimation) return;
+    this._zoomPivotActive = false;
+
+if (e.touches.length === 1) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const touch = e.touches[0];
+    this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+    this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
+    if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
+        this.touchDragActive = true;
+        this.touchDragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
+    }
+    this.touchState.isPinching = false;
+}else if (e.touches.length === 2) {
+        e.preventDefault();
+        if (this.touchDragActive) { this.touchDragActive = false; this.syncControlsTarget(); }
+
+        const t0 = e.touches[0], t1 = e.touches[1];
+        const ts = this.touchState;
+        ts.isPinching = true;
+        ts.id0 = t0.identifier;
+        ts.id1 = t1.identifier;
+
+        const dx = t1.clientX - t0.clientX;
+        const dy = t1.clientY - t0.clientY;
+        const dist = Math.hypot(dx, dy);
+        const angle = Math.atan2(dy, dx);
+        const midX = (t0.clientX + t1.clientX) * 0.5;
+        const midY = (t0.clientY + t1.clientY) * 0.5;
+
+        ts.startDist = ts.prevDist = dist;
+        ts.prevAngle = angle;
+        ts.prevMidX = midX;
+        ts.prevMidY = midY;
+        ts.startZoom = this.continuousZoom;
+        ts.accumulatedLineAngle = 0;
+
+        // снимок текущей камеры
+        const target = this.controls.target;
+        const dir = this.camera.position.clone().sub(target);
+        const d = dir.length();
+        ts.prevAzimuth = Math.atan2(dir.z, dir.x);
+        ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
+    }
+},
 
     findTouchById(touches, id) {
         for (let i = 0; i < touches.length; i++) {
@@ -128,41 +285,100 @@ export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
         return null;
     },
 
-    onTouchMove(e) {
-        if (this._cameraAnimation) return;
-        if (this.touchDragActive && e.touches.length === 1) {
-            e.preventDefault();
-            const rect = this.renderer.domElement.getBoundingClientRect();
-            const touch = e.touches[0];
-            this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
-            this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
-            this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
-            if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
-                this.worldGroup.position.copy(this.intersection).sub(this.touchDragLocalPoint);
-                this.maybeUpdateVisibleTiles();
-            }
-        } else if (this.touchState.isPinching && e.touches.length === 2) {
-            e.preventDefault();
-            const t0 = this.findTouchById(e.touches, this.touchState.id0);
-            const t1 = this.findTouchById(e.touches, this.touchState.id1);
-            if (!t0 || !t1) return;
-            const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
-            const scale = currentDist / this.touchState.startDist;
-            const zoomDelta = Math.log2(scale) * 6 * this.ZOOM_SENSITIVITY;
-            this.targetContinuousZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, this.touchState.startZoom + zoomDelta));
-            this.controls.update();
-            this.maybeUpdateVisibleTiles();
-        }
-    },
+onTouchMove(e: TouchEvent) {
+    if (this._cameraAnimation) return;
 
-    onTouchEnd(e) {
-        if (e.touches.length < 2) this.touchState.isPinching = false;
-        if (e.touches.length === 0 && this.touchDragActive) {
-            this.touchDragActive = false;
-            if (this._cameraAnimation) return;
-            this.syncControlsTarget();
+if (this.touchDragActive && e.touches.length === 1) {
+    e.preventDefault();
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const touch = e.touches[0];
+    this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+    this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
+    if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
+        this.worldGroup.position.copy(this.intersection).sub(this.touchDragLocalPoint);
+        this.maybeUpdateVisibleTiles();
+    }
+    return;
+}
+
+    if (this.touchState.isPinching && e.touches.length === 2) {
+        e.preventDefault();
+        const ts = this.touchState;
+        const t0 = this.findTouchById(e.touches, ts.id0);
+        const t1 = this.findTouchById(e.touches, ts.id1);
+        if (!t0 || !t1) return;
+
+        const dx = t1.clientX - t0.clientX;
+        const dy = t1.clientY - t0.clientY;
+        const curDist = Math.hypot(dx, dy);
+        const curAngle = Math.atan2(dy, dx);
+        const midX = (t0.clientX + t1.clientX) * 0.5;
+        const midY = (t0.clientY + t1.clientY) * 0.5;
+        if (curDist < 1e-3) return;
+
+        // --- 1. Raycast ДО изменений камеры (старая камера, старая точка) ---
+        const P_before = this._raycastToGround(ts.prevMidX, ts.prevMidY, this._tempVec3a);
+
+        // --- 2. Дельты за кадр ---
+        let angleDelta = curAngle - ts.prevAngle;
+        while (angleDelta >  Math.PI) angleDelta -= 2 * Math.PI;
+        while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
+
+        const zoomDelta = Math.log2(curDist / ts.prevDist);           // 1:1 по зуму
+        const tiltDeltaPx = ts.prevMidY - midY;                        // >0, если пальцы ушли вверх
+
+        // --- 3. Применяем камеру ---
+        const target = this.controls.target;
+        const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
+        const newCameraDist = prevCameraDist * Math.pow(0.5, zoomDelta);
+        const newAzimuth    = ts.prevAzimuth - angleDelta;             // если крутит не туда — поменяйте знак
+        const H = this.renderer.domElement.clientHeight || 1;
+        const newPitch      = ts.prevPitch + tiltDeltaPx * (this.controls.maxPolarAngle / H);
+
+        const placement = this._resolveCameraPlacement(
+            target, newCameraDist, newPitch, newAzimuth, this._tempPlacementOut
+        );
+        this.camera.position.copy(this._tempPlacementOut);
+        this.camera.lookAt(target);
+        this.controls.update();                                        // синхронизация внутреннего состояния OrbitControls
+
+        // --- 4. Raycast ПОСЛЕ (новая камера, текущая точка) ---
+        const P_after = this._raycastToGround(midX, midY, this._tempVec3b);
+
+        // --- 5. Компенсация ---
+        if (P_before && P_after) {
+            this.worldGroup.position.x += P_after.x - P_before.x;
+            this.worldGroup.position.z += P_after.z - P_before.z;
         }
-    },
+
+        // --- 6. Обновляем состояние ---
+        ts.prevDist  = curDist;
+        ts.prevAngle = curAngle;
+        ts.prevMidX  = midX;
+        ts.prevMidY  = midY;
+        ts.prevAzimuth = newAzimuth;
+        ts.prevPitch   = placement.pitch;                              // уже с учётом terrain-клампа
+        this.continuousZoom = this.getZoomForDistance(
+            this.camera.position.distanceTo(target)
+        );
+        this.targetContinuousZoom = this.continuousZoom;
+
+        this.maybeUpdateVisibleTiles();
+    }
+},
+
+onTouchEnd(e: TouchEvent) {
+    if (e.touches.length < 2 && this.touchState.isPinching) {
+        this.touchState.isPinching = false;
+        // Полезно: пере-центрируем target под экран (устраняет долгий дрейф worldGroup)
+        if (!this._cameraAnimation) this.syncControlsTarget();
+    }
+    if (e.touches.length === 0 && this.touchDragActive) {
+        this.touchDragActive = false;
+        if (!this._cameraAnimation) this.syncControlsTarget();
+    }
+},
 
     onResize() {
         if (this._disposed) return;

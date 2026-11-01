@@ -272,8 +272,10 @@ export const CoreLifecycleMixin = {
                 this.continuousZoom = this.targetContinuousZoom;
             }
         }
-        this.controls.update();
-        this._wrapLongitudeIfNeeded();
+        if (!this._zoomPivotActive)
+            this.controls.update();
+        if (!this._zoomPivotActive)
+            this._wrapLongitudeIfNeeded();
         if (!this._cameraAnimation)
             this.applyZoomDistance();
         this.camera.updateMatrixWorld(true);

@@ -60,13 +60,19 @@ interface TouchState {
     accumulatedLineAngle: number;
     id0: number | null;
     id1: number | null;
-    // новое:
     prevDist: number;
     prevAngle: number;
     prevMidX: number;
     prevMidY: number;
     prevAzimuth: number;
     prevPitch: number;
+
+    // NEW: для классификации жеста
+    startAngle: number;
+    startMidX: number;
+    startMidY: number;
+    startPitch: number;
+    activeGesture: 'zoomRotate' | 'tilt' | null;
 }
 
 // =====================================================================

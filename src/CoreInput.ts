@@ -48,6 +48,11 @@ initTouchState() {
         id0: null, id1: null,
         prevDist: 0, prevAngle: 0, prevMidX: 0, prevMidY: 0,
         prevAzimuth: 0, prevPitch: 0,
+        startAngle: 0,
+        startMidX: 0,
+        startMidY: 0,
+        startPitch: 0,
+        activeGesture: null,
     };
 },
 
@@ -261,20 +266,20 @@ if (e.touches.length === 1) {
         const angle = Math.atan2(dy, dx);
         const midX = (t0.clientX + t1.clientX) * 0.5;
         const midY = (t0.clientY + t1.clientY) * 0.5;
+ts.startDist = ts.prevDist = dist;
+ts.startAngle = ts.prevAngle = angle;      // NEW
+ts.startMidX = ts.prevMidX = midX;          // NEW
+ts.startMidY = ts.prevMidY = midY;          // NEW
+ts.startZoom = this.continuousZoom;
+ts.accumulatedLineAngle = 0;
+ts.activeGesture = null;                    // NEW
 
-        ts.startDist = ts.prevDist = dist;
-        ts.prevAngle = angle;
-        ts.prevMidX = midX;
-        ts.prevMidY = midY;
-        ts.startZoom = this.continuousZoom;
-        ts.accumulatedLineAngle = 0;
-
-        // снимок текущей камеры
-        const target = this.controls.target;
-        const dir = this.camera.position.clone().sub(target);
-        const d = dir.length();
-        ts.prevAzimuth = Math.atan2(dir.z, dir.x);
-        ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
+const target = this.controls.target;
+const dir = this.camera.position.clone().sub(target);
+const d = dir.length();
+ts.prevAzimuth = Math.atan2(dir.z, dir.x);
+ts.prevPitch   = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
+ts.startPitch  = ts.prevPitch;              // NEW
     }
 },
 
@@ -302,76 +307,158 @@ if (this.touchDragActive && e.touches.length === 1) {
     return;
 }
 
-    if (this.touchState.isPinching && e.touches.length === 2) {
-        e.preventDefault();
-        const ts = this.touchState;
-        const t0 = this.findTouchById(e.touches, ts.id0);
-        const t1 = this.findTouchById(e.touches, ts.id1);
-        if (!t0 || !t1) return;
+if (this.touchState.isPinching && e.touches.length === 2) {
+    e.preventDefault();
+    const ts = this.touchState;
+    const t0 = this.findTouchById(e.touches, ts.id0);
+    const t1 = this.findTouchById(e.touches, ts.id1);
+    if (!t0 || !t1) return;
 
-        const dx = t1.clientX - t0.clientX;
-        const dy = t1.clientY - t0.clientY;
-        const curDist = Math.hypot(dx, dy);
-        const curAngle = Math.atan2(dy, dx);
-        const midX = (t0.clientX + t1.clientX) * 0.5;
-        const midY = (t0.clientY + t1.clientY) * 0.5;
-        if (curDist < 1e-3) return;
+    const dx = t1.clientX - t0.clientX;
+    const dy = t1.clientY - t0.clientY;
+    const curDist  = Math.hypot(dx, dy);
+    const curAngle = Math.atan2(dy, dx);
+    const midX = (t0.clientX + t1.clientX) * 0.5;
+    const midY = (t0.clientY + t1.clientY) * 0.5;
+    if (curDist < 1e-3) return;
 
-        // --- 1. Raycast ДО изменений камеры (старая камера, старая точка) ---
-        const P_before = this._raycastToGround(ts.prevMidX, ts.prevMidY, this._tempVec3a);
+    // ─────────────────────────────────────────────────────────────
+    // 1. КЛАССИФИКАЦИЯ ЖЕСТА (один раз на касание)
+    // ─────────────────────────────────────────────────────────────
+    if (ts.activeGesture === null) {
+        let aDiff = curAngle - ts.startAngle;
+        while (aDiff >  Math.PI) aDiff -= 2 * Math.PI;
+        while (aDiff < -Math.PI) aDiff += 2 * Math.PI;
 
-        // --- 2. Дельты за кадр ---
-        let angleDelta = curAngle - ts.prevAngle;
-        while (angleDelta >  Math.PI) angleDelta -= 2 * Math.PI;
-        while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
+        const zoomSignal   = Math.abs(curDist - ts.startDist);
+        const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5; // «пиксели» эквивалент
+        const tiltSignal   = Math.abs(midY - ts.startMidY);
 
-        const zoomDelta = Math.log2(curDist / ts.prevDist);           // 1:1 по зуму
-        const tiltDeltaPx = ts.prevMidY - midY;                        // >0, если пальцы ушли вверх
+        const GESTURE_TRIGGER_PX = 14;   // ниже — «мёртвая зона»
+        const TILT_DOMINANCE     = 1.5;  // tilt должен явно доминировать
 
-        // --- 3. Применяем камеру ---
-        const target = this.controls.target;
-        const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
-        const newCameraDist = prevCameraDist * Math.pow(0.5, zoomDelta);
-        const newAzimuth    = ts.prevAzimuth - angleDelta;             // если крутит не туда — поменяйте знак
+        const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
+        if (maxSignal < GESTURE_TRIGGER_PX) {
+            // ещё не набрали сигнала — просто запоминаем prev
+            ts.prevDist = curDist;
+            ts.prevAngle = curAngle;
+            ts.prevMidX = midX;
+            ts.prevMidY = midY;
+            return;
+        }
+
+        if (tiltSignal >= GESTURE_TRIGGER_PX &&
+            tiltSignal >  TILT_DOMINANCE * zoomSignal &&
+            tiltSignal >  TILT_DOMINANCE * rotateSignal) {
+            // TILT — эксклюзивный режим
+            ts.activeGesture = 'tilt';
+            ts.startPitch = ts.prevPitch;
+            ts.startMidY  = midY;               // база отсчёта — от текущего момента
+            ts.startMidX  = midX;
+            // для симметрии сохраним дистанцию/угол — вдруг пригодится
+            ts.startDist  = curDist;
+            ts.startAngle = curAngle;
+        } else {
+            ts.activeGesture = 'zoomRotate';
+        }
+
+        // «мёртвая зона» — накопленное до классификации не применяем
+        ts.prevDist = curDist;
+        ts.prevAngle = curAngle;
+        ts.prevMidX = midX;
+        ts.prevMidY = midY;
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2. TILT — только pitch, зум и rotate отключены
+    // ─────────────────────────────────────────────────────────────
+    if (ts.activeGesture === 'tilt') {
         const H = this.renderer.domElement.clientHeight || 1;
-        const newPitch      = ts.prevPitch + tiltDeltaPx * (this.controls.maxPolarAngle / H);
+        const tiltRange = this.controls.maxPolarAngle - this.controls.minPolarAngle;
+
+        // Полный диапазон pitch (0…85°) за ~35% высоты экрана.
+        // Было: maxPolarAngle / H  (полный диапазон за весь экран).
+        const TILT_FULL_RANGE_PX = H * 0.35;
+
+        const tiltDeltaPx = ts.startMidY - midY;     // >0, пальцы ушли вверх
+        const newPitch = ts.startPitch +
+                         tiltDeltaPx * (tiltRange / TILT_FULL_RANGE_PX);
+
+        const target = this.controls.target;
+        const currentDist = this.camera.position.distanceTo(target);
+
+        // azimuth не меняем — берём фактический с камеры
+        const dir = this._tempVec3a.subVectors(this.camera.position, target);
+        const azimuth = Math.atan2(dir.z, dir.x);
 
         const placement = this._resolveCameraPlacement(
-            target, newCameraDist, newPitch, newAzimuth, this._tempPlacementOut
+            target, currentDist, newPitch, azimuth, this._tempPlacementOut
         );
         this.camera.position.copy(this._tempPlacementOut);
         this.camera.lookAt(target);
-        this.controls.update();                                        // синхронизация внутреннего состояния OrbitControls
+        this.controls.update();
 
-        // --- 4. Raycast ПОСЛЕ (новая камера, текущая точка) ---
-        const P_after = this._raycastToGround(midX, midY, this._tempVec3b);
-
-        // --- 5. Компенсация ---
-        if (P_before && P_after) {
-            this.worldGroup.position.x += P_after.x - P_before.x;
-            this.worldGroup.position.z += P_after.z - P_before.z;
-        }
-
-        // --- 6. Обновляем состояние ---
+        ts.prevPitch = placement.pitch;
         ts.prevDist  = curDist;
         ts.prevAngle = curAngle;
         ts.prevMidX  = midX;
         ts.prevMidY  = midY;
-        ts.prevAzimuth = newAzimuth;
-        ts.prevPitch   = placement.pitch;                              // уже с учётом terrain-клампа
-        this.continuousZoom = this.getZoomForDistance(
-            this.camera.position.distanceTo(target)
-        );
-        this.targetContinuousZoom = this.continuousZoom;
 
         this.maybeUpdateVisibleTiles();
+        return;
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // 3. ZOOM + ROTATE — оригинальное поведение, но БЕЗ tilt
+    // ─────────────────────────────────────────────────────────────
+    const P_before = this._raycastToGround(ts.prevMidX, ts.prevMidY, this._tempVec3a);
+
+    let angleDelta = curAngle - ts.prevAngle;
+    while (angleDelta >  Math.PI) angleDelta -= 2 * Math.PI;
+    while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
+
+    const zoomDelta = Math.log2(curDist / ts.prevDist);
+
+    const target = this.controls.target;
+    const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
+    const newCameraDist  = prevCameraDist * Math.pow(0.5, zoomDelta);
+    const newAzimuth     = ts.prevAzimuth - angleDelta;
+    const newPitch       = ts.prevPitch;          // ← pitch больше не меняем
+
+    const placement = this._resolveCameraPlacement(
+        target, newCameraDist, newPitch, newAzimuth, this._tempPlacementOut
+    );
+    this.camera.position.copy(this._tempPlacementOut);
+    this.camera.lookAt(target);
+    this.controls.update();
+
+    const P_after = this._raycastToGround(midX, midY, this._tempVec3b);
+    if (P_before && P_after) {
+        this.worldGroup.position.x += P_after.x - P_before.x;
+        this.worldGroup.position.z += P_after.z - P_before.z;
+    }
+
+    ts.prevDist  = curDist;
+    ts.prevAngle = curAngle;
+    ts.prevMidX  = midX;
+    ts.prevMidY  = midY;
+    ts.prevAzimuth = newAzimuth;
+    ts.prevPitch   = placement.pitch;
+
+    this.continuousZoom = this.getZoomForDistance(
+        this.camera.position.distanceTo(target)
+    );
+    this.targetContinuousZoom = this.continuousZoom;
+
+    this.maybeUpdateVisibleTiles();
+}
 },
 
 onTouchEnd(e: TouchEvent) {
     if (e.touches.length < 2 && this.touchState.isPinching) {
         this.touchState.isPinching = false;
-        // Полезно: пере-центрируем target под экран (устраняет долгий дрейф worldGroup)
+        this.touchState.activeGesture = null;    // NEW
         if (!this._cameraAnimation) this.syncControlsTarget();
     }
     if (e.touches.length === 0 && this.touchDragActive) {

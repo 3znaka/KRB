@@ -49,6 +49,7 @@ function onMessage(e) {
                 tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
                 styleZoom ?? continuousZoom ?? z
             );
+            
             self.postMessage({ id, result });
         } catch (err) {
             self.postMessage({ id, error: err.message });
@@ -87,20 +88,34 @@ const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLES)};
 const LAYER_RENDER_ORDER = ${JSON.stringify(LAYER_RENDER_ORDER)};
 let workerStyles = DEFAULT_STYLES;
 
+
 const CARRIER_ONLY_LINE_LAYERS = new Set(['transportation_name', 'water_name']);
 
-// Casing (обводка) дорог. В style.json casing-слои идут отдельными
-// записями (highway-*-casing, bridge-*-casing, tunnel-*-casing);
-// здесь — упрощение: +extraWidth px к толщине fill для дорог вне туннеля.
 const TRANSPORTATION_CASING = {
-    motorway:  { color: 0xe9ac77, extraWidth: 2 },
-    trunk:     { color: 0xe9ac77, extraWidth: 2 },
-    primary:   { color: 0xe9ac77, extraWidth: 2 },
-    secondary: { color: 0xe9ac77, extraWidth: 2 },
-    tertiary:  { color: 0xe9ac77, extraWidth: 2 },
-    minor:     { color: 0xcfcdca, extraWidth: 1.75 },
-    service:   { color: 0xcfcdca, extraWidth: 1.75 },
-    track:     { color: 0xcfcdca, extraWidth: 1.75 }
+    motorway:  { color: 0xe9ac77, extraWidth: 3 },
+    trunk:     { color: 0xe9ac77, extraWidth: 3 },
+    primary:   { color: 0xe9ac77, extraWidth: 3 },
+    secondary: { color: 0xe9ac77, extraWidth: 3 },
+    tertiary:  { color: 0xe9ac77, extraWidth: 3 },
+    minor:     { color: 0xcfcdca, extraWidth: 3 },
+    service:   { color: 0xcfcdca, extraWidth: 3 },
+    track:     { color: 0xcfcdca, extraWidth: 3 }
+};
+
+const TRANSPORTATION_CLASS_ORDER = {
+    motorway:  7,
+    trunk:     6,
+    primary:   5,
+    secondary: 4,
+    tertiary:  3,
+    minor:     2,   // residential / unclassified / living_street
+    service:   1,
+    track:     0,
+    path:     -1,
+    steps:    -2,
+    rail:     -3,
+    transit:  -4,
+    ferry:    -5,
 };
 
 function collectTransferables(obj, list) {
@@ -1205,64 +1220,73 @@ for (const ring of rings) {
                             ? blendWithBackground(color, opacity)
                             : color;
 
-                        let dynamicOrder = layerBaseOrder;
-                        if (name === 'transportation') {
-                            const brunnel = props.brunnel || '';
-                            const bridge = brunnel === 'bridge' ? 2 : 0;
-                            const tunnel = brunnel === 'tunnel' ? -2 : 0;
-                            const layerVal = props.layer ? parseInt(props.layer, 10) : 0;
-                            dynamicOrder = dynamicOrder + bridge + tunnel + layerVal;
-                        }
+// brunnel/layerVal/orderKey — вычисляем ОДИН РАЗ на уровне фичи
+const brunnel  = props.brunnel || 'none';
+const layerVal = props.layer ? parseInt(props.layer, 10) : 0;
+const orderKey = brunnel + ':' + layerVal;
 
-                        const dashKey = dash ? dash.map(v => v.toFixed(3)).join(',') : 'none';
-                        const wKey = curveKey(widthCurve);
-                        const lineKey = 'line:' + name + ':' +
-                            finalColor.toString(16) + ':' + wKey + ':' + dashKey;
-                        let lineGroup = linesMap.get(lineKey);
-                        if (!lineGroup) {
-                            lineGroup = {
-                                rings: [],
-                                renderOrder: dynamicOrder,
-                                dash,
-                                dashZ: dash ? z : null,
-                                width: widthCurve,
-                                widthAdd: 0,
-                                hideBelow: null
-                            };
-                            linesMap.set(lineKey, lineGroup);
-                        }
-                        for (const ring of rings) {
-                            if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
-                        }
+let semanticOrder = layerBaseOrder;
+if (name === 'transportation') {
+    const bridgeOff = brunnel === 'bridge' ? 200 : 0;
+    const tunnelOff = brunnel === 'tunnel' ? -200 : 0;
+    const cls       = props.class;
+    const classOff  = TRANSPORTATION_CLASS_ORDER[cls] ?? 0;
+  semanticOrder =
+    layerBaseOrder +
+    bridgeOff +
+    tunnelOff +
+    classOff +
+    layerVal * 0.1;
+}
 
-                        // ---- Casing (обводка) для дорог ----
-                        // hideBelow проверяется в главном потоке по вычисленной
-                        // ширине — не «запекаем» порог в момент сборки тайла.
-                        const cls = props.class;
-                        const brunnel = props.brunnel || '';
-                        const casingInfo = TRANSPORTATION_CASING[cls];
-                        if (name === 'transportation' && casingInfo &&
-                            brunnel !== 'tunnel') {
-                            const casingKey = 'line:' + name + ':' +
-                                casingInfo.color.toString(16) + ':' +
-                                wKey + '+' + casingInfo.extraWidth + ':none';
-                            let casingGroup = linesMap.get(casingKey);
-                            if (!casingGroup) {
-                                casingGroup = {
-                                    rings: [],
-                                    renderOrder: dynamicOrder - 0.5,
-                                    dash: null,
-                                    dashZ: null,
-                                    width: widthCurve,
-                                    widthAdd: casingInfo.extraWidth,
-                                    hideBelow: 0.5
-                                };
-                                linesMap.set(casingKey, casingGroup);
-                            }
-                            for (const ring of rings) {
-                                if (ring.length >= 2) casingGroup.rings.push({ ring, sortKey });
-                            }
-                        }
+const dashKey = dash ? dash.map(v => v.toFixed(3)).join(',') : 'none';
+const wKey = curveKey(widthCurve);
+const lineKey = 'line:' + name + ':' +
+    finalColor.toString(16) + ':' + wKey + ':' + dashKey + ':' + orderKey;
+
+let lineGroup = linesMap.get(lineKey);
+if (!lineGroup) {
+    lineGroup = {
+        rings: [],
+renderOrder: semanticOrder,
+        dash,
+        dashZ: dash ? z : null,
+        width: widthCurve,
+        widthAdd: 0,
+        hideBelow: null
+    };
+    linesMap.set(lineKey, lineGroup);
+}
+for (const ring of rings) {
+    if (ring.length >= 2) lineGroup.rings.push({ ring, sortKey });
+}
+
+// ---- Casing ----
+// Никаких const brunnel здесь — используем тот, что объявлен выше
+const cls = props.class;
+const casingInfo = TRANSPORTATION_CASING[cls];
+if (name === 'transportation' && casingInfo && brunnel !== 'tunnel') {
+    const casingKey = 'line:' + name + ':' +
+        casingInfo.color.toString(16) + ':' +
+        wKey + '+' + casingInfo.extraWidth + ':none:' + orderKey;
+    let casingGroup = linesMap.get(casingKey);
+    if (!casingGroup) {
+        casingGroup = {
+            rings: [],
+renderOrder: semanticOrder - 0.5,
+            dash: null,
+            dashZ: null,
+            width: widthCurve,
+            widthAdd: casingInfo.extraWidth,
+            hideBelow: 3.5 
+        };
+        linesMap.set(casingKey, casingGroup);
+    }
+    for (const ring of rings) {
+        if (ring.length >= 2) casingGroup.rings.push({ ring, sortKey });
+    }
+}
+
                     }
                 }
 

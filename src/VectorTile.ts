@@ -1,6 +1,7 @@
 // VectorTile.ts
 import { THREE, LineMaterial } from './js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
+import { VectorTileDiagnosticsMixin } from './VectorTileDiagnostics.js';
 
 import type {
     VectorTileOptions,
@@ -172,6 +173,12 @@ this.depthTest = options.depthTest ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
 
+        this.maxVisibleTiles = (options as any).maxVisibleTiles ?? 20;
+this.maxTileDistanceFactor = (options as any).maxTileDistanceFactor ?? 4;
+
+this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));
+this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibleTiles * 2);
+
         this.maxTextLabels = options.maxTextLabels ?? 150;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;
         this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 500;
@@ -257,6 +264,7 @@ export interface VectorTile {
     _sendToWorker(buffer: ArrayBuffer, z: number, x: number, y: number, is3d: boolean,
         existingGroup?: THREE.Group | null, generation?: number, styleZoom?: number): Promise<THREE.Group | null>;
     identify(sceneX: number, sceneZ: number, opts?: { tolerance?: number }): Promise<any>;
+    diagnoseAt(sceneX: number, sceneZ: number): Promise<void>;
 
     // --- coverage ---
     _is3dNow(): boolean;
@@ -267,6 +275,8 @@ export interface VectorTile {
     _stashGroup(key: string, group: THREE.Group | null | undefined): void;
     _beginTransition(newZ: number, styleZoom: number): void;
     _resolveCoverage(): void;
+    maxVisibleTiles: number;
+maxTileDistanceFactor: number;
 
     // --- loading ---
     _prefetchNextZoom(z: number): void;
@@ -307,6 +317,7 @@ applyMixin(VectorTile.prototype, VectorTileWorkerMixin);
 applyMixin(VectorTile.prototype, VectorTileCoverageMixin);
 applyMixin(VectorTile.prototype, VectorTileLoadingMixin);
 applyMixin(VectorTile.prototype, VectorTileLifecycleMixin);
+applyMixin(VectorTile.prototype, VectorTileDiagnosticsMixin);
 
 // Backward compatibility.
 export const VectorTileLayer = VectorTile;

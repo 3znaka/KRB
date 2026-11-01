@@ -68,14 +68,12 @@ export const VectorTileMaterialsMixin = {
     _getDynamicLineMaterial(line) {
         if (!this._map)
             return null;
+        const isCasing = (line.widthAdd || 0) > 0; // casing всегда имеет widthAdd > 0
         const wKey = typeof line.width === 'number'
             ? String(line.width)
             : JSON.stringify((line.width && line.width.stops) || line.width);
         const add = line.widthAdd || 0;
         const dashKey = line.dash ? line.dash.join(',') : 'none';
-        // hideBelow и dashZ влияют на поведение материала (видимость/масштаб штриха),
-        // поэтому обязаны входить в ключ — иначе линии с одинаковыми
-        // color/width/dash, но разными порогами, делили бы один материал.
         const hideKey = line.hideBelow ?? 'none';
         const dzKey = line.dashZ ?? 'none';
         const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}:${hideKey}:${dzKey}`;
@@ -87,11 +85,16 @@ export const VectorTileMaterialsMixin = {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
+            // ── Жёстко непрозрачный материал ────────────────────────────────
+            transparent: false,
+            opacity: 1,
+            alphaToCoverage: false, // ← ключевое: убираем MSAA-«просвечивание»
             depthTest: this.depthTest,
             depthWrite: false,
+            // ── Разный depth-bias: casing назад, fill вперёд ────────────────
             polygonOffset: true,
-            polygonOffsetFactor: 1,
-            polygonOffsetUnits: 2,
+            polygonOffsetFactor: isCasing ? 2 : -2,
+            polygonOffsetUnits: isCasing ? 4 : -4,
         };
         if (line.dash && Array.isArray(line.dash) && line.dash.length >= 2) {
             opts.dashed = true;
@@ -105,6 +108,9 @@ export const VectorTileMaterialsMixin = {
             add: line.widthAdd || 0,
             hideBelow: line.hideBelow ?? null,
             dashZ: line.dashZ ?? null,
+            role: isCasing ? 'casing' : 'fill',
+            isCasing, // ← добавить
+            layerName: line.layerName, // ← заодно для диагностики
         };
         this._lineMaterialCache.set(key, mat);
         this._lineMaterialsSet.add(mat);

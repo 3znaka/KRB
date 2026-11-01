@@ -139,8 +139,14 @@ export const VectorTileWorkerMixin = {
             if (fill.indices)
                 geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             const mesh = new THREE.Mesh(geom, mat);
-            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
-            mesh.position.y = 0;
+            const rawFillOrder = typeof fill.renderOrder === 'number' && Number.isFinite(fill.renderOrder)
+                ? fill.renderOrder
+                : VECTOR_TILE_RENDER_ORDER.FILL;
+            const isTransportationFill = fill.layerName === 'transportation';
+            mesh.renderOrder = isTransportationFill
+                ? 200_000 + rawFillOrder
+                : rawFillOrder;
+            mesh.position.y = isTransportationFill ? 0.04 : 0;
             group.add(mesh);
         }
         if (result.buildings && result.buildings.length > 0) {
@@ -255,12 +261,29 @@ export const VectorTileWorkerMixin = {
             else if (typeof lGeo.computeLineDistances === 'function') {
                 lGeo.computeLineDistances();
             }
-            else {
-                console.warn('[VectorTile] computeLineDistances() недоступен ни у Line2, ни у LineSegmentsGeometry.');
-            }
         }
-        lineObj.renderOrder = renderOrder ?? VECTOR_TILE_RENDER_ORDER.LINE;
-        lineObj.position.y = 0;
+        const dyn = material?.userData?.dyn;
+        const role = dyn?.role;
+        const semanticOrder = typeof renderOrder === 'number' && Number.isFinite(renderOrder)
+            ? renderOrder
+            : VECTOR_TILE_RENDER_ORDER.LINE;
+        const ROLE_ORDER = {
+            casing: 100_000,
+            fill: 200_000,
+            other: 0,
+        };
+        if (role === 'casing') {
+            lineObj.renderOrder = ROLE_ORDER.casing + semanticOrder;
+            lineObj.position.y = 0.02;
+        }
+        else if (role === 'fill') {
+            lineObj.renderOrder = ROLE_ORDER.fill + semanticOrder;
+            lineObj.position.y = 0.04;
+        }
+        else {
+            lineObj.renderOrder = semanticOrder;
+            lineObj.position.y = 0.01;
+        }
         lineObj.frustumCulled = false;
         group.add(lineObj);
     },
@@ -385,6 +408,18 @@ export const VectorTileWorkerMixin = {
                 this._pendingWorkerRequests.delete(id);
                 reject(err);
             }
+        }).then((result) => {
+            // ── автовызов диагностики ────────────────────────────────────
+            if (this._debug) {
+                try {
+                    this.diagnoseAt(sceneX, sceneZ, result);
+                }
+                catch (e) {
+                    console.warn('[VT DIAG] diagnoseAt failed:', e);
+                }
+            }
+            // ─────────────────────────────────────────────────────────────
+            return result;
         });
     },
 };

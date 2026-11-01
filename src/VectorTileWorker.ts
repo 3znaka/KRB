@@ -146,10 +146,22 @@ export const VectorTileWorkerMixin = {
             const geom = new THREE.BufferGeometry();
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
-            const mesh = new THREE.Mesh(geom, mat);
-            mesh.renderOrder = fill.renderOrder ?? VECTOR_TILE_RENDER_ORDER.FILL;
-            mesh.position.y = 0;
-            group.add(mesh);
+const mesh = new THREE.Mesh(geom, mat);
+
+const rawFillOrder =
+    typeof fill.renderOrder === 'number' && Number.isFinite(fill.renderOrder)
+        ? fill.renderOrder
+        : VECTOR_TILE_RENDER_ORDER.FILL;
+
+const isTransportationFill =
+    fill.layerName === 'transportation';
+
+mesh.renderOrder = isTransportationFill
+    ? 200_000 + rawFillOrder
+    : rawFillOrder;
+
+mesh.position.y = isTransportationFill ? 0.04 : 0;
+group.add(mesh);
         }
 
         if (result.buildings && result.buildings.length > 0) {
@@ -244,35 +256,58 @@ export const VectorTileWorkerMixin = {
         return out;
     },
 
-    _addFatLineFromPositions(
-        this: any,
-        group: THREE.Group,
-        positions: Float32Array | ArrayLike<number> | undefined,
-        material: any,
-        renderOrder: number | undefined,
-    ): void {
-        const segs = this._fatLineSegmentsFromPositions(positions);
-        if (!segs) return;
+_addFatLineFromPositions(
+    this: any,
+    group: THREE.Group,
+    positions: Float32Array | ArrayLike<number> | undefined,
+    material: any,
+    renderOrder: number | undefined,
+): void {
+    const segs = this._fatLineSegmentsFromPositions(positions);
+    if (!segs) return;
 
-        const lGeo = new LineSegmentsGeometry();
-        lGeo.setPositions(segs as unknown as number[]);
-        const lineObj = new Line2(lGeo, material);
+    const lGeo = new LineSegmentsGeometry();
+    lGeo.setPositions(segs as unknown as number[]);
 
-        if (material.dashed) {
-            if (typeof (lineObj as any).computeLineDistances === 'function') {
-                (lineObj as any).computeLineDistances();
-            } else if (typeof (lGeo as any).computeLineDistances === 'function') {
-                (lGeo as any).computeLineDistances();
-            } else {
-                console.warn('[VectorTile] computeLineDistances() недоступен ни у Line2, ни у LineSegmentsGeometry.');
-            }
-        }
 
-        lineObj.renderOrder = renderOrder ?? VECTOR_TILE_RENDER_ORDER.LINE;
-        lineObj.position.y = 0;
-        lineObj.frustumCulled = false;
-        group.add(lineObj);
-    },
+const lineObj = new Line2(lGeo, material);
+
+if (material.dashed) {
+    if (typeof (lineObj as any).computeLineDistances === 'function') {
+        (lineObj as any).computeLineDistances();
+    } else if (typeof (lGeo as any).computeLineDistances === 'function') {
+        (lGeo as any).computeLineDistances();
+    }
+}
+
+const dyn = (material as any)?.userData?.dyn;
+const role = dyn?.role;
+
+const semanticOrder =
+    typeof renderOrder === 'number' && Number.isFinite(renderOrder)
+        ? renderOrder
+        : VECTOR_TILE_RENDER_ORDER.LINE;
+
+const ROLE_ORDER = {
+    casing: 100_000,
+    fill:   200_000,
+    other:       0,
+} as const;
+
+if (role === 'casing') {
+    lineObj.renderOrder = ROLE_ORDER.casing + semanticOrder;
+    lineObj.position.y = 0.02;
+} else if (role === 'fill') {
+    lineObj.renderOrder = ROLE_ORDER.fill + semanticOrder;
+    lineObj.position.y = 0.04;
+} else {
+    lineObj.renderOrder = semanticOrder;
+    lineObj.position.y = 0.01;
+}
+
+lineObj.frustumCulled = false;
+group.add(lineObj);
+},
 
     async _sendToWorker(
         this: any,
@@ -375,33 +410,42 @@ export const VectorTileWorkerMixin = {
         const clickLocalX = localX - centerX;
         const clickLocalZ = localZ - centerZ;
 
-        return new Promise<any>((resolve, reject) => {
-            const id = ++this._requestId;
-            const generation = this._generation;
-            this._pendingWorkerRequests.set(id, {
-                resolve, reject, group: null, key: null,
-                generation, sourceZoom,
-                styleZoom: Number.isFinite(this._transitionStyleZoom)
-                    ? this._transitionStyleZoom
-                    : map.currentDiscreteZoom + this.zoomOffset,
-                isIdentify: true,
-            });
-            try {
-                this._worker!.postMessage({
-                    type: 'identify', id, buffer,
-                    z: sourceZoom, x: xSlippy, y: ySlippy,
-                    tileSize, maxMerc: map.MAX_MERCATOR,
-                    continuousZoom: map.continuousZoom + this.zoomOffset,
-                    styleZoom: Number.isFinite(this._transitionStyleZoom)
-                        ? this._transitionStyleZoom
-                        : map.currentDiscreteZoom + this.zoomOffset,
-                    localX: clickLocalX, localZ: clickLocalZ,
-                    tolerance: opts.tolerance || tileSize * 0.005,
-                }, [buffer]);
-            } catch (err) {
-                this._pendingWorkerRequests.delete(id);
-                reject(err);
-            }
-        });
+return new Promise<any>((resolve, reject) => {
+    const id = ++this._requestId;
+    const generation = this._generation;
+    this._pendingWorkerRequests.set(id, {
+        resolve, reject, group: null, key: null,
+        generation, sourceZoom,
+        styleZoom: Number.isFinite(this._transitionStyleZoom)
+            ? this._transitionStyleZoom
+            : map.currentDiscreteZoom + this.zoomOffset,
+        isIdentify: true,
+    });
+    try {
+        this._worker!.postMessage({
+            type: 'identify', id, buffer,
+            z: sourceZoom, x: xSlippy, y: ySlippy,
+            tileSize, maxMerc: map.MAX_MERCATOR,
+            continuousZoom: map.continuousZoom + this.zoomOffset,
+            styleZoom: Number.isFinite(this._transitionStyleZoom)
+                ? this._transitionStyleZoom
+                : map.currentDiscreteZoom + this.zoomOffset,
+            localX: clickLocalX, localZ: clickLocalZ,
+            tolerance: opts.tolerance || tileSize * 0.005,
+        }, [buffer]);
+    } catch (err) {
+        this._pendingWorkerRequests.delete(id);
+        reject(err);
+    }
+}).then((result) => {
+    // ── автовызов диагностики ────────────────────────────────────
+    if (this._debug) {
+        try { this.diagnoseAt(sceneX, sceneZ, result); }
+        catch (e) { console.warn('[VT DIAG] diagnoseAt failed:', e); }
+    }
+    // ─────────────────────────────────────────────────────────────
+    return result;
+});
+
     },
 };

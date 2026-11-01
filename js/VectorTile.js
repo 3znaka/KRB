@@ -1,6 +1,7 @@
 // VectorTile.ts
 import { THREE } from './js_TP/tpb.js';
 import { DEFAULT_STYLES } from './vectorTileDefaults.js';
+import { VectorTileDiagnosticsMixin } from './VectorTileDiagnostics.js';
 export { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
 import { VectorTileMaterialsMixin } from './VectorTileMaterials.js';
 import { VectorTileLabelsMixin } from './VectorTileLabels.js';
@@ -136,6 +137,10 @@ export class VectorTile {
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
+        this.maxVisibleTiles = options.maxVisibleTiles ?? 20;
+        this.maxTileDistanceFactor = options.maxTileDistanceFactor ?? 4;
+        this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));
+        this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibleTiles * 2);
         this.maxTextLabels = options.maxTextLabels ?? 150;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;
         this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 500;
@@ -195,5 +200,6 @@ applyMixin(VectorTile.prototype, VectorTileWorkerMixin);
 applyMixin(VectorTile.prototype, VectorTileCoverageMixin);
 applyMixin(VectorTile.prototype, VectorTileLoadingMixin);
 applyMixin(VectorTile.prototype, VectorTileLifecycleMixin);
+applyMixin(VectorTile.prototype, VectorTileDiagnosticsMixin);
 // Backward compatibility.
 export const VectorTileLayer = VectorTile;

@@ -29,15 +29,23 @@ class VectorPointLabelSource {
     getText() { return this.text; }
     getLabelType() { return 'point'; }
 
-    getScreenPosition() {
-        const v = this.map.getVec3().copy(this.worldPos).add(this.map.worldGroup.position);
-        v.project(this.map.camera);
-        const rect = this.map.renderer.domElement.getBoundingClientRect();
-        return {
-            x: (v.x * 0.5 + 0.5) * rect.width,
-            y: (-v.y * 0.5 + 0.5) * rect.height,
-        };
-    }
+getScreenPosition() {
+    const map = this.map;
+    const cam = map.camera;
+    const v = map.getVec3().copy(this.worldPos).add(map.worldGroup.position);
+
+    // Если точка за near-плоскостью (в т.ч. за камерой) — проекция зеркалится,
+    // и подпись улетает в небо. Возвращаем null, чтобы TextManager скрыл её.
+    const vCam = map.getVec3().copy(v).applyMatrix4(cam.matrixWorldInverse);
+    if (vCam.z >= -cam.near) return null;
+
+    v.project(cam);
+    const rect = map.renderer.domElement.getBoundingClientRect();
+    return {
+        x: (v.x * 0.5 + 0.5) * rect.width,
+        y: (-v.y * 0.5 + 0.5) * rect.height,
+    };
+}
 
     getTextStyle() {
         const o = this.options;

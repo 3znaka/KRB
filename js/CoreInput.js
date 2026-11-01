@@ -191,36 +191,104 @@ export const CoreInputMixin = {
     },
     // Применяет уже вычисленные dTheta/dPhi — переиспользуется и при drag, и при инерции.
     _applyRotationDelta(dTheta, dPhi, pivot) {
-        const cam = this.camera.position.clone();
-        const target = this.controls.target.clone();
-        const dir = cam.clone().sub(target);
+        const cam = this.camera.position;
+        const target = this.controls.target;
+        const dir = this._tempDir.subVectors(cam, target);
         const r = dir.length();
         if (r < 1e-6)
             return;
-        // Pre-clamp по phi, чтобы OrbitControls потом не «схлопывал» камеру
-        const phi0 = Math.acos(Math.max(-1, Math.min(1, dir.y / r)));
-        const phiAfter = phi0 + dPhi;
+        // 1. Ограничиваем pitch взгляда диапазоном [minPolarAngle, maxPolarAngle]
         const minP = this.controls.minPolarAngle;
         const maxP = this.controls.maxPolarAngle;
-        if (phiAfter < minP || phiAfter > maxP)
-            return; // упёрлись в зенит/надир
+        const phi0 = Math.acos(Math.max(-1, Math.min(1, dir.y / r)));
+        dPhi = Math.max(minP, Math.min(maxP, phi0 + dPhi)) - phi0;
+        const dPhiRequested = dPhi; // сколько хотели наклонить
         const theta0 = Math.atan2(dir.x, dir.z);
         const thetaAfter = theta0 + dTheta;
-        // R = qH(dPhi, h_afterAzimuth) * qY(dTheta, Y)
         const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dTheta);
         const h = new THREE.Vector3(Math.cos(thetaAfter), 0, -Math.sin(thetaAfter));
-        const qH = new THREE.Quaternion().setFromAxisAngle(h, dPhi);
-        const R = new THREE.Quaternion().multiplyQuaternions(qH, qY);
-        // Вращаем C и T вокруг W
-        cam.sub(pivot).applyQuaternion(R).add(pivot);
-        target.sub(pivot).applyQuaternion(R).add(pivot);
-        this.camera.position.copy(cam);
-        this.controls.target.copy(target);
+        const qH = new THREE.Quaternion();
+        const R = new THREE.Quaternion();
+        const camRel = cam.clone().sub(pivot);
+        const tgtRel = target.clone().sub(pivot);
+        const test = new THREE.Vector3();
+        const buildR = (a) => {
+            qH.setFromAxisAngle(h, a);
+            R.multiplyQuaternions(qH, qY);
+        };
+        const clearanceAt = (a) => {
+            buildR(a);
+            test.copy(camRel).applyQuaternion(R).add(pivot);
+            const ground = this.hasElevation ? this.getSurfaceHeightAt(test.x, test.z) : 0;
+            return test.y - (ground + this.CAMERA_TERRAIN_CLEARANCE);
+        };
+        // 2. Ограничиваем dPhi так, чтобы камера не ушла под землю при вращении вокруг пивота
+        if (dPhi !== 0) {
+            const fEnd = clearanceAt(dPhi);
+            if (fEnd < 0) {
+                const f0 = clearanceAt(0);
+                if (f0 >= 0) {
+                    let lo = 0, hi = dPhi;
+                    for (let i = 0; i < 10; i++) {
+                        const mid = (lo + hi) * 0.5;
+                        if (clearanceAt(mid) >= 0)
+                            lo = mid;
+                        else
+                            hi = mid;
+                    }
+                    dPhi = lo;
+                }
+                else if (fEnd <= f0) {
+                    dPhi = 0;
+                }
+            }
+        }
+        // 3. Применяем вращение вокруг пивота
+        buildR(dPhi);
+        cam.copy(camRel).applyQuaternion(R).add(pivot);
+        target.copy(tgtRel).applyQuaternion(R).add(pivot);
+        // 4. Возвращаем target на землю, чтобы дальше вращаться вокруг нормального пивота
+        this._retargetToGround();
+        // 5. Докручиваем остаток dPhi вокруг controls.target
+        let dPhiResidual = dPhiRequested - dPhi;
+        if (Math.abs(dPhiResidual) > 1e-6) {
+            const nd = new THREE.Vector3().subVectors(cam, target);
+            const nth = Math.atan2(nd.x, nd.z);
+            const nh = new THREE.Vector3(Math.cos(nth), 0, -Math.sin(nth));
+            const posAt = (a) => {
+                const crt = new THREE.Vector3().subVectors(cam, target);
+                const qh = new THREE.Quaternion().setFromAxisAngle(nh, a);
+                crt.applyQuaternion(qh);
+                return target.clone().add(crt);
+            };
+            const clearAt = (a) => {
+                const p = posAt(a);
+                const ground = this.hasElevation ? this.getSurfaceHeightAt(p.x, p.z) : 0;
+                return p.y - (ground + this.CAMERA_TERRAIN_CLEARANCE);
+            };
+            if (dPhiResidual > 0 && clearAt(dPhiResidual) < 0) {
+                if (clearAt(0) >= 0) {
+                    let lo = 0, hi = dPhiResidual;
+                    for (let i = 0; i < 10; i++) {
+                        const mid = (lo + hi) * 0.5;
+                        if (clearAt(mid) >= 0)
+                            lo = mid;
+                        else
+                            hi = mid;
+                    }
+                    dPhiResidual = lo;
+                }
+                else {
+                    dPhiResidual = 0;
+                }
+            }
+            if (Math.abs(dPhiResidual) > 1e-6) {
+                cam.copy(posAt(dPhiResidual));
+            }
+        }
         this.camera.lookAt(target);
         this.camera.updateMatrixWorld(true);
         this.controls.update();
-        // target после наклона вокруг пивота ушёл с плоскости земли — возвращаем
-        this._retargetToGround();
         this.maybeUpdateVisibleTiles();
     },
     onTouchStart(e) {

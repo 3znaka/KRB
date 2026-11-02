@@ -116,6 +116,7 @@ export const VectorTileMaterialsMixin = {
         this._lineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
         this._lastStyleZoom = NaN;
+        this._lastDashDiscreteZoom = -1;
         return mat;
     },
     _evalCurve(c, z) {
@@ -134,22 +135,28 @@ export const VectorTileMaterialsMixin = {
         }
         return stops[stops.length - 1][1];
     },
-    _updateDynamicLineMaterials(zoom) {
-        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
+    _updateDynamicLineMaterials(continuousZoom, discreteZoom) {
         if (!this._map)
             return;
-        if (Math.abs(zoom - this._lastStyleZoom) < 0.005)
+        const contChanged = Math.abs(continuousZoom - this._lastStyleZoom) >= 0.005;
+        const discChanged = discreteZoom !== this._lastDashDiscreteZoom;
+        if (!contChanged && !discChanged)
             return;
-        this._lastStyleZoom = zoom;
+        this._lastStyleZoom = continuousZoom;
+        this._lastDashDiscreteZoom = discreteZoom;
         for (const mat of this._lineMaterialsSet) {
             const d = mat.userData.dyn;
             if (!d)
                 continue;
-            const base = this._evalCurve(d.width, zoom);
+            const base = this._evalCurve(d.width, continuousZoom);
             mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
             mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
-            if (mat.dashed && d.dashZ != null)
-                mat.dashScale = Math.pow(2, zoom - d.dashZ);
+            if (mat.dashed && d.dashZ != null) {
+                // ── ключевое: квантуем dashScale по дискретному зуму ──
+                const targetScale = Math.pow(2, discreteZoom - d.dashZ);
+                if (mat.dashScale !== targetScale)
+                    mat.dashScale = targetScale;
+            }
         }
     },
     _getPointGeometry(radius) {

@@ -193,9 +193,8 @@ export const VectorTileLifecycleMixin = {
             this._lastWorldPos.copy(worldPos);
             this._lastMovementTime = performance.now();
         }
-        // ── Fix #9: пропускаем цикл по материалам, если линий нет ────────
         if (this._lineMaterialsSet.size > 0) {
-            this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset);
+            this._updateDynamicLineMaterials(map.continuousZoom + this.zoomOffset, map.currentDiscreteZoom + this.zoomOffset);
         }
         const discreteZoom = map.currentDiscreteZoom;
         const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;

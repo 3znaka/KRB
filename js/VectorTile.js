@@ -97,6 +97,7 @@ export class VectorTile {
     _coverageDirty = false;
     _lastIs3d = undefined;
     _lastStyleZoom = NaN;
+    _lastDashDiscreteZoom = -1;
     _lastPrefetchZoom = -1;
     _prefetchInFlight = new Map();
     _raycaster = new THREE.Raycaster();

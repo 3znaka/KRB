@@ -127,6 +127,8 @@ export class VectorLineLabelSource {
         const bbox = this._charBBox(charLayout);
         if (!bbox)
             return null;
+        if (!bbox || bbox.hasSelfOverlap)
+            return null;
         if (!this._isBBoxOnScreen(bbox, data))
             return null;
         return { t, isFlipped, charLayout, bbox };
@@ -572,6 +574,38 @@ export class VectorLineLabelSource {
         }
         return false;
     }
+    _smoothTangentAt(data, s, halfWin) {
+        const { pointsPx, segRawAngles } = data;
+        const n = pointsPx.length;
+        const lo = s - halfWin;
+        const hi = s + halfWin;
+        let ss = 0, cc = 0, ww = 0;
+        for (let i = 0; i < n - 1; i++) {
+            const s0 = pointsPx[i];
+            const s1 = pointsPx[i + 1];
+            if (s1 <= lo)
+                continue;
+            if (s0 >= hi)
+                break;
+            const a = Math.max(s0, lo);
+            const b = Math.min(s1, hi);
+            const len = b - a;
+            if (len <= 0)
+                continue;
+            // Треугольный вес: 1 в центре окна, 0 на границах s ± halfWin.
+            // Так вклад соседних сегментов убывает с расстоянием от глифа.
+            const mid = (a + b) * 0.5;
+            const w = Math.max(0, 1 - Math.abs(mid - s) / halfWin);
+            const weight = len * w;
+            const rad = segRawAngles[i] * Math.PI / 180;
+            ss += Math.sin(rad) * weight;
+            cc += Math.cos(rad) * weight;
+            ww += weight;
+        }
+        if (ww <= 1e-9)
+            return this._getRawAngleAt(data, s);
+        return Math.atan2(ss, cc) * 180 / Math.PI;
+    }
     _buildCharLayout(data, cw, startPx, isFlipped) {
         const s = this.getTextStyle();
         const fs = parseFloat(s.fontSize) || 12;
@@ -593,29 +627,60 @@ export class VectorLineLabelSource {
         let px = startPx;
         const len = cw.text.length;
         const flipAngleDeg = isFlipped ? 180 : 0;
+        const tanHalfWin = fs * 1.5;
         for (let i = 0; i < len; i++) {
             const charIndex = isFlipped ? (len - 1 - i) : i;
             const visualW = cw.visual[charIndex];
             const advanceW = cw.advance[charIndex];
             const centerPx = px + visualW * 0.5;
-            const rawDeg = this._getRawAngleAt(data, centerPx);
+            const rawDeg = this._smoothTangentAt(data, centerPx, tanHalfWin);
             const effDeg = rawDeg + flipAngleDeg;
             const rad = effDeg * Math.PI / 180;
-            const p = this._samplePx(data, centerPx);
-            if (!p)
-                return null;
             const sin = Math.sin(rad);
             const cos = Math.cos(rad);
             const dxp = sin * perpDist;
             const dyp = -cos * perpDist;
+            const p = this._samplePx(data, centerPx);
+            if (!p)
+                return null;
+            const currentX = p.x + dxp + ox;
+            const currentY = p.y + dyp + oy;
             layout.push({
                 char: cw.text[charIndex],
-                x: p.x + dxp + ox,
-                y: p.y + dyp + oy,
+                x: currentX,
+                y: currentY,
                 angle: effDeg,
                 w: visualW
             });
-            px += advanceW;
+            // ── Адаптивный трекинг ──
+            if (i < len - 1) {
+                const nextCharIndex = isFlipped ? (len - 2 - i) : (i + 1);
+                const nextVisualW = cw.visual[nextCharIndex];
+                let nextPx = px + advanceW;
+                // Если излом крутой, центры букв в screen-space могут оказаться 
+                // слишком близко. Толкаем следующую букву вперед по дуге, 
+                // пока расстояние между центрами не станет безопасным.
+                let guard = 0;
+                while (nextPx < data.totalLenPx && guard++ < 80) {
+                    const nextCenterPx = nextPx + nextVisualW * 0.5;
+                    const pNext = this._samplePx(data, nextCenterPx);
+                    if (!pNext)
+                        break;
+                    const dist = Math.hypot(pNext.x - currentX, pNext.y - currentY);
+                    // Требуем, чтобы центры были не ближе 85% от суммы их полуширин
+                    const minDist = (visualW + nextVisualW) * 0.5 * 0.85;
+                    if (dist >= minDist)
+                        break;
+                    nextPx += 1.0; // сдвигаем на 1 пиксель вдоль линии
+                }
+                // Если текст вылез за пределы линии из-за разрядки — отменяем
+                if (nextPx + nextVisualW > data.totalLenPx)
+                    return null;
+                px = nextPx;
+            }
+            else {
+                px += advanceW;
+            }
         }
         return layout;
     }
@@ -665,11 +730,32 @@ export class VectorLineLabelSource {
         }
         if (!isFinite(minX))
             return null;
+        // ── Проверка на самопересечение букв ──
+        let hasSelfOverlap = false;
+        for (let i = 0; i < perChar.length; i++) {
+            for (let j = i + 1; j < perChar.length; j++) {
+                // Проверяем только рядом стоящие буквы (до 3 позиций вперед)
+                if (j - i > 3)
+                    continue;
+                const a = perChar[i];
+                const b = perChar[j];
+                // Допускаем касание в 0.5px, но не более
+                const overlapX = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
+                const overlapY = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
+                if (overlapX > 0.5 && overlapY > 0.5) {
+                    hasSelfOverlap = true;
+                    break;
+                }
+            }
+            if (hasSelfOverlap)
+                break;
+        }
         return {
             minX, minY, maxX, maxY,
             cx: (minX + maxX) / 2,
             cy: (minY + maxY) / 2,
-            perChar
+            perChar,
+            hasSelfOverlap // <-- Возвращаем флаг
         };
     }
 }

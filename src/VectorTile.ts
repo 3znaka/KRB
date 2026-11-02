@@ -122,6 +122,7 @@ sprite;
     private _coverageDirty = false;
     private _lastIs3d: boolean | undefined = undefined;
     private _lastStyleZoom = NaN;
+    private _lastDashDiscreteZoom = -1; 
 
     private _lastPrefetchZoom = -1;
     private _prefetchInFlight = new Map<string, Promise<ArrayBuffer | null>>();
@@ -280,7 +281,7 @@ export interface VectorTile {
     _getLineMaterialFromData(layerName: string, color: number, width: number, dash: number[] | undefined): LineMaterial;
     _getDynamicLineMaterial(line: WorkerLine): LineMaterial | null;
     _evalCurve(c: WidthSpec, z: number): number;
-    _updateDynamicLineMaterials(zoom: number): void;
+    _updateDynamicLineMaterials(continuousZoom: number, discreteZoom: number): void;
     _getPointGeometry(radius: number): THREE.BufferGeometry;
     _concatF32(arrays: Float32Array[]): Float32Array;
     _getBuildingMaterial(color: number, opacity?: number): THREE.Material;

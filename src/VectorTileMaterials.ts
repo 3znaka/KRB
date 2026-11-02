@@ -133,6 +133,7 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
     this._lineMaterialsSet.add(mat);
     this._managedMaterials.add(mat);
     this._lastStyleZoom = NaN;
+    this._lastDashDiscreteZoom = -1;
     return mat;
 },
 
@@ -150,20 +151,30 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
         return stops[stops.length - 1][1];
     },
 
-    _updateDynamicLineMaterials(this: any, zoom: number): void {
-        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
-        if (!this._map) return;
-        if (Math.abs(zoom - this._lastStyleZoom) < 0.005) return;
-        this._lastStyleZoom = zoom;
-        for (const mat of this._lineMaterialsSet) {
-            const d = (mat as any).userData.dyn;
-            if (!d) continue;
-            const base = this._evalCurve(d.width, zoom);
-            mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
-            mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
-            if (mat.dashed && d.dashZ != null) mat.dashScale = Math.pow(2, zoom - d.dashZ);
+_updateDynamicLineMaterials(this: any, continuousZoom: number, discreteZoom: number): void {
+    if (!this._map) return;
+    const contChanged = Math.abs(continuousZoom - this._lastStyleZoom) >= 0.005;
+    const discChanged = discreteZoom !== this._lastDashDiscreteZoom;
+    if (!contChanged && !discChanged) return;
+
+    this._lastStyleZoom = continuousZoom;
+    this._lastDashDiscreteZoom = discreteZoom;
+
+    for (const mat of this._lineMaterialsSet) {
+        const d = (mat as any).userData.dyn;
+        if (!d) continue;
+
+        const base = this._evalCurve(d.width, continuousZoom);
+        mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
+        mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
+
+        if (mat.dashed && d.dashZ != null) {
+            // ── ключевое: квантуем dashScale по дискретному зуму ──
+            const targetScale = Math.pow(2, discreteZoom - d.dashZ);
+            if (mat.dashScale !== targetScale) mat.dashScale = targetScale;
         }
-    },
+    }
+},
 
     _getPointGeometry(this: any, radius: number): THREE.BufferGeometry {
         const key = `point_${radius}`;

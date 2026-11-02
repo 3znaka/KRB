@@ -124,6 +124,7 @@ export class VectorLineLabelSource {
     getCandidateAtT(t) {
         const data = this._getScreenData();
         if (!data) return null;
+        if (!data.visibleIntervalPx) return null; 
         const cw = this._getCharWidths();
         if (!cw.total) return null;
 
@@ -145,6 +146,7 @@ export class VectorLineLabelSource {
     getCandidates() {
         const data = this._getScreenData();
         if (!data) return [];
+        if (!data.visibleIntervalPx) return [];
         const cw = this._getCharWidths();
         if (!cw.total) return [];
 
@@ -348,21 +350,24 @@ export class VectorLineLabelSource {
                 p.y >= 0 && p.y <= H
             );
         }
-        const firstVisible = flags.indexOf(true);
-        if (firstVisible === -1) return null;
-        let lastVisible = firstVisible;
-        for (let i = flags.length - 1; i >= 0; i--) {
-            if (flags[i]) { lastVisible = i; break; }
-        }
-        const visibleIntervalPx = {
-            min: (firstVisible / samples) * totalLenPx,
-            max: (lastVisible / samples) * totalLenPx
-        };
-        if (visibleIntervalPx.max - visibleIntervalPx.min < 10) return null;
 
-        const tMinVisible = this._pxToT(probe, visibleIntervalPx.min);
-        const tMaxVisible = this._pxToT(probe, visibleIntervalPx.max);
-        const tMidVisible = (tMinVisible + tMaxVisible) / 2;
+const firstVisible = flags.indexOf(true);
+let visibleIntervalPx = null;
+let tMidVisible = 0.5;
+if (firstVisible !== -1) {
+    let lastVisible = firstVisible;
+    for (let i = flags.length - 1; i >= 0; i--) {
+        if (flags[i]) { lastVisible = i; break; }
+    }
+    const minPx = (firstVisible / samples) * totalLenPx;
+    const maxPx = (lastVisible / samples) * totalLenPx;
+    if (maxPx - minPx >= 10) {
+        visibleIntervalPx = { min: minPx, max: maxPx };
+        const tMinVisible = this._pxToT(probe, minPx);
+        const tMaxVisible = this._pxToT(probe, maxPx);
+        tMidVisible = (tMinVisible + tMaxVisible) / 2;
+    }
+}
 
         const vc = new THREE.Vector3(offX, 0, offZ).project(camera);
         const tileCenterScreen = {

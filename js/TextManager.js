@@ -1116,12 +1116,9 @@ export class TextManager {
                     this._setLabelVisible(label, false);
                     continue;
                 }
-                if (isCurved) {
-                    continue;
-                }
             }
             if (isCurved) {
-                if (label._pendingChosenT != null) {
+                if (shouldBeVisible && label._pendingChosenT != null) {
                     const el = label.element;
                     const fadeOutDone = label._hideTimeout == null && el.style.display === 'none';
                     if (!fadeOutDone) {
@@ -1136,16 +1133,19 @@ export class TextManager {
                     label._pendingChosenIsFlipped = false;
                 }
                 if (label._chosenT == null) {
-                    this._setLabelVisible(label, false);
+                    if (shouldBeVisible)
+                        this._setLabelVisible(label, false);
                     continue;
                 }
                 const charLayout = src.getCharLayoutAtT(label._chosenT, label._chosenIsFlipped);
                 if (!charLayout) {
-                    this._setLabelVisible(label, false);
+                    if (shouldBeVisible)
+                        this._setLabelVisible(label, false);
                     continue;
                 }
                 this._renderLineChars(label, charLayout);
-                this._setLabelVisible(label, true);
+                if (shouldBeVisible)
+                    this._setLabelVisible(label, true); // ← guard!
                 continue;
             }
             let pos;

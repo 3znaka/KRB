@@ -1099,53 +1099,52 @@ export class TextManager {
                 zoom >= zb.min && zoom <= zb.max;
             const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
-            if (!shouldBeVisible) {
-                const isFadingOut = label._hideTimeout != null;
-                if (!isFadingOut) {
-                    if (isCurved && label._pendingChosenT != null) {
-                        label._pendingChosenT = null;
-                        label._pendingChosenIsFlipped = false;
-                    }
-                    this._setLabelVisible(label, false);
-                    continue;
-                }
-                if (isCurved) {
-                    continue;
-                }
-            }
+if (!shouldBeVisible) {
+    const isFadingOut = label._hideTimeout != null;
+    if (!isFadingOut) {
+        if (isCurved && label._pendingChosenT != null) {
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
+        }
+        this._setLabelVisible(label, false);
+        continue;
+    }
 
-            if (isCurved) {
-                if (label._pendingChosenT != null) {
-                    const el = label.element;
-                    const fadeOutDone =
-                        label._hideTimeout == null && el.style.display === 'none';
-                    if (!fadeOutDone) {
-                        if (label._hideTimeout == null) {
-                            this._setLabelVisible(label, false);
-                        }
-                        continue;
-                    }
-                    label._chosenT = label._pendingChosenT;
-                    label._chosenIsFlipped = label._pendingChosenIsFlipped;
-                    label._pendingChosenT = null;
-                    label._pendingChosenIsFlipped = false;
-                }
+}
 
-                if (label._chosenT == null) {
-                    this._setLabelVisible(label, false);
-                    continue;
-                }
-                const charLayout = src.getCharLayoutAtT(
-                    label._chosenT, label._chosenIsFlipped
-                );
-                if (!charLayout) {
-                    this._setLabelVisible(label, false);
-                    continue;
-                }
-                this._renderLineChars(label, charLayout);
-                this._setLabelVisible(label, true);
-                continue;
+if (isCurved) {
+
+    if (shouldBeVisible && label._pendingChosenT != null) {
+        const el = label.element;
+        const fadeOutDone =
+            label._hideTimeout == null && el.style.display === 'none';
+        if (!fadeOutDone) {
+            if (label._hideTimeout == null) {
+                this._setLabelVisible(label, false);
             }
+            continue;
+        }
+        label._chosenT = label._pendingChosenT;
+        label._chosenIsFlipped = label._pendingChosenIsFlipped;
+        label._pendingChosenT = null;
+        label._pendingChosenIsFlipped = false;
+    }
+
+    if (label._chosenT == null) {
+        if (shouldBeVisible) this._setLabelVisible(label, false);
+        continue;
+    }
+    const charLayout = src.getCharLayoutAtT(
+        label._chosenT, label._chosenIsFlipped
+    );
+    if (!charLayout) {
+        if (shouldBeVisible) this._setLabelVisible(label, false);
+        continue;
+    }
+    this._renderLineChars(label, charLayout);
+    if (shouldBeVisible) this._setLabelVisible(label, true);  // ← guard!
+    continue;
+}
 
             let pos;
             if (type === 'line') pos = src.getScreenPositionAt(label.t);

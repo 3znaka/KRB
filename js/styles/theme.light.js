@@ -550,6 +550,7 @@ export const LIGHT_THEME = {
                     _default: [0, -6],
                 },
             },
+            textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff',
             textAlign: 'center',
             textVerticalAlign: 'center',
             textZoomMin: 0,

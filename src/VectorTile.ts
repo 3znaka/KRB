@@ -71,6 +71,7 @@ sprite;
     private _crsCode: string | null;
     private _crs: any;
     private _labelIdPrefix: string;
+    private _themeRef: any = null;
 
     private _tileGroupRenderOrder: number;
     private _map: any = null;
@@ -158,6 +159,7 @@ sprite;
         this.visible = options.visible ?? true;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
+        this._themeRef = options.theme ?? LIGHT_THEME;
 
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn('VectorTile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
@@ -245,6 +247,10 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
 
         this._workerReady = this._initWorker();
     }
+
+        getThemeBackground(): string | null {
+  return this._themeRef?.backgroundColor ?? null;
+}
 
     async _initDefaultSprite() {
         try {
@@ -337,6 +343,9 @@ maxTileDistanceFactor: number;
     removeFromMap(): void;
     addExclusionArea(collection: any, layers: string[]): this;
     _postUpdate(map: any): void;
+
+
+
 }
 
 // ============================================================================

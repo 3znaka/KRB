@@ -57,6 +57,7 @@ export interface KrbMapOptions {
     panInertia?: boolean;
 
     panFriction?: number;
+    backgroundColor?: string | number;
 
 }
 
@@ -241,6 +242,10 @@ export class KrbMap {
     _rotateLastX: number;
     _rotateLastY: number;
 
+    private _defaultBackgroundColor: any = 0xffffff;
+private _backgroundColor: any = null;
+private _backgroundExplicit = false;
+
     constructor(options: KrbMapOptions) {
         if (!options) throw new Error('Map constructor: options object is required');
 
@@ -366,6 +371,9 @@ export class KrbMap {
         this._rafId = null;
         this._abortController = null;
 
+
+        this._backgroundColor = options.backgroundColor ?? null;
+this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
         this.initControls();
         this.initDragTools();
@@ -436,18 +444,18 @@ export class KrbMap {
             });
         }
 
-        // ── NEW: attach dynamic layers (VectorTile и т.п.) ─────────────────
-        for (const layer of this.layers) {
-            if (!layer) continue;
-            if (layer.texture || layer.elevation) continue;
-            if (typeof layer.addTo !== 'function') continue;
-            if (layer._map === this) continue;
-            try {
-                layer.addTo(this);
-            } catch (err) {
-                console.warn('KrbMap: layer.addTo() failed', layer, err);
-            }
-        }
+for (const layer of this.layers) {
+    if (!layer) continue;
+    if (layer.texture || layer.elevation) continue;
+    if (typeof layer.addTo !== 'function') continue;
+    if (layer._map === this) continue;
+    try {
+        layer.addTo(this);
+        this._tryApplyLayerBackground(layer);   // ← NEW
+    } catch (err) {
+        console.warn('KrbMap: layer.addTo() failed', layer, err);
+    }
+}
         // ── END NEW ────────────────────────────────────────────────────────
 
         this._rebuildLayerStack();
@@ -491,8 +499,11 @@ export class KrbMap {
        ================================================================ */
 
     initThree(): void {
-        this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0xffffff);
+this.scene = new THREE.Scene();
+const initialBg = this._backgroundExplicit
+    ? this._backgroundColor
+    : this._defaultBackgroundColor;
+this.scene.background = new THREE.Color(initialBg);
         this.camera = new THREE.PerspectiveCamera(
             45,
             this.targetElement.clientWidth / this.targetElement.clientHeight,
@@ -511,6 +522,27 @@ export class KrbMap {
         this.sunLight.position.set(1, 2, 3);
         this.scene.add(this.sunLight);
     }
+
+
+/**
+ * Устанавливает цвет фона сцены.
+ * Если передан options.backgroundColor при создании карты — этот
+ * вызов его перезапишет (но тема слоёв больше не будет перебивать).
+ */
+setBackgroundColor(color: string | number | null): void {
+    if (!this.scene) return;
+    if (color == null) color = this._defaultBackgroundColor;
+    this.scene.background = new THREE.Color(color);
+    this._backgroundColor = color;
+}
+
+private _tryApplyLayerBackground(layer: any): void {
+    if (this._backgroundExplicit) return;  // явный override приоритетнее
+    const bg = typeof layer?.getThemeBackground === 'function'
+        ? layer.getThemeBackground()
+        : null;
+    if (bg != null) this.setBackgroundColor(bg);
+}
 
     setAmbientLight(color: any, intensity: number = 0.8): void {
         if (!this.ambientLight) { console.warn('Ambient light is not initialized.'); return; }

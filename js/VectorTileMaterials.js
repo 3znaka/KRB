@@ -134,22 +134,24 @@ export const VectorTileMaterialsMixin = {
         }
         return stops[stops.length - 1][1];
     },
-    _updateDynamicLineMaterials(zoom) {
-        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
+    _updateDynamicLineMaterials(continuousZoom, discreteZoom) {
         if (!this._map)
             return;
-        if (Math.abs(zoom - this._lastStyleZoom) < 0.005)
-            return;
-        this._lastStyleZoom = zoom;
+        // дискретный зум для dash-паттерна — округляем на всякий случай
+        const dz = Math.round(discreteZoom);
         for (const mat of this._lineMaterialsSet) {
             const d = mat.userData.dyn;
             if (!d)
                 continue;
-            const base = this._evalCurve(d.width, zoom);
+            // ── Ширина: плавно от continuous zoom ────────────────────────
+            const base = this._evalCurve(d.width, continuousZoom);
             mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
             mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
-            if (mat.dashed && d.dashZ != null)
-                mat.dashScale = Math.pow(2, zoom - d.dashZ);
+            if (mat.dashed && d.dashZ != null) {
+                const target = Math.pow(2, dz - d.dashZ);
+                if (mat.dashScale !== target)
+                    mat.dashScale = target;
+            }
         }
     },
     _getPointGeometry(radius) {

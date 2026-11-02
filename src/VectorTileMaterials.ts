@@ -150,20 +150,26 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
         return stops[stops.length - 1][1];
     },
 
-    _updateDynamicLineMaterials(this: any, zoom: number): void {
-        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
-        if (!this._map) return;
-        if (Math.abs(zoom - this._lastStyleZoom) < 0.005) return;
-        this._lastStyleZoom = zoom;
-        for (const mat of this._lineMaterialsSet) {
-            const d = (mat as any).userData.dyn;
-            if (!d) continue;
-            const base = this._evalCurve(d.width, zoom);
-            mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
-            mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
-            if (mat.dashed && d.dashZ != null) mat.dashScale = Math.pow(2, zoom - d.dashZ);
+_updateDynamicLineMaterials(this: any, continuousZoom: number, discreteZoom: number): void {
+    if (!this._map) return;
+
+    // дискретный зум для dash-паттерна — округляем на всякий случай
+    const dz = Math.round(discreteZoom);
+
+    for (const mat of this._lineMaterialsSet) {
+        const d = (mat as any).userData.dyn;
+        if (!d) continue;
+
+        // ── Ширина: плавно от continuous zoom ────────────────────────
+        const base = this._evalCurve(d.width, continuousZoom);
+        mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
+        mat.visible  = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
+        if (mat.dashed && d.dashZ != null) {
+            const target = Math.pow(2, dz - d.dashZ);
+            if (mat.dashScale !== target) mat.dashScale = target;
         }
-    },
+    }
+},
 
     _getPointGeometry(this: any, radius: number): THREE.BufferGeometry {
         const key = `point_${radius}`;

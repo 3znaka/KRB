@@ -55,6 +55,7 @@ export class VectorTile {
     _crsCode;
     _crs;
     _labelIdPrefix;
+    _themeRef = null;
     _tileGroupRenderOrder;
     _map = null;
     _rootGroup;
@@ -125,6 +126,7 @@ export class VectorTile {
         this.visible = options.visible ?? true;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
+        this._themeRef = options.theme ?? LIGHT_THEME;
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn('VectorTile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
                 'Значение maxSourceZoom будет использовано как maxNativeZoom.');
@@ -201,6 +203,9 @@ export class VectorTile {
             console.warn('VectorTile: workerScripts должен содержать два URL (tpb.js и earcut.js).');
         }
         this._workerReady = this._initWorker();
+    }
+    getThemeBackground() {
+        return this._themeRef?.backgroundColor ?? null;
     }
     async _initDefaultSprite() {
         try {

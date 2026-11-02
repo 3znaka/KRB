@@ -25,3 +25,4 @@ export {
     ECEF_CODES,
 } from './Vector3D.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
+export * from './styles/index.js';

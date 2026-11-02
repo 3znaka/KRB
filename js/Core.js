@@ -153,6 +153,9 @@ export class KrbMap {
     _rotatePivotY;
     _rotateLastX;
     _rotateLastY;
+    _defaultBackgroundColor = 0xffffff;
+    _backgroundColor = null;
+    _backgroundExplicit = false;
     constructor(options) {
         if (!options)
             throw new Error('Map constructor: options object is required');
@@ -258,6 +261,8 @@ export class KrbMap {
         this._io = null;
         this._rafId = null;
         this._abortController = null;
+        this._backgroundColor = options.backgroundColor ?? null;
+        this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
         this.initControls();
         this.initDragTools();
@@ -314,7 +319,6 @@ export class KrbMap {
                     this._surfaceMaxHeightCache.clear();
             });
         }
-        // ── NEW: attach dynamic layers (VectorTile и т.п.) ─────────────────
         for (const layer of this.layers) {
             if (!layer)
                 continue;
@@ -326,6 +330,7 @@ export class KrbMap {
                 continue;
             try {
                 layer.addTo(this);
+                this._tryApplyLayerBackground(layer); // ← NEW
             }
             catch (err) {
                 console.warn('KrbMap: layer.addTo() failed', layer, err);
@@ -365,7 +370,10 @@ export class KrbMap {
        ================================================================ */
     initThree() {
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0xffffff);
+        const initialBg = this._backgroundExplicit
+            ? this._backgroundColor
+            : this._defaultBackgroundColor;
+        this.scene.background = new THREE.Color(initialBg);
         this.camera = new THREE.PerspectiveCamera(45, this.targetElement.clientWidth / this.targetElement.clientHeight, 1, 200000000);
         this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance', logarithmicDepthBuffer: true, });
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
@@ -376,6 +384,28 @@ export class KrbMap {
         this.sunLight = new THREE.DirectionalLight(0xffffff, 3);
         this.sunLight.position.set(1, 2, 3);
         this.scene.add(this.sunLight);
+    }
+    /**
+     * Устанавливает цвет фона сцены.
+     * Если передан options.backgroundColor при создании карты — этот
+     * вызов его перезапишет (но тема слоёв больше не будет перебивать).
+     */
+    setBackgroundColor(color) {
+        if (!this.scene)
+            return;
+        if (color == null)
+            color = this._defaultBackgroundColor;
+        this.scene.background = new THREE.Color(color);
+        this._backgroundColor = color;
+    }
+    _tryApplyLayerBackground(layer) {
+        if (this._backgroundExplicit)
+            return; // явный override приоритетнее
+        const bg = typeof layer?.getThemeBackground === 'function'
+            ? layer.getThemeBackground()
+            : null;
+        if (bg != null)
+            this.setBackgroundColor(bg);
     }
     setAmbientLight(color, intensity = 0.8) {
         if (!this.ambientLight) {

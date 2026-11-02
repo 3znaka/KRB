@@ -15,6 +15,7 @@ import type { Theme } from './types.js';
  */
 export const LIGHT_THEME: Theme = {
   name: 'Light',
+  backgroundColor: '#ffffff',
 
   // ─────────────────────────────────────────────────────────────────
   // Палитра категорий POI.

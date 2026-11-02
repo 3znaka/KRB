@@ -24,19 +24,21 @@ export const LIGHT_THEME: Theme = {
   //  service / transport / lodging / other).
   // Маппинг class → category задаётся в spec.openmaptiles.ts.
   // ─────────────────────────────────────────────────────────────────
-  poiCategories: {
-    food:      '#e74c3c',
-    health:    '#dc3545',
-    education: '#3f51b5',
-    culture:   '#7b1fa2',
-    sport:     '#43a047',
-    shopping:  '#ff5722',
-    finance:   '#388e3c',
-    service:   '#546e7a',
-    transport: '#1565c0',
-    lodging:   '#1976d2',
-    other:     '#888888',
-  },
+poiCategories: {
+  food:      '#e74c3c',
+  health:    '#dc3545',
+  education: '#3f51b5',
+  culture:   '#7b1fa2',
+  sport:     '#43a047',
+  shopping:  '#ff5722',
+  finance:   '#388e3c',
+  service:   '#546e7a',
+  transport: '#1565c0',
+  lodging:   '#1976d2',
+  nature:    '#6d9e3f',   // ← NEW
+  religion:  '#7e57c2',   // ← NEW
+  other:     '#888888',
+},
 
   poiDefaultIcon: 'marker',
 

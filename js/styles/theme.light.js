@@ -31,6 +31,8 @@ export const LIGHT_THEME = {
         service: '#546e7a',
         transport: '#1565c0',
         lodging: '#1976d2',
+        nature: '#6d9e3f', // ← NEW
+        religion: '#7e57c2', // ← NEW
         other: '#888888',
     },
     poiDefaultIcon: 'marker',

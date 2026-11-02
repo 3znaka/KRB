@@ -198,7 +198,10 @@ export class VectorTile {
     }
     async _initDefaultSprite() {
         try {
-            const s = new Sprite('/src/sprite/sprite.json', '/src/sprite/sprite.png');
+            // Резолвим пути относительно папки, где лежит сам VectorTile.js (то есть js/)
+            const jsonUrl = new URL('./sprite/sprite.json', _MODULE_DIR).href;
+            const pngUrl = new URL('./sprite/sprite.png', _MODULE_DIR).href;
+            const s = new Sprite(jsonUrl, pngUrl);
             await s.load();
             this.sprite = s;
             this._labelsDirty = true;
@@ -207,7 +210,7 @@ export class VectorTile {
             }
         }
         catch (err) {
-            console.warn('VectorTile: Не удалось загрузить дефолтный спрайт из /src/sprite/. Иконки будут отключены.', err);
+            console.warn('VectorTile: Не удалось загрузить дефолтный спрайт. Иконки будут отключены.', err);
         }
     }
 }

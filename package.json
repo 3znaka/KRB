@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "watch": "tsc --watch",
+    "watch": "npx -p typescript tsc --watch",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
@@ -14,7 +14,7 @@
   },
   "license": "ISC",
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
   }
 }

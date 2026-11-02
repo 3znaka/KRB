@@ -281,35 +281,50 @@ export class TextManager {
             top: '0',
             willChange: 'transform'
         });
-        if (hasIcon) {
-            // NEW: flex-контейнер с gap для icon+text.
-            el.style.alignItems = 'center';
-            el.style.gap = '4px';
-        }
+if (hasIcon) {
+    const pos = source.getLabelPosition ? source.getLabelPosition() : 'right';
+
+    let flexDirection: string;
+    if (pos === 'left')        flexDirection = 'row-reverse';
+    else if (pos === 'top')    flexDirection = 'column-reverse';
+    else if (pos === 'bottom') flexDirection = 'column';
+    else                       flexDirection = 'row';
+
+    Object.assign(el.style, {
+        display: 'inline-flex',
+        flexDirection,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '4px',
+    });
+    if (pos === 'top' || pos === 'bottom') {
+        el.style.textAlign = 'center';
+    }
+
+    // ── ЭТО БЫЛО ПОТЕРЯНО ───────────────────────────────────────
+    this._setupIcon(el, iconStyle, icon);
+    const txt = source.getText ? source.getText() : '';
+    if (txt) {
+        const textSpan = document.createElement('span');
+        textSpan.className = 'krb-text';
+        textSpan.style.whiteSpace = type === 'point' ? 'pre-line' : 'nowrap';
+        textSpan.textContent = type === 'point'
+            ? this._wrapPointText(txt, el.style.fontSize)
+            : txt;
+        el.appendChild(textSpan);
+    }
+    // ────────────────────────────────────────────────────────────
+} else if (type === 'point') {
+    el.style.whiteSpace = 'pre-line';
+    el.textContent = this._wrapPointText(source.getText(), el.style.fontSize);
+} else if (!isCurved) {
+    el.textContent = source.getText();
+}
         const styleObj = source.getTextStyle ? source.getTextStyle() : {};
         Object.assign(el.style, styleObj);
         el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
-        // NEW: рендер контента — иконка + текст, только иконка, или только текст.
-        if (hasIcon) {
-            this._setupIcon(el, iconStyle, icon);
-            const txt = source.getText ? source.getText() : '';
-            if (txt) {
-                const textSpan = document.createElement('span');
-                textSpan.className = 'krb-text';
-                textSpan.style.whiteSpace = type === 'point' ? 'pre-line' : 'nowrap';
-                textSpan.textContent = type === 'point'
-                    ? this._wrapPointText(txt, el.style.fontSize)
-                    : txt;
-                el.appendChild(textSpan);
-            }
-        } else if (type === 'point') {
-            el.style.whiteSpace = 'pre-line';
-            el.textContent = this._wrapPointText(source.getText(), el.style.fontSize);
-        } else if (!isCurved) {
-            el.textContent = source.getText();
-        }
 
         this.pane.appendChild(el);
 
@@ -336,6 +351,8 @@ export class TextManager {
             _display: hasIcon ? 'inline-flex' : 'block',
             _hasIcon: hasIcon,
             _icon: icon || null,
+                _iconCenterX: null as number | null,  
+    _iconCenterY: null as number | null, 
         };
 
         label._vectorOwner = owner;
@@ -377,9 +394,14 @@ export class TextManager {
             'letterSpacing', 'lineHeight', 'textTransform'
         ].some(key => oldStyle[key] !== newStyle[key]);
 
-        // NEW: если у подписи есть иконка — текст живёт в <span class="krb-text">.
-        // Обновляем только этот span, не трогая .krb-icon.
-        if (label._hasIcon) {
+if (label._hasIcon) {
+    const pos = newSource.getLabelPosition ? newSource.getLabelPosition() : 'right';
+    const dir = pos === 'left'        ? 'row-reverse'
+              : pos === 'top'         ? 'column-reverse'
+              : pos === 'bottom'      ? 'column'
+              : 'row';
+    el.style.flexDirection = dir;
+    el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
             if (textChanged || fontChanged) {
                 let textSpan = el.querySelector('.krb-text');
                 if (newText) {
@@ -551,13 +573,29 @@ export class TextManager {
                 }
                 el.style.visibility = 'hidden';
             }
+for (const { label, el } of states) {
+    label.width  = el.offsetWidth;
+    label.height = el.offsetHeight;
+    label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
 
-            for (const { label, el } of states) {
-                label.width = el.offsetWidth;
-                label.height = el.offsetHeight;
-                label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
-                label._needsMeasure = false;
+    if (label._hasIcon) {
+        const iconEl = el.querySelector('.krb-icon');
+        if (iconEl) {
+            const savedTransform = el.style.transform;
+            el.style.transform = 'none';            // чтобы rect'ы были в layout-координатах
+            try {
+                const labelRect = el.getBoundingClientRect();
+                const iconRect  = iconEl.getBoundingClientRect();
+                label._iconCenterX = (iconRect.left + iconRect.right)  * 0.5 - labelRect.left;
+                label._iconCenterY = (iconRect.top  + iconRect.bottom) * 0.5 - labelRect.top;
+            } finally {
+                el.style.transform = savedTransform;
             }
+        }
+    }
+
+    label._needsMeasure = false;
+}
         } finally {
             for (const { el, display, visibility } of states) {
                 el.style.display = display;
@@ -611,29 +649,43 @@ export class TextManager {
         }
     }
 
-    _computeAnchor(label, rotationDeg) {
-        const src = label.source;
-        if (label._needsMeasure) this._flushMeasurements();
-        const w = label.width;
-        const h = label.height;
-        const align = src.getTitleAlign ? src.getTitleAlign() : 'center';
-        const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
-        const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
-        let anchorX;
-        if (align === 'left') anchorX = 0;
-        else if (align === 'right') anchorX = w;
-        else anchorX = w / 2;
-        let anchorY;
-        if (vAlign === 'top') anchorY = 0;
-        else if (vAlign === 'bottom') anchorY = h;
-        else anchorY = h / 2;
-        const rad = rotationDeg * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
+_computeAnchor(label, rotationDeg) {
+    const src = label.source;
+    if (label._needsMeasure) this._flushMeasurements();
+    const w = label.width;
+    const h = label.height;
+    const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+
+    const rad = rotationDeg * Math.PI / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    // NEW: плашки с иконкой якорятся по центру иконки,
+    // чтобы мировая точка приходилась именно на krb-icon.
+    if (label._hasIcon && label._iconCenterX != null && label._iconCenterY != null) {
+        const anchorX = label._iconCenterX;
+        const anchorY = label._iconCenterY;
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
         return { dx, dy, offX, offY, w, h, cos, sin };
     }
+
+    // Старое поведение для текстовых плашек без иконки.
+    const align  = src.getTitleAlign ? src.getTitleAlign() : 'center';
+    const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+    let anchorX;
+    if (align === 'left')       anchorX = 0;
+    else if (align === 'right') anchorX = w;
+    else                        anchorX = w / 2;
+    let anchorY;
+    if (vAlign === 'top')       anchorY = 0;
+    else if (vAlign === 'bottom') anchorY = h;
+    else                          anchorY = h / 2;
+
+    const dx = -anchorX * cos + anchorY * sin;
+    const dy = -anchorX * sin - anchorY * cos;
+    return { dx, dy, offX, offY, w, h, cos, sin };
+}
 
     _getLabelCorners(label, tOverride = null) {
         const src = label.source;

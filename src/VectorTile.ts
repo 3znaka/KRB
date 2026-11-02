@@ -11,14 +11,15 @@ import type {
     WidthSpec,
     WorkerLine,
     WorkerTextPoint,
+    PoiLabelPosition,  
 } from './VectorTileTypes.js';
 
-// Re-exports для backward compatibility
+
 export type {
     VectorTileOptions, Stops, WidthSpec,
     WorkerLine, WorkerTextPoint, WorkerTextLine,
+    PoiLabelPosition, 
 } from './VectorTileTypes.js';
-export { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
 
 import { VectorTileMaterialsMixin } from './VectorTileMaterials.js';
 import { VectorTileLabelsMixin } from './VectorTileLabels.js';
@@ -38,12 +39,14 @@ export class VectorTile {
     visible: boolean;
     minZoom: number;
     maxZoom: number;
+    labelPosition: PoiLabelPosition;
     minNativeZoom: number;
     maxNativeZoom: number;
     lineWidthMultiplier: number;
     fillOpacity: number;
     depthTest: boolean;
     visibleLayers: string[] | null;
+    invisibleLayers: string[] | null; 
     zoomOffset: number;
     buildings3d: boolean;
     buildings3dMinZoom: number;
@@ -160,7 +163,7 @@ sprite;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
         this._themeRef = options.theme ?? LIGHT_THEME;
-
+this.labelPosition = options.labelPosition ?? 'bottom';
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn('VectorTile: опция maxSourceZoom устарела, используйте maxNativeZoom. ' +
                 'Значение maxSourceZoom будет использовано как maxNativeZoom.');
@@ -185,6 +188,7 @@ sprite;
         this.fillOpacity = options.fillOpacity ?? 1.0;
 this.depthTest = options.depthTest ?? true;
         this.visibleLayers = options.visibleLayers || null;
+        this.invisibleLayers = options.invisibleLayers || null;
         this.zoomOffset = options.zoomOffset ?? -1;
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;

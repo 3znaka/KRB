@@ -36,6 +36,12 @@ class VectorPointLabelSource {
             sprite: this.options.sprite,
         };
     }
+    getLabelPosition() {
+        const pos = this.options.labelPosition;
+        return (pos === 'left' || pos === 'right' || pos === 'top' || pos === 'bottom')
+            ? pos
+            : 'right';
+    }
     getScreenPosition() {
         const map = this.map;
         const cam = map.camera;
@@ -247,6 +253,10 @@ export const VectorTileLabelsMixin = {
             }
             else {
                 const pt = cand.pt;
+                const rawPos = pt.labelPosition;
+                const labelPosition = (rawPos === 'left' || rawPos === 'right' || rawPos === 'top' || rawPos === 'bottom')
+                    ? rawPos
+                    : this.labelPosition;
                 source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
                     textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
                     fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
@@ -262,6 +272,7 @@ export const VectorTileLabelsMixin = {
                     iconCircleScale: pt.iconCircleScale,
                     iconGlyphRatio: pt.iconGlyphRatio,
                     sprite: this.sprite,
+                    labelPosition
                 });
             }
             const label = textManager.addLabel(source, id, this);

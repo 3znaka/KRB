@@ -1,7 +1,7 @@
 // VectorTileLabels.ts
 import { THREE } from './js_TP/tpb.js';
 import { VectorLineLabelSource } from './LineLabelSource.js';
-import type { WorkerTextPoint, WorkerTextLine } from './VectorTileTypes.js';
+import type { WorkerTextPoint, WorkerTextLine, PoiLabelPosition } from './VectorTileTypes.js';
 
 /**
  * Бонус к приоритету для подписей, выбранных в прошлый refresh.
@@ -42,6 +42,13 @@ class VectorPointLabelSource {
             glyphRatio: this.options.iconGlyphRatio,
             sprite: this.options.sprite, 
         };
+    }
+
+      getLabelPosition(): 'right' | 'left' | 'top' | 'bottom' {
+        const pos = this.options.labelPosition;
+        return (pos === 'left' || pos === 'right' || pos === 'top' || pos === 'bottom')
+            ? pos
+            : 'right';
     }
 
     getScreenPosition() {
@@ -177,6 +184,7 @@ export const VectorTileLabelsMixin = {
         group.userData.textLabels = [];
     },
 
+
     _selectCandidatesByScreenGrid(this: any, candidates: LabelCandidate[]): LabelCandidate[] {
         const cellSize = this.labelScreenGridSize > 0 ? this.labelScreenGridSize : 256;
         const maxPerCell = this.labelMaxPerCell > 0 ? this.labelMaxPerCell : 6;
@@ -305,8 +313,14 @@ export const VectorTileLabelsMixin = {
                 }
                 source = cached;
             }             else {
-                const pt = cand.pt;
-                source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
+const pt = cand.pt;
+const rawPos = pt.labelPosition;
+const labelPosition: PoiLabelPosition =
+    (rawPos === 'left' || rawPos === 'right' || rawPos === 'top' || rawPos === 'bottom')
+        ? rawPos
+        : this.labelPosition;
+
+source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
                     textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
                     fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
                     textFontStyle: pt.textFontStyle, textLetterSpacing: pt.textLetterSpacing,
@@ -321,6 +335,7 @@ export const VectorTileLabelsMixin = {
                     iconCircleScale: pt.iconCircleScale, 
                     iconGlyphRatio: pt.iconGlyphRatio,   
                     sprite: this.sprite,
+                    labelPosition
                 });
             }
 
@@ -337,6 +352,8 @@ export const VectorTileLabelsMixin = {
         this._oldTileGroups?.forEach((g: THREE.Group) => { g.userData.textLabels = groupLabels.get(g) || []; });
     },
 
+
+    
     _collectLabelCandidates(this: any): { candidates: LabelCandidate[]; isClose: boolean } {
         const map = this._map;
         const camera = map.camera;

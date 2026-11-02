@@ -7,6 +7,7 @@ import type { TileSpec, Theme } from './styles/types.js';
 // Options
 // ============================================================================
 
+export type PoiLabelPosition = 'right' | 'left' | 'top' | 'bottom';
 export interface VectorTileOptions {
 
     sprite?: Sprite | null;
@@ -36,6 +37,7 @@ export interface VectorTileOptions {
     fillOpacity?: number;
     depthTest?: boolean;
     visibleLayers?: string[] | null;
+    invisibleLayers?: string[] | null;
     zoomOffset?: number;
     buildings3d?: boolean;
     buildings3dMinZoom?: number;
@@ -69,6 +71,7 @@ export interface VectorTileOptions {
     tileSpec?: TileSpec;
     /** Тема оформления. По умолчанию светлая. */
     theme?: Theme;
+     labelPosition?: PoiLabelPosition;
 }
 
 export type Stops = Array<[number, number]>;
@@ -122,6 +125,7 @@ properties?: Record<string, any>;
     iconScale?: number;
     /** Смещение иконки в CSS-пикселях [dx, dy]. */
     iconOffset?: [number, number];
+    labelPosition?: string;
 }
 
 export interface WorkerTextLine {

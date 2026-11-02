@@ -40,40 +40,42 @@ function onMessage(e) {
         workerStyles = msg.styles || DEFAULT_STYLES;
         return;
     }
-    if (msg.type === 'identify') {
-        const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ,
-                tolerance, continuousZoom, styleZoom } = msg;
-        try {
-            const tile = new VectorTile(new Protobuf(buffer));
-            const result = identifyAt(
-                tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
-                styleZoom ?? continuousZoom ?? z
-            );
-            
-            self.postMessage({ id, result });
-        } catch (err) {
-            self.postMessage({ id, error: err.message });
-        }
-        return;
+if (msg.type === 'identify') {
+    const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ,
+            tolerance, continuousZoom, styleZoom,
+            visibleLayers = null, invisibleLayers = null } = msg;
+    try {
+        const tile = new VectorTile(new Protobuf(buffer));
+        const result = identifyAt(
+            tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
+            styleZoom ?? continuousZoom ?? z,
+            visibleLayers, invisibleLayers
+        );
+        self.postMessage({ id, result });
+    } catch (err) {
+        self.postMessage({ id, error: err.message });
     }
-    if (msg.type === 'process') {
-        const {
-            id, buffer, z, x, y, tileSize, maxMerc, is3d,
-            visibleLayers, buildingEdges,
-            continuousZoom, styleZoom,
-            exclusionPolygons = [], exclusionLayers = [],
-            maxTextPointsPerTile = 300,
-            maxTextLinesPerTile = 30
-        } = msg;
-        try {
-            const tile = new VectorTile(new Protobuf(buffer));
-            const result = processTile(
-                tile, z, x, y, tileSize, maxMerc, is3d,
-                visibleLayers, buildingEdges,
-                exclusionPolygons, exclusionLayers,
-                maxTextPointsPerTile, maxTextLinesPerTile,
-                styleZoom ?? continuousZoom ?? z
-            );
+    return;
+}
+if (msg.type === 'process') {
+    const {
+        id, buffer, z, x, y, tileSize, maxMerc, is3d,
+        visibleLayers, invisibleLayers,        // ← добавить
+        buildingEdges,
+        continuousZoom, styleZoom,
+        exclusionPolygons = [], exclusionLayers = [],
+        maxTextPointsPerTile = 300,
+        maxTextLinesPerTile = 30
+    } = msg;
+    try {
+        const tile = new VectorTile(new Protobuf(buffer));
+        const result = processTile(
+            tile, z, x, y, tileSize, maxMerc, is3d,
+            visibleLayers, invisibleLayers, buildingEdges,   // ← порядок: см. сигнатуру ниже
+            exclusionPolygons, exclusionLayers,
+            maxTextPointsPerTile, maxTextLinesPerTile,
+            styleZoom ?? continuousZoom ?? z
+        );
             const transferList = [];
             const payload = { id, result };
             collectTransferables(payload, transferList);
@@ -779,15 +781,17 @@ function blendWithBackground(color, opacity) {
 // IDENTIFY
 // ════════════════════════════════════════════════════════════════════════
 
-function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance, styleZoom) {
+function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ,
+                    tolerance, styleZoom, visibleLayers, invisibleLayers) {
     const zoom = styleZoom ?? z;
-    const tol = tolerance || tileSize * 0.005;
+    const tol  = tolerance || tileSize * 0.005;
     const tolSq = tol * tol;
     const results = [];
 
     for (const layerName in tile.layers) {
+        if (visibleLayers && !visibleLayers.includes(layerName)) continue;
+        if (invisibleLayers && invisibleLayers.includes(layerName)) continue;
         const layer = tile.layers[layerName];
-        const layerStyle = workerStyles[layerName];
         for (let i = 0; i < layer.length; i++) {
             const feature = layer.feature(i);
             const props = feature.properties || {};
@@ -974,7 +978,8 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 // ОБРАБОТКА ТАЙЛА
 // ════════════════════════════════════════════════════════════════════════
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buildingEdges,
+function processTile(tile, z, x, y, tileSize, maxMerc, is3d,
+                     visibleLayers, invisibleLayers, buildingEdges,
                      exclusionPolygons = [], exclusionLayers = [],
                      maxTextPointsPerTile = 300, maxTextLinesPerTile = 30,
                      styleZoom = z) {
@@ -999,9 +1004,10 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
     const textPoints = [];
     const textLines = [];
 
-    const processLayer = (name) => {
-        if (visibleLayers && !visibleLayers.includes(name)) return;
-        const layer = tile.layers[name];
+const processLayer = (name) => {
+    if (visibleLayers && !visibleLayers.includes(name)) return;
+    if (invisibleLayers && invisibleLayers.includes(name)) return;   // ← добавить
+    const layer = tile.layers[name];
         if (!layer) return;
         const layerStyle = workerStyles[name];
         if (!layerStyle) return;
@@ -1048,11 +1054,11 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                     const text = props.name || '';
                     if (!text) continue;
 
-                    textPoints.push({
-                        x: worldX, z: worldZ, text, layerName: name,
-                        textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
-                        properties: props,
-                        fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 12, geomType) + 'px',
+textPoints.push({
+    x: worldX, z: worldZ, text, layerName: name,
+    textColor: resolveString(layerStyle.textColor, props, styleZoom, '#333333', geomType),
+    properties: props,
+    fontSize: resolveNumber(layerStyle.fontSize, props, styleZoom, 12, geomType) + 'px',
                         fontFamily: resolveString(layerStyle.fontFamily, props, styleZoom, 'sans-serif', geomType),
                         fontWeight: resolveString(layerStyle.fontWeight, props, styleZoom, 'normal', geomType),
                         textFontStyle: resolveString(layerStyle.textFontStyle, props, styleZoom, '', geomType),
@@ -1066,7 +1072,7 @@ function processTile(tile, z, x, y, tileSize, maxMerc, is3d, visibleLayers, buil
                         zoomBounds: {
                             min: resolveNumber(layerStyle.textZoomMin, props, styleZoom, 0, geomType),
                             max: resolveNumber(layerStyle.textZoomMax, props, styleZoom, 24, geomType)
-                        }
+                        }, labelPosition: resolveString(layerStyle.labelPosition, props, styleZoom, '', geomType), 
                     });
                     continue;
                 }

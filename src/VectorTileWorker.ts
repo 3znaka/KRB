@@ -440,6 +440,7 @@ group.add(lineObj);
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,
             visibleLayers: this.visibleLayers,
+            invisibleLayers: this.invisibleLayers,
             buildingEdges: this.buildingEdges,
             exclusionPolygons,
             exclusionLayers,
@@ -529,6 +530,8 @@ return new Promise<any>((resolve, reject) => {
                 : map.currentDiscreteZoom + this.zoomOffset,
             localX: clickLocalX, localZ: clickLocalZ,
             tolerance: opts.tolerance || tileSize * 0.005,
+            visibleLayers: this.visibleLayers,
+    invisibleLayers: this.invisibleLayers,
         }, [buffer]);
     } catch (err) {
         this._pendingWorkerRequests.delete(id);

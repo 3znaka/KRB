@@ -411,6 +411,7 @@ export const VectorTileWorkerMixin = {
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,
             visibleLayers: this.visibleLayers,
+            invisibleLayers: this.invisibleLayers,
             buildingEdges: this.buildingEdges,
             exclusionPolygons,
             exclusionLayers,
@@ -498,6 +499,8 @@ export const VectorTileWorkerMixin = {
                         : map.currentDiscreteZoom + this.zoomOffset,
                     localX: clickLocalX, localZ: clickLocalZ,
                     tolerance: opts.tolerance || tileSize * 0.005,
+                    visibleLayers: this.visibleLayers,
+                    invisibleLayers: this.invisibleLayers,
                 }, [buffer]);
             }
             catch (err) {

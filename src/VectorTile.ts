@@ -185,7 +185,7 @@ this.depthTest = options.depthTest ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
 
-        this.maxVisibleTiles = (options as any).maxVisibleTiles ?? 20;
+        this.maxVisibleTiles = (options as any).maxVisibleTiles ?? 50;
 this.maxTileDistanceFactor = (options as any).maxTileDistanceFactor ?? 4;
 
 this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));

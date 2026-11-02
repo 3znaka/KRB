@@ -148,7 +148,7 @@ export class VectorTile {
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;
-        this.maxVisibleTiles = options.maxVisibleTiles ?? 20;
+        this.maxVisibleTiles = options.maxVisibleTiles ?? 50;
         this.maxTileDistanceFactor = options.maxTileDistanceFactor ?? 4;
         this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));
         this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibleTiles * 2);

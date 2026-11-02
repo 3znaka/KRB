@@ -1,0 +1,107 @@
+import type { TileSpec } from './types.js';
+
+export const OPENMAPTILES_SPEC: TileSpec = {
+  name: 'OpenMapTiles',
+  layers: {
+    landcover:   { geometry: 'polygon' },
+    landuse:     { geometry: 'polygon' },
+    park:        { geometry: 'polygon' },
+    waterway:    { geometry: 'line' },
+    water:       { geometry: 'polygon' },
+    building:    { geometry: 'polygon' },
+    transportation: { geometry: 'line' },
+    aeroway:     { geometry: 'line' },
+    boundary:    { geometry: 'line' },
+    water_name:  { geometry: 'line' },
+
+    poi: {
+      geometry: 'point',
+      poiClasses: {
+        // ── Еда / напитки ──
+        restaurant:  { category: 'food' },
+        cafe:        { category: 'food' },
+        bar:         { category: 'food' },
+        pub:         { category: 'food', icon: 'bar' },
+        beer:        { category: 'food' },
+        fast_food:   { category: 'food' },
+        ice_cream:   { category: 'food' },
+        bakery:      { category: 'food' },
+
+        // ── Здоровье ──
+        hospital:    { category: 'health' },
+        pharmacy:    { category: 'health' },
+        dentist:     { category: 'health' },
+        doctors:     { category: 'health' },
+        veterinary:  { category: 'health' },
+
+        // ── Образование ──
+        school:      { category: 'education' },
+        college:     { category: 'education' },
+        library:     { category: 'education' },
+        kindergarten:{ category: 'education' },
+
+        // ── Культура / развлечения ──
+        museum:      { category: 'culture' },
+        theatre:     { category: 'culture' },
+        cinema:      { category: 'culture' },
+        art_gallery: { category: 'culture' },
+        attraction:  { category: 'culture' },
+        monument:    { category: 'culture' },
+        castle:      { category: 'culture' },
+        place_of_worship: { category: 'culture' },
+        viewpoint:   { category: 'culture' },
+        stadium:     { category: 'sport' },
+        sports_centre: { category: 'sport' },
+        playground:  { category: 'sport' },
+        park:        { category: 'sport' },
+        garden:      { category: 'sport' },
+        zoo:         { category: 'sport' },
+        golf:        { category: 'sport' },
+        music:       { category: 'culture' },
+        escape_game: { category: 'culture', icon: 'video_games' },
+
+        // ── Магазины ──
+        supermarket: { category: 'shopping' },
+        grocery:     { category: 'shopping' },
+        convenience: { category: 'shopping' },
+        butcher:     { category: 'shopping' },
+        shop:        { category: 'shopping' },
+        clothing_store: { category: 'shopping' },
+        alcohol_shop:{ category: 'shopping' },
+        florist:     { category: 'shopping' },
+        hairdresser: { category: 'shopping' },
+        laundry:     { category: 'shopping' },
+
+        // ── Финансы / сервис ──
+        bank:        { category: 'finance' },
+        atm:         { category: 'finance' },
+        toilets:     { category: 'service' },
+        post:        { category: 'service', icon: 'post_office' },
+        police:      { category: 'service' },
+        fire_station:{ category: 'service' },
+        town_hall:   { category: 'service' },
+        information: { category: 'service' },
+        gate:        { category: 'service' },
+        embassy:     { category: 'service', icon: 'diplomatic' },
+
+        // ── Транспорт ──
+        airport:     { category: 'transport' },
+        bus:         { category: 'transport', icon: 'bus_stop' },
+        railway:     { category: 'transport' },
+        ferry_terminal: { category: 'transport' },
+        parking:     { category: 'transport' },
+        fuel:        { category: 'transport' },
+        car:         { category: 'transport' },
+        bicycle:     { category: 'transport' },
+        volleyball:  { category: 'sport' },
+
+        // ── Проживание ──
+        lodging:     { category: 'lodging' },
+      }
+    },
+
+    transportation_name: { geometry: 'line' },
+    aerodrome_label:     { geometry: 'point' },
+    place:               { geometry: 'point' },
+  }
+};

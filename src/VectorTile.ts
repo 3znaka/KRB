@@ -1,6 +1,8 @@
 // VectorTile.ts
 import { THREE, LineMaterial } from './js_TP/tpb.js';
-import { DEFAULT_STYLES } from './vectorTileDefaults.js';
+import { DEFAULT_STYLES, resolveStyle } from './styles/resolve.js';
+import { OPENMAPTILES_SPEC } from './styles/spec.openmaptiles.js';
+import { LIGHT_THEME } from './styles/theme.light.js';
 import { VectorTileDiagnosticsMixin } from './VectorTileDiagnostics.js';
 import { Sprite } from './Sprite.js';
 
@@ -211,8 +213,11 @@ this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibl
         this.lineLabelPlacement = options.lineLabelPlacement ?? 'auto';
 
         this._debug = options.debug ?? false;
-        this._styles = this._mergeStyles(DEFAULT_STYLES, options.styles || {});
-
+const baseStyles =
+    (options.tileSpec || options.theme)
+        ? resolveStyle(options.tileSpec ?? OPENMAPTILES_SPEC, options.theme ?? LIGHT_THEME)
+        : DEFAULT_STYLES;
+this._styles = this._mergeStyles(baseStyles, options.styles || {});
         this._tileGroupRenderOrder = options.tileGroupRenderOrder ?? 1_000_000;
         this._rootGroup = new THREE.Group();
         this._rootGroup.visible = this.visible;

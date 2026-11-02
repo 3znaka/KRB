@@ -1,6 +1,7 @@
 // VectorTileTypes.ts
 import type { THREE } from './js_TP/tpb.js';
 import type { Sprite } from './Sprite.js';
+import type { TileSpec, Theme } from './styles/types.js';
 
 // ============================================================================
 // Options
@@ -64,6 +65,10 @@ export interface VectorTileOptions {
     updateThrottle?: number;
     tileDataCacheMaxSize?: number;
     groupCacheMaxSize?: number;
+        /** Спецификация слоёв тайл-сервера. По умолчанию OpenMapTiles. */
+    tileSpec?: TileSpec;
+    /** Тема оформления. По умолчанию светлая. */
+    theme?: Theme;
 }
 
 export type Stops = Array<[number, number]>;

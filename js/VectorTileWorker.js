@@ -2,7 +2,6 @@
 import { THREE, Line2, LineSegmentsGeometry } from './js_TP/tpb.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
-import { POI_COLORS } from './poiColors.js';
 // ============================================================================
 // Module-level shared blob cache
 // ============================================================================
@@ -251,10 +250,9 @@ export const VectorTileWorkerMixin = {
             if (pt.iconGlyphRatio == null) {
                 pt.iconGlyphRatio = style.iconGlyphRatio;
             }
-            // NEW: Привязываем цвет на основе класса (используя импорт)
             if (pt.iconColor == null) {
                 const cls = pt.properties?.class || pt.class;
-                pt.iconColor = POI_COLORS[cls] || POI_COLORS._default;
+                pt.iconColor = style.classColors?.[cls] ?? '#888888';
             }
         }
     },

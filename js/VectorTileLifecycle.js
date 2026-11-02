@@ -34,16 +34,17 @@ export const VectorTileLifecycleMixin = {
         this._groupCache.forEach((g) => { g.renderOrder = baseOrder; });
     },
     _mergeStyles(base, overrides) {
-        const merged = JSON.parse(JSON.stringify(base));
-        for (const [key, val] of Object.entries(overrides)) {
-            if (val && typeof val === 'object' && !Array.isArray(val) && merged[key]) {
-                merged[key] = this._mergeStyles(merged[key], val);
+        const out = structuredClone(base);
+        for (const key of Object.keys(overrides)) {
+            const v = overrides[key];
+            if (v && typeof v === 'object' && !Array.isArray(v) && out[key] && typeof out[key] === 'object') {
+                out[key] = this._mergeStyles(out[key], v);
             }
             else {
-                merged[key] = val;
+                out[key] = v;
             }
         }
-        return merged;
+        return out;
     },
     addTo(map) {
         if (this._map)

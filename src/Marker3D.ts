@@ -139,6 +139,8 @@ export class Marker3D {
          */
         this._crs = null;
 
+        this._boundingSphereOffset = null;
+
         /** @private @type {string} */        this._primitiveType = options.primitiveType || 'box';
         /** @private @type {number|Array<number>|null} */ this._size = options.size || null;
         /** @private @type {string|null} */   this._modelUrl = options.modelUrl || null;
@@ -351,13 +353,20 @@ export class Marker3D {
 
         this._unregisterInteraction = map.interaction.register(this, {
             getMeshes: () => this._getRaycastMeshes(),
-            getBoundingSphere: () => {
-                if (this._boundingRadius <= 0) return null;
-                return {
-                    center: this._worldPosition,
-                    radius: this._boundingRadius
-                };
-            },
+getBoundingSphere: () => {
+    if (this._boundingRadius <= 0) return null;
+
+    // базовый центр = мировая позиция anchor'а
+    const center = this._map.getVec3().copy(this._worldPosition);
+
+    // добавляем локальное смещение центра AABB (для примитива — с учётом rotation)
+    if (this._boundingSphereOffset) {
+        const off = this._map.getVec3().copy(this._boundingSphereOffset);
+        if (this._object3D) off.applyQuaternion(this._object3D.quaternion);
+        center.add(off);
+    }
+    return { center, radius: this._boundingRadius };
+},
             onHover: this._onHover || null,
             onClick: this._onClick || null,
             getTooltip: this._tooltipText ? () => this._tooltipText : null,
@@ -417,10 +426,15 @@ export class Marker3D {
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
 
-        this._localBox = geometry.boundingBox.clone();
-        this._boundingRadius = geometry.boundingSphere
-            ? geometry.boundingSphere.radius
-            : 0.5 * Math.sqrt(w * w + h * h + d * d);
+this._localBox = geometry.boundingBox.clone();
+this._boundingRadius = geometry.boundingSphere
+    ? geometry.boundingSphere.radius
+    : 0.5 * Math.sqrt(w * w + h * h + d * d);
+
+
+this._boundingSphereOffset = geometry.boundingSphere
+    ? geometry.boundingSphere.center.clone()
+    : new THREE.Vector3();
 
         mesh.renderOrder = MARKER_RENDER_ORDER;
         this._geometry = geometry;
@@ -559,25 +573,25 @@ export class Marker3D {
         // Обновляем мировые матрицы поддерева (родитель отсутствует → world = local).
         model.updateMatrixWorld(true);
 
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        this._height = size.y;
+const box = new THREE.Box3().setFromObject(model);
+const size = box.getSize(new THREE.Vector3());
+this._height = size.y;
+this._boundingRadius = 0.5 * size.length();
 
-        // Радиус bounding-сферы: полдиагонали AABB. Anchor лежит внутри AABB,
-        // значит сфера с центром в anchor и таким радиусом гарантированно
-        // покрывает модель.
-        this._boundingRadius = 0.5 * size.length();
+// НОВОЕ: центр AABB в системе родителя ДО сдвига на anchor
+const boxCenter = box.getCenter(new THREE.Vector3());
 
-        // Точка привязки в локальных координатах Group.
-        const anchorPoint = new THREE.Vector3(
-            box.min.x + this._anchor[0] * size.x,
-            box.min.y + this._anchor[1] * size.y,
-            box.min.z + this._anchor[2] * size.z
-        );
+const anchorPoint = new THREE.Vector3(
+    box.min.x + this._anchor[0] * size.x,
+    box.min.y + this._anchor[1] * size.y,
+    box.min.z + this._anchor[2] * size.z
+);
 
-        // Сдвигаем модель так, чтобы anchor оказался в начале координат Group.
-        model.position.sub(anchorPoint);
-        model.updateMatrix();
+// НОВОЕ: локальное смещение центра AABB относительно нового нуля (= anchor)
+this._boundingSphereOffset = boxCenter.clone().sub(anchorPoint);
+
+model.position.sub(anchorPoint);
+model.updateMatrix();
 
         // Возвращаем модель к прежнему родителю.
         if (prevParent) prevParent.add(model);
@@ -743,6 +757,7 @@ export class Marker3D {
         this._localBox = null;
         this._boundingRadius = 0;
         this._raycastMeshesCache = null;
+        this._boundingSphereOffset = null;
     }
 
     /**

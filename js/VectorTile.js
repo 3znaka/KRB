@@ -179,7 +179,7 @@ export class VectorTile {
         this._throttle = options.updateThrottle ?? 500;
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
         this._groupCacheMaxSize = options.groupCacheMaxSize ?? 100;
-        this.buildings3dOpacity = options.buildings3dOpacity ?? 1.0;
+        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.5;
         this.buildings3dEdgeOpacity = options.buildings3dEdgeOpacity ?? this.buildings3dOpacity;
         this._workerScriptUrls = rawScripts.map((s) => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/'))

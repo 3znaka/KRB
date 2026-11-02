@@ -168,6 +168,11 @@ export const VectorTileWorkerMixin = {
                 const geom = new THREE.BufferGeometry();
                 geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
                 geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
+                if (isTransparent) {
+                    const depthMesh = new THREE.Mesh(geom, this._getBuildingDepthMaterial());
+                    depthMesh.renderOrder = 900_000;
+                    group.add(depthMesh);
+                }
                 const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color, opacity));
                 mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
                 group.add(mesh);

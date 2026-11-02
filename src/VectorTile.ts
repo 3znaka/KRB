@@ -225,7 +225,7 @@ this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibl
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
         this._groupCacheMaxSize = options.groupCacheMaxSize ?? 100;
 
-        this.buildings3dOpacity = options.buildings3dOpacity ?? 1.0;
+        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.5;
         this.buildings3dEdgeOpacity = options.buildings3dEdgeOpacity ?? this.buildings3dOpacity;
 
         this._workerScriptUrls = rawScripts.map((s) => {
@@ -285,6 +285,7 @@ export interface VectorTile {
     _getPointGeometry(radius: number): THREE.BufferGeometry;
     _concatF32(arrays: Float32Array[]): Float32Array;
     _getBuildingMaterial(color: number, opacity?: number): THREE.Material;
+    _getBuildingDepthMaterial(): THREE.Material;
     _getBuildingEdgeMaterial(color: number, opacity?: number): THREE.Material;
 
     // --- worker ---

@@ -116,7 +116,6 @@ export const VectorTileMaterialsMixin = {
         this._lineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
         this._lastStyleZoom = NaN;
-        this._lastDashDiscreteZoom = -1;
         return mat;
     },
     _evalCurve(c, z) {
@@ -135,28 +134,22 @@ export const VectorTileMaterialsMixin = {
         }
         return stops[stops.length - 1][1];
     },
-    _updateDynamicLineMaterials(continuousZoom, discreteZoom) {
+    _updateDynamicLineMaterials(zoom) {
+        // _postUpdate может дёрнуть этот метод уже после removeFromMap — guard.
         if (!this._map)
             return;
-        const contChanged = Math.abs(continuousZoom - this._lastStyleZoom) >= 0.005;
-        const discChanged = discreteZoom !== this._lastDashDiscreteZoom;
-        if (!contChanged && !discChanged)
+        if (Math.abs(zoom - this._lastStyleZoom) < 0.005)
             return;
-        this._lastStyleZoom = continuousZoom;
-        this._lastDashDiscreteZoom = discreteZoom;
+        this._lastStyleZoom = zoom;
         for (const mat of this._lineMaterialsSet) {
             const d = mat.userData.dyn;
             if (!d)
                 continue;
-            const base = this._evalCurve(d.width, continuousZoom);
+            const base = this._evalCurve(d.width, zoom);
             mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
             mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);
-            if (mat.dashed && d.dashZ != null) {
-                // ── ключевое: квантуем dashScale по дискретному зуму ──
-                const targetScale = Math.pow(2, discreteZoom - d.dashZ);
-                if (mat.dashScale !== targetScale)
-                    mat.dashScale = targetScale;
-            }
+            if (mat.dashed && d.dashZ != null)
+                mat.dashScale = Math.pow(2, zoom - d.dashZ);
         }
     },
     _getPointGeometry(radius) {
@@ -195,6 +188,27 @@ export const VectorTileMaterialsMixin = {
             opacity,
             depthTest: true,
             depthWrite: !transparent,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1,
+        });
+        this._fillMaterialCache.set(key, mat);
+        this._managedMaterials.add(mat);
+        return mat;
+    },
+    _getBuildingDepthMaterial() {
+        const key = 'bldDepth';
+        const cached = this._fillMaterialCache.get(key);
+        if (cached)
+            return cached;
+        const mat = new THREE.MeshBasicMaterial({
+            colorWrite: false, // только глубина
+            depthWrite: true,
+            depthTest: true,
+            side: THREE.FrontSide,
+            // ВАЖНО: тот же polygonOffset, что у _getBuildingMaterial.
+            // Без него depth-буфер и цветовой проход разойдутся, и цвет
+            // не пройдёт depthTest (LEQUAL).
             polygonOffset: true,
             polygonOffsetFactor: 1,
             polygonOffsetUnits: 1,

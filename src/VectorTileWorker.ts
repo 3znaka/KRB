@@ -176,17 +176,23 @@ group.add(mesh);
                 g.nrm.push(b.normals);
                 if (b.edgePositions) g.edg.push(b.edgePositions);
             }
-            const opacity = this.buildings3dOpacity;
-            const isTransparent = opacity < 1;
-            for (const g of byColor.values()) {
-                const geom = new THREE.BufferGeometry();
-                geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
-                geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
-                const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color, opacity));
-                mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
-                group.add(mesh);
+const opacity = this.buildings3dOpacity;
+const isTransparent = opacity < 1;
+for (const g of byColor.values()) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
+    geom.setAttribute('normal',   new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
+    if (isTransparent) {
+        const depthMesh = new THREE.Mesh(geom, this._getBuildingDepthMaterial());
+        depthMesh.renderOrder = 900_000;
+        group.add(depthMesh);
+    }
 
-                if (this.buildingEdges && g.edg.length) {
+    const mesh = new THREE.Mesh(geom, this._getBuildingMaterial(g.color, opacity));
+    mesh.renderOrder = VECTOR_TILE_RENDER_ORDER.BUILDING;
+    group.add(mesh);
+
+    if (this.buildingEdges && g.edg.length) {
                     const edgeGeom = new THREE.BufferGeometry();
                     edgeGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
                     const lines = new THREE.LineSegments(

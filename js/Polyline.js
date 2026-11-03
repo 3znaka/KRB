@@ -1,14 +1,17 @@
 /**
  * Polyline — полилиния с толстой линией (Line2), высотами узлов,
- * видимостью по зуму и подписью. После addTo() мутабелен:
- * цвет / толщина / прозрачность / видимость / текст / вершины
- * меняются без пересоздания объекта.
+ * видимостью по зуму и подписью.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * подпись, altitude и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся только специфика линии: вершины, Line2-геометрия,
+ * altitudeMode, экранные данные для подписи, raycast-интерактив.
  *
  * @module polyline
  */
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 function pointToSegmentDistance(point, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
     const ap = new THREE.Vector3().subVectors(point, a);
@@ -23,19 +26,16 @@ function pointToSegmentDistance(point, a, b) {
 // =====================================================================
 // Polyline
 // =====================================================================
-export class Polyline {
+export class Polyline extends SpatialObject {
     // ── Данные ──
     _positions;
     _crsCode;
     _crs;
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     _color;
     _opacity;
     _width;
     _altitudeMode;
-    _altitudeOffset;
-    _minZoom;
-    _maxZoom;
     _depthTest;
     _depthWrite;
     // ── Высоты ──
@@ -44,19 +44,10 @@ export class Polyline {
     _absPositions = [];
     _nodeHeights = [];
     _cachedHeights = null;
-    // ── Подпись ──
-    _title;
-    _titleOffset;
-    _titleAlign;
-    _titleStyle;
-    _titleMinZoom;
-    _titleMaxZoom;
+    // ── Подпись: placement + vertical align ──
     _titlePlacement;
     _titleVerticalAlign;
-    _titleAllowOverflow;
-    _titlePriority;
     _labelT = 0.5;
-    _labelObj = null;
     _screenData = {
         points3D: null,
         segLengths: null,
@@ -66,15 +57,14 @@ export class Polyline {
         map: null,
         valid: false,
     };
-    // ── Присоединение ──
-    _map = null;
-    _layer = null;
+    // ── 3D-объекты ──
     _line = null;
     _material = null;
     _geometry = null;
-    // ── NEW: пользовательская видимость ──
-    _userVisible = true;
+    // ── Интерактив ──
+    _unregisterInteraction = null;
     constructor(options) {
+        super();
         if (!options.positions?.length || options.positions.length < 2) {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }
@@ -85,40 +75,33 @@ export class Polyline {
         this._opacity = options.opacity ?? 1;
         this._width = options.width || 2;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
-        this._altitudeOffset = options.altitudeOffset ?? 10;
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._depthTest = options.depthTest ?? false;
         this._depthWrite = options.depthWrite ?? false;
         this._heightUpdateInterval = options.heightUpdateInterval ?? 500;
         this._title = options.title ?? '';
-        this._titleOffset = options.titleOffset ?? [0, 0];
         this._titleAlign = options.titleAlign ?? 'center';
         this._titleStyle = options.titleStyle ?? {};
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         this._titlePlacement = options.titlePlacement ?? 'center';
         this._titleVerticalAlign = options.titleVerticalAlign ?? 'center';
+        this._userTitleOffset = options.titleOffset
+            ? [options.titleOffset[0], options.titleOffset[1]]
+            : null;
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
+        this._resolveTitleOffset();
+        this._tooltipText = options.tooltip ?? '';
+        this._onClick = options.onClick ?? null;
+        this._onHover = options.onHover ?? null;
     }
     // =================================================================
-    // Присоединение / отсоединение
+    // Хуки SpatialObject
     // =================================================================
-    addTo(map) {
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
+    _onAttached(map) {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
@@ -131,6 +114,7 @@ export class Polyline {
             this._nodeHeights.push(Number.isFinite(h) ? h : 0);
         }
         this._cachedHeights = null;
+        this._lastHeightUpdateTime = 0;
         this._geometry = new LineGeometry();
         const canvas = map.renderer.domElement;
         this._material = new LineMaterial({
@@ -145,11 +129,13 @@ export class Polyline {
         this._line = new Line2(this._geometry, this._material);
         this._line.renderOrder = 999;
         map.worldGroup.add(this._line);
-        if (this._title && map.textManager) {
-            this._labelObj = map.textManager.addLabel(this);
-        }
+        this._registerInteraction(map);
     }
-    remove() {
+    _teardown() {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
         if (this._line) {
             this._line.parent?.remove(this._line);
             this._geometry?.dispose();
@@ -158,27 +144,97 @@ export class Polyline {
             this._geometry = null;
             this._material = null;
         }
-        if (this._labelObj && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._labelObj);
-            this._labelObj = null;
-        }
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
         this._crs = null;
         this._screenData.valid = false;
+        this._screenData.points3D = null;
+        this._screenData.segLengths = null;
+        this._screenData.map = null;
+        this._screenData.camera = null;
+    }
+    _applyHidden() {
+        if (this._line)
+            this._line.visible = false;
+        this._screenData.valid = false;
+    }
+    _onTooltipChanged() {
+        if (this._map)
+            this._registerInteraction(this._map);
+    }
+    _onAltitudeChanged() {
+        this._cachedHeights = null;
+        this._lastHeightUpdateTime = 0;
+        this._screenData.valid = false;
+    }
+    getLabelType() { return 'line'; }
+    getTitleVerticalAlign() {
+        return this._titleVerticalAlign || 'center';
+    }
+    isVisible() {
+        return this._line?.visible ?? false;
+    }
+    getScreenPosition() {
+        return this.getScreenPositionAt(this._labelT);
     }
     // =================================================================
-    // Мутабельность
+    // Интерактив
     // =================================================================
-    /** Меняет цвет линии (O(1), без перестройки геометрии). */
+    _registerInteraction(map) {
+        if (!map.interaction || typeof map.interaction.register !== 'function')
+            return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (!this._onClick && !this._onHover && !this._tooltipText)
+            return;
+        this._unregisterInteraction = map.interaction.register(this, {
+            getMeshes: () => this._line ? [this._line] : [],
+            getBoundingSphere: () => {
+                if (this._absPositions.length === 0)
+                    return null;
+                const wgPos = map.worldGroup.position;
+                let minX = Infinity, minY = Infinity, minZ = Infinity;
+                let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+                for (let i = 0; i < this._absPositions.length; i++) {
+                    const [ax, az] = this._absPositions[i];
+                    const y = this._cachedHeights?.[i] ?? this._altitude;
+                    const x = ax + wgPos.x;
+                    const z = az + wgPos.z;
+                    if (x < minX)
+                        minX = x;
+                    if (x > maxX)
+                        maxX = x;
+                    if (y < minY)
+                        minY = y;
+                    if (y > maxY)
+                        maxY = y;
+                    if (z < minZ)
+                        minZ = z;
+                    if (z > maxZ)
+                        maxZ = z;
+                }
+                const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                return {
+                    center: map.getVec3().set((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+                    radius: 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz),
+                };
+            },
+            onHover: this._onHover || null,
+            onClick: this._onClick || null,
+            getTooltip: this._tooltipText ? () => this._tooltipText : null,
+            isVisible: () => this._line?.visible ?? false,
+        });
+    }
+    // =================================================================
+    // Стиль
+    // =================================================================
     setColor(color) {
         this._color = color;
         if (this._material?.color)
             this._material.color.set(color);
         return this;
     }
-    /** Меняет толщину линии в пикселях. */
+    getColor() { return this._color; }
     setWidth(width) {
         if (!(width > 0))
             return this;
@@ -189,7 +245,7 @@ export class Polyline {
         }
         return this;
     }
-    /** Меняет прозрачность (0..1). */
+    getWidth() { return this._width; }
     setOpacity(opacity) {
         const v = Math.max(0, Math.min(1, opacity));
         this._opacity = v;
@@ -203,39 +259,48 @@ export class Polyline {
         }
         return this;
     }
-    /** Управляет видимостью (перекрывает зум-ограничения и видимость слоя). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
-        if (!this._line)
-            return this;
-        if (!this._userVisible) {
-            this._line.visible = false;
-            this._screenData.valid = false;
+    getOpacity() { return this._opacity; }
+    // =================================================================
+    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // =================================================================
+    setAltitudeMode(mode) {
+        this._altitudeMode = mode;
+        this._onAltitudeChanged();
+        return this;
+    }
+    getAltitudeMode() { return this._altitudeMode; }
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setAltitudeOffset(offset) { return this.setAltitude(offset); }
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getAltitudeOffset() { return this.getAltitude(); }
+    // =================================================================
+    // Depth
+    // =================================================================
+    setDepthTest(depthTest) {
+        this._depthTest = !!depthTest;
+        if (this._material) {
+            this._material.depthTest = this._depthTest;
+            this._material.needsUpdate = true;
         }
         return this;
     }
-    /** Меняет текст подписи (или убирает, если пусто). */
-    setTitle(text) {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm)
-            return this;
-        if (this._labelObj) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._labelObj);
-            }
-            else {
-                tm.removeLabel(this._labelObj);
-                this._labelObj = null;
-                if (this._title)
-                    this._labelObj = tm.addLabel(this);
-            }
-        }
-        else if (this._title) {
-            this._labelObj = tm.addLabel(this);
+    getDepthTest() { return this._depthTest; }
+    setDepthWrite(depthWrite) {
+        this._depthWrite = !!depthWrite;
+        if (this._material) {
+            this._material.depthWrite = this._depthWrite;
+            this._material.needsUpdate = true;
         }
         return this;
     }
+    getDepthWrite() { return this._depthWrite; }
+    // =================================================================
+    // CRS
+    // =================================================================
+    getCRS() { return this._crsCode; }
+    // =================================================================
+    // Позиции
+    // =================================================================
     /**
      * Заменяет вершины. Пересчитывает `_absPositions` (если линия уже
      * на карте). Геометрия пересоберётся на следующем кадре через
@@ -257,7 +322,7 @@ export class Polyline {
             this._nodeHeights.push(Number.isFinite(h) ? h : 0);
         }
         this._cachedHeights = null;
-        this._lastHeightUpdateTime = 0; // force recompute
+        this._lastHeightUpdateTime = 0;
         return this;
     }
     /** Возвращает копию исходных координат (в `crs` полилинии). */
@@ -280,12 +345,9 @@ export class Polyline {
     _update(map) {
         if (!this._map || !this._line)
             return;
-        const zoom = this._map.continuousZoom;
-        const visible = this._userVisible &&
-            (this._layer ? this._layer.visible : true) &&
-            zoom >= this._minZoom && zoom <= this._maxZoom;
-        this._line.visible = visible;
-        if (!visible) {
+        if (!this._isWithinView()) {
+            this._line.visible = false;
+            this._isVisible = false;
             this._screenData.valid = false;
             return;
         }
@@ -302,7 +364,7 @@ export class Polyline {
         if (map.objectRenderDistanceFactor > 0 && this._absPositions.length >= 2) {
             const wgPos = map.worldGroup.position;
             const points3D = this._absPositions.map(([ax, az], i) => {
-                const height = this._cachedHeights?.[i] ?? this._altitudeOffset;
+                const height = this._cachedHeights?.[i] ?? this._altitude;
                 return new THREE.Vector3(ax + wgPos.x, height + wgPos.y, az + wgPos.z);
             });
             let minDist = Infinity;
@@ -313,6 +375,7 @@ export class Polyline {
             }
             if (minDist > map.maxObjectDistance) {
                 this._line.visible = false;
+                this._isVisible = false;
                 this._screenData.valid = false;
                 return;
             }
@@ -321,6 +384,8 @@ export class Polyline {
         if (this._title) {
             this._computeScreenData();
         }
+        this._line.visible = true;
+        this._isVisible = true;
     }
     _updateHeights() {
         if (!this._map)
@@ -338,10 +403,10 @@ export class Polyline {
             if (clamp) {
                 const worldX = absX + wgPos.x;
                 const worldZ = absZ + wgPos.z;
-                y = this._map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset + nodeH;
+                y = this._map.getSurfaceHeightAt(worldX, worldZ) + this._altitude + nodeH;
             }
             else {
-                y = this._altitudeOffset + nodeH;
+                y = this._altitude + nodeH;
             }
             heights[i] = y;
         }
@@ -376,7 +441,7 @@ export class Polyline {
             return;
         }
         const points3D = pts.map(([ax, az], i) => {
-            let y = this._altitudeOffset + (this._nodeHeights[i] ?? 0);
+            let y = this._altitude + (this._nodeHeights[i] ?? 0);
             if (this._cachedHeights)
                 y = this._cachedHeights[i];
             return new THREE.Vector3(ax + wgPos.x, y + wgPos.y, az + wgPos.z);
@@ -451,27 +516,11 @@ export class Polyline {
         }
     }
     // =================================================================
-    // TextManager contract
+    // Подпись: параметры вдоль линии
     // =================================================================
-    getText() { return this._title; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    getLabelType() { return 'line'; }
-    isVisible() { return this._line?.visible ?? false; }
     getVisibleInterval() {
         return this._screenData.valid ? this._screenData.visibleInterval : null;
     }
-    getAllowOverflow() { return this._titleAllowOverflow; }
-    getPriority() { return this._titlePriority; }
     getScreenPositionAt(t) {
         const data = this._screenData;
         if (!data.valid || !data.map)
@@ -555,11 +604,6 @@ export class Polyline {
         }
     }
     getPlacement() { return this._titlePlacement; }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleVerticalAlign() {
-        return this._titleVerticalAlign || 'center';
-    }
-    getTitleOffset() { return this._titleOffset; }
     // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================

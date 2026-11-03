@@ -3,16 +3,21 @@
  * мутабелен: позиция, размер, поворот, anchor, цвет, видимость, текст
  * и тултип меняются без пересоздания объекта.
  *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * подпись, altitude и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся только 3D-специфика: GLTF, примитивы, bbox/frustum,
+ * анимация размера, рельеф, depth-флаги, `_titlePlacement`.
+ *
  * @module Marker3D
  */
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 const MARKER_RENDER_ORDER = 1000;
 // =====================================================================
 // Marker3D
 // =====================================================================
-export class Marker3D {
+export class Marker3D extends SpatialObject {
     // ── Данные позиции ──
     _coord;
     _crsCode;
@@ -20,43 +25,27 @@ export class Marker3D {
     _lon = null;
     _lat = null;
     _positionSetAsLonLat = false;
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     _primitiveType;
     _size;
     _modelUrl;
-    _altitude;
     _altitudeMode;
     _rotation;
     _anchor;
-    _minZoom;
-    _maxZoom;
     _playAnimation;
     _color;
-    // ── Подпись ──
-    _title;
-    _titleStyle;
-    _titleMinZoom;
-    _titleMaxZoom;
+    _depthTest;
+    _depthWrite;
+    // ── Подпись: размещение (влияет на offset и verticalAlign) ──
     _titlePlacement;
-    _titleAlign;
-    _titleOffset;
-    // ── Интерактив ──
-    _tooltipText;
-    _onClick;
-    _onHover;
+    // ── Интерактив / кластеризация ──
     _clusterable;
     _unregisterInteraction = null;
-    // ── Присоединение ──
-    _map = null;
-    _layer = null;
     // ── 3D-объекты ──
     _object3D = null;
     _modelRoot = null;
     _geometry = null;
     _material = null;
-    _textLabel = null;
-    _isVisible = false;
-    _userVisible = true;
     _lastHeightUpdateTime = 0;
     _cachedWorldY = 0;
     _isModelLoading = false;
@@ -80,6 +69,7 @@ export class Marker3D {
     _tempFrustum;
     _tempProjScreenMatrix;
     constructor(options) {
+        super();
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker3D: options.position is required [x, y]');
         }
@@ -96,6 +86,10 @@ export class Marker3D {
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._playAnimation = options.playAnimation !== undefined ? options.playAnimation : true;
+        this._color = options.color ?? 0x3388ff;
+        this._depthTest = options.depthTest ?? true;
+        this._depthWrite = options.depthWrite ?? true;
+        this._isModel = !!this._modelUrl;
         this._title = options.title ?? '';
         this._titleStyle = options.titleStyle ?? {};
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
@@ -106,72 +100,39 @@ export class Marker3D {
         }
         else {
             switch (this._titlePlacement) {
-                case 'top':
-                case 'bottom':
-                default:
-                    this._titleAlign = 'center';
-                    break;
                 case 'left':
                     this._titleAlign = 'right';
                     break;
                 case 'right':
                     this._titleAlign = 'left';
                     break;
-            }
-        }
-        if (options.titleOffset !== undefined) {
-            this._titleOffset = options.titleOffset;
-        }
-        else {
-            switch (this._titlePlacement) {
                 case 'top':
-                    this._titleOffset = [0, -10];
-                    break;
                 case 'bottom':
-                    this._titleOffset = [0, 10];
+                default:
+                    this._titleAlign = 'center';
                     break;
-                case 'left':
-                    this._titleOffset = [-10, 0];
-                    break;
-                case 'right':
-                    this._titleOffset = [10, 0];
-                    break;
-                default: this._titleOffset = [0, -10];
             }
         }
+        this._userTitleOffset = options.titleOffset
+            ? [options.titleOffset[0], options.titleOffset[1]]
+            : null;
+        this._resolveTitleOffset();
         this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
         this._clusterable = options.clusterable ?? false;
-        this._color = options.color ?? 0x3388ff;
-        this._isModel = !!this._modelUrl;
         this._worldPosition = new THREE.Vector3();
         this._tempBox = new THREE.Box3();
         this._tempFrustum = new THREE.Frustum();
         this._tempProjScreenMatrix = new THREE.Matrix4();
     }
     // =================================================================
-    // Присоединение / отсоединение
+    // Хуки SpatialObject
     // =================================================================
-    addTo(map) {
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
+    _onAttached(map) {
         const newCrs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-        // Пре-аттач setLngLat без явного crs: _coord был записан как
-        // EPSG:4326. Пересчитываем, если inputCRS другой.
         if (this._positionSetAsLonLat
             && this._lon !== null
             && this._lat !== null
@@ -183,7 +144,6 @@ export class Marker3D {
         }
         this._positionSetAsLonLat = false;
         this._crs = newCrs;
-        // Производные WGS84 для getLngLat.
         const ll = this._crs.toLonLat(this._coord);
         this._lon = ll[0];
         this._lat = ll[1];
@@ -198,10 +158,64 @@ export class Marker3D {
         }
         map.worldGroup.add(this._object3D);
         this._registerInteraction(map);
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
+    }
+    _teardown() {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (this._mixer) {
+            this._mixer.stopAllAction();
+            this._mixer = null;
+            this._mixerClock = null;
+        }
+        if (this._object3D) {
+            if (this._object3D.parent)
+                this._object3D.parent.remove(this._object3D);
+            if (this._geometry)
+                this._geometry.dispose();
+            if (this._material)
+                this._material.dispose();
+            this._object3D = null;
+            this._modelRoot = null;
+            this._geometry = null;
+            this._material = null;
+        }
+        this._crs = null;
+        this._worldPosition.set(0, 0, 0);
+        this._localBox = null;
+        this._boundingRadius = 0;
+        this._raycastMeshesCache = null;
+        this._boundingSphereOffset = null;
+        this._isModelLoading = false;
+        this._modelPromise = null;
+        this._sizeAnimation = null;
+    }
+    _applyHidden() {
+        if (this._object3D)
+            this._object3D.visible = false;
+    }
+    _defaultTitleOffset() {
+        switch (this._titlePlacement) {
+            case 'top': return [0, -10];
+            case 'bottom': return [0, 10];
+            case 'left': return [-10, 0];
+            case 'right': return [10, 0];
+            default: return [0, -10];
         }
     }
+    /** Смена высоты — сбросить кэш рельефа. */
+    _onAltitudeChanged() {
+        this._lastHeightUpdateTime = 0;
+    }
+    _onTooltipChanged() {
+        if (this._map)
+            this._registerInteraction(this._map);
+    }
+    getLabelType() { return 'point'; }
+    // =================================================================
+    // Интерактив
+    // =================================================================
     _registerInteraction(map) {
         if (!map.interaction || typeof map.interaction.register !== 'function')
             return;
@@ -249,6 +263,9 @@ export class Marker3D {
         this._raycastMeshesCache = meshes;
         return meshes;
     }
+    // =================================================================
+    // Построение примитива / GLB
+    // =================================================================
     _createPrimitive() {
         const [w, h, d] = this._normalizePrimitiveSize(this._size);
         this._height = h;
@@ -271,6 +288,8 @@ export class Marker3D {
         const material = new THREE.MeshStandardMaterial({
             color: this._color,
             roughness: 0.5,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite,
         });
         const mesh = new THREE.Mesh(geometry, material);
         const offset = new THREE.Vector3((0.5 - this._anchor[0]) * w, (0.5 - this._anchor[1]) * h, (0.5 - this._anchor[2]) * d);
@@ -305,10 +324,6 @@ export class Marker3D {
         }
         throw new Error('Marker3D: invalid size type');
     }
-    /**
-     * Пересоздаёт примитив в текущей позиции/повороте, освобождая
-     * старые geometry и material. Используется `setSize` и `setAnchor`.
-     */
     _rebuildPrimitiveInPlace() {
         if (!this._object3D)
             return;
@@ -345,8 +360,7 @@ export class Marker3D {
                 if (this._playAnimation && gltf.animations && gltf.animations.length > 0) {
                     this._mixer = new THREE.AnimationMixer(model);
                     for (const clip of gltf.animations) {
-                        const action = this._mixer.clipAction(clip);
-                        action.play();
+                        this._mixer.clipAction(clip).play();
                     }
                     this._mixerClock = new THREE.Clock();
                 }
@@ -356,10 +370,18 @@ export class Marker3D {
                 this._originalModelPosition = model.position.clone();
                 this._applyModelSizeAndAnchor(model);
                 model.traverse((child) => {
-                    if (child.isMesh) {
-                        child.renderOrder = MARKER_RENDER_ORDER;
-                        child.castShadow = true;
-                        child.receiveShadow = true;
+                    if (!child.isMesh)
+                        return;
+                    child.renderOrder = MARKER_RENDER_ORDER;
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    if (child.material) {
+                        const mats = Array.isArray(child.material) ? child.material : [child.material];
+                        for (const m of mats) {
+                            m.depthTest = this._depthTest;
+                            m.depthWrite = this._depthWrite;
+                            m.needsUpdate = true;
+                        }
                     }
                 });
                 this._modelRoot = model;
@@ -383,8 +405,7 @@ export class Marker3D {
         model.position.copy(this._originalModelPosition);
         model.rotation.set(...this._rotation);
         if (this._size) {
-            const scaleFactors = this._calculateModelScale(this._size, this._originalModelSize);
-            model.scale.copy(scaleFactors);
+            model.scale.copy(this._calculateModelScale(this._size, this._originalModelSize));
         }
         model.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(model);
@@ -426,9 +447,8 @@ export class Marker3D {
         throw new Error('Marker3D: invalid size type');
     }
     // =================================================================
-    // Мутабельность
+    // Позиция / CRS
     // =================================================================
-    /** Устанавливает позицию в WGS84 [lon, lat]. */
     setLngLat(lonLat) {
         if (!lonLat || lonLat.length !== 2)
             return this;
@@ -455,7 +475,6 @@ export class Marker3D {
         this._lastHeightUpdateTime = 0;
         return this;
     }
-    /** Координаты в WGS84 [lon, lat], либо `null`. */
     getLngLat() {
         if (this._lon !== null && this._lat !== null)
             return [this._lon, this._lat];
@@ -470,19 +489,28 @@ export class Marker3D {
         }
         return null;
     }
-    /** Меняет высоту (интерпретация зависит от `altitudeMode`). */
-    setAltitude(altitude) {
-        this._altitude = altitude;
-        this._lastHeightUpdateTime = 0;
-        return this;
+    getLonLat() { return this.getLngLat(); }
+    /** Возвращает исходные координаты в собственной СК маркера. */
+    getPosition() { return [this._coord[0], this._coord[1]]; }
+    /** Возвращает код СК маркера или null. */
+    getCRS() { return this._crsCode; }
+    /** Центр (по факту — позиция) в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter() {
+        const ll = this.getLngLat();
+        return ll ? [ll[0], ll[1]] : null;
     }
-    /** Меняет режим высоты. */
+    // =================================================================
+    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // =================================================================
     setAltitudeMode(mode) {
         this._altitudeMode = mode;
-        this._lastHeightUpdateTime = 0;
+        this._onAltitudeChanged();
         return this;
     }
-    /** Меняет углы поворота (радианы). */
+    getAltitudeMode() { return this._altitudeMode; }
+    // =================================================================
+    // Rotation / anchor / size / color
+    // =================================================================
     setRotation(rotation) {
         this._rotation = [rotation[0], rotation[1], rotation[2]];
         if (!this._object3D)
@@ -496,11 +524,9 @@ export class Marker3D {
         }
         return this;
     }
-    /**
-     * Меняет точку привязки (нормализованные [0..1] по bounding box).
-     * Пересчитывает геометрию/смещение модели — «центр» маркера
-     * визуально остаётся на той же географической точке.
-     */
+    getRotation() {
+        return [this._rotation[0], this._rotation[1], this._rotation[2]];
+    }
     setAnchor(anchor) {
         this._anchor = [anchor[0], anchor[1], anchor[2]];
         if (!this._object3D)
@@ -514,7 +540,9 @@ export class Marker3D {
         }
         return this;
     }
-    /** Меняет размер. См. описание `options.size` для примитивов и GLB. */
+    getAnchor() {
+        return [this._anchor[0], this._anchor[1], this._anchor[2]];
+    }
     setSize(size) {
         this._size = size;
         if (!this._object3D)
@@ -529,9 +557,7 @@ export class Marker3D {
         }
         return this;
     }
-    /** Возвращает текущую спецификацию размера. */
     getSize() { return this._size; }
-    /** Меняет цвет примитива или материалов GLB-модели. */
     setColor(color) {
         this._color = color;
         if (!this._object3D)
@@ -550,53 +576,56 @@ export class Marker3D {
         }
         return this;
     }
-    /** Управляет видимостью (перекрывает зум и видимость слоя). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
+    getColor() { return this._color; }
+    /** Участвует ли маркер в кластеризации. */
+    getClusterable() { return this._clusterable; }
+    // =================================================================
+    // Depth
+    // =================================================================
+    setDepthTest(depthTest) {
+        this._depthTest = !!depthTest;
+        this._applyDepthFlags();
+        return this;
+    }
+    getDepthTest() { return this._depthTest; }
+    setDepthWrite(depthWrite) {
+        this._depthWrite = !!depthWrite;
+        this._applyDepthFlags();
+        return this;
+    }
+    getDepthWrite() { return this._depthWrite; }
+    _applyDepthFlags() {
         if (!this._object3D)
-            return this;
-        if (!this._userVisible) {
-            this._object3D.visible = false;
-            this._isVisible = false;
-        }
-        return this;
-    }
-    /** Меняет тултип. При необходимости — регистрирует интерактив. */
-    setTooltip(html) {
-        this._tooltipText = html ?? '';
-        if (this._map)
-            this._registerInteraction(this._map);
-        return this;
-    }
-    /** Меняет текст подписи (пустая строка — убрать). */
-    setTitle(text) {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm)
-            return this;
-        if (this._textLabel) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._textLabel);
-            }
-            else {
-                tm.removeLabel(this._textLabel);
-                this._textLabel = null;
-                if (this._title)
-                    this._textLabel = tm.addLabel(this);
+            return;
+        const meshes = [];
+        if (this._object3D.isMesh)
+            meshes.push(this._object3D);
+        else
+            this._object3D.traverse((child) => { if (child.isMesh)
+                meshes.push(child); });
+        for (const m of meshes) {
+            const mat = m.material;
+            if (!mat)
+                continue;
+            const mats = Array.isArray(mat) ? mat : [mat];
+            for (const mm of mats) {
+                let changed = false;
+                if (mm.depthTest !== this._depthTest) {
+                    mm.depthTest = this._depthTest;
+                    changed = true;
+                }
+                if (mm.depthWrite !== this._depthWrite) {
+                    mm.depthWrite = this._depthWrite;
+                    changed = true;
+                }
+                if (changed)
+                    mm.needsUpdate = true;
             }
         }
-        else if (this._title) {
-            this._textLabel = tm.addLabel(this);
-        }
-        return this;
     }
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom, maxZoom) {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
-        return this;
-    }
-    /** Запускает анимацию размера. */
+    // =================================================================
+    // Анимация размера
+    // =================================================================
     animateSize(newSize, duration = 1000, easing = 'linear') {
         let startSize = this._size ?? [100, 100, 100];
         if (this._size === null && this._isModel && this._originalModelSize) {
@@ -611,58 +640,6 @@ export class Marker3D {
         };
         return this;
     }
-    /** Центр (по факту — позиция) в WGS84: `[lon, lat]`, либо `null`. */
-    getCenter() {
-        const ll = this.getLngLat();
-        return ll ? [ll[0], ll[1]] : null;
-    }
-    // =================================================================
-    // Удаление
-    // =================================================================
-    remove() {
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (this._mixer) {
-            this._mixer.stopAllAction();
-            this._mixer = null;
-            this._mixerClock = null;
-        }
-        if (this._object3D) {
-            if (this._object3D.parent)
-                this._object3D.parent.remove(this._object3D);
-            if (this._geometry)
-                this._geometry.dispose();
-            if (this._material)
-                this._material.dispose();
-            this._object3D = null;
-            this._modelRoot = null;
-            this._geometry = null;
-            this._material = null;
-        }
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        if (this._layer) {
-            this._layer._removeRef(this);
-            this._layer = null;
-        }
-        this._map = null;
-        this._crs = null;
-        this._isVisible = false;
-        this._worldPosition.set(0, 0, 0);
-        this._localBox = null;
-        this._boundingRadius = 0;
-        this._raycastMeshesCache = null;
-        this._boundingSphereOffset = null;
-        this._isModelLoading = false;
-        this._modelPromise = null;
-    }
-    // =================================================================
-    // Обновление на кадре
-    // =================================================================
     _updateSizeAnimation(now) {
         if (!this._sizeAnimation)
             return;
@@ -685,8 +662,7 @@ export class Marker3D {
                 progress = t;
                 break;
         }
-        const currentSize = this._lerpSize(anim.startSize, anim.endSize, progress);
-        this.setSize(currentSize);
+        this.setSize(this._lerpSize(anim.startSize, anim.endSize, progress));
         if (t >= 1) {
             this._sizeAnimation = null;
             this.setSize(anim.endSize);
@@ -706,23 +682,15 @@ export class Marker3D {
         }
         return end;
     }
+    // =================================================================
+    // Обновление на кадре
+    // =================================================================
     _update(_map) {
         if (!this._map || !this._object3D)
             return;
-        const mapInstance = this._map;
-        const zoom = mapInstance.continuousZoom;
-        if (!this._userVisible) {
-            this._object3D.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (this._layer && !this._layer.visible) {
-            this._object3D.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._object3D.visible = false;
+        const map = this._map;
+        if (!this._isWithinView()) {
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -731,16 +699,16 @@ export class Marker3D {
             const delta = this._mixerClock.getDelta();
             this._mixer.update(delta);
         }
-        const [absWorldX, absWorldZ] = mapInstance.project(this._coord, this._crs);
-        const wgPos = mapInstance.worldGroup.position;
+        const [absWorldX, absWorldZ] = map.project(this._coord, this._crs);
+        const wgPos = map.worldGroup.position;
         const worldX = absWorldX + wgPos.x;
         const worldZ = absWorldZ + wgPos.z;
         let worldY = 0;
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > 500) {
-                mapInstance.ensureTileForPoint(worldX, worldZ);
-                this._cachedWorldY = mapInstance.getSurfaceHeightAt(worldX, worldZ);
+                map.ensureTileForPoint(worldX, worldZ);
+                this._cachedWorldY = map.getSurfaceHeightAt(worldX, worldZ);
                 this._lastHeightUpdateTime = now;
             }
             worldY = this._cachedWorldY + this._altitude;
@@ -750,15 +718,15 @@ export class Marker3D {
         }
         this._object3D.position.set(absWorldX, worldY, absWorldZ);
         this._worldPosition.set(worldX, worldY, worldZ);
-        if (mapInstance.view.objectRenderDistanceFactor > 0) {
-            const dist = mapInstance.camera.position.distanceTo(this._worldPosition);
-            if (dist > mapInstance.maxObjectDistance) {
-                this._object3D.visible = false;
+        if (map.view.objectRenderDistanceFactor > 0) {
+            const dist = map.camera.position.distanceTo(this._worldPosition);
+            if (dist > map.maxObjectDistance) {
+                this._applyHidden();
                 this._isVisible = false;
                 return;
             }
         }
-        this._tempProjScreenMatrix.multiplyMatrices(mapInstance.camera.projectionMatrix, mapInstance.camera.matrixWorldInverse);
+        this._tempProjScreenMatrix.multiplyMatrices(map.camera.projectionMatrix, map.camera.matrixWorldInverse);
         this._tempFrustum.setFromProjectionMatrix(this._tempProjScreenMatrix);
         if (this._isModel) {
             this._tempBox.setFromObject(this._object3D);
@@ -768,12 +736,12 @@ export class Marker3D {
             this._tempBox.copy(this._localBox).applyMatrix4(this._object3D.matrixWorld);
         }
         else {
-            this._object3D.visible = false;
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
         if (!this._tempFrustum.intersectsBox(this._tempBox)) {
-            this._object3D.visible = false;
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -781,22 +749,17 @@ export class Marker3D {
         this._isVisible = true;
     }
     // =================================================================
-    // TextManager contract
+    // TextManager-специфика Marker3D
     // =================================================================
-    getText() { return this._title; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
+    getTitleVerticalAlign() {
+        switch (this._titlePlacement) {
+            case 'bottom': return 'top';
+            case 'left':
+            case 'right': return 'center';
+            case 'top':
+            default: return 'bottom';
+        }
     }
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    getLabelType() { return 'point'; }
-    isVisible() { return this._isVisible; }
     getScreenPosition() {
         if (!this._isVisible || !this._object3D || !this._map)
             return null;
@@ -849,43 +812,14 @@ export class Marker3D {
         }
         const centerX = (minX + maxX) / 2;
         const centerY = (minY + maxY) / 2;
-        let x, y;
         switch (this._titlePlacement) {
-            case 'bottom':
-                x = centerX;
-                y = maxY;
-                break;
-            case 'left':
-                x = minX;
-                y = centerY;
-                break;
-            case 'right':
-                x = maxX;
-                y = centerY;
-                break;
+            case 'bottom': return { x: centerX, y: maxY };
+            case 'left': return { x: minX, y: centerY };
+            case 'right': return { x: maxX, y: centerY };
             case 'top':
-            default:
-                x = centerX;
-                y = minY;
-                break;
-        }
-        return { x, y };
-    }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleOffset() { return this._titleOffset; }
-    getTitleVerticalAlign() {
-        switch (this._titlePlacement) {
-            case 'bottom': return 'top';
-            case 'left':
-            case 'right': return 'center';
-            case 'top':
-            default: return 'bottom';
+            default: return { x: centerX, y: minY };
         }
     }
-    getAllowOverflow() { return false; }
-    getPriority() { return 0; }
-    /** Участвует ли маркер в кластеризации (информационный геттер). */
-    getClusterable() { return this._clusterable; }
     // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================

@@ -4,12 +4,17 @@
  * цвет, видимость, подпись, тултип, границы видимости меняются без
  * пересоздания объекта.
  *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * подпись, altitude и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся специфика Area3D: кольца, полигон-геометрия, GLTF,
+ * fit/rotate/anchor, bbox/frustum, `_titlePlacement`.
+ *
  * @module Area3D
  */
 
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { Layer } from './Layers.js';
+import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -23,8 +28,6 @@ export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'cone';
 export type Area3DFit = 'stretch' | 'contain';
 export type AltitudeMode = 'clampToGround' | 'absolute';
 export type TitlePlacement = 'top' | 'bottom' | 'left' | 'right';
-export type TitleAlignH = 'left' | 'center' | 'right';
-export type TitleAlignV = 'top' | 'center' | 'bottom';
 export type Anchor = [number, number, number];
 
 export interface Area3DOptions {
@@ -62,46 +65,30 @@ const AREA3D_RENDER_ORDER = 1000;
 // Area3D
 // =====================================================================
 
-export class Area3D {
+export class Area3D extends SpatialObject {
     // ── Данные ──
     private _rings: Area3DRing[];
     private _crsCode: string | null;
     private _crs: any | null;
 
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     private _modelUrl: string | null;
     private _primitiveType: PrimitiveType;
     private _size: SizeSpec | null;
     private _fit: Area3DFit;
     private _rotate: number; // 0..3
-    private _altitude: number;
     private _altitudeMode: AltitudeMode;
     private _anchor: Anchor;
-    private _minZoom: number;
-    private _maxZoom: number;
     private _playAnimation: boolean;
     private _color: string | number;
     private _depthTest: boolean;
     private _depthWrite: boolean;
 
-    // ── Подпись ──
-    private _title: string;
-    private _titleStyle: Record<string, string | number>;
-    private _titleMinZoom: number;
-    private _titleMaxZoom: number;
+    // ── Подпись: размещение (влияет на offset и verticalAlign) ──
     private _titlePlacement: TitlePlacement;
-    private _titleAlign: TitleAlignH;
-    private _titleOffset: [number, number];
 
     // ── Интерактив ──
-    private _tooltipText: string;
-    private _onClick: ((event: MouseEvent, area: Area3D) => void) | null;
-    private _onHover: ((hovered: boolean) => void) | null;
     private _unregisterInteraction: (() => void) | null = null;
-
-    // ── Присоединение ──
-    private _map: any = null;
-    private _layer: Layer | null = null;
 
     // ── 3D-иерархия ──
     private _group: any;
@@ -134,7 +121,6 @@ export class Area3D {
 
     // ── Подпись (экран) ──
     private _centroidScreenPos: { x: number; y: number } | null = null;
-    private _textLabel: any = null;
 
     // ── Bounding sphere (для interaction) ──
     private _boundingRadius = 0;
@@ -143,10 +129,9 @@ export class Area3D {
     private _raycastMeshesCache: any[] | null = null;
     private _tempBox: any;
 
-    // ── NEW: пользовательская видимость ──
-    private _userVisible = true;
-
     constructor(options: Area3DOptions) {
+        super();
+
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }
@@ -176,16 +161,14 @@ export class Area3D {
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         this._titlePlacement = options.titlePlacement ?? 'top';
 
-        if (options.titleAlign !== undefined) {
-            this._titleAlign = options.titleAlign;
-        } else {
-            this._titleAlign = this._defaultTitleAlign();
-        }
-        if (options.titleOffset !== undefined) {
-            this._titleOffset = options.titleOffset;
-        } else {
-            this._titleOffset = this._defaultTitleOffset();
-        }
+        this._titleAlign = options.titleAlign !== undefined
+            ? options.titleAlign
+            : this._defaultTitleAlign();
+
+        this._userTitleOffset = options.titleOffset
+            ? [options.titleOffset[0], options.titleOffset[1]]
+            : null;
+        this._resolveTitleOffset();
 
         this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
@@ -207,40 +190,17 @@ export class Area3D {
         switch (this._titlePlacement) {
             case 'top':
             case 'bottom': return 'center';
-            case 'left': return 'right';
-            case 'right': return 'left';
-            default: return 'center';
-        }
-    }
-
-    private _defaultTitleOffset(): [number, number] {
-        switch (this._titlePlacement) {
-            case 'top': return [0, -10];
-            case 'bottom': return [0, 10];
-            case 'left': return [-10, 0];
-            case 'right': return [10, 0];
-            default: return [0, -10];
+            case 'left':   return 'right';
+            case 'right':  return 'left';
+            default:       return 'center';
         }
     }
 
     // =================================================================
-    // Присоединение / отсоединение
+    // Хуки SpatialObject
     // =================================================================
 
-    addTo(map: any): this {
-        if (this._map) this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        (personalLayer as any).add(this);
-        return this;
-    }
-
-    _attach(map: any, layer: Layer): void {
-        if (this._map === map && this._layer === layer) return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
-
+    protected _onAttached(map: any): void {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
@@ -256,13 +216,91 @@ export class Area3D {
             this._createPrimitive();
         }
 
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
-        }
-
         this._registerInteraction(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
     }
+
+    protected _teardown(): void {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (this._mixer) {
+            this._mixer.stopAllAction();
+            this._mixer = null;
+            this._mixerClock = null;
+        }
+        if (this._group) {
+            this._group.parent?.remove(this._group);
+            if (this._object3D) {
+                this._object3D.traverse((child: any) => {
+                    if (child.isMesh) {
+                        child.geometry?.dispose();
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach((m: any) => m.dispose());
+                        } else {
+                            child.material?.dispose();
+                        }
+                    }
+                });
+                this._object3D = null;
+            }
+        }
+        this._crs = null;
+        this._raycastMeshesCache = null;
+        this._boundingRadius = 0;
+        this._boundingCenterYLocal = 0;
+        this._centroidScreenPos = null;
+        this._isModelLoading = false;
+        this._modelPromise = null;
+    }
+
+    protected _applyHidden(): void {
+        if (this._group) this._group.visible = false;
+    }
+
+    protected _defaultTitleOffset(): [number, number] {
+        switch (this._titlePlacement) {
+            case 'top':    return [0, -10];
+            case 'bottom': return [0, 10];
+            case 'left':   return [-10, 0];
+            case 'right':  return [10, 0];
+            default:       return [0, -10];
+        }
+    }
+
+    protected _onTooltipChanged(): void {
+        if (this._map) this._registerInteraction(this._map);
+    }
+
+    protected _onAltitudeChanged(): void {
+        this._lastHeightUpdateTime = 0;
+    }
+
+    getLabelType(): 'area3d' { return 'area3d'; }
+
+    override isVisible(): boolean {
+        return this._group?.visible ?? false;
+    }
+
+    override getTitleVerticalAlign(): TitleAlignV {
+        switch (this._titlePlacement) {
+            case 'bottom': return 'top';
+            case 'left':
+            case 'right':  return 'center';
+            case 'top':
+            default:       return 'bottom';
+        }
+    }
+
+    override getScreenPosition(): { x: number; y: number } | null {
+        this._updateScreenPosition();
+        return this._centroidScreenPos;
+    }
+
+    // =================================================================
+    // Интерактив
+    // =================================================================
 
     private _registerInteraction(map: any): void {
         if (!map.interaction || typeof map.interaction.register !== 'function') return;
@@ -397,11 +435,11 @@ export class Area3D {
 
         let geometry: any;
         switch (this._primitiveType.toLowerCase() as PrimitiveType) {
-            case 'sphere': geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
+            case 'sphere':   geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
             case 'cylinder': geometry = new THREE.CylinderGeometry(w / 2, w / 2, h, 32); break;
-            case 'cone': geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
+            case 'cone':     geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
             case 'box':
-            default: geometry = new THREE.BoxGeometry(w, h, d); break;
+            default:         geometry = new THREE.BoxGeometry(w, h, d); break;
         }
         const material = new THREE.MeshStandardMaterial({
             color: this._color,
@@ -449,8 +487,12 @@ export class Area3D {
                         child.castShadow = true;
                         child.receiveShadow = true;
                         if (child.material) {
-                            child.material.depthTest = this._depthTest;
-                            child.material.depthWrite = this._depthWrite;
+                            const mats = Array.isArray(child.material) ? child.material : [child.material];
+                            for (const m of mats) {
+                                m.depthTest = this._depthTest;
+                                m.depthWrite = this._depthWrite;
+                                m.needsUpdate = true;
+                            }
                         }
                     }
                 });
@@ -586,43 +628,38 @@ export class Area3D {
     }
 
     // =================================================================
-    // Мутабельность
+    // Позиция / CRS
     // =================================================================
 
-    /** Управляет видимостью (перекрывает зум и видимость слоя). */
-    setVisible(visible: boolean): this {
-        this._userVisible = !!visible;
-        if (!this._group) return this;
-        if (!this._userVisible) this._group.visible = false;
-        return this;
+    /** Центроид внешнего кольца в СК Area3D. */
+    getPosition(): [number, number] {
+        const outer = this._rings[0];
+        if (!outer || !outer.length) return [0, 0];
+        let sx = 0, sy = 0;
+        for (const p of outer) { sx += p[0]; sy += p[1]; }
+        return [sx / outer.length, sy / outer.length];
     }
 
-    /** Меняет тултип. При необходимости — регистрирует интерактив. */
-    setTooltip(html: string): this {
-        this._tooltipText = html ?? '';
-        if (this._map) this._registerInteraction(this._map);
-        return this;
+    /** WGS84-центр bbox — алиас `getCenter()`. */
+    getLngLat(): LonLat | null {
+        return this.getCenter();
     }
 
-    /** Меняет текст подписи (пустая строка — убрать). */
-    setTitle(text: string): this {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm) return this;
+    getCRS(): string | null { return this._crsCode; }
 
-        if (this._textLabel) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._textLabel);
-            } else {
-                tm.removeLabel(this._textLabel);
-                this._textLabel = null;
-                if (this._title) this._textLabel = tm.addLabel(this);
-            }
-        } else if (this._title) {
-            this._textLabel = tm.addLabel(this);
-        }
-        return this;
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter(): LonLat | null {
+        const b = this.getBounds('EPSG:4326');
+        if (!b) return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
     }
+
+    // =================================================================
+    // Кольца
+    // =================================================================
 
     /** Меняет кольца. Пересобирает параметры полигона и трансформации. */
     setRings(rings: Area3DRing[]): this {
@@ -640,49 +677,64 @@ export class Area3D {
         return this;
     }
 
-    /** Меняет размер (см. описание `options.size`). */
+    getRings(): Area3DRing[] {
+        return this._rings.map(r => r.map(p => [...p] as Area3DCoord));
+    }
+
+    // =================================================================
+    // Размер / fit / rotate / anchor
+    // =================================================================
+
     setSize(size: SizeSpec | null): this {
         this._size = size;
         if (this._object3D) this._applyModelTransform();
         return this;
     }
 
-    /** Меняет режим вписывания (`'stretch'` или `'contain'`). */
+    getSize(): SizeSpec | null { return this._size; }
+
     setFit(fit: Area3DFit): this {
         this._fit = fit;
         if (this._object3D) this._applyModelTransform();
         return this;
     }
 
-    /** Меняет поворот модели (0..3, кратно 90°). */
+    getFit(): Area3DFit { return this._fit; }
+
     setRotate(rotate: number): this {
         this._rotate = Math.min(3, Math.max(0, Math.floor(rotate)));
         if (this._object3D) this._applyModelTransform();
         return this;
     }
 
-    /** Меняет anchor (нормализованные [0..1] по bounding box). */
+    getRotate(): number { return this._rotate; }
+
     setAnchor(anchor: Anchor): this {
         this._anchor = [anchor[0], anchor[1], anchor[2]];
         if (this._object3D) this._applyModelTransform();
         return this;
     }
 
-    /** Меняет высоту (интерпретация зависит от `altitudeMode`). */
-    setAltitude(altitude: number): this {
-        this._altitude = altitude;
-        this._lastHeightUpdateTime = 0;
-        return this;
+    getAnchor(): Anchor {
+        return [this._anchor[0], this._anchor[1], this._anchor[2]];
     }
 
-    /** Меняет режим высоты. */
+    // =================================================================
+    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // =================================================================
+
     setAltitudeMode(mode: AltitudeMode): this {
         this._altitudeMode = mode;
-        this._lastHeightUpdateTime = 0;
+        this._onAltitudeChanged();
         return this;
     }
 
-    /** Меняет цвет примитива или материалов GLB-модели. */
+    getAltitudeMode(): AltitudeMode { return this._altitudeMode; }
+
+    // =================================================================
+    // Цвет / depth
+    // =================================================================
+
     setColor(color: string | number): this {
         this._color = color;
         if (!this._object3D) return this;
@@ -700,115 +752,44 @@ export class Area3D {
         return this;
     }
 
-    /** Включает/отключает depthTest на всех материалах объекта. */
+    getColor(): string | number { return this._color; }
+
     setDepthTest(depthTest: boolean): this {
         this._depthTest = !!depthTest;
-        if (!this._object3D) return this;
-        const meshes: any[] = [];
-        if (this._object3D.isMesh) meshes.push(this._object3D);
-        else this._object3D.traverse((child: any) => { if (child.isMesh) meshes.push(child); });
-        for (const m of meshes) {
-            const mat = m.material;
-            if (!mat) continue;
-            if (Array.isArray(mat)) mat.forEach((x: any) => { if (x.depthTest !== this._depthTest) { x.depthTest = this._depthTest; x.needsUpdate = true; } });
-            else if (mat.depthTest !== this._depthTest) { mat.depthTest = this._depthTest; mat.needsUpdate = true; }
-        }
+        this._applyDepthFlag('depthTest', this._depthTest);
         return this;
     }
 
-    /** Включает/отключает depthWrite на всех материалах объекта. */
+    getDepthTest(): boolean { return this._depthTest; }
+
     setDepthWrite(depthWrite: boolean): this {
         this._depthWrite = !!depthWrite;
-        if (!this._object3D) return this;
+        this._applyDepthFlag('depthWrite', this._depthWrite);
+        return this;
+    }
+
+    getDepthWrite(): boolean { return this._depthWrite; }
+
+    private _applyDepthFlag(field: 'depthTest' | 'depthWrite', value: boolean): void {
+        if (!this._object3D) return;
         const meshes: any[] = [];
         if (this._object3D.isMesh) meshes.push(this._object3D);
         else this._object3D.traverse((child: any) => { if (child.isMesh) meshes.push(child); });
         for (const m of meshes) {
             const mat = m.material;
             if (!mat) continue;
-            if (Array.isArray(mat)) mat.forEach((x: any) => { if (x.depthWrite !== this._depthWrite) { x.depthWrite = this._depthWrite; x.needsUpdate = true; } });
-            else if (mat.depthWrite !== this._depthWrite) { mat.depthWrite = this._depthWrite; mat.needsUpdate = true; }
-        }
-        return this;
-    }
-
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom: number, maxZoom: number): this {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
-        return this;
-    }
-
-    // =================================================================
-    // Геттеры
-    // =================================================================
-
-    getRings(): Area3DRing[] {
-        return this._rings.map(r => r.map(p => [...p] as Area3DCoord));
-    }
-
-    getSize(): SizeSpec | null { return this._size; }
-    getFit(): Area3DFit { return this._fit; }
-    getRotate(): number { return this._rotate; }
-    getAnchor(): Anchor { return [this._anchor[0], this._anchor[1], this._anchor[2]]; }
-    getAltitude(): number { return this._altitude; }
-    getAltitudeMode(): AltitudeMode { return this._altitudeMode; }
-
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
-    getCenter(): LonLat | null {
-        const b = this.getBounds('EPSG:4326');
-        if (!b) return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
-    }
-
-    // =================================================================
-    // Удаление
-    // =================================================================
-
-    remove(): void {
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (this._mixer) {
-            this._mixer.stopAllAction();
-            this._mixer = null;
-            this._mixerClock = null;
-        }
-        if (this._group) {
-            this._group.parent?.remove(this._group);
-            if (this._object3D) {
-                this._object3D.traverse((child: any) => {
-                    if (child.isMesh) {
-                        child.geometry?.dispose();
-                        if (Array.isArray(child.material)) {
-                            child.material.forEach((m: any) => m.dispose());
-                        } else {
-                            child.material?.dispose();
-                        }
-                    }
-                });
-                this._object3D = null;
+            const mats = Array.isArray(mat) ? mat : [mat];
+            for (const mm of mats) {
+                if (mm[field] !== value) {
+                    mm[field] = value;
+                    mm.needsUpdate = true;
+                }
             }
         }
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        if (this._layer) {
-            (this._layer as any)._removeRef(this);
-            this._layer = null;
-        }
-        this._map = null;
-        this._crs = null;
-        this._raycastMeshesCache = null;
-        this._boundingRadius = 0;
-        this._boundingCenterYLocal = 0;
-        this._centroidScreenPos = null;
     }
+
+    /** Участвует ли объект в кластеризации (информационный геттер). */
+    getClusterable(): boolean { return false; }
 
     // =================================================================
     // Обновление на кадре
@@ -817,18 +798,9 @@ export class Area3D {
     _update(map: any): void {
         if (!this._map || !this._group) return;
 
-        if (!this._userVisible) {
-            this._group.visible = false;
-            return;
-        }
-
-        const zoom = map.continuousZoom;
-        if (this._layer && !(this._layer as any).visible) {
-            this._group.visible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
+        if (!this._isWithinView()) {
+            this._applyHidden();
+            this._isVisible = false;
             return;
         }
 
@@ -838,12 +810,14 @@ export class Area3D {
                 .add(map.worldGroup.position);
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
-                this._group.visible = false;
+                this._applyHidden();
+                this._isVisible = false;
                 return;
             }
         }
 
         this._group.visible = true;
+        this._isVisible = true;
 
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
@@ -909,61 +883,13 @@ export class Area3D {
         let x: number, y: number;
         switch (this._titlePlacement) {
             case 'bottom': x = centerX; y = maxY; break;
-            case 'left': x = minX; y = centerY; break;
-            case 'right': x = maxX; y = centerY; break;
+            case 'left':   x = minX;    y = centerY; break;
+            case 'right':  x = maxX;    y = centerY; break;
             case 'top':
-            default: x = centerX; y = minY; break;
+            default:       x = centerX; y = minY; break;
         }
         this._centroidScreenPos = { x, y };
     }
-
-    // =================================================================
-    // TextManager contract
-    // =================================================================
-
-    getText(): string { return this._title; }
-
-    getTextStyle(): Record<string, string | number> {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-
-    getTextZoomBounds(): { min: number; max: number } {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-
-    getLabelType(): 'area3d' { return 'area3d'; }
-
-    isVisible(): boolean { return this._group?.visible ?? false; }
-
-    getScreenPosition(): { x: number; y: number } | null {
-        this._updateScreenPosition();
-        return this._centroidScreenPos;
-    }
-
-    getTitleAlign(): TitleAlignH { return this._titleAlign; }
-
-    getTitleOffset(): [number, number] { return this._titleOffset; }
-
-    getTitleVerticalAlign(): TitleAlignV {
-        switch (this._titlePlacement) {
-            case 'bottom': return 'top';
-            case 'left':
-            case 'right': return 'center';
-            case 'top':
-            default: return 'bottom';
-        }
-    }
-
-    getAllowOverflow(): boolean { return false; }
-
-    getPriority(): number { return 0; }
-
-    getClusterable(): boolean { return false; }
 
     // =================================================================
     // KrbMap#fitTo / getBounds

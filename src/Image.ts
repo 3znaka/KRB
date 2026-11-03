@@ -1,15 +1,23 @@
 /**
- * Image — плоское изображение на карте. После `addTo()` мутабелен:
- * позиция/узлы, размер, поворот, anchor, прозрачность, blending,
- * цвет фона (через blending), видимость, подпись и тултип меняются
- * без пересоздания объекта.
+ * Image — плоское изображение на карте (nodes / position + size + anchor).
+ * После `addTo()` мутабелен.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * подпись, altitude (= elevationOffset), zoom bounds и TextManager-контракт
+ * берутся из базового класса.
+ *
+ * Специфика Image: собственный статический реестр интерактивных
+ * (`Image._interactiveImages` + глобальные DOM-слушатели на canvas) вместо
+ * `map.interaction`, две модели геометрии (nodes / position+size+anchor+
+ * rotation), текстура, blending и "alwaysOnTop" как единственный control
+ * над depthTest/polygonOffset.
  *
  * @module Image
  */
 
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { Layer } from './Layers.js';
+import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -18,8 +26,8 @@ import { Layer } from './Layers.js';
 export type LonLat = [number, number];
 export type ImageSource = string | HTMLImageElement | HTMLCanvasElement;
 export type ImageBlending = 'normal' | 'additive' | 'multiply' | 'subtract' | number;
-export type ImageTitleAlign = 'left' | 'center' | 'right';
-export type ImageTitleAlignV = 'top' | 'center' | 'bottom';
+export type ImageTitleAlign = TitleAlignH;
+export type ImageTitleAlignV = TitleAlignV;
 
 export interface ImageNode {
     lon: number;
@@ -45,7 +53,12 @@ export interface ImageOptions {
     minZoom?: number;
     maxZoom?: number;
     alwaysOnTop?: boolean;
+
+    /** Глобальный подъём по Y (world-метры), добавляется к alt каждого узла/центра. */
+    altitude?: number;
+    /** @deprecated Используйте `altitude`. */
     elevationOffset?: number;
+
     polygonOffset?: number;
     title?: string;
     titleStyle?: Record<string, string | number>;
@@ -80,7 +93,7 @@ interface DelegatedHandlers {
 // Image
 // =====================================================================
 
-export class Image {
+export class Image extends SpatialObject {
     // ── Данные ──
     private _source: ImageSource;
     private _nodes: ImageNode[] | null;
@@ -88,50 +101,26 @@ export class Image {
     private _crsCode: string | null;
     private _crs: any | null;
 
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     private _size: ImageSize;
     private _anchor: ImageAnchor;
     private _rotation: ImageRotation;
     private _opacity: number;
     private _blending: ImageBlending;
-    private _minZoom: number;
-    private _maxZoom: number;
-
     private _alwaysOnTop: boolean;
-    private _elevationOffset: number;
     private _polygonOffset: number;
 
-    // ── Подпись ──
-    private _title: string;
-    private _titleStyle: Record<string, string | number>;
-    private _titleMinZoom: number;
-    private _titleMaxZoom: number;
-    private _titleAlign: ImageTitleAlign;
-    private _titleOffset: [number, number];
-    private _titleAllowOverflow: boolean;
-    private _titlePriority: number;
-
     // ── Интерактив ──
-    private _onClick: ((event: MouseEvent, image: Image) => void) | null;
-    private _onHover: ((hovered: boolean) => void) | null;
     private _isHovered = false;
-    private _tooltipText: string;
 
     // ── Внутреннее состояние ──
-    private _map: any = null;
-    private _layer: Layer | null = null;
     private _group: any;
     private _mesh: any = null;
     private _geometry: any = null;
     private _material: any = null;
     private _texture: any = null;
-    private _textLabel: any = null;
-    private _isVisible = false;
-    private _userVisible = true;
     private _worldPositions: any[] = [];
     private _centroidWorld: any;
-    private _lastWorldGroupPos: any;
-    private _lastDiscreteZoom = -1;
     private _boundingSphereRadius = 0;
     private _tempVec3: any;
     private _dirtyGeometry = true;
@@ -146,6 +135,8 @@ export class Image {
     private static _clickMoveThreshold = 5;
 
     constructor(options: ImageOptions) {
+        super();
+
         if (!options.source) {
             throw new Error('Image: options.source is required');
         }
@@ -165,9 +156,7 @@ export class Image {
         this._maxZoom = options.maxZoom ?? Infinity;
 
         this._alwaysOnTop = options.alwaysOnTop === true;
-        this._elevationOffset = Number.isFinite(options.elevationOffset)
-            ? (options.elevationOffset as number)
-            : 0;
+        this._altitude = options.altitude ?? options.elevationOffset ?? 0;
         this._polygonOffset = Number.isFinite(options.polygonOffset)
             ? (options.polygonOffset as number)
             : DEFAULT_POLYGON_OFFSET;
@@ -177,22 +166,89 @@ export class Image {
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         this._titleAlign = options.titleAlign ?? 'center';
-        this._titleOffset = options.titleOffset ?? [0, 0];
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
+        this._userTitleOffset = options.titleOffset
+            ? [options.titleOffset[0], options.titleOffset[1]]
+            : null;
+        this._resolveTitleOffset();
 
+        this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
-        this._tooltipText = options.tooltip ?? '';
 
         this._group = new THREE.Group();
         this._centroidWorld = new THREE.Vector3();
-        this._lastWorldGroupPos = new THREE.Vector3();
         this._tempVec3 = new THREE.Vector3();
+    }
 
+    // =================================================================
+    // Хуки SpatialObject
+    // =================================================================
+
+    protected _onAttached(map: any): void {
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+
+        this._loadTexture();
+        this._buildGeometry(map);
+        map.worldGroup.add(this._group);
+
+        // Регистрируем только если есть интерактив.
         if (this._onClick || this._onHover || this._tooltipText) {
             Image._registerInteractive(this);
         }
+    }
+
+    protected _teardown(): void {
+        if (this._map) Image._unregisterInteractive(this);
+
+        if (this._group.parent) this._group.parent.remove(this._group);
+        this._disposeGeometry();
+        this._disposeTexture();
+
+        this._crs = null;
+        this._isHovered = false;
+        this._dirtyGeometry = true;
+        this._worldPositions.length = 0;
+    }
+
+    protected _applyHidden(): void {
+        if (this._group) this._group.visible = false;
+    }
+
+    protected _onTooltipChanged(): void {
+        if (!this._map) return;
+        if (this._onClick || this._onHover || this._tooltipText) {
+            Image._registerInteractive(this);
+        } else {
+            Image._unregisterInteractive(this);
+        }
+    }
+
+    protected _onAltitudeChanged(): void {
+        this._dirtyGeometry = true;
+        if (this._map) this._buildGeometry(this._map);
+    }
+
+    getLabelType(): 'image' { return 'image'; }
+
+    override getTitleVerticalAlign(): ImageTitleAlignV { return 'bottom'; }
+
+    override getScreenPosition(): { x: number; y: number } | null {
+        if (!this._isVisible || !this._group || !this._map) return null;
+        const worldPos = this._tempVec3
+            .copy(this._group.position)
+            .add(this._map.worldGroup.position);
+        worldPos.y += this._boundingSphereRadius * 0.1;
+        const screenPos = worldPos.clone().project(this._map.camera);
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) return null;
+        const canvas = this._map.renderer.domElement;
+        return {
+            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
+        };
     }
 
     // =================================================================
@@ -276,69 +332,9 @@ export class Image {
     }
 
     // =================================================================
-    // Присоединение / отсоединение
-    // =================================================================
-
-    addTo(map: any): this {
-        if (this._map) this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        (personalLayer as any).add(this);
-        return this;
-    }
-
-    _attach(map: any, layer: Layer): void {
-        if (this._map === map && this._layer === layer) return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
-
-        this._crs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : map.inputCRS;
-
-        this._loadTexture();
-        this._buildGeometry(map);
-        map.worldGroup.add(this._group);
-
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
-        }
-
-        if ((this._onClick || this._onHover || this._tooltipText)
-            && !Image._eventListenersAttached) {
-            Image._attachGlobalListeners();
-        }
-
-        this._lastWorldGroupPos.copy(map.worldGroup.position);
-        this._lastDiscreteZoom = map.currentDiscreteZoom;
-    }
-
-    remove(): void {
-        if (this._map) Image._unregisterInteractive(this);
-
-        if (this._group.parent) this._group.parent.remove(this._group);
-        this._disposeGeometry();
-        this._disposeTexture();
-
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
-        this._crs = null;
-        this._isVisible = false;
-        this._worldPositions.length = 0;
-    }
-
-    // =================================================================
     // Мутабельность
     // =================================================================
 
-    /** Меняет источник (URL / HTMLImageElement / Canvas). */
     setSource(source: ImageSource): this {
         if (!source) {
             console.warn('Image.setSource: source is empty');
@@ -356,7 +352,8 @@ export class Image {
         return this;
     }
 
-    /** Меняет прозрачность (0..1). */
+    getSource(): ImageSource { return this._source; }
+
     setOpacity(opacity: number): this {
         this._opacity = Math.max(0, Math.min(1, opacity));
         if (this._material) {
@@ -366,7 +363,8 @@ export class Image {
         return this;
     }
 
-    /** Меняет режим смешивания. */
+    getOpacity(): number { return this._opacity; }
+
     setBlending(blending: ImageBlending): this {
         this._blending = blending;
         if (this._material) {
@@ -375,111 +373,28 @@ export class Image {
         return this;
     }
 
-    /** Управляет видимостью (перекрывает зум-ограничения и видимость слоя). */
-    setVisible(visible: boolean): this {
-        this._userVisible = !!visible;
-        if (!this._group) return this;
-        if (!this._userVisible) {
-            this._group.visible = false;
-            this._isVisible = false;
-        }
-        return this;
+    getBlending(): ImageBlending { return this._blending; }
+
+    // ── Altitude (= elevationOffset) ──────────────────────────────────
+
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setElevationOffset(offset: number): this {
+        return this.setAltitude(offset);
     }
 
-    /** Меняет текст подписи (пустая строка — убрать). */
-    setTitle(text: string): this {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm) return this;
-
-        if (this._textLabel) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._textLabel);
-            } else {
-                tm.removeLabel(this._textLabel);
-                this._textLabel = null;
-                if (this._title) this._textLabel = tm.addLabel(this);
-            }
-        } else if (this._title) {
-            this._textLabel = tm.addLabel(this);
-        }
-        return this;
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getElevationOffset(): number {
+        return this.getAltitude();
     }
+
+    // ── AlwaysOnTop / PolygonOffset ──────────────────────────────────
 
     /**
-     * Меняет тултип. Если ранее не было ни `onClick`, ни `onHover`,
-     * ни `tooltip` — регистрирует изображение в статическом реестре
-     * интерактивных и привязывает глобальные слушатели.
+     * Единственный control над depth для Image: `alwaysOnTop` одновременно
+     * переключает `depthTest` и `polygonOffset` на материале. Отдельных
+     * `setDepthTest`/`setDepthWrite` у Image нет — this._alwaysOnTop и есть
+     * абстракция глубины.
      */
-    setTooltip(html: string): this {
-        const wasEmpty = !this._tooltipText;
-        this._tooltipText = html ?? '';
-        if (this._map && wasEmpty && this._tooltipText
-            && !Image._interactiveImages.has(this)) {
-            Image._registerInteractive(this);
-        }
-        return this;
-    }
-
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom: number, maxZoom: number): this {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
-        return this;
-    }
-
-    /** Устанавливает узлы (углы) изображения. */
-    setNodes(nodes: ImageNode[]): this {
-        if (!Array.isArray(nodes) || (nodes.length !== 3 && nodes.length !== 4)) {
-            throw new Error('Image.setNodes: nodes must be an array of 3 or 4 objects');
-        }
-        this._nodes = nodes;
-        this._dirtyGeometry = true;
-        if (this._map) this._buildGeometry(this._map);
-        return this;
-    }
-
-    /** Меняет всё сразу: позицию, размер, anchor и поворот. */
-    setPositionRotation(params: SizeAnchorRotationParams = {}): this {
-        if (params.position) this._position = params.position;
-        if (params.size) this._size = params.size;
-        if (params.anchor) this._anchor = params.anchor;
-        if (params.rotation) this._rotation = params.rotation;
-        this._dirtyGeometry = true;
-        if (this._map) this._buildGeometry(this._map);
-        return this;
-    }
-
-    /** Меняет только позицию (в режиме anchor). */
-    setPosition(position: ImagePosition): this {
-        return this.setPositionRotation({ position });
-    }
-
-    /** Меняет только размер (в режиме anchor). */
-    setSize(size: ImageSize): this {
-        return this.setPositionRotation({ size });
-    }
-
-    /** Меняет только anchor (в режиме anchor). */
-    setAnchor(anchor: ImageAnchor): this {
-        return this.setPositionRotation({ anchor });
-    }
-
-    /** Меняет только поворот (в режиме anchor). */
-    setRotation(rotation: ImageRotation): this {
-        return this.setPositionRotation({ rotation });
-    }
-
-    /** Меняет дополнительный подъём над `alt` (world-метры). */
-    setElevationOffset(offset: number): this {
-        if (!Number.isFinite(offset)) return this;
-        this._elevationOffset = offset;
-        this._dirtyGeometry = true;
-        if (this._map) this._buildGeometry(this._map);
-        return this;
-    }
-
-    /** Отключает/включает depthTest (изображение поверх всей сцены). */
     setAlwaysOnTop(alwaysOnTop: boolean): this {
         this._alwaysOnTop = !!alwaysOnTop;
         if (this._material) {
@@ -490,7 +405,9 @@ export class Image {
         return this;
     }
 
-    /** Устанавливает polygonOffset (отрицательное значение — к камере). */
+    getAlwaysOnTop(): boolean { return this._alwaysOnTop; }
+
+    /** Сдвиг по глубине (отрицательное значение — ближе к камере). */
     setPolygonOffset(offset: number): this {
         if (!Number.isFinite(offset)) return this;
         this._polygonOffset = offset;
@@ -501,16 +418,50 @@ export class Image {
         return this;
     }
 
-    // =================================================================
-    // Геттеры
-    // =================================================================
+    getPolygonOffset(): number { return this._polygonOffset; }
 
-    getSource(): ImageSource { return this._source; }
+    // ── Узлы / позиция / размер / anchor / поворот ───────────────────
+
+    setNodes(nodes: ImageNode[]): this {
+        if (!Array.isArray(nodes) || (nodes.length !== 3 && nodes.length !== 4)) {
+            throw new Error('Image.setNodes: nodes must be an array of 3 or 4 objects');
+        }
+        this._nodes = nodes;
+        this._dirtyGeometry = true;
+        if (this._map) this._buildGeometry(this._map);
+        return this;
+    }
 
     getNodes(): ImageNode[] | null {
         return this._nodes
             ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
             : null;
+    }
+
+    setPositionRotation(params: SizeAnchorRotationParams = {}): this {
+        if (params.position) this._position = params.position;
+        if (params.size) this._size = params.size;
+        if (params.anchor) this._anchor = params.anchor;
+        if (params.rotation) this._rotation = params.rotation;
+        this._dirtyGeometry = true;
+        if (this._map) this._buildGeometry(this._map);
+        return this;
+    }
+
+    setPosition(position: ImagePosition): this {
+        return this.setPositionRotation({ position });
+    }
+
+    setSize(size: ImageSize): this {
+        return this.setPositionRotation({ size });
+    }
+
+    setAnchor(anchor: ImageAnchor): this {
+        return this.setPositionRotation({ anchor });
+    }
+
+    setRotation(rotation: ImageRotation): this {
+        return this.setPositionRotation({ rotation });
     }
 
     getPosition(): ImagePosition | null {
@@ -523,11 +474,6 @@ export class Image {
 
     getRotation(): ImageRotation { return [...this._rotation] as ImageRotation; }
 
-    getOpacity(): number { return this._opacity; }
-
-    getBlending(): ImageBlending { return this._blending; }
-
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
     getCenter(): LonLat | null {
         const b = this.getBounds('EPSG:4326');
         if (!b) return null;
@@ -594,13 +540,12 @@ export class Image {
     }
 
     private _computeWorldPositionsFromNodes(): any[] {
-        if (!this._nodes || this._nodes.length < 3) return [];
+        if (!this._nodes || this._nodes.length < 3 || !this._map) return [];
 
         const map = this._map;
-        const yOffset = this._elevationOffset;
         const positions = this._nodes.map(node => {
             const [x, z] = map.project([node.lon, node.lat], this._crs);
-            const y = (node.alt || 0) + yOffset;
+            const y = (node.alt || 0) + this._altitude;
             return new THREE.Vector3(x, y, z);
         });
 
@@ -613,8 +558,7 @@ export class Image {
                 normal.normalize();
                 const dist = new THREE.Vector3().subVectors(p3, p0).dot(normal);
                 if (Math.abs(dist) > 1e-6) {
-                    const projected = p3.clone().addScaledVector(normal, -dist);
-                    positions[3] = projected;
+                    positions[3] = p3.clone().addScaledVector(normal, -dist);
                 }
             }
         }
@@ -623,7 +567,7 @@ export class Image {
     }
 
     private _computeWorldPositionsFromAnchor(): any[] {
-        if (!this._position) return [];
+        if (!this._position || !this._map) return [];
 
         const [lon, lat, alt] = this._position;
         const [width, height] = this._size;
@@ -631,7 +575,7 @@ export class Image {
         const [rx, ry, rz] = this._rotation;
 
         const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-        const center = new THREE.Vector3(worldX, (alt || 0) + this._elevationOffset, worldZ);
+        const center = new THREE.Vector3(worldX, (alt || 0) + this._altitude, worldZ);
 
         const halfW = width / 2;
         const halfH = height / 2;
@@ -791,7 +735,7 @@ export class Image {
     }
 
     private _raycastImage(event: MouseEvent): boolean {
-        if (!this._mesh || !this._mesh.visible) return false;
+        if (!this._mesh || !this._mesh.visible || !this._map) return false;
         const rect = this._map.renderer.domElement.getBoundingClientRect();
         const mouse = new THREE.Vector2(
             ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -809,20 +753,8 @@ export class Image {
     _update(map: any): void {
         if (!this._map || !this._group) return;
 
-        if (!this._userVisible) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-
-        const zoom = this._map.continuousZoom;
-        if (this._layer && !(this._layer as any).visible) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
+        if (!this._isWithinView()) {
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -832,10 +764,12 @@ export class Image {
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
-                const worldCenter = this._tempVec3.copy(this._group.position).add(map.worldGroup.position);
+                const worldCenter = this._tempVec3
+                    .copy(this._group.position)
+                    .add(map.worldGroup.position);
                 const distToCenter = map.camera.position.distanceTo(worldCenter);
                 if (distToCenter - this._boundingSphereRadius > maxDist) {
-                    this._group.visible = false;
+                    this._applyHidden();
                     this._isVisible = false;
                     return;
                 }
@@ -847,52 +781,6 @@ export class Image {
     }
 
     // =================================================================
-    // TextManager contract
-    // =================================================================
-
-    getText(): string { return this._title; }
-
-    getTextStyle(): Record<string, string | number> {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-
-    getTextZoomBounds(): { min: number; max: number } {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-
-    getLabelType(): 'image' { return 'image'; }
-
-    isVisible(): boolean { return this._isVisible; }
-
-    getScreenPosition(): { x: number; y: number } | null {
-        if (!this._isVisible || !this._group) return null;
-        const worldPos = this._tempVec3.copy(this._group.position).add(this._map.worldGroup.position);
-        worldPos.y += this._boundingSphereRadius * 0.1;
-        const screenPos = worldPos.clone().project(this._map.camera);
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) return null;
-        const canvas = this._map.renderer.domElement;
-        return {
-            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
-        };
-    }
-
-    getTitleAlign(): ImageTitleAlign { return this._titleAlign; }
-
-    getTitleOffset(): [number, number] { return this._titleOffset; }
-
-    getTitleVerticalAlign(): ImageTitleAlignV { return 'bottom'; }
-
-    getAllowOverflow(): boolean { return this._titleAllowOverflow; }
-
-    getPriority(): number { return this._titlePriority; }
-
-    // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================
 
@@ -902,7 +790,7 @@ export class Image {
         const dstCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
         if (!srcCrs || !dstCrs) return null;
 
-        // Режим 1: nodes — считаем по «сырым» координатам.
+        // Режим 1: nodes — по «сырым» координатам.
         if (this._nodes && this._nodes.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let count = 0;

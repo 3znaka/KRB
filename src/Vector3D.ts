@@ -1,14 +1,17 @@
 /**
  * Vector3D — направленный 3D-вектор (ломаная со стрелкой) и опциональной
- * анимацией. После `addTo()` мутабелен: точки, цвет, толщина, размер
- * стрелки, прозрачность, видимость, высотный масштаб, подписи и тултип
- * меняются без пересоздания.
+ * анимацией. После `addTo()` мутабелен.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * altitude, zoom bounds и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся специфика: ECEF, Line2-геометрия, статическая стрелка,
+ * анимации, две подписи (start/end) через фасады.
  *
  * @module Vector3D
  */
 
-import { Layer } from './Layers.js';
 import { Projections } from './Projections.js';
+import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
 import {
     THREE,
     Line2,
@@ -26,8 +29,7 @@ export type LonLat = [number, number];
 export type Vector3DPosition = [number, number, number];
 export type Vector3DColor = string | number;
 export type ArrowSizeMode = 'px' | 'world';
-export type TitleAlignH = 'left' | 'center' | 'right';
-export type TitleAlignV = 'top' | 'middle' | 'bottom';
+export type Vector3DAltitudeMode = 'clampToGround' | 'absolute';
 export type AnimationType = 'movingArrow' | 'flowArrows' | 'pulse' | 'part' | 'none';
 export type PartMode = 'extend' | 'center' | 'boomerang' | 'dash';
 export type Easing = 'linear' | 'sine' | 'easeIn' | 'easeOut' | 'easeInOut';
@@ -93,8 +95,12 @@ export interface Vector3DOptions {
     arrowSizeMode?: ArrowSizeMode;
     opacity?: number;
     depthTest?: boolean;
+    depthWrite?: boolean;
     heightScale?: number;
+    altitude?: number;
+    /** @deprecated Используйте `altitude`. */
     altitudeOffset?: number;
+    altitudeMode?: Vector3DAltitudeMode;
     minZoom?: number;
     maxZoom?: number;
 
@@ -138,7 +144,6 @@ export interface Vector3DOptions {
     animation?: AnimationSpec | string | Array<AnimationSpec | string> | null;
 }
 
-/** Разобранный config анимации — со всеми полями по умолчанию. */
 interface ParsedAnimation {
     type: AnimationType;
     period: number;
@@ -150,7 +155,6 @@ interface ParsedAnimation {
     size: number | null;
     sizeMode: ArrowSizeMode | null;
     opacity: number | null;
-    // может быть всё, что угодно из AnimationSpec с дефолтами
     easing?: Easing;
     hideStaticArrow?: boolean;
     count?: number;
@@ -170,7 +174,6 @@ interface ParsedAnimation {
     fadeEdges?: boolean;
 }
 
-/** Runtime-слот анимации: config + созданные GPU-ресурсы. */
 interface AnimSlot {
     config: ParsedAnimation;
     time: number;
@@ -246,40 +249,32 @@ const MAX_HEAD_CONES = 100;
 // Vector3D
 // =====================================================================
 
-export class Vector3D {
+export class Vector3D extends SpatialObject {
     // ── Данные ──
     private _positions: Vector3DPosition[];
     private _crsCode: string | null;
     private _crs: any | null;
     private _isEcef: boolean;
 
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     private _color: Vector3DColor;
     private _width: number;
     private _arrowSize: number;
     private _arrowSizeMode: ArrowSizeMode;
     private _opacity: number;
     private _depthTest: boolean;
-    private _minZoom: number;
-    private _maxZoom: number;
+    private _depthWrite: boolean;
     private _heightScale: number;
-    private _altitudeOffset: number;
+    private _altitudeMode: Vector3DAltitudeMode;
 
-    // ── Подписи ──
+    // ── Две подписи ──
     private _titles: { start: Vector3DTitleOptions; end: Vector3DTitleOptions };
 
     // ── Интерактив ──
-    private _tooltip: string;
-    private _onClick: ((event: MouseEvent, vec: Vector3D) => void) | null;
-    private _onHover: ((hovered: boolean) => void) | null;
     private _unregisterInteraction: (() => void) | null = null;
 
-    // ── Присоединение ──
-    private _map: any = null;
-    private _layer: Layer | null = null;
-    private _group: any;
-
     // ── 3D-объекты ──
+    private _group: any;
     private _line: any = null;
     private _material: any = null;
     private _geometry: any = null;
@@ -294,15 +289,18 @@ export class Vector3D {
     private _animPolyline: { lengths: number[]; total: number } | null = null;
     private _lastUpdateTime = 0;
 
+    // ── clampToGround ──
+    private _lastSurfaceUpdateTime = 0;
+    private _lastWorldGroupPos: any;
+
     // ── Временные ──
     private _tempVecA: any;
     private _tempVecB: any;
     private _Y_AXIS: any;
 
-    // ── NEW: видимость ──
-    private _userVisible = true;
-
     constructor(options: Vector3DOptions) {
+        super();
+
         if (!options.positions || options.positions.length < 2) {
             throw new Error('Vector3D: options.positions required, at least 2 points');
         }
@@ -318,17 +316,19 @@ export class Vector3D {
         this._arrowSizeMode = options.arrowSizeMode === 'world' ? 'world' : 'px';
         this._opacity = options.opacity ?? 1;
         this._depthTest = options.depthTest ?? false;
+        this._depthWrite = options.depthWrite ?? this._depthTest;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._heightScale = options.heightScale ?? 1;
-        this._altitudeOffset = options.altitudeOffset ?? 0;
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 0;
+        this._altitudeMode = options.altitudeMode ?? 'absolute';
 
         this._titles = {
             start: this._parseTitleOptions(options, 'start'),
             end: this._parseTitleOptions(options, 'end'),
         };
 
-        this._tooltip = options.tooltip ?? '';
+        this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
 
@@ -337,13 +337,121 @@ export class Vector3D {
         this._tempVecA = new THREE.Vector3();
         this._tempVecB = new THREE.Vector3();
         this._Y_AXIS = new THREE.Vector3(0, 1, 0);
+        this._lastWorldGroupPos = new THREE.Vector3();
 
         this._parseAnimationsInto(options.animation);
     }
 
     // =================================================================
-    // Разбор подписей и анимаций
+    // Хуки SpatialObject
     // =================================================================
+
+    protected _onAttached(map: any): void {
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+
+        this._recomputeWorldPoints();
+        if (this._worldPoints.length < 2) return;
+
+        this._buildLine(map);
+        this._buildStaticCone();
+        if (this._animList.length) this._setupAnimations(map);
+
+        map.worldGroup.add(this._group);
+
+        this._registerInteraction(map);
+        this._attachLabels(map);
+
+        this._lastWorldGroupPos.copy(map.worldGroup.position);
+        this._lastSurfaceUpdateTime = 0;
+    }
+
+    protected _teardown(): void {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+
+        if (this._map?.textManager) {
+            for (const { handle } of this._labels) {
+                this._map.textManager.removeLabel(handle);
+            }
+        }
+        this._labels = [];
+
+        this._teardownAnimations();
+
+        if (this._group.parent) this._group.parent.remove(this._group);
+
+        for (const child of [...this._group.children]) {
+            if (child.geometry && typeof child.geometry.dispose === 'function') {
+                child.geometry.dispose();
+            }
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const m of mats) if (m && typeof m.dispose === 'function') m.dispose();
+            }
+            this._group.remove(child);
+        }
+
+        this._line = null;
+        this._material = null;
+        this._geometry = null;
+        this._cone = null;
+        this._lastSegLen = 0;
+        this._lastUpdateTime = 0;
+        this._lastSurfaceUpdateTime = 0;
+        this._crs = null;
+    }
+
+    protected _applyHidden(): void {
+        if (this._group) this._group.visible = false;
+    }
+
+    protected _onTooltipChanged(): void {
+        if (this._map) this._registerInteraction(this._map);
+    }
+
+    protected _onAltitudeChanged(): void {
+        if (!this._map) return;
+        this._recomputeWorldPoints();
+        this._refreshGeometryAfterPositionsChange();
+    }
+
+    getLabelType(): 'point' { return 'point'; }
+
+    // =================================================================
+    // Подписи: start/end через фасады, getText делегирует к start
+    // =================================================================
+
+    override setTitle(text: string): this {
+        return this.setTitleStart(text);
+    }
+
+    override getText(): string { return this._titles.start.text; }
+
+    override getTextStyle(): Record<string, string | number> {
+        return Object.assign({
+            fontFamily: 'sans-serif',
+            color: '#ffffff',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
+        }, this._titles.start.style);
+    }
+
+    override getTextZoomBounds(): { min: number; max: number } {
+        return { min: this._titles.start.minZoom, max: this._titles.start.maxZoom };
+    }
+
+    override getTitleAlign(): TitleAlignH { return this._titles.start.align; }
+    override getTitleVerticalAlign(): TitleAlignV { return this._titles.start.verticalAlign; }
+    override getTitleOffset(): [number, number] { return this._titles.start.offset; }
+    override getAllowOverflow(): boolean { return this._titles.start.allowOverflow; }
+    override getPriority(): number { return this._titles.start.priority; }
+
+    override getScreenPosition(): { x: number; y: number } | null {
+        return this._getScreenPositionAt('start');
+    }
 
     private _parseTitleOptions(options: Vector3DOptions, role: TitleRole): Vector3DTitleOptions {
         const isStart = role === 'start';
@@ -427,23 +535,67 @@ export class Vector3D {
         };
     }
 
+    setTitleStart(text: string): this {
+        return this._setTitleText('start', text ?? '');
+    }
+
+    setTitleEnd(text: string): this {
+        return this._setTitleText('end', text ?? '');
+    }
+
+    private _setTitleText(role: TitleRole, text: string): this {
+        this._titles[role].text = text;
+        const tm = this._map?.textManager;
+        if (!tm) return this;
+
+        const entry = this._labels.find(l => l.role === role);
+        if (entry) {
+            if (text) {
+                if (typeof tm.updateLabel === 'function') tm.updateLabel(entry.handle);
+            } else {
+                tm.removeLabel(entry.handle);
+                this._labels = this._labels.filter(l => l !== entry);
+            }
+        } else if (text) {
+            const facade = this._makeLabelFacade(role);
+            const handle = tm.addLabel(facade);
+            this._labels.push({ role, handle, facade });
+        }
+        return this;
+    }
+
+    private _attachLabels(map: any): void {
+        if (!map.textManager) return;
+        for (const role of ['start', 'end'] as TitleRole[]) {
+            const title = this._titles[role];
+            if (!title.text) continue;
+            const facade = this._makeLabelFacade(role);
+            const handle = map.textManager.addLabel(facade);
+            this._labels.push({ role, handle, facade });
+        }
+    }
+
+    // =================================================================
+    // Разбор анимаций
+    // =================================================================
+
     private _parseAnimationsInto(anim: Vector3DOptions['animation']): void {
         this._animList = [];
         if (!anim) return;
-const arr = Array.isArray(anim) ? anim : [anim];
-for (const a of arr) {
-    const cfg = this._parseOneAnimation(a);   // ← без as any
-    if (cfg) this._animList.push({ config: cfg, time: 0 });
-}
+        const arr = Array.isArray(anim) ? anim : [anim];
+        for (const a of arr) {
+            const cfg = this._parseOneAnimation(a);
+            if (cfg) this._animList.push({ config: cfg, time: 0 });
+        }
     }
 
-private _parseOneAnimation(
-    anim: AnimationSpec | string | null | undefined | false
-): ParsedAnimation | null {
-    if (!anim) return null;   // ← ловит null, undefined, '', false
-    const src: AnimationSpec = (typeof anim === 'string')
-        ? { type: anim as AnimationType }
-        : anim;
+    private _parseOneAnimation(
+        anim: AnimationSpec | string | null | undefined | false
+    ): ParsedAnimation | null {
+        if (!anim) return null;
+        const src: AnimationSpec = (typeof anim === 'string')
+            ? { type: anim as AnimationType }
+            : anim;
         const type: AnimationType = src.type ?? 'none';
         if (type === 'none') return null;
 
@@ -520,7 +672,7 @@ private _parseOneAnimation(
     }
 
     // =================================================================
-    // Геометрия маршрута
+    // Геометрия маршрута (для анимаций)
     // =================================================================
 
     private _computePolylineData(): { lengths: number[]; total: number } | null {
@@ -604,7 +756,7 @@ private _parseOneAnimation(
     }
 
     // =================================================================
-    // Setup / teardown анимаций (внутренние)
+    // Setup / teardown анимаций
     // =================================================================
 
     private _setupAnimations(map: any): void {
@@ -634,7 +786,7 @@ private _parseOneAnimation(
                 opacity,
                 transparent: opacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
             });
             const cone = new THREE.Mesh(geo, mat);
             cone.renderOrder = 999;
@@ -665,7 +817,7 @@ private _parseOneAnimation(
                     color, opacity,
                     transparent: opacity < 1,
                     depthTest: this._depthTest,
-                    depthWrite: this._depthTest,
+                    depthWrite: this._depthWrite,
                 });
                 const c = new THREE.Mesh(g, m);
                 c.renderOrder = 999;
@@ -684,7 +836,7 @@ private _parseOneAnimation(
                 opacity,
                 transparent: opacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
                 resolution: new THREE.Vector2(
                     map.renderer.domElement.width,
                     map.renderer.domElement.height
@@ -948,7 +1100,7 @@ private _parseOneAnimation(
                 opacity: coneOpacity,
                 transparent: coneOpacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
             });
             const c = new THREE.Mesh(g, m);
             c.renderOrder = 999;
@@ -1027,42 +1179,53 @@ private _parseOneAnimation(
     }
 
     // =================================================================
-    // Присоединение / отсоединение
+    // Интерактив
     // =================================================================
 
-    addTo(map: any): this {
-        if (this._map === map && this._layer) return this;
-        if (this._map) this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        (personalLayer as any).add(this);
-        return this;
+    private _registerInteraction(map: any): void {
+        if (!map.interaction) return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (!this._onClick && !this._onHover && !this._tooltipText) return;
+
+        this._unregisterInteraction = map.interaction.register(this, {
+            getMeshes: () => {
+                const meshes: any[] = [];
+                if (this._line && this._line.visible) meshes.push(this._line);
+                if (this._cone && this._cone.visible) meshes.push(this._cone);
+                for (const anim of this._animList) {
+                    if (anim.config.type === 'flowArrows' && anim.cones) {
+                        for (const c of anim.cones) if (c.visible) meshes.push(c);
+                    }
+                    if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
+                        meshes.push(anim.cone);
+                    }
+                    if (anim.config.type === 'part' && anim.headConePool) {
+                        for (const c of anim.headConePool) if (c.visible) meshes.push(c);
+                    }
+                }
+                return meshes;
+            },
+            onClick: this._onClick || null,
+            onHover: this._onHover || null,
+            getTooltip: this._tooltipText ? () => this._tooltipText : null,
+            isVisible: () => this._isVisible,
+        });
     }
 
-    _attach(map: any, layer: Layer): void {
-        if (this._map === map && this._layer === layer) return;
-        if (this._map || this._layer) this.remove();
-        this._map = map;
-        this._layer = layer;
-
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
-
-        this._recomputeWorldPoints();
-        if (this._worldPoints.length < 2) return;
-
-        this._buildLine(map);
-        this._buildStaticCone();
-        if (this._animList.length) this._setupAnimations(map);
-
-        map.worldGroup.add(this._group);
-
-        this._registerInteraction(map);
-        this._attachLabels(map);
-    }
+    // =================================================================
+    // Точки / геометрия
+    // =================================================================
 
     /** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
     private _recomputeWorldPoints(): void {
+        if (!this._map) return;
         const worldPts: Vector3DPosition[] = [];
+        const wgPos = this._map.worldGroup.position;
+        const clamp = this._altitudeMode === 'clampToGround';
+
         for (let i = 0; i < this._positions.length; i++) {
             const p = this._positions[i];
             if (!Array.isArray(p) || p.length < 2) continue;
@@ -1079,7 +1242,11 @@ private _parseOneAnimation(
             }
             if (!xy) continue;
 
-            const worldY = h * this._heightScale + this._altitudeOffset;
+            let surfaceY = 0;
+            if (clamp) {
+                surfaceY = this._map.getSurfaceHeightAt(xy[0] + wgPos.x, xy[1] + wgPos.z);
+            }
+            const worldY = surfaceY + h * this._heightScale + this._altitude;
             worldPts.push([xy[0], worldY, xy[1]]);
         }
         this._worldPoints = worldPts;
@@ -1099,7 +1266,7 @@ private _parseOneAnimation(
             opacity: this._opacity,
             transparent: this._opacity < 1,
             depthTest: this._depthTest,
-            depthWrite: this._depthTest,
+            depthWrite: this._depthWrite,
             resolution: new THREE.Vector2(canvas.width, canvas.height),
         });
 
@@ -1127,7 +1294,7 @@ private _parseOneAnimation(
             opacity: this._opacity,
             transparent: this._opacity < 1,
             depthTest: this._depthTest,
-            depthWrite: this._depthTest,
+            depthWrite: this._depthWrite,
         }));
         this._cone.renderOrder = 999;
         this._cone.position.copy(pTo);
@@ -1137,50 +1304,6 @@ private _parseOneAnimation(
         this._applyConeScale(this._map);
 
         this._group.add(this._cone);
-    }
-
-    private _registerInteraction(map: any): void {
-        if (!map.interaction) return;
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (!this._onClick && !this._onHover && !this._tooltip) return;
-
-        this._unregisterInteraction = map.interaction.register(this, {
-            getMeshes: () => {
-                const meshes: any[] = [];
-                if (this._line && this._line.visible) meshes.push(this._line);
-                if (this._cone && this._cone.visible) meshes.push(this._cone);
-                for (const anim of this._animList) {
-                    if (anim.config.type === 'flowArrows' && anim.cones) {
-                        for (const c of anim.cones) if (c.visible) meshes.push(c);
-                    }
-                    if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
-                        meshes.push(anim.cone);
-                    }
-                    if (anim.config.type === 'part' && anim.headConePool) {
-                        for (const c of anim.headConePool) if (c.visible) meshes.push(c);
-                    }
-                }
-                return meshes;
-            },
-            onClick: this._onClick || null,
-            onHover: this._onHover || null,
-            getTooltip: this._tooltip ? () => this._tooltip : null,
-            isVisible: () => this._group.visible,
-        });
-    }
-
-    private _attachLabels(map: any): void {
-        if (!map.textManager) return;
-        for (const role of ['start', 'end'] as TitleRole[]) {
-            const title = this._titles[role];
-            if (!title.text) continue;
-            const facade = this._makeLabelFacade(role);
-            const handle = map.textManager.addLabel(facade);
-            this._labels.push({ role, handle, facade });
-        }
     }
 
     private _applyConeScale(
@@ -1226,8 +1349,9 @@ private _parseOneAnimation(
     _update(map: any, deltaTime?: number): void {
         if (!this._map || !this._line) return;
 
-        if (!this._userVisible) {
-            this._group.visible = false;
+        if (!this._isWithinView()) {
+            this._applyHidden();
+            this._isVisible = false;
             return;
         }
 
@@ -1240,21 +1364,33 @@ private _parseOneAnimation(
         if (deltaTime > 0.1) deltaTime = 0.1;
         this._lastUpdateTime = performance.now();
 
-        const zoom = map.continuousZoom;
-        let visible = (this._layer ? (this._layer as any).visible : true)
-            && zoom >= this._minZoom && zoom <= this._maxZoom;
+        // clampToGround: периодически обновляем высоты по рельефу.
+        if (this._altitudeMode === 'clampToGround' && this._worldPoints.length >= 2) {
+            const now = performance.now();
+            const posChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
+            if (now - this._lastSurfaceUpdateTime > 500 || posChanged) {
+                this._recomputeWorldPoints();
+                this._updateGeometryOnly();
+                this._lastSurfaceUpdateTime = now;
+                this._lastWorldGroupPos.copy(map.worldGroup.position);
+            }
+        }
 
-        if (visible && map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
+        if (map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
             const mid = this._worldPoints[this._worldPoints.length >> 1];
             const wgPos = map.worldGroup.position;
             const d = map.camera.position.distanceTo(
                 map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z)
             );
-            if (d > map.maxObjectDistance) visible = false;
+            if (d > map.maxObjectDistance) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
         }
 
-        this._group.visible = visible;
-        if (!visible) return;
+        this._group.visible = true;
+        this._isVisible = true;
 
         if (this._animList.length > 0 && this._animPolyline) {
             this._stepAllAnimations(map, deltaTime);
@@ -1282,15 +1418,6 @@ private _parseOneAnimation(
     // Мутабельность
     // =================================================================
 
-    /** Управляет видимостью (перекрывает зум и видимость слоя). */
-    setVisible(visible: boolean): this {
-        this._userVisible = !!visible;
-        if (!this._group) return this;
-        if (!this._userVisible) this._group.visible = false;
-        return this;
-    }
-
-    /** Меняет цвет линии и конусов (где не задан явный override). */
     setColor(color: Vector3DColor): this {
         this._color = color;
         if (this._material?.color) this._material.color.set(color as any);
@@ -1311,7 +1438,8 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет толщину линии. */
+    getColor(): Vector3DColor { return this._color; }
+
     setWidth(width: number): this {
         if (!(width >= 0)) return this;
         this._width = width;
@@ -1328,7 +1456,8 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет прозрачность линии и конусов (где не задан явный override). */
+    getWidth(): number { return this._width; }
+
     setOpacity(opacity: number): this {
         const v = Math.max(0, Math.min(1, opacity));
         this._opacity = v;
@@ -1352,7 +1481,8 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет размер стрелки (пиксели или world — зависит от `arrowSizeMode`). */
+    getOpacity(): number { return this._opacity; }
+
     setArrowSize(size: number): this {
         if (!(size > 0)) return this;
         this._arrowSize = size;
@@ -1360,16 +1490,43 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет режим размера стрелки. */
+    getArrowSize(): number { return this._arrowSize; }
+
     setArrowSizeMode(mode: ArrowSizeMode): this {
         this._arrowSizeMode = mode;
         if (this._cone && this._map) this._applyConeScale(this._map);
         return this;
     }
 
-    /** Включает/отключает depthTest во всех материалах. */
+    getArrowSizeMode(): ArrowSizeMode { return this._arrowSizeMode; }
+
     setDepthTest(depthTest: boolean): this {
         this._depthTest = !!depthTest;
+        for (const m of this._collectAllMaterials()) {
+            if (m.depthTest !== this._depthTest) {
+                m.depthTest = this._depthTest;
+                m.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+
+    getDepthTest(): boolean { return this._depthTest; }
+
+    setDepthWrite(depthWrite: boolean): this {
+        this._depthWrite = !!depthWrite;
+        for (const m of this._collectAllMaterials()) {
+            if (m.depthWrite !== this._depthWrite) {
+                m.depthWrite = this._depthWrite;
+                m.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+
+    getDepthWrite(): boolean { return this._depthWrite; }
+
+    private _collectAllMaterials(): any[] {
         const all: any[] = [];
         if (this._material) all.push(this._material);
         if (this._cone?.material) all.push(this._cone.material);
@@ -1379,23 +1536,13 @@ private _parseOneAnimation(
             if (anim.overlayMat) all.push(anim.overlayMat);
             if (anim.headConePool) for (const c of anim.headConePool) all.push(c.material);
         }
-        for (const m of all) {
-            if (m.depthTest !== this._depthTest) {
-                m.depthTest = this._depthTest;
-                m.needsUpdate = true;
-            }
-        }
-        return this;
+        return all;
     }
 
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom: number, maxZoom: number): this {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
-        return this;
-    }
+    // =================================================================
+    // HeightScale / altitudeMode
+    // =================================================================
 
-    /** Меняет вертикальное преувеличение. */
     setHeightScale(scale: number): this {
         this._heightScale = scale;
         if (!this._map) return this;
@@ -1404,19 +1551,26 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет высотное смещение (world-метры). */
-    setAltitudeOffset(offset: number): this {
-        this._altitudeOffset = offset;
-        if (!this._map) return this;
-        this._recomputeWorldPoints();
-        this._refreshGeometryAfterPositionsChange();
+    getHeightScale(): number { return this._heightScale; }
+
+    setAltitudeMode(mode: Vector3DAltitudeMode): this {
+        this._altitudeMode = mode;
+        this._onAltitudeChanged();
         return this;
     }
 
-    /**
-     * Заменяет точки. Пересчитывает `_worldPoints`, обновляет линию,
-     * позицию статического конуса и пересоздаёт анимации.
-     */
+    getAltitudeMode(): Vector3DAltitudeMode { return this._altitudeMode; }
+
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setAltitudeOffset(offset: number): this { return this.setAltitude(offset); }
+
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getAltitudeOffset(): number { return this.getAltitude(); }
+
+    // =================================================================
+    // Позиции
+    // =================================================================
+
     setPositions(positions: Vector3DPosition[]): this {
         if (!positions || positions.length < 2) return this;
         this._positions = positions;
@@ -1428,59 +1582,34 @@ private _parseOneAnimation(
         return this;
     }
 
-    /** Меняет тултип. При необходимости — перерегистрирует интерактив. */
-    setTooltip(html: string): this {
-        this._tooltip = html ?? '';
-        if (this._map) this._registerInteraction(this._map);
-        return this;
+    getPositions(): Vector3DPosition[] {
+        return this._positions.map(p => [p[0], p[1], p[2]] as Vector3DPosition);
     }
 
-    /** Меняет стартовую подпись. */
-    setTitleStart(text: string): this {
-        return this._setTitleText('start', text ?? '');
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter(): LonLat | null {
+        const b = this.getBounds('EPSG:4326');
+        if (!b) return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
     }
 
-    /** Меняет конечную подпись. */
-    setTitleEnd(text: string): this {
-        return this._setTitleText('end', text ?? '');
-    }
+    // =================================================================
+    // Пересборка после изменения _worldPoints
+    // =================================================================
 
-    private _setTitleText(role: TitleRole, text: string): this {
-        this._titles[role].text = text;
-        const tm = this._map?.textManager;
-        if (!tm) return this;
-
-        const entry = this._labels.find(l => l.role === role);
-        if (entry) {
-            if (text) {
-                if (typeof tm.updateLabel === 'function') tm.updateLabel(entry.handle);
-                // else: facade.getText уже видит новый текст, но без
-                // updateLabel нет способа форсировать пересчёт. Оставляем
-                // как есть — большинство пользователей будет с новой
-                // версией TextManager.
-            } else {
-                tm.removeLabel(entry.handle);
-                this._labels = this._labels.filter(l => l !== entry);
-            }
-        } else if (text) {
-            const facade = this._makeLabelFacade(role);
-            const handle = tm.addLabel(facade);
-            this._labels.push({ role, handle, facade });
-        }
-        return this;
-    }
-
-    /** Пересобирает геометрию и анимации после изменения `_worldPoints`. */
-    private _refreshGeometryAfterPositionsChange(): void {
-        if (!this._map || !this._line) return;
+    /** Обновляет только геометрию линии/конуса/_animPolyline, не трогая анимации. */
+    private _updateGeometryOnly(): void {
+        if (!this._map || !this._line || !this._geometry) return;
 
         const flat: number[] = [];
         for (const wp of this._worldPoints) flat.push(wp[0], wp[1], wp[2]);
         this._geometry.setPositions(flat);
         this._line.computeLineDistances();
 
-        // Обновляем позицию статического конуса.
-        if (this._cone) {
+        if (this._cone && this._worldPoints.length >= 2) {
             const last = this._worldPoints.length - 1;
             const pFrom = new THREE.Vector3(...this._worldPoints[last - 1]);
             const pTo = new THREE.Vector3(...this._worldPoints[last]);
@@ -1494,79 +1623,16 @@ private _parseOneAnimation(
             }
         }
 
-        // Пересоздаём анимации.
+        this._animPolyline = this._computePolylineData();
+    }
+
+    /** Полная пересборка: геометрия + пересоздание анимаций. */
+    private _refreshGeometryAfterPositionsChange(): void {
+        if (!this._map || !this._line) return;
+
         this._teardownAnimations();
+        this._updateGeometryOnly();
         if (this._animList.length) this._setupAnimations(this._map);
-    }
-
-    // =================================================================
-    // Геттеры
-    // =================================================================
-
-    getPositions(): Vector3DPosition[] {
-        return this._positions.map(p => [p[0], p[1], p[2]] as Vector3DPosition);
-    }
-
-    getColor(): Vector3DColor { return this._color; }
-    getWidth(): number { return this._width; }
-    getOpacity(): number { return this._opacity; }
-    getArrowSize(): number { return this._arrowSize; }
-    getArrowSizeMode(): ArrowSizeMode { return this._arrowSizeMode; }
-    getHeightScale(): number { return this._heightScale; }
-    getAltitudeOffset(): number { return this._altitudeOffset; }
-
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
-    getCenter(): LonLat | null {
-        const b = this.getBounds('EPSG:4326');
-        if (!b) return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
-    }
-
-    // =================================================================
-    // Удаление
-    // =================================================================
-
-    remove(): void {
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-
-        if (this._map?.textManager) {
-            for (const { handle } of this._labels) {
-                this._map.textManager.removeLabel(handle);
-            }
-        }
-        this._labels = [];
-
-        this._teardownAnimations();
-
-        if (this._group.parent) this._group.parent.remove(this._group);
-
-        for (const child of [...this._group.children]) {
-            if (child.geometry && typeof child.geometry.dispose === 'function') {
-                child.geometry.dispose();
-            }
-            if (child.material) {
-                const mats = Array.isArray(child.material) ? child.material : [child.material];
-                for (const m of mats) if (m && typeof m.dispose === 'function') m.dispose();
-            }
-            this._group.remove(child);
-        }
-
-        this._line = null;
-        this._material = null;
-        this._geometry = null;
-        this._cone = null;
-        this._lastSegLen = 0;
-        this._lastUpdateTime = 0;
-
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
     }
 
     // =================================================================
@@ -1590,43 +1656,4 @@ private _parseOneAnimation(
         }
         return [[mnx, mnz], [mxx, mxz]];
     }
-
-    // =================================================================
-    // Legacy-геттеры (делегируют к start)
-    // =================================================================
-
-    getText(): string { return this._titles.start.text; }
-
-    getTextStyle(): Record<string, string | number> {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#ffffff',
-            fontSize: '12px',
-            fontWeight: 'bold',
-            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
-        }, this._titles.start.style);
-    }
-
-    getTextZoomBounds(): { min: number; max: number } {
-        return { min: this._titles.start.minZoom, max: this._titles.start.maxZoom };
-    }
-
-    getLabelType(): 'point' { return 'point'; }
-
-    isVisible(): boolean {
-        if (!this._layer || !(this._layer as any).visible) return false;
-        if (!this._map) return false;
-        const zoom = this._map.continuousZoom;
-        return zoom >= this._titles.start.minZoom && zoom <= this._titles.start.maxZoom;
-    }
-
-    getScreenPosition(): { x: number; y: number } | null {
-        return this._getScreenPositionAt('start');
-    }
-
-    getTitleAlign(): TitleAlignH { return this._titles.start.align; }
-    getTitleVerticalAlign(): TitleAlignV { return this._titles.start.verticalAlign; }
-    getTitleOffset(): [number, number] { return this._titles.start.offset; }
-    getAllowOverflow(): boolean { return this._titles.start.allowOverflow; }
-    getPriority(): number { return this._titles.start.priority; }
 }

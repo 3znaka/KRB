@@ -2,9 +2,10 @@
  * Marker — маркер на карте с поддержкой мутации после addTo().
  *
  * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
- * onHover, подпись и TextManager-контракт берутся из базового класса.
- * Здесь остаётся только то, что специфично для DOM-маркера: CRS/позиция,
- * иконка, altitudeMode, кластеризация, DOM-элемент и DOM-события.
+ * onHover, подпись, altitude и TextManager-контракт берутся из базового
+ * класса. Здесь остаётся только то, что специфично для DOM-маркера:
+ * CRS/позиция, иконка (размер / anchor / поворот), altitudeMode,
+ * кластеризация, DOM-элемент и DOM-события.
  *
  * @module marker
  */
@@ -31,6 +32,8 @@ export interface MarkerOptions {
     crs?: string;
     iconSize?: IconSize;
     anchor?: Anchor;
+    /** Поворот иконки в градусах (CSS `rotate`). */
+    rotation?: number;
     minZoom?: number;
     maxZoom?: number;
     altitudeMode?: AltitudeMode;
@@ -63,10 +66,6 @@ const _mapPanes = new WeakMap<object, MapPanes>();
 
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
-/**
- * Возвращает (и при необходимости создаёт) DOM-панель для маркеров,
- * связанную с конкретным экземпляром карты.
- */
 export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
     let panes = _mapPanes.get(map);
     if (!panes) {
@@ -93,15 +92,6 @@ export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
 // Marker
 // =====================================================================
 
-/**
- * Маркер. После {@link Marker#addTo} объект мутабелен — можно менять
- * позицию, иконку, подпись, тултип, onClick/onHover, zoom bounds и
- * видимость без пересоздания.
- *
- * @example
- * const m = new Marker({ position: [37.66, 55.76], title: 'Точка' }).addTo(map);
- * m.setLngLat([30.31, 59.93]).setTitle('Питер');
- */
 export class Marker extends SpatialObject {
     static _idCounter = 0;
 
@@ -111,17 +101,16 @@ export class Marker extends SpatialObject {
     private _crs: any | null;
     private _lon: number | null = null;
     private _lat: number | null = null;
-    /** true, если _coord был записан из setLngLat() до attach без явного crs. */
     private _positionSetAsLonLat = false;
 
     // ── Оформление ──
     private _iconSize: IconSize;
     private _anchor: Anchor;
+    private _rotation: number;
     private _iconUrl: string | null;
 
-    // ── Поведение ──
+    // ── Поведение ── (altitude — в базе)
     private _altitudeMode: AltitudeMode;
-    private _altitude: number;
     private _clusterable: boolean;
 
     // ── Состояние DOM ──
@@ -139,12 +128,11 @@ export class Marker extends SpatialObject {
         }
         this._coord = [options.position[0], options.position[1]];
         this._crsCode = options.crs ?? null;
-        // Резолвим CRS сразу, если он явно задан — это позволяет
-        // setLngLat/getLngLat работать до addTo().
         this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._iconSize = options.iconSize ?? [16, 16];
         this._anchor = options.anchor ?? [0.5, 1.0];
+        this._rotation = options.rotation ?? 0;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._altitudeMode = options.altitudeMode ?? 'ground';
@@ -163,6 +151,7 @@ export class Marker extends SpatialObject {
         this._userTitleOffset = options.titleOffset ? [...options.titleOffset] : null;
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
+        this._resolveTitleOffset();
     }
 
     // =================================================================
@@ -174,7 +163,6 @@ export class Marker extends SpatialObject {
             ? Projections.get(this._crsCode)
             : map.inputCRS;
 
-        // setLngLat() до attach без явного crs: _coord хранится в WGS84.
         if (this._positionSetAsLonLat
             && this._lon !== null
             && this._lat !== null
@@ -186,7 +174,6 @@ export class Marker extends SpatialObject {
         this._positionSetAsLonLat = false;
         this._crs = newCrs;
 
-        // Производные WGS84 — для обратной совместимости с ClusterLayer.
         const ll = this._crs.toLonLat(this._coord);
         this._lon = ll[0];
         this._lat = ll[1];
@@ -201,9 +188,6 @@ export class Marker extends SpatialObject {
         el.className = 'krb-marker';
         Object.assign(el.style, {
             position: 'absolute',
-            width: `${this._iconSize[0]}px`,
-            height: `${this._iconSize[1]}px`,
-            transform: `translate(${-this._anchor[0] * 100}%, ${-this._anchor[1] * 100}%)`,
             pointerEvents: 'auto',
             cursor: 'pointer',
             display: 'none',
@@ -225,8 +209,8 @@ export class Marker extends SpatialObject {
         markerPane.appendChild(el);
         this._element = el;
 
-        // Обработчики читают this._onClick/this._onHover/this._tooltipText
-        // динамически — сеттеры работают без перепривязки событий.
+        this._applyStyleTransforms();
+
         el.addEventListener('click', (e) => {
             e.stopPropagation();
             if (this._onClick) this._onClick(e, this);
@@ -270,18 +254,17 @@ export class Marker extends SpatialObject {
         return [0, this._iconSize[1] / 2 + 4];
     }
 
+    /** Смена высоты должна пересчитать кэши позиции. */
+    protected _onAltitudeChanged(): void {
+        this._afterPositionChange();
+    }
+
     getLabelType(): 'point' { return 'point'; }
 
     // =================================================================
-    // Позиция / CRS
+    // Позиция / CRS / bounds
     // =================================================================
 
-    /**
-     * Устанавливает позицию в WGS84 [lon, lat].
-     * Работает до и после addTo(). Если маркер ещё не присоединён и
-     * у него нет явного `crs`, позиция временно трактуется как EPSG:4326
-     * и пересчитывается в `map.inputCRS` при attach.
-     */
     setLngLat(lonLat: LonLat): this {
         if (!lonLat || lonLat.length !== 2) return this;
         const crs = this._resolveCrs() ?? Projections.get('EPSG:4326');
@@ -295,10 +278,6 @@ export class Marker extends SpatialObject {
         return this;
     }
 
-    /**
-     * Координаты в WGS84. Работает до addTo(), если у маркера есть
-     * явный `crs` или вызывался setLngLat().
-     */
     getLngLat(): LonLat | null {
         if (this._lon !== null && this._lat !== null) {
             return [this._lon, this._lat];
@@ -309,34 +288,26 @@ export class Marker extends SpatialObject {
         return [ll[0], ll[1]];
     }
 
-    /**
-     * Координаты в WGS84 [lon, lat] или `null`. Синоним `getLngLat()`
-     * для обратной совместимости со старой версией `Marker.getLonLat()`.
-     */
     getLonLat(): LonLat | null {
         return this.getLngLat();
     }
 
-    /** Возвращает исходные координаты в собственной СК маркера. */
     getPosition(): CoordXY {
         return [this._coord[0], this._coord[1]];
     }
 
-    /** Возвращает код СК маркера или null. */
     getCRS(): string | null {
         return this._crsCode;
     }
 
-    /** Участвует ли маркер в кластеризации. */
-    getClusterable(): boolean {
-        return this._clusterable;
+    getCenter(): LonLat | null {
+        return this.getLngLat();
     }
 
     // =================================================================
-    // Иконка
+    // Иконка: URL / размер / anchor / поворот
     // =================================================================
 
-    /** Меняет URL иконки (или убирает иконку при `null`). */
     setIconUrl(url: string | null): this {
         this._iconUrl = url;
         if (!this._element) return this;
@@ -363,11 +334,65 @@ export class Marker extends SpatialObject {
         return this;
     }
 
+    setIconSize(size: IconSize): this {
+        if (!size || size.length !== 2) return this;
+        this._iconSize = [size[0], size[1]];
+        this._applyStyleTransforms();
+        this._resolveTitleOffset();
+        return this;
+    }
+
+    getIconSize(): IconSize {
+        return [this._iconSize[0], this._iconSize[1]];
+    }
+
+    setAnchor(anchor: Anchor): this {
+        if (!anchor || anchor.length !== 2) return this;
+        this._anchor = [anchor[0], anchor[1]];
+        this._applyStyleTransforms();
+        return this;
+    }
+
+    getAnchor(): Anchor {
+        return [this._anchor[0], this._anchor[1]];
+    }
+
+    setRotation(degrees: number): this {
+        this._rotation = Number.isFinite(degrees) ? degrees : 0;
+        this._applyStyleTransforms();
+        return this;
+    }
+
+    getRotation(): number {
+        return this._rotation;
+    }
+
+    // =================================================================
+    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // =================================================================
+
+    setAltitudeMode(mode: AltitudeMode): this {
+        this._altitudeMode = mode;
+        this._afterPositionChange();
+        return this;
+    }
+
+    getAltitudeMode(): AltitudeMode {
+        return this._altitudeMode;
+    }
+
+    // =================================================================
+    // Кластеризация
+    // =================================================================
+
+    getClusterable(): boolean {
+        return this._clusterable;
+    }
+
     // =================================================================
     // Внутренние хелперы
     // =================================================================
 
-    /** Резолвит CRS маркера, если он известен без map. */
     private _resolveCrs(): any {
         if (this._crs) return this._crs;
         if (this._crsCode) {
@@ -377,7 +402,6 @@ export class Marker extends SpatialObject {
         return null;
     }
 
-    /** Сбрасывает кэши позиции; следующий _update() всё пересчитает. */
     private _afterPositionChange(): void {
         this._lastScreenPos = null;
         this._cachedWorldY = 0;
@@ -392,6 +416,17 @@ export class Marker extends SpatialObject {
         if (this._isMobile && this._tooltipText && this._map?.popupManager) {
             this._map.popupManager.show(this, this._tooltipText);
         }
+    }
+
+    private _applyStyleTransforms(): void {
+        const el = this._element;
+        if (!el) return;
+        const [ax, ay] = this._anchor;
+        el.style.width = `${this._iconSize[0]}px`;
+        el.style.height = `${this._iconSize[1]}px`;
+        el.style.transformOrigin = `${ax * 100}% ${ay * 100}%`;
+        el.style.transform =
+            `translate(${-ax * 100}%, ${-ay * 100}%) rotate(${this._rotation}deg)`;
     }
 
     // =================================================================
@@ -446,7 +481,6 @@ export class Marker extends SpatialObject {
             }
         }
 
-        // Общий гейт: userVisible + layer + zoom bounds.
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;
@@ -470,12 +504,12 @@ export class Marker extends SpatialObject {
                     this._cachedWorldY = map.getSurfaceHeightAt(worldX, worldZ);
                     this._lastHeightUpdateTime = now;
                 }
-                worldY = this._cachedWorldY;
+                worldY = this._cachedWorldY + this._altitude;
                 break;
             }
             case 'ground':
             default:
-                worldY = 0;
+                worldY = this._altitude;
                 break;
         }
 

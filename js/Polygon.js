@@ -1,13 +1,15 @@
 /**
  * Polygon — полигон с заливкой, обводкой, экструзией и подписью.
- * После `addTo()` мутабелен: цвет/толщина/видимость/текст меняются
- * без пересоздания геометрии.
+ * После `addTo()` мутабелен.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
+ * onHover, подпись, TextManager-контракт и altitude берутся из базы.
  *
  * @module polygon
  */
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 import earcut from './js_TP/earcut.js';
 export const POLYGON_RENDER_ORDER = {
     BOTTOM: 900,
@@ -24,7 +26,7 @@ function crossY(p0, p1, p2) {
 // =====================================================================
 // Polygon
 // =====================================================================
-export class Polygon {
+export class Polygon extends SpatialObject {
     // ── Данные колец ──
     _rings;
     _crsCode;
@@ -36,7 +38,6 @@ export class Polygon {
     _strokeWidth;
     _strokeOpacity;
     _altitudeMode;
-    _altitudeOffset;
     _extruded;
     _height;
     _minHeight;
@@ -46,30 +47,12 @@ export class Polygon {
     _receiveShadow;
     _roughness;
     _metalness;
-    _minZoom;
-    _maxZoom;
     _useSimpleStroke;
     _useWorkerForTriangulation;
-    // ── Подпись ──
-    _title;
-    _titleOffset;
-    _titleAlign;
-    _titleStyle;
-    _titleMinZoom;
-    _titleMaxZoom;
-    _titleAllowOverflow;
-    _titlePriority;
     // ── Интерактив ──
-    _onClick;
-    _onHover;
-    _isHovered = false;
-    _tooltipText;
     _unregisterInteraction = null;
-    // ── Присоединение ──
-    _map = null;
-    _layer = null;
+    // ── 3D-объекты ──
     _group;
-    // ── Меши ──
     _fillMesh = null;
     _fillGeometry = null;
     _fillMaterial = null;
@@ -79,7 +62,6 @@ export class Polygon {
     _sideMesh = null;
     _sideGeometry = null;
     _sideMaterial = null;
-    _sideVertexCount = 0;
     _strokeLine = null;
     _strokeGeometry = null;
     _strokeMaterial = null;
@@ -105,13 +87,11 @@ export class Polygon {
     _lastWorldGroupPos;
     _lastDiscreteZoom = -1;
     _centroidScreenPos = null;
-    _textLabel = null;
     _strokePositionsArray = [];
     _sidePositionsArray = [];
     _sideIndicesArray = [];
-    // ── NEW: пользовательская видимость ──
-    _userVisible = true;
     constructor(options) {
+        super();
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
             throw new Error('Polygon: options.rings required with at least one ring');
         }
@@ -124,7 +104,8 @@ export class Polygon {
         this._strokeWidth = options.strokeWidth ?? 2;
         this._strokeOpacity = options.strokeOpacity ?? 1;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
-        this._altitudeOffset = options.altitudeOffset ?? 10;
+        // Единая высота: `altitude` приоритетнее `altitudeOffset`.
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
         this._extruded = options.extruded ?? false;
         this._height = options.height ?? 0;
         this._minHeight = options.minHeight ?? 0;
@@ -142,11 +123,11 @@ export class Polygon {
         this._roughness = options.roughness ?? 0.8;
         this._metalness = options.metalness ?? 0.0;
         this._title = options.title ?? '';
-        this._titleOffset = options.titleOffset ?? [0, 0];
-        this._titleAlign = options.titleAlign ?? 'center';
         this._titleStyle = options.titleStyle ?? {};
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        this._titleAlign = options.titleAlign ?? 'center';
+        this._userTitleOffset = options.titleOffset ? [...options.titleOffset] : null;
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
         this._onClick = options.onClick ?? null;
@@ -161,37 +142,70 @@ export class Polygon {
         this._cachedStrokeHeights = new Array(initialLen).fill(0);
     }
     // =================================================================
-    // Присоединение / отсоединение
+    // Хуки SpatialObject
     // =================================================================
-    addTo(map) {
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
+    _onAttached(map) {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
-        }
         this._registerInteraction(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
         this._heightsDirty = true;
         this._heightsFinalized = false;
+        this._lastHeightUpdateTime = 0;
+        this._lastCentroidHeightUpdateTime = 0;
     }
+    _teardown() {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        this._disposeMeshes();
+        if (this._group.parent)
+            this._group.parent.remove(this._group);
+        this._worldCoords.length = 0;
+        this._strokeWorldCoords.length = 0;
+        this._nodeHeights.length = 0;
+        this._strokeNodeHeights.length = 0;
+        this._vertices2D = [];
+        this._boundingSphereRadius = 0;
+        this._cachedHeights = [];
+        this._cachedStrokeHeights = [];
+        this._raycastMeshesCache = null;
+        this._invalidGeometry = false;
+        this._centroidScreenPos = null;
+        this._crs = null;
+    }
+    _applyHidden() {
+        if (this._group)
+            this._group.visible = false;
+        this._centroidScreenPos = null;
+    }
+    _onTooltipChanged() {
+        if (this._map)
+            this._registerInteraction(this._map);
+    }
+    /** Смена высоты должна пересчитать кэш рельефа. */
+    _onAltitudeChanged() {
+        this._heightsDirty = true;
+        this._heightsFinalized = false;
+        this._lastHeightUpdateTime = 0;
+        this._lastCentroidHeightUpdateTime = 0;
+    }
+    getLabelType() { return 'polygon'; }
+    getScreenPosition() {
+        return this._centroidScreenPos;
+    }
+    isVisible() {
+        return this._group?.visible ?? false;
+    }
+    // =================================================================
+    // Интерактив
+    // =================================================================
     _registerInteraction(map) {
         if (!map.interaction || typeof map.interaction.register !== 'function')
             return;
@@ -218,10 +232,7 @@ export class Polygon {
             isVisible: () => this._group.visible,
         };
         if (this._onHover) {
-            callbacks.onHover = (isHovered) => {
-                this._isHovered = isHovered;
-                this._onHover(isHovered);
-            };
+            callbacks.onHover = (isHovered) => this._onHover(isHovered);
         }
         else if (this._tooltipText) {
             callbacks.getTooltip = () => this._tooltipText;
@@ -244,6 +255,74 @@ export class Polygon {
         this._raycastMeshesCache = meshes;
         return meshes;
     }
+    // =================================================================
+    // Кольца (требует пересборки)
+    // =================================================================
+    setRings(rings) {
+        if (!rings || !rings.length || rings[0].length < 3) {
+            console.warn('Polygon.setRings: need at least one ring with 3+ points');
+            return this;
+        }
+        this._rings = rings;
+        if (!this._map)
+            return this;
+        this._rebuildGeometry();
+        return this;
+    }
+    getRings() {
+        return this._rings.map(ring => ring.map(pt => [...pt]));
+    }
+    _rebuildGeometry() {
+        if (!this._map)
+            return;
+        this._disposeMeshes();
+        this._worldCoords.length = 0;
+        this._strokeWorldCoords.length = 0;
+        this._nodeHeights.length = 0;
+        this._strokeNodeHeights.length = 0;
+        this._vertices2D = [];
+        this._invalidGeometry = false;
+        this._buildFillGeometry(this._map);
+        this._buildStrokeGeometry(this._map);
+        this._registerInteraction(this._map);
+        this._lastWorldGroupPos.copy(this._map.worldGroup.position);
+        this._lastDiscreteZoom = this._map.currentDiscreteZoom;
+        this._heightsDirty = true;
+        this._heightsFinalized = false;
+        this._lastHeightUpdateTime = 0;
+        this._lastCentroidHeightUpdateTime = 0;
+    }
+    _disposeMeshes() {
+        if (this._group) {
+            while (this._group.children.length > 0) {
+                this._group.remove(this._group.children[0]);
+            }
+        }
+        this._fillGeometry?.dispose();
+        this._fillMaterial?.dispose();
+        this._bottomGeometry?.dispose();
+        this._bottomMaterial?.dispose();
+        this._sideGeometry?.dispose();
+        this._sideMaterial?.dispose();
+        this._strokeGeometry?.dispose();
+        this._strokeMaterial?.dispose();
+        this._fillMesh = null;
+        this._fillGeometry = null;
+        this._fillMaterial = null;
+        this._bottomMesh = null;
+        this._bottomGeometry = null;
+        this._bottomMaterial = null;
+        this._sideMesh = null;
+        this._sideGeometry = null;
+        this._sideMaterial = null;
+        this._strokeLine = null;
+        this._strokeGeometry = null;
+        this._strokeMaterial = null;
+        this._raycastMeshesCache = null;
+    }
+    // =================================================================
+    // Построение геометрии
+    // =================================================================
     _createSurfaceMaterial() {
         const isTransparent = this._fillOpacity < 1;
         if (this._extruded) {
@@ -310,8 +389,7 @@ export class Polygon {
                 const b = ring[(i + 1) % n];
                 if (!a || !b || a.length < 2 || b.length < 2)
                     continue;
-                const dLon = b[0] - a[0];
-                if (Math.abs(dLon) > 180)
+                if (Math.abs(b[0] - a[0]) > 180)
                     return true;
             }
         }
@@ -344,9 +422,6 @@ export class Polygon {
         }
         return false;
     }
-    // =================================================================
-    // Построение геометрии (только при attach)
-    // =================================================================
     _buildFillGeometry(map) {
         const rings = this._rings;
         if (!rings || !rings.length || rings[0].length < 3) {
@@ -427,7 +502,6 @@ export class Polygon {
                 maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-        // Верхняя крышка
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
@@ -523,7 +597,6 @@ export class Polygon {
             this._sideMesh = sideMesh;
             this._sideGeometry = sideGeometry;
             this._sideMaterial = sideMaterial;
-            this._sideVertexCount = sidePositions.length / 3;
             this._group.add(sideMesh);
         }
         this._raycastMeshesCache = null;
@@ -597,9 +670,8 @@ export class Polygon {
         }
     }
     // =================================================================
-    // Мутабельность
+    // Стиль
     // =================================================================
-    /** Меняет цвет заливки (верх/низ/стенки). Без перестройки геометрии. */
     setFillColor(color) {
         this._fillColor = color;
         if (this._fillMaterial?.color)
@@ -610,22 +682,29 @@ export class Polygon {
             this._sideMaterial.color.set(color);
         return this;
     }
-    /** Меняет цвет обводки. */
+    getFillColor() { return this._fillColor; }
+    setFillOpacity(opacity) {
+        this._fillOpacity = Math.max(0, Math.min(1, opacity));
+        const transparent = this._fillOpacity < 1;
+        for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial]) {
+            if (!mat)
+                continue;
+            mat.opacity = this._fillOpacity;
+            if (mat.transparent !== transparent) {
+                mat.transparent = transparent;
+                mat.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+    getFillOpacity() { return this._fillOpacity; }
     setStrokeColor(color) {
         this._strokeColor = color;
         if (this._strokeMaterial?.color)
             this._strokeMaterial.color.set(color);
         return this;
     }
-    /**
-     * Меняет толщину обводки.
-     *
-     * Для `LineMaterial` (толстая линия) работает через `linewidth` в
-     * пикселях. Для `LineBasicMaterial` (`useSimpleStroke: true`) значение
-     * сохраняется, но большинство браузеров игнорируют `linewidth` в
-     * WebGL — визуально ничего не изменится. Чтобы толщина работала,
-     * нужно создавать полигон с `useSimpleStroke: false`.
-     */
+    getStrokeColor() { return this._strokeColor; }
     setStrokeWidth(width) {
         if (!(width >= 0))
             return this;
@@ -637,55 +716,115 @@ export class Polygon {
         }
         return this;
     }
-    /** Управляет видимостью полигона (перекрывает зум-ограничения). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
-        if (!this._group)
-            return this;
-        if (!this._userVisible) {
-            this._group.visible = false;
-            this._centroidScreenPos = null;
+    getStrokeWidth() { return this._strokeWidth; }
+    setStrokeOpacity(opacity) {
+        this._strokeOpacity = Math.max(0, Math.min(1, opacity));
+        const mat = this._strokeMaterial;
+        if (mat) {
+            mat.opacity = this._strokeOpacity;
+            const transparent = this._strokeOpacity < 1;
+            if (mat.transparent !== transparent) {
+                mat.transparent = transparent;
+                mat.needsUpdate = true;
+            }
         }
         return this;
     }
-    /** Меняет текст подписи (или убирает, если пусто). */
-    setTitle(text) {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm)
-            return this;
-        if (this._textLabel) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._textLabel);
-            }
-            else {
-                // Fallback для старого TextManager без updateLabel
-                tm.removeLabel(this._textLabel);
-                this._textLabel = null;
-                if (this._title)
-                    this._textLabel = tm.addLabel(this);
-            }
-        }
-        else if (this._title) {
-            this._textLabel = tm.addLabel(this);
-        }
+    getStrokeOpacity() { return this._strokeOpacity; }
+    // =================================================================
+    // Высота: altitude — в базе; altitudeOffset — deprecated-алиас
+    // =================================================================
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setAltitudeOffset(offset) {
+        return this.setAltitude(offset);
+    }
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getAltitudeOffset() {
+        return this.getAltitude();
+    }
+    setAltitudeMode(mode) {
+        this._altitudeMode = mode;
+        this._onAltitudeChanged();
         return this;
     }
-    /**
-     * Меняет тултип. Если полигон не был зарегистрирован в
-     * InteractionManager (не было ни onClick, ни onHover, ни tooltip),
-     * регистрация произойдёт автоматически.
-     */
-    setTooltip(html) {
-        this._tooltipText = html ?? '';
+    getAltitudeMode() { return this._altitudeMode; }
+    // =================================================================
+    // Экструзия
+    // =================================================================
+    setExtruded(extruded) {
+        const next = !!extruded;
+        if (this._extruded === next)
+            return this;
+        this._extruded = next;
+        if (next && this._height <= 0) {
+            console.warn('Polygon.setExtruded: height is 0, side walls will be flat');
+        }
         if (this._map)
-            this._registerInteraction(this._map);
+            this._rebuildGeometry();
         return this;
     }
-    /**
-     * Центр bounding box в WGS84: `[lon, lat]`.
-     * Возвращает `null`, если колец нет / bbox вырожден.
-     */
+    getExtruded() { return this._extruded; }
+    setHeight(height) {
+        if (!(height >= 0))
+            return this;
+        this._height = height;
+        if (this._extruded) {
+            this._heightsDirty = true;
+            this._heightsFinalized = false;
+        }
+        return this;
+    }
+    getHeight() { return this._height; }
+    setMinHeight(height) {
+        if (!(height >= 0))
+            return this;
+        this._minHeight = height;
+        this._heightsDirty = true;
+        this._heightsFinalized = false;
+        return this;
+    }
+    getMinHeight() { return this._minHeight; }
+    // =================================================================
+    // Depth
+    // =================================================================
+    setDepthTest(depthTest) {
+        this._depthTest = !!depthTest;
+        this._applyDepthFlags();
+        return this;
+    }
+    getDepthTest() { return this._depthTest; }
+    setDepthWrite(depthWrite) {
+        this._depthWrite = !!depthWrite;
+        this._applyDepthFlags();
+        return this;
+    }
+    getDepthWrite() { return this._depthWrite; }
+    _applyDepthFlags() {
+        const mats = [
+            this._fillMaterial,
+            this._bottomMaterial,
+            this._sideMaterial,
+            this._strokeMaterial,
+        ];
+        for (const mat of mats) {
+            if (!mat)
+                continue;
+            let changed = false;
+            if (mat.depthTest !== this._depthTest) {
+                mat.depthTest = this._depthTest;
+                changed = true;
+            }
+            if (mat.depthWrite !== this._depthWrite) {
+                mat.depthWrite = this._depthWrite;
+                changed = true;
+            }
+            if (changed)
+                mat.needsUpdate = true;
+        }
+    }
+    // =================================================================
+    // Центр / bounds
+    // =================================================================
     getCenter() {
         const b = this.getBounds('EPSG:4326');
         if (!b)
@@ -696,76 +835,14 @@ export class Polygon {
         ];
     }
     // =================================================================
-    // Удаление
-    // =================================================================
-    remove() {
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (this._group) {
-            this._group.parent?.remove(this._group);
-            this._fillGeometry?.dispose();
-            this._fillMaterial?.dispose();
-            this._bottomGeometry?.dispose();
-            this._bottomMaterial?.dispose();
-            this._sideGeometry?.dispose();
-            this._sideMaterial?.dispose();
-            this._strokeGeometry?.dispose();
-            this._strokeMaterial?.dispose();
-            this._fillMesh = null;
-            this._bottomMesh = null;
-            this._sideMesh = null;
-            this._strokeLine = null;
-            this._fillGeometry = null;
-            this._fillMaterial = null;
-            this._bottomGeometry = null;
-            this._bottomMaterial = null;
-            this._sideGeometry = null;
-            this._sideMaterial = null;
-            this._strokeGeometry = null;
-            this._strokeMaterial = null;
-        }
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        this._worldCoords.length = 0;
-        this._strokeWorldCoords.length = 0;
-        this._nodeHeights.length = 0;
-        this._strokeNodeHeights.length = 0;
-        this._vertices2D.length = 0;
-        this._boundingSphereRadius = 0;
-        this._cachedHeights.length = 0;
-        this._cachedStrokeHeights.length = 0;
-        this._isHovered = false;
-        this._raycastMeshesCache = null;
-        this._invalidGeometry = false;
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
-        this._crs = null;
-    }
-    // =================================================================
     // Обновление на кадре
     // =================================================================
     _update(map) {
         if (!this._map || !this._group)
             return;
-        if (this._invalidGeometry || !this._userVisible) {
-            this._group.visible = false;
-            this._centroidScreenPos = null;
-            return;
-        }
-        const zoom = this._map.continuousZoom;
-        if (this._layer && !this._layer.visible) {
-            this._group.visible = false;
-            this._centroidScreenPos = null;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
-            this._centroidScreenPos = null;
+        if (this._invalidGeometry || !this._isWithinView()) {
+            this._applyHidden();
+            this._isVisible = false;
             return;
         }
         if (this._group.parent !== this._map.worldGroup) {
@@ -787,13 +864,14 @@ export class Polygon {
                     .add(map.worldGroup.position);
                 const distToCenter = map.camera.position.distanceTo(worldCenter);
                 if (distToCenter - this._boundingSphereRadius > maxDist) {
-                    this._group.visible = false;
-                    this._centroidScreenPos = null;
+                    this._applyHidden();
+                    this._isVisible = false;
                     return;
                 }
             }
         }
         this._group.visible = true;
+        this._isVisible = true;
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;
@@ -829,12 +907,12 @@ export class Polygon {
             const worldCoord = this._worldCoords[i];
             if (!worldCoord)
                 continue;
-            let base = this._altitudeOffset;
+            let base = this._altitude;
             if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
                 const worldZ = worldCoord[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
-                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
+                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
             const nodeH = this._nodeHeights[i] ?? 0;
             this._cachedHeights[i] = base + nodeH + this._minHeight + extrude;
@@ -847,12 +925,12 @@ export class Polygon {
             const worldCoord = this._strokeWorldCoords[i];
             if (!worldCoord)
                 continue;
-            let base = this._altitudeOffset;
+            let base = this._altitude;
             if (isDynamic) {
                 const worldX = worldCoord[0] + wgPos.x;
                 const worldZ = worldCoord[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
-                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitudeOffset;
+                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
             const nodeH = this._strokeNodeHeights[i] ?? 0;
             this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
@@ -910,12 +988,12 @@ export class Polygon {
             const worldCoord = this._strokeWorldCoords[i];
             if (!worldCoord)
                 continue;
-            const y = this._cachedStrokeHeights[i] ?? this._altitudeOffset;
+            const y = this._cachedStrokeHeights[i] ?? this._altitude;
             positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
         }
         if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
-            const fy = this._cachedStrokeHeights[0] ?? this._altitudeOffset;
+            const fy = this._cachedStrokeHeights[0] ?? this._altitude;
             positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);
         }
         if (this._useSimpleStroke) {
@@ -949,7 +1027,7 @@ export class Polygon {
         const wgPos = map.worldGroup.position;
         const worldX = this._centroidWorld.x + wgPos.x;
         const worldZ = this._centroidWorld.z + wgPos.z;
-        let worldY = this._altitudeOffset;
+        let worldY = this._altitude;
         if (this._altitudeMode === 'clampToGround' && map.hasElevation) {
             const now = performance.now();
             if (now - this._lastCentroidHeightUpdateTime > this._heightUpdateInterval) {
@@ -957,7 +1035,7 @@ export class Polygon {
                 this._cachedCentroidHeight = map.getSurfaceHeightAt(worldX, worldZ);
                 this._lastCentroidHeightUpdateTime = now;
             }
-            worldY = (this._cachedCentroidHeight ?? 0) + this._altitudeOffset;
+            worldY = (this._cachedCentroidHeight ?? 0) + this._altitude;
         }
         let avgNodeH = 0;
         if (this._nodeHeights.length > 0) {
@@ -981,29 +1059,6 @@ export class Polygon {
             };
         }
     }
-    // =================================================================
-    // TextManager contract
-    // =================================================================
-    getText() { return this._title; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    getLabelType() { return 'polygon'; }
-    isVisible() { return this._group?.visible ?? false; }
-    getScreenPosition() { return this._centroidScreenPos; }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleOffset() { return this._titleOffset; }
-    getTitleVerticalAlign() { return 'center'; }
-    getAllowOverflow() { return this._titleAllowOverflow; }
-    getPriority() { return this._titlePriority; }
     // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================

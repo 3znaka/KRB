@@ -1,13 +1,16 @@
 /**
  * Vector3D — направленный 3D-вектор (ломаная со стрелкой) и опциональной
- * анимацией. После `addTo()` мутабелен: точки, цвет, толщина, размер
- * стрелки, прозрачность, видимость, высотный масштаб, подписи и тултип
- * меняются без пересоздания.
+ * анимацией. После `addTo()` мутабелен.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * altitude, zoom bounds и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся специфика: ECEF, Line2-геометрия, статическая стрелка,
+ * анимации, две подписи (start/end) через фасады.
  *
  * @module Vector3D
  */
-import { Layer } from './Layers.js';
 import { Projections } from './Projections.js';
+import { SpatialObject } from './SpatialObject.js';
 import { THREE, Line2, LineMaterial, LineGeometry, LineSegments2, LineSegmentsGeometry, } from './js_TP/tpb.js';
 // =====================================================================
 // Константы и утилиты ECEF
@@ -57,35 +60,28 @@ const MAX_HEAD_CONES = 100;
 // =====================================================================
 // Vector3D
 // =====================================================================
-export class Vector3D {
+export class Vector3D extends SpatialObject {
     // ── Данные ──
     _positions;
     _crsCode;
     _crs;
     _isEcef;
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     _color;
     _width;
     _arrowSize;
     _arrowSizeMode;
     _opacity;
     _depthTest;
-    _minZoom;
-    _maxZoom;
+    _depthWrite;
     _heightScale;
-    _altitudeOffset;
-    // ── Подписи ──
+    _altitudeMode;
+    // ── Две подписи ──
     _titles;
     // ── Интерактив ──
-    _tooltip;
-    _onClick;
-    _onHover;
     _unregisterInteraction = null;
-    // ── Присоединение ──
-    _map = null;
-    _layer = null;
-    _group;
     // ── 3D-объекты ──
+    _group;
     _line = null;
     _material = null;
     _geometry = null;
@@ -97,13 +93,15 @@ export class Vector3D {
     _animList = [];
     _animPolyline = null;
     _lastUpdateTime = 0;
+    // ── clampToGround ──
+    _lastSurfaceUpdateTime = 0;
+    _lastWorldGroupPos;
     // ── Временные ──
     _tempVecA;
     _tempVecB;
     _Y_AXIS;
-    // ── NEW: видимость ──
-    _userVisible = true;
     constructor(options) {
+        super();
         if (!options.positions || options.positions.length < 2) {
             throw new Error('Vector3D: options.positions required, at least 2 points');
         }
@@ -117,26 +115,121 @@ export class Vector3D {
         this._arrowSizeMode = options.arrowSizeMode === 'world' ? 'world' : 'px';
         this._opacity = options.opacity ?? 1;
         this._depthTest = options.depthTest ?? false;
+        this._depthWrite = options.depthWrite ?? this._depthTest;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._heightScale = options.heightScale ?? 1;
-        this._altitudeOffset = options.altitudeOffset ?? 0;
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 0;
+        this._altitudeMode = options.altitudeMode ?? 'absolute';
         this._titles = {
             start: this._parseTitleOptions(options, 'start'),
             end: this._parseTitleOptions(options, 'end'),
         };
-        this._tooltip = options.tooltip ?? '';
+        this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
         this._group = new THREE.Group();
         this._tempVecA = new THREE.Vector3();
         this._tempVecB = new THREE.Vector3();
         this._Y_AXIS = new THREE.Vector3(0, 1, 0);
+        this._lastWorldGroupPos = new THREE.Vector3();
         this._parseAnimationsInto(options.animation);
     }
     // =================================================================
-    // Разбор подписей и анимаций
+    // Хуки SpatialObject
     // =================================================================
+    _onAttached(map) {
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        this._recomputeWorldPoints();
+        if (this._worldPoints.length < 2)
+            return;
+        this._buildLine(map);
+        this._buildStaticCone();
+        if (this._animList.length)
+            this._setupAnimations(map);
+        map.worldGroup.add(this._group);
+        this._registerInteraction(map);
+        this._attachLabels(map);
+        this._lastWorldGroupPos.copy(map.worldGroup.position);
+        this._lastSurfaceUpdateTime = 0;
+    }
+    _teardown() {
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (this._map?.textManager) {
+            for (const { handle } of this._labels) {
+                this._map.textManager.removeLabel(handle);
+            }
+        }
+        this._labels = [];
+        this._teardownAnimations();
+        if (this._group.parent)
+            this._group.parent.remove(this._group);
+        for (const child of [...this._group.children]) {
+            if (child.geometry && typeof child.geometry.dispose === 'function') {
+                child.geometry.dispose();
+            }
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (const m of mats)
+                    if (m && typeof m.dispose === 'function')
+                        m.dispose();
+            }
+            this._group.remove(child);
+        }
+        this._line = null;
+        this._material = null;
+        this._geometry = null;
+        this._cone = null;
+        this._lastSegLen = 0;
+        this._lastUpdateTime = 0;
+        this._lastSurfaceUpdateTime = 0;
+        this._crs = null;
+    }
+    _applyHidden() {
+        if (this._group)
+            this._group.visible = false;
+    }
+    _onTooltipChanged() {
+        if (this._map)
+            this._registerInteraction(this._map);
+    }
+    _onAltitudeChanged() {
+        if (!this._map)
+            return;
+        this._recomputeWorldPoints();
+        this._refreshGeometryAfterPositionsChange();
+    }
+    getLabelType() { return 'point'; }
+    // =================================================================
+    // Подписи: start/end через фасады, getText делегирует к start
+    // =================================================================
+    setTitle(text) {
+        return this.setTitleStart(text);
+    }
+    getText() { return this._titles.start.text; }
+    getTextStyle() {
+        return Object.assign({
+            fontFamily: 'sans-serif',
+            color: '#ffffff',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
+        }, this._titles.start.style);
+    }
+    getTextZoomBounds() {
+        return { min: this._titles.start.minZoom, max: this._titles.start.maxZoom };
+    }
+    getTitleAlign() { return this._titles.start.align; }
+    getTitleVerticalAlign() { return this._titles.start.verticalAlign; }
+    getTitleOffset() { return this._titles.start.offset; }
+    getAllowOverflow() { return this._titles.start.allowOverflow; }
+    getPriority() { return this._titles.start.priority; }
+    getScreenPosition() {
+        return this._getScreenPositionAt('start');
+    }
     _parseTitleOptions(options, role) {
         const isStart = role === 'start';
         const sfx = isStart ? 'Start' : 'End';
@@ -211,20 +304,64 @@ export class Vector3D {
             y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
+    setTitleStart(text) {
+        return this._setTitleText('start', text ?? '');
+    }
+    setTitleEnd(text) {
+        return this._setTitleText('end', text ?? '');
+    }
+    _setTitleText(role, text) {
+        this._titles[role].text = text;
+        const tm = this._map?.textManager;
+        if (!tm)
+            return this;
+        const entry = this._labels.find(l => l.role === role);
+        if (entry) {
+            if (text) {
+                if (typeof tm.updateLabel === 'function')
+                    tm.updateLabel(entry.handle);
+            }
+            else {
+                tm.removeLabel(entry.handle);
+                this._labels = this._labels.filter(l => l !== entry);
+            }
+        }
+        else if (text) {
+            const facade = this._makeLabelFacade(role);
+            const handle = tm.addLabel(facade);
+            this._labels.push({ role, handle, facade });
+        }
+        return this;
+    }
+    _attachLabels(map) {
+        if (!map.textManager)
+            return;
+        for (const role of ['start', 'end']) {
+            const title = this._titles[role];
+            if (!title.text)
+                continue;
+            const facade = this._makeLabelFacade(role);
+            const handle = map.textManager.addLabel(facade);
+            this._labels.push({ role, handle, facade });
+        }
+    }
+    // =================================================================
+    // Разбор анимаций
+    // =================================================================
     _parseAnimationsInto(anim) {
         this._animList = [];
         if (!anim)
             return;
         const arr = Array.isArray(anim) ? anim : [anim];
         for (const a of arr) {
-            const cfg = this._parseOneAnimation(a); // ← без as any
+            const cfg = this._parseOneAnimation(a);
             if (cfg)
                 this._animList.push({ config: cfg, time: 0 });
         }
     }
     _parseOneAnimation(anim) {
         if (!anim)
-            return null; // ← ловит null, undefined, '', false
+            return null;
         const src = (typeof anim === 'string')
             ? { type: anim }
             : anim;
@@ -306,7 +443,7 @@ export class Vector3D {
         return 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
     }
     // =================================================================
-    // Геометрия маршрута
+    // Геометрия маршрута (для анимаций)
     // =================================================================
     _computePolylineData() {
         const pts = this._worldPoints;
@@ -381,7 +518,7 @@ export class Vector3D {
         }
     }
     // =================================================================
-    // Setup / teardown анимаций (внутренние)
+    // Setup / teardown анимаций
     // =================================================================
     _setupAnimations(map) {
         this._animPolyline = this._computePolylineData();
@@ -408,7 +545,7 @@ export class Vector3D {
                 opacity,
                 transparent: opacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
             });
             const cone = new THREE.Mesh(geo, mat);
             cone.renderOrder = 999;
@@ -435,7 +572,7 @@ export class Vector3D {
                     color, opacity,
                     transparent: opacity < 1,
                     depthTest: this._depthTest,
-                    depthWrite: this._depthTest,
+                    depthWrite: this._depthWrite,
                 });
                 const c = new THREE.Mesh(g, m);
                 c.renderOrder = 999;
@@ -453,7 +590,7 @@ export class Vector3D {
                 opacity,
                 transparent: opacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
                 resolution: new THREE.Vector2(map.renderer.domElement.width, map.renderer.domElement.height),
             });
             const overlay = new LineSegments2(geo, mat);
@@ -707,7 +844,7 @@ export class Vector3D {
                 opacity: coneOpacity,
                 transparent: coneOpacity < 1,
                 depthTest: this._depthTest,
-                depthWrite: this._depthTest,
+                depthWrite: this._depthWrite,
             });
             const c = new THREE.Mesh(g, m);
             c.renderOrder = 999;
@@ -785,108 +922,8 @@ export class Vector3D {
         return this;
     }
     // =================================================================
-    // Присоединение / отсоединение
+    // Интерактив
     // =================================================================
-    addTo(map) {
-        if (this._map === map && this._layer)
-            return this;
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        if (this._map || this._layer)
-            this.remove();
-        this._map = map;
-        this._layer = layer;
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
-        this._recomputeWorldPoints();
-        if (this._worldPoints.length < 2)
-            return;
-        this._buildLine(map);
-        this._buildStaticCone();
-        if (this._animList.length)
-            this._setupAnimations(map);
-        map.worldGroup.add(this._group);
-        this._registerInteraction(map);
-        this._attachLabels(map);
-    }
-    /** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
-    _recomputeWorldPoints() {
-        const worldPts = [];
-        for (let i = 0; i < this._positions.length; i++) {
-            const p = this._positions[i];
-            if (!Array.isArray(p) || p.length < 2)
-                continue;
-            let xy = null;
-            let h = 0;
-            if (this._isEcef) {
-                const [lon, lat, hh] = ecefToGeodetic(p[0], p[1], p[2] ?? 0);
-                xy = this._map.projectSafe([lon, lat], 'EPSG:4326');
-                h = hh;
-            }
-            else {
-                xy = this._map.projectSafe([p[0], p[1]], this._crs);
-                h = p[2] ?? 0;
-            }
-            if (!xy)
-                continue;
-            const worldY = h * this._heightScale + this._altitudeOffset;
-            worldPts.push([xy[0], worldY, xy[1]]);
-        }
-        this._worldPoints = worldPts;
-    }
-    _buildLine(map) {
-        const flat = [];
-        for (const wp of this._worldPoints)
-            flat.push(wp[0], wp[1], wp[2]);
-        this._geometry = new LineGeometry();
-        this._geometry.setPositions(flat);
-        const canvas = map.renderer.domElement;
-        this._material = new LineMaterial({
-            color: this._color,
-            linewidth: this._width,
-            opacity: this._opacity,
-            transparent: this._opacity < 1,
-            depthTest: this._depthTest,
-            depthWrite: this._depthTest,
-            resolution: new THREE.Vector2(canvas.width, canvas.height),
-        });
-        this._line = new Line2(this._geometry, this._material);
-        this._line.computeLineDistances();
-        this._line.renderOrder = 999;
-        this._group.add(this._line);
-    }
-    _buildStaticCone() {
-        const pts = this._worldPoints;
-        const last = pts.length - 1;
-        const pFrom = new THREE.Vector3(...pts[last - 1]);
-        const pTo = new THREE.Vector3(...pts[last]);
-        const dir = new THREE.Vector3().subVectors(pTo, pFrom);
-        const len = dir.length();
-        if (len <= 1e-6)
-            return;
-        const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
-        cGeo.translate(0, 0.5, 0);
-        this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
-            color: this._color,
-            opacity: this._opacity,
-            transparent: this._opacity < 1,
-            depthTest: this._depthTest,
-            depthWrite: this._depthTest,
-        }));
-        this._cone.renderOrder = 999;
-        this._cone.position.copy(pTo);
-        this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
-        this._lastSegLen = len;
-        this._applyConeScale(this._map);
-        this._group.add(this._cone);
-    }
     _registerInteraction(map) {
         if (!map.interaction)
             return;
@@ -894,7 +931,7 @@ export class Vector3D {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
         }
-        if (!this._onClick && !this._onHover && !this._tooltip)
+        if (!this._onClick && !this._onHover && !this._tooltipText)
             return;
         this._unregisterInteraction = map.interaction.register(this, {
             getMeshes: () => {
@@ -922,21 +959,91 @@ export class Vector3D {
             },
             onClick: this._onClick || null,
             onHover: this._onHover || null,
-            getTooltip: this._tooltip ? () => this._tooltip : null,
-            isVisible: () => this._group.visible,
+            getTooltip: this._tooltipText ? () => this._tooltipText : null,
+            isVisible: () => this._isVisible,
         });
     }
-    _attachLabels(map) {
-        if (!map.textManager)
+    // =================================================================
+    // Точки / геометрия
+    // =================================================================
+    /** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
+    _recomputeWorldPoints() {
+        if (!this._map)
             return;
-        for (const role of ['start', 'end']) {
-            const title = this._titles[role];
-            if (!title.text)
+        const worldPts = [];
+        const wgPos = this._map.worldGroup.position;
+        const clamp = this._altitudeMode === 'clampToGround';
+        for (let i = 0; i < this._positions.length; i++) {
+            const p = this._positions[i];
+            if (!Array.isArray(p) || p.length < 2)
                 continue;
-            const facade = this._makeLabelFacade(role);
-            const handle = map.textManager.addLabel(facade);
-            this._labels.push({ role, handle, facade });
+            let xy = null;
+            let h = 0;
+            if (this._isEcef) {
+                const [lon, lat, hh] = ecefToGeodetic(p[0], p[1], p[2] ?? 0);
+                xy = this._map.projectSafe([lon, lat], 'EPSG:4326');
+                h = hh;
+            }
+            else {
+                xy = this._map.projectSafe([p[0], p[1]], this._crs);
+                h = p[2] ?? 0;
+            }
+            if (!xy)
+                continue;
+            let surfaceY = 0;
+            if (clamp) {
+                surfaceY = this._map.getSurfaceHeightAt(xy[0] + wgPos.x, xy[1] + wgPos.z);
+            }
+            const worldY = surfaceY + h * this._heightScale + this._altitude;
+            worldPts.push([xy[0], worldY, xy[1]]);
         }
+        this._worldPoints = worldPts;
+    }
+    _buildLine(map) {
+        const flat = [];
+        for (const wp of this._worldPoints)
+            flat.push(wp[0], wp[1], wp[2]);
+        this._geometry = new LineGeometry();
+        this._geometry.setPositions(flat);
+        const canvas = map.renderer.domElement;
+        this._material = new LineMaterial({
+            color: this._color,
+            linewidth: this._width,
+            opacity: this._opacity,
+            transparent: this._opacity < 1,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite,
+            resolution: new THREE.Vector2(canvas.width, canvas.height),
+        });
+        this._line = new Line2(this._geometry, this._material);
+        this._line.computeLineDistances();
+        this._line.renderOrder = 999;
+        this._group.add(this._line);
+    }
+    _buildStaticCone() {
+        const pts = this._worldPoints;
+        const last = pts.length - 1;
+        const pFrom = new THREE.Vector3(...pts[last - 1]);
+        const pTo = new THREE.Vector3(...pts[last]);
+        const dir = new THREE.Vector3().subVectors(pTo, pFrom);
+        const len = dir.length();
+        if (len <= 1e-6)
+            return;
+        const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
+        cGeo.translate(0, 0.5, 0);
+        this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
+            color: this._color,
+            opacity: this._opacity,
+            transparent: this._opacity < 1,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite,
+        }));
+        this._cone.renderOrder = 999;
+        this._cone.position.copy(pTo);
+        this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
+        this._lastSegLen = len;
+        this._applyConeScale(this._map);
+        this._group.add(this._cone);
     }
     _applyConeScale(map, cone = this._cone, size = null, sizeMode = null) {
         if (!cone)
@@ -969,8 +1076,9 @@ export class Vector3D {
     _update(map, deltaTime) {
         if (!this._map || !this._line)
             return;
-        if (!this._userVisible) {
-            this._group.visible = false;
+        if (!this._isWithinView()) {
+            this._applyHidden();
+            this._isVisible = false;
             return;
         }
         if (typeof deltaTime !== 'number' || !isFinite(deltaTime) || deltaTime < 0) {
@@ -982,19 +1090,29 @@ export class Vector3D {
         if (deltaTime > 0.1)
             deltaTime = 0.1;
         this._lastUpdateTime = performance.now();
-        const zoom = map.continuousZoom;
-        let visible = (this._layer ? this._layer.visible : true)
-            && zoom >= this._minZoom && zoom <= this._maxZoom;
-        if (visible && map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
+        // clampToGround: периодически обновляем высоты по рельефу.
+        if (this._altitudeMode === 'clampToGround' && this._worldPoints.length >= 2) {
+            const now = performance.now();
+            const posChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
+            if (now - this._lastSurfaceUpdateTime > 500 || posChanged) {
+                this._recomputeWorldPoints();
+                this._updateGeometryOnly();
+                this._lastSurfaceUpdateTime = now;
+                this._lastWorldGroupPos.copy(map.worldGroup.position);
+            }
+        }
+        if (map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
             const mid = this._worldPoints[this._worldPoints.length >> 1];
             const wgPos = map.worldGroup.position;
             const d = map.camera.position.distanceTo(map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z));
-            if (d > map.maxObjectDistance)
-                visible = false;
+            if (d > map.maxObjectDistance) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
         }
-        this._group.visible = visible;
-        if (!visible)
-            return;
+        this._group.visible = true;
+        this._isVisible = true;
         if (this._animList.length > 0 && this._animPolyline) {
             this._stepAllAnimations(map, deltaTime);
         }
@@ -1019,16 +1137,6 @@ export class Vector3D {
     // =================================================================
     // Мутабельность
     // =================================================================
-    /** Управляет видимостью (перекрывает зум и видимость слоя). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
-        if (!this._group)
-            return this;
-        if (!this._userVisible)
-            this._group.visible = false;
-        return this;
-    }
-    /** Меняет цвет линии и конусов (где не задан явный override). */
     setColor(color) {
         this._color = color;
         if (this._material?.color)
@@ -1054,7 +1162,7 @@ export class Vector3D {
         }
         return this;
     }
-    /** Меняет толщину линии. */
+    getColor() { return this._color; }
     setWidth(width) {
         if (!(width >= 0))
             return this;
@@ -1071,7 +1179,7 @@ export class Vector3D {
         }
         return this;
     }
-    /** Меняет прозрачность линии и конусов (где не задан явный override). */
+    getWidth() { return this._width; }
     setOpacity(opacity) {
         const v = Math.max(0, Math.min(1, opacity));
         this._opacity = v;
@@ -1103,7 +1211,7 @@ export class Vector3D {
         }
         return this;
     }
-    /** Меняет размер стрелки (пиксели или world — зависит от `arrowSizeMode`). */
+    getOpacity() { return this._opacity; }
     setArrowSize(size) {
         if (!(size > 0))
             return this;
@@ -1112,16 +1220,37 @@ export class Vector3D {
             this._applyConeScale(this._map);
         return this;
     }
-    /** Меняет режим размера стрелки. */
+    getArrowSize() { return this._arrowSize; }
     setArrowSizeMode(mode) {
         this._arrowSizeMode = mode;
         if (this._cone && this._map)
             this._applyConeScale(this._map);
         return this;
     }
-    /** Включает/отключает depthTest во всех материалах. */
+    getArrowSizeMode() { return this._arrowSizeMode; }
     setDepthTest(depthTest) {
         this._depthTest = !!depthTest;
+        for (const m of this._collectAllMaterials()) {
+            if (m.depthTest !== this._depthTest) {
+                m.depthTest = this._depthTest;
+                m.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+    getDepthTest() { return this._depthTest; }
+    setDepthWrite(depthWrite) {
+        this._depthWrite = !!depthWrite;
+        for (const m of this._collectAllMaterials()) {
+            if (m.depthWrite !== this._depthWrite) {
+                m.depthWrite = this._depthWrite;
+                m.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+    getDepthWrite() { return this._depthWrite; }
+    _collectAllMaterials() {
         const all = [];
         if (this._material)
             all.push(this._material);
@@ -1139,21 +1268,11 @@ export class Vector3D {
                 for (const c of anim.headConePool)
                     all.push(c.material);
         }
-        for (const m of all) {
-            if (m.depthTest !== this._depthTest) {
-                m.depthTest = this._depthTest;
-                m.needsUpdate = true;
-            }
-        }
-        return this;
+        return all;
     }
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom, maxZoom) {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
-        return this;
-    }
-    /** Меняет вертикальное преувеличение. */
+    // =================================================================
+    // HeightScale / altitudeMode
+    // =================================================================
     setHeightScale(scale) {
         this._heightScale = scale;
         if (!this._map)
@@ -1162,19 +1281,20 @@ export class Vector3D {
         this._refreshGeometryAfterPositionsChange();
         return this;
     }
-    /** Меняет высотное смещение (world-метры). */
-    setAltitudeOffset(offset) {
-        this._altitudeOffset = offset;
-        if (!this._map)
-            return this;
-        this._recomputeWorldPoints();
-        this._refreshGeometryAfterPositionsChange();
+    getHeightScale() { return this._heightScale; }
+    setAltitudeMode(mode) {
+        this._altitudeMode = mode;
+        this._onAltitudeChanged();
         return this;
     }
-    /**
-     * Заменяет точки. Пересчитывает `_worldPoints`, обновляет линию,
-     * позицию статического конуса и пересоздаёт анимации.
-     */
+    getAltitudeMode() { return this._altitudeMode; }
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setAltitudeOffset(offset) { return this.setAltitude(offset); }
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getAltitudeOffset() { return this.getAltitude(); }
+    // =================================================================
+    // Позиции
+    // =================================================================
     setPositions(positions) {
         if (!positions || positions.length < 2)
             return this;
@@ -1187,59 +1307,32 @@ export class Vector3D {
         this._refreshGeometryAfterPositionsChange();
         return this;
     }
-    /** Меняет тултип. При необходимости — перерегистрирует интерактив. */
-    setTooltip(html) {
-        this._tooltip = html ?? '';
-        if (this._map)
-            this._registerInteraction(this._map);
-        return this;
+    getPositions() {
+        return this._positions.map(p => [p[0], p[1], p[2]]);
     }
-    /** Меняет стартовую подпись. */
-    setTitleStart(text) {
-        return this._setTitleText('start', text ?? '');
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter() {
+        const b = this.getBounds('EPSG:4326');
+        if (!b)
+            return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
     }
-    /** Меняет конечную подпись. */
-    setTitleEnd(text) {
-        return this._setTitleText('end', text ?? '');
-    }
-    _setTitleText(role, text) {
-        this._titles[role].text = text;
-        const tm = this._map?.textManager;
-        if (!tm)
-            return this;
-        const entry = this._labels.find(l => l.role === role);
-        if (entry) {
-            if (text) {
-                if (typeof tm.updateLabel === 'function')
-                    tm.updateLabel(entry.handle);
-                // else: facade.getText уже видит новый текст, но без
-                // updateLabel нет способа форсировать пересчёт. Оставляем
-                // как есть — большинство пользователей будет с новой
-                // версией TextManager.
-            }
-            else {
-                tm.removeLabel(entry.handle);
-                this._labels = this._labels.filter(l => l !== entry);
-            }
-        }
-        else if (text) {
-            const facade = this._makeLabelFacade(role);
-            const handle = tm.addLabel(facade);
-            this._labels.push({ role, handle, facade });
-        }
-        return this;
-    }
-    /** Пересобирает геометрию и анимации после изменения `_worldPoints`. */
-    _refreshGeometryAfterPositionsChange() {
-        if (!this._map || !this._line)
+    // =================================================================
+    // Пересборка после изменения _worldPoints
+    // =================================================================
+    /** Обновляет только геометрию линии/конуса/_animPolyline, не трогая анимации. */
+    _updateGeometryOnly() {
+        if (!this._map || !this._line || !this._geometry)
             return;
         const flat = [];
         for (const wp of this._worldPoints)
             flat.push(wp[0], wp[1], wp[2]);
         this._geometry.setPositions(flat);
         this._line.computeLineDistances();
-        // Обновляем позицию статического конуса.
-        if (this._cone) {
+        if (this._cone && this._worldPoints.length >= 2) {
             const last = this._worldPoints.length - 1;
             const pFrom = new THREE.Vector3(...this._worldPoints[last - 1]);
             const pTo = new THREE.Vector3(...this._worldPoints[last]);
@@ -1252,72 +1345,16 @@ export class Vector3D {
                 this._applyConeScale(this._map);
             }
         }
-        // Пересоздаём анимации.
+        this._animPolyline = this._computePolylineData();
+    }
+    /** Полная пересборка: геометрия + пересоздание анимаций. */
+    _refreshGeometryAfterPositionsChange() {
+        if (!this._map || !this._line)
+            return;
         this._teardownAnimations();
+        this._updateGeometryOnly();
         if (this._animList.length)
             this._setupAnimations(this._map);
-    }
-    // =================================================================
-    // Геттеры
-    // =================================================================
-    getPositions() {
-        return this._positions.map(p => [p[0], p[1], p[2]]);
-    }
-    getColor() { return this._color; }
-    getWidth() { return this._width; }
-    getOpacity() { return this._opacity; }
-    getArrowSize() { return this._arrowSize; }
-    getArrowSizeMode() { return this._arrowSizeMode; }
-    getHeightScale() { return this._heightScale; }
-    getAltitudeOffset() { return this._altitudeOffset; }
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
-    getCenter() {
-        const b = this.getBounds('EPSG:4326');
-        if (!b)
-            return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
-    }
-    // =================================================================
-    // Удаление
-    // =================================================================
-    remove() {
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (this._map?.textManager) {
-            for (const { handle } of this._labels) {
-                this._map.textManager.removeLabel(handle);
-            }
-        }
-        this._labels = [];
-        this._teardownAnimations();
-        if (this._group.parent)
-            this._group.parent.remove(this._group);
-        for (const child of [...this._group.children]) {
-            if (child.geometry && typeof child.geometry.dispose === 'function') {
-                child.geometry.dispose();
-            }
-            if (child.material) {
-                const mats = Array.isArray(child.material) ? child.material : [child.material];
-                for (const m of mats)
-                    if (m && typeof m.dispose === 'function')
-                        m.dispose();
-            }
-            this._group.remove(child);
-        }
-        this._line = null;
-        this._material = null;
-        this._geometry = null;
-        this._cone = null;
-        this._lastSegLen = 0;
-        this._lastUpdateTime = 0;
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
     }
     // =================================================================
     // KrbMap#fitTo / getBounds
@@ -1343,37 +1380,4 @@ export class Vector3D {
         }
         return [[mnx, mnz], [mxx, mxz]];
     }
-    // =================================================================
-    // Legacy-геттеры (делегируют к start)
-    // =================================================================
-    getText() { return this._titles.start.text; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#ffffff',
-            fontSize: '12px',
-            fontWeight: 'bold',
-            textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
-        }, this._titles.start.style);
-    }
-    getTextZoomBounds() {
-        return { min: this._titles.start.minZoom, max: this._titles.start.maxZoom };
-    }
-    getLabelType() { return 'point'; }
-    isVisible() {
-        if (!this._layer || !this._layer.visible)
-            return false;
-        if (!this._map)
-            return false;
-        const zoom = this._map.continuousZoom;
-        return zoom >= this._titles.start.minZoom && zoom <= this._titles.start.maxZoom;
-    }
-    getScreenPosition() {
-        return this._getScreenPositionAt('start');
-    }
-    getTitleAlign() { return this._titles.start.align; }
-    getTitleVerticalAlign() { return this._titles.start.verticalAlign; }
-    getTitleOffset() { return this._titles.start.offset; }
-    getAllowOverflow() { return this._titles.start.allowOverflow; }
-    getPriority() { return this._titles.start.priority; }
 }

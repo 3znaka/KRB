@@ -2,10 +2,9 @@
  * SpatialObject — базовый класс для всех пространственных объектов карты.
  *
  * Хранит общее состояние, которое есть у каждого объекта (границы зума,
- * пользовательская видимость, интерактив, подпись, tooltip) и реализует
- * единый TextManager-контракт. Подклассы переопределяют только то, что
- * действительно специфично (создание/снос ресурсов, как именно скрывать,
- * как именно перерегистрировать интерактив, labelType).
+ * пользовательская видимость, интерактив, подпись, tooltip, высота) и
+ * реализует единый TextManager-контракт. Подклассы переопределяют только
+ * то, что действительно специфично.
  *
  * @module SpatialObject
  */
@@ -22,9 +21,19 @@ export abstract class SpatialObject {
 
     // ── Видимость ──
     protected _userVisible: boolean = true;
-    /** Результат последнего _update — не путать с _userVisible. */
     protected _isVisible: boolean = false;
     protected _lastScreenPos: { x: number; y: number } | null = null;
+
+    // ── Высота ──
+    /**
+     * Смещение по вертикали (world-метры). Семантика зависит от
+     * `altitudeMode` подкласса:
+     *   - 'clampToGround' — поверх рельефа + altitude;
+     *   - 'absolute'      — абсолютная Y = altitude;
+     *   - 'ground'        — плоскость Y = altitude.
+     * Реализация интерпретации — в `_update` подкласса.
+     */
+    protected _altitude: number = 0;
 
     // ── Интерактив ──
     protected _tooltipText: string = '';
@@ -51,7 +60,6 @@ export abstract class SpatialObject {
     // Жизненный цикл
     // =================================================================
 
-    /** Создаёт персональный слой и добавляет в него объект. */
     addTo(map: any): this {
         if (this._map) this.remove();
         const personalLayer = new Layer();
@@ -60,10 +68,6 @@ export abstract class SpatialObject {
         return this;
     }
 
-    /**
-     * Шаблонный метод присоединения к карте. Подкласс реализует
-     * `_onAttached(map)` — там создаются DOM/геометрия/слушатели.
-     */
     _attach(map: any, layer: Layer): void {
         if (this._map === map && this._layer === layer) return;
         this.remove();
@@ -78,10 +82,6 @@ export abstract class SpatialObject {
         }
     }
 
-    /**
-     * Шаблонный метод отсоединения. Подкласс реализует `_teardown()` —
-     * там освобождаются ресурсы (DOM/меши/слушатели).
-     */
     remove(): void {
         this._teardown();
 
@@ -103,30 +103,29 @@ export abstract class SpatialObject {
     // Абстрактные / шаблонные хуки
     // =================================================================
 
-    /** Создать/привязать ресурсы (DOM, геометрию, слушатели). */
     protected abstract _onAttached(map: any): void;
-
-    /** Освободить ресурсы подкласса (DOM, меши, слушатели, GLTF). */
     protected abstract _teardown(): void;
-
-    /** Скрыть визуальное представление (вызывается из `setVisible(false)`). */
     protected abstract _applyHidden(): void;
-
-    /** Тип подписи для TextManager: 'point' | 'polygon' | 'line' | 'image' | 'area3d'. */
     abstract getLabelType(): string;
 
-    /** Значение `titleOffset` по умолчанию (если пользователь не задал). */
     protected _defaultTitleOffset(): [number, number] {
         return [0, 0];
     }
 
     /**
-     * Хук: вызывается после изменения tooltip/onClick/onHover, когда
-     * объект уже присоединён к карте. Подклассы, использующие
-     * `map.interaction`, здесь перерегистрируют интерактив. По умолчанию
-     * — no-op (для объектов на DOM-событиях, как Marker).
+     * Хук: вызывается после изменения tooltip/onClick/onHover, а также
+     * после смены altitude/altitudeMode (см. `_onAltitudeChanged`), когда
+     * объект уже присоединён к карте. По умолчанию — no-op.
      */
     protected _onTooltipChanged(): void { /* override if needed */ }
+
+    /**
+     * Хук: вызывается из `setAltitude`/`setAltitudeMode` после того,
+     * как значение обновлено. Нужен подклассам, которые кэшируют
+     * высоту рельефа (Marker/Marker3D/Polygon/Polyline). По умолчанию
+     * — no-op (для тех, у кого _altitude не влияет на кэш).
+     */
+    protected _onAltitudeChanged(): void { /* override if needed */ }
 
     // =================================================================
     // Zoom
@@ -140,6 +139,21 @@ export abstract class SpatialObject {
 
     getZoomBounds(): { min: number; max: number } {
         return { min: this._minZoom, max: this._maxZoom };
+    }
+
+    // =================================================================
+    // Высота
+    // =================================================================
+
+    setAltitude(altitude: number): this {
+        if (!Number.isFinite(altitude)) return this;
+        this._altitude = altitude;
+        this._onAltitudeChanged();
+        return this;
+    }
+
+    getAltitude(): number {
+        return this._altitude;
     }
 
     // =================================================================
@@ -218,11 +232,6 @@ export abstract class SpatialObject {
     getAllowOverflow(): boolean { return this._titleAllowOverflow; }
     getPriority(): number { return this._titlePriority; }
 
-    /**
-     * По умолчанию — последняя известная экранная позиция, пока объект
-     * видим. Подклассы, которым нужно считать позицию по геометрии,
-     * переопределяют.
-     */
     getScreenPosition(): { x: number; y: number } | null {
         return this._isVisible ? this._lastScreenPos : null;
     }
@@ -231,14 +240,12 @@ export abstract class SpatialObject {
     // Внутренние хелперы
     // =================================================================
 
-    /** Вычисляет `_titleOffset` из `_userTitleOffset` или дефолта подкласса. */
     protected _resolveTitleOffset(): void {
         this._titleOffset = this._userTitleOffset
             ? [this._userTitleOffset[0], this._userTitleOffset[1]]
             : this._defaultTitleOffset();
     }
 
-    /** Обновляет/пересоздаёт дескриптор подписи в TextManager. */
     protected _refreshTextLabel(): void {
         const tm = this._map?.textManager;
         if (!tm) return;
@@ -255,11 +262,6 @@ export abstract class SpatialObject {
         }
     }
 
-    /**
-     * Общий входной гейт видимости: пользовательская видимость, видимость
-     * слоя и границы зума. Кластерная видимость и прочие специфичные
-     * проверки — в подклассах.
-     */
     protected _isWithinView(): boolean {
         if (!this._map) return false;
         if (!this._userVisible) return false;

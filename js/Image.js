@@ -1,66 +1,52 @@
 /**
- * Image — плоское изображение на карте. После `addTo()` мутабелен:
- * позиция/узлы, размер, поворот, anchor, прозрачность, blending,
- * цвет фона (через blending), видимость, подпись и тултип меняются
- * без пересоздания объекта.
+ * Image — плоское изображение на карте (nodes / position + size + anchor).
+ * После `addTo()` мутабелен.
+ *
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
+ * подпись, altitude (= elevationOffset), zoom bounds и TextManager-контракт
+ * берутся из базового класса.
+ *
+ * Специфика Image: собственный статический реестр интерактивных
+ * (`Image._interactiveImages` + глобальные DOM-слушатели на canvas) вместо
+ * `map.interaction`, две модели геометрии (nodes / position+size+anchor+
+ * rotation), текстура, blending и "alwaysOnTop" как единственный control
+ * над depthTest/polygonOffset.
  *
  * @module Image
  */
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 const IMAGE_RENDER_ORDER = 997;
 const DEFAULT_POLYGON_OFFSET = -4;
 // =====================================================================
 // Image
 // =====================================================================
-export class Image {
+export class Image extends SpatialObject {
     // ── Данные ──
     _source;
     _nodes;
     _position;
     _crsCode;
     _crs;
-    // ── Оформление ──
+    // ── Оформление ── (altitude — в базе)
     _size;
     _anchor;
     _rotation;
     _opacity;
     _blending;
-    _minZoom;
-    _maxZoom;
     _alwaysOnTop;
-    _elevationOffset;
     _polygonOffset;
-    // ── Подпись ──
-    _title;
-    _titleStyle;
-    _titleMinZoom;
-    _titleMaxZoom;
-    _titleAlign;
-    _titleOffset;
-    _titleAllowOverflow;
-    _titlePriority;
     // ── Интерактив ──
-    _onClick;
-    _onHover;
     _isHovered = false;
-    _tooltipText;
     // ── Внутреннее состояние ──
-    _map = null;
-    _layer = null;
     _group;
     _mesh = null;
     _geometry = null;
     _material = null;
     _texture = null;
-    _textLabel = null;
-    _isVisible = false;
-    _userVisible = true;
     _worldPositions = [];
     _centroidWorld;
-    _lastWorldGroupPos;
-    _lastDiscreteZoom = -1;
     _boundingSphereRadius = 0;
     _tempVec3;
     _dirtyGeometry = true;
@@ -73,6 +59,7 @@ export class Image {
     static _pointerDownActive = false;
     static _clickMoveThreshold = 5;
     constructor(options) {
+        super();
         if (!options.source) {
             throw new Error('Image: options.source is required');
         }
@@ -89,9 +76,7 @@ export class Image {
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._alwaysOnTop = options.alwaysOnTop === true;
-        this._elevationOffset = Number.isFinite(options.elevationOffset)
-            ? options.elevationOffset
-            : 0;
+        this._altitude = options.altitude ?? options.elevationOffset ?? 0;
         this._polygonOffset = Number.isFinite(options.polygonOffset)
             ? options.polygonOffset
             : DEFAULT_POLYGON_OFFSET;
@@ -100,19 +85,82 @@ export class Image {
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
         this._titleAlign = options.titleAlign ?? 'center';
-        this._titleOffset = options.titleOffset ?? [0, 0];
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
+        this._userTitleOffset = options.titleOffset
+            ? [options.titleOffset[0], options.titleOffset[1]]
+            : null;
+        this._resolveTitleOffset();
+        this._tooltipText = options.tooltip ?? '';
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
-        this._tooltipText = options.tooltip ?? '';
         this._group = new THREE.Group();
         this._centroidWorld = new THREE.Vector3();
-        this._lastWorldGroupPos = new THREE.Vector3();
         this._tempVec3 = new THREE.Vector3();
+    }
+    // =================================================================
+    // Хуки SpatialObject
+    // =================================================================
+    _onAttached(map) {
+        this._crs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : map.inputCRS;
+        this._loadTexture();
+        this._buildGeometry(map);
+        map.worldGroup.add(this._group);
+        // Регистрируем только если есть интерактив.
         if (this._onClick || this._onHover || this._tooltipText) {
             Image._registerInteractive(this);
         }
+    }
+    _teardown() {
+        if (this._map)
+            Image._unregisterInteractive(this);
+        if (this._group.parent)
+            this._group.parent.remove(this._group);
+        this._disposeGeometry();
+        this._disposeTexture();
+        this._crs = null;
+        this._isHovered = false;
+        this._dirtyGeometry = true;
+        this._worldPositions.length = 0;
+    }
+    _applyHidden() {
+        if (this._group)
+            this._group.visible = false;
+    }
+    _onTooltipChanged() {
+        if (!this._map)
+            return;
+        if (this._onClick || this._onHover || this._tooltipText) {
+            Image._registerInteractive(this);
+        }
+        else {
+            Image._unregisterInteractive(this);
+        }
+    }
+    _onAltitudeChanged() {
+        this._dirtyGeometry = true;
+        if (this._map)
+            this._buildGeometry(this._map);
+    }
+    getLabelType() { return 'image'; }
+    getTitleVerticalAlign() { return 'bottom'; }
+    getScreenPosition() {
+        if (!this._isVisible || !this._group || !this._map)
+            return null;
+        const worldPos = this._tempVec3
+            .copy(this._group.position)
+            .add(this._map.worldGroup.position);
+        worldPos.y += this._boundingSphereRadius * 0.1;
+        const screenPos = worldPos.clone().project(this._map.camera);
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
+            return null;
+        const canvas = this._map.renderer.domElement;
+        return {
+            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
+        };
     }
     // =================================================================
     // Статический реестр интерактивных
@@ -186,60 +234,8 @@ export class Image {
         }
     }
     // =================================================================
-    // Присоединение / отсоединение
-    // =================================================================
-    addTo(map) {
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
-        this._crs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : map.inputCRS;
-        this._loadTexture();
-        this._buildGeometry(map);
-        map.worldGroup.add(this._group);
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
-        }
-        if ((this._onClick || this._onHover || this._tooltipText)
-            && !Image._eventListenersAttached) {
-            Image._attachGlobalListeners();
-        }
-        this._lastWorldGroupPos.copy(map.worldGroup.position);
-        this._lastDiscreteZoom = map.currentDiscreteZoom;
-    }
-    remove() {
-        if (this._map)
-            Image._unregisterInteractive(this);
-        if (this._group.parent)
-            this._group.parent.remove(this._group);
-        this._disposeGeometry();
-        this._disposeTexture();
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        this._layer?._removeRef(this);
-        this._layer = null;
-        this._map = null;
-        this._crs = null;
-        this._isVisible = false;
-        this._worldPositions.length = 0;
-    }
-    // =================================================================
     // Мутабельность
     // =================================================================
-    /** Меняет источник (URL / HTMLImageElement / Canvas). */
     setSource(source) {
         if (!source) {
             console.warn('Image.setSource: source is empty');
@@ -256,7 +252,7 @@ export class Image {
         }
         return this;
     }
-    /** Меняет прозрачность (0..1). */
+    getSource() { return this._source; }
     setOpacity(opacity) {
         this._opacity = Math.max(0, Math.min(1, opacity));
         if (this._material) {
@@ -265,7 +261,7 @@ export class Image {
         }
         return this;
     }
-    /** Меняет режим смешивания. */
+    getOpacity() { return this._opacity; }
     setBlending(blending) {
         this._blending = blending;
         if (this._material) {
@@ -273,60 +269,46 @@ export class Image {
         }
         return this;
     }
-    /** Управляет видимостью (перекрывает зум-ограничения и видимость слоя). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
-        if (!this._group)
-            return this;
-        if (!this._userVisible) {
-            this._group.visible = false;
-            this._isVisible = false;
-        }
-        return this;
+    getBlending() { return this._blending; }
+    // ── Altitude (= elevationOffset) ──────────────────────────────────
+    /** @deprecated Используйте унаследованный `setAltitude`. */
+    setElevationOffset(offset) {
+        return this.setAltitude(offset);
     }
-    /** Меняет текст подписи (пустая строка — убрать). */
-    setTitle(text) {
-        this._title = text ?? '';
-        const tm = this._map?.textManager;
-        if (!tm)
-            return this;
-        if (this._textLabel) {
-            if (typeof tm.updateLabel === 'function') {
-                tm.updateLabel(this._textLabel);
-            }
-            else {
-                tm.removeLabel(this._textLabel);
-                this._textLabel = null;
-                if (this._title)
-                    this._textLabel = tm.addLabel(this);
-            }
-        }
-        else if (this._title) {
-            this._textLabel = tm.addLabel(this);
-        }
-        return this;
+    /** @deprecated Используйте унаследованный `getAltitude`. */
+    getElevationOffset() {
+        return this.getAltitude();
     }
+    // ── AlwaysOnTop / PolygonOffset ──────────────────────────────────
     /**
-     * Меняет тултип. Если ранее не было ни `onClick`, ни `onHover`,
-     * ни `tooltip` — регистрирует изображение в статическом реестре
-     * интерактивных и привязывает глобальные слушатели.
+     * Единственный control над depth для Image: `alwaysOnTop` одновременно
+     * переключает `depthTest` и `polygonOffset` на материале. Отдельных
+     * `setDepthTest`/`setDepthWrite` у Image нет — this._alwaysOnTop и есть
+     * абстракция глубины.
      */
-    setTooltip(html) {
-        const wasEmpty = !this._tooltipText;
-        this._tooltipText = html ?? '';
-        if (this._map && wasEmpty && this._tooltipText
-            && !Image._interactiveImages.has(this)) {
-            Image._registerInteractive(this);
+    setAlwaysOnTop(alwaysOnTop) {
+        this._alwaysOnTop = !!alwaysOnTop;
+        if (this._material) {
+            this._material.depthTest = !this._alwaysOnTop;
+            this._material.polygonOffset = !this._alwaysOnTop;
+            this._material.needsUpdate = true;
         }
         return this;
     }
-    /** Устанавливает границы видимости по зуму. */
-    setZoomBounds(minZoom, maxZoom) {
-        this._minZoom = minZoom;
-        this._maxZoom = maxZoom;
+    getAlwaysOnTop() { return this._alwaysOnTop; }
+    /** Сдвиг по глубине (отрицательное значение — ближе к камере). */
+    setPolygonOffset(offset) {
+        if (!Number.isFinite(offset))
+            return this;
+        this._polygonOffset = offset;
+        if (this._material) {
+            this._material.polygonOffsetFactor = offset;
+            this._material.polygonOffsetUnits = offset;
+        }
         return this;
     }
-    /** Устанавливает узлы (углы) изображения. */
+    getPolygonOffset() { return this._polygonOffset; }
+    // ── Узлы / позиция / размер / anchor / поворот ───────────────────
     setNodes(nodes) {
         if (!Array.isArray(nodes) || (nodes.length !== 3 && nodes.length !== 4)) {
             throw new Error('Image.setNodes: nodes must be an array of 3 or 4 objects');
@@ -337,7 +319,11 @@ export class Image {
             this._buildGeometry(this._map);
         return this;
     }
-    /** Меняет всё сразу: позицию, размер, anchor и поворот. */
+    getNodes() {
+        return this._nodes
+            ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
+            : null;
+    }
     setPositionRotation(params = {}) {
         if (params.position)
             this._position = params.position;
@@ -352,61 +338,17 @@ export class Image {
             this._buildGeometry(this._map);
         return this;
     }
-    /** Меняет только позицию (в режиме anchor). */
     setPosition(position) {
         return this.setPositionRotation({ position });
     }
-    /** Меняет только размер (в режиме anchor). */
     setSize(size) {
         return this.setPositionRotation({ size });
     }
-    /** Меняет только anchor (в режиме anchor). */
     setAnchor(anchor) {
         return this.setPositionRotation({ anchor });
     }
-    /** Меняет только поворот (в режиме anchor). */
     setRotation(rotation) {
         return this.setPositionRotation({ rotation });
-    }
-    /** Меняет дополнительный подъём над `alt` (world-метры). */
-    setElevationOffset(offset) {
-        if (!Number.isFinite(offset))
-            return this;
-        this._elevationOffset = offset;
-        this._dirtyGeometry = true;
-        if (this._map)
-            this._buildGeometry(this._map);
-        return this;
-    }
-    /** Отключает/включает depthTest (изображение поверх всей сцены). */
-    setAlwaysOnTop(alwaysOnTop) {
-        this._alwaysOnTop = !!alwaysOnTop;
-        if (this._material) {
-            this._material.depthTest = !this._alwaysOnTop;
-            this._material.polygonOffset = !this._alwaysOnTop;
-            this._material.needsUpdate = true;
-        }
-        return this;
-    }
-    /** Устанавливает polygonOffset (отрицательное значение — к камере). */
-    setPolygonOffset(offset) {
-        if (!Number.isFinite(offset))
-            return this;
-        this._polygonOffset = offset;
-        if (this._material) {
-            this._material.polygonOffsetFactor = offset;
-            this._material.polygonOffsetUnits = offset;
-        }
-        return this;
-    }
-    // =================================================================
-    // Геттеры
-    // =================================================================
-    getSource() { return this._source; }
-    getNodes() {
-        return this._nodes
-            ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
-            : null;
     }
     getPosition() {
         return this._position ? [...this._position] : null;
@@ -414,9 +356,6 @@ export class Image {
     getSize() { return [...this._size]; }
     getAnchor() { return [...this._anchor]; }
     getRotation() { return [...this._rotation]; }
-    getOpacity() { return this._opacity; }
-    getBlending() { return this._blending; }
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
     getCenter() {
         const b = this.getBounds('EPSG:4326');
         if (!b)
@@ -478,13 +417,12 @@ export class Image {
         }
     }
     _computeWorldPositionsFromNodes() {
-        if (!this._nodes || this._nodes.length < 3)
+        if (!this._nodes || this._nodes.length < 3 || !this._map)
             return [];
         const map = this._map;
-        const yOffset = this._elevationOffset;
         const positions = this._nodes.map(node => {
             const [x, z] = map.project([node.lon, node.lat], this._crs);
-            const y = (node.alt || 0) + yOffset;
+            const y = (node.alt || 0) + this._altitude;
             return new THREE.Vector3(x, y, z);
         });
         if (positions.length === 4) {
@@ -496,22 +434,21 @@ export class Image {
                 normal.normalize();
                 const dist = new THREE.Vector3().subVectors(p3, p0).dot(normal);
                 if (Math.abs(dist) > 1e-6) {
-                    const projected = p3.clone().addScaledVector(normal, -dist);
-                    positions[3] = projected;
+                    positions[3] = p3.clone().addScaledVector(normal, -dist);
                 }
             }
         }
         return positions;
     }
     _computeWorldPositionsFromAnchor() {
-        if (!this._position)
+        if (!this._position || !this._map)
             return [];
         const [lon, lat, alt] = this._position;
         const [width, height] = this._size;
         const [ax, ay] = this._anchor;
         const [rx, ry, rz] = this._rotation;
         const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-        const center = new THREE.Vector3(worldX, (alt || 0) + this._elevationOffset, worldZ);
+        const center = new THREE.Vector3(worldX, (alt || 0) + this._altitude, worldZ);
         const halfW = width / 2;
         const halfH = height / 2;
         const cornersLocal = [
@@ -647,7 +584,7 @@ export class Image {
         }
     }
     _raycastImage(event) {
-        if (!this._mesh || !this._mesh.visible)
+        if (!this._mesh || !this._mesh.visible || !this._map)
             return false;
         const rect = this._map.renderer.domElement.getBoundingClientRect();
         const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
@@ -661,19 +598,8 @@ export class Image {
     _update(map) {
         if (!this._map || !this._group)
             return;
-        if (!this._userVisible) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        const zoom = this._map.continuousZoom;
-        if (this._layer && !this._layer.visible) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
+        if (!this._isWithinView()) {
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -681,10 +607,12 @@ export class Image {
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
-                const worldCenter = this._tempVec3.copy(this._group.position).add(map.worldGroup.position);
+                const worldCenter = this._tempVec3
+                    .copy(this._group.position)
+                    .add(map.worldGroup.position);
                 const distToCenter = map.camera.position.distanceTo(worldCenter);
                 if (distToCenter - this._boundingSphereRadius > maxDist) {
-                    this._group.visible = false;
+                    this._applyHidden();
                     this._isVisible = false;
                     return;
                 }
@@ -694,42 +622,6 @@ export class Image {
         this._isVisible = true;
     }
     // =================================================================
-    // TextManager contract
-    // =================================================================
-    getText() { return this._title; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    getLabelType() { return 'image'; }
-    isVisible() { return this._isVisible; }
-    getScreenPosition() {
-        if (!this._isVisible || !this._group)
-            return null;
-        const worldPos = this._tempVec3.copy(this._group.position).add(this._map.worldGroup.position);
-        worldPos.y += this._boundingSphereRadius * 0.1;
-        const screenPos = worldPos.clone().project(this._map.camera);
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
-            return null;
-        const canvas = this._map.renderer.domElement;
-        return {
-            x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
-        };
-    }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleOffset() { return this._titleOffset; }
-    getTitleVerticalAlign() { return 'bottom'; }
-    getAllowOverflow() { return this._titleAllowOverflow; }
-    getPriority() { return this._titlePriority; }
-    // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================
     getBounds(crs = 'EPSG:4326') {
@@ -738,7 +630,7 @@ export class Image {
         const dstCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
         if (!srcCrs || !dstCrs)
             return null;
-        // Режим 1: nodes — считаем по «сырым» координатам.
+        // Режим 1: nodes — по «сырым» координатам.
         if (this._nodes && this._nodes.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let count = 0;

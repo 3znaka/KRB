@@ -12,7 +12,7 @@
     "type": "git",
     "url": "git+https://github.com/3znaka/KRB.git"
   },
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "esbuild": "^0.25.0",
     "typescript": "^5.9.3"

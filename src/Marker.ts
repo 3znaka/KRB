@@ -374,6 +374,17 @@ export class Marker {
         return [ll[0], ll[1]];
     }
 
+    /**
+ * Координаты в WGS84 [lon, lat] или `null`, если CRS неизвестна
+ * (маркер не присоединён и нет явного crs, либо setLngLat не вызывался).
+ *
+ * Синоним {@link Marker#getLngLat}. Оставлен для обратной совместимости
+ * со старой версией `Marker.getLonLat()`.
+ */
+getLonLat(): LonLat | null {
+    return this.getLngLat();
+}
+
     /** Меняет URL иконки (или убирает иконку при `null`). */
     setIconUrl(url: string | null): this {
         this._iconUrl = url;

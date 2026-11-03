@@ -104,57 +104,106 @@ export const VectorTileWorkerMixin = {
     },
     // ── Деформация tile-CRS → map-CRS ─────────────────────────────────────
     _computeTileDeform(z, tileCX, tileCZ) {
+        const K = 16; // сетка (K+1)×(K+1)
         const tileCrs = this._tileCrs;
-        const halfX = tileCrs.halfExtentX;
-        const halfY = tileCrs.halfExtentY;
-        const tsX = (2 * halfX) / (1 << z);
-        const tsY = (2 * halfY) / (1 << z);
+        const mapProj = this._map.projection;
+        const tsX = (2 * tileCrs.halfExtentX) / (1 << z);
+        const tsY = (2 * tileCrs.halfExtentY) / (1 << z);
         const htX = tsX / 2;
         const htY = tsY / 2;
-        const c00 = this._tileToMap(tileCX - htX, tileCZ - htY);
-        const c10 = this._tileToMap(tileCX + htX, tileCZ - htY);
-        const c01 = this._tileToMap(tileCX - htX, tileCZ + htY);
-        const c11 = this._tileToMap(tileCX + htX, tileCZ + htY);
-        if (!c00 || !c10 || !c01 || !c11)
-            return null;
-        const mapCX = (c00.x + c10.x + c01.x + c11.x) / 4;
-        const mapCZ = (c00.z + c10.z + c01.z + c11.z) / 4;
-        // Порог вырожденности — по большему из размеров тайла в tile-CRS.
-        const maxSide = Math.max(Math.hypot(c10.x - c00.x, c10.z - c00.z), Math.hypot(c01.x - c00.x, c01.z - c00.z), Math.hypot(c11.x - c10.x, c11.z - c10.z), Math.hypot(c11.x - c01.x, c11.z - c01.z));
+        const G = K + 1;
+        const gridSize = G * G;
+        const grid = new Float32Array(gridSize * 2);
+        let sumX = 0, sumZ = 0;
+        for (let j = 0; j < G; j++) {
+            const ty = (j / K) * tsY - htY;
+            for (let i = 0; i < G; i++) {
+                const tx = (i / K) * tsX - htX;
+                const wx = tileCX + tx;
+                const wz = tileCZ + ty;
+                const ll = tileCrs.toLonLat([wx, -wz]);
+                if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                    return null;
+                const p = typeof mapProj.fromLonLatSafe === 'function'
+                    ? mapProj.fromLonLatSafe(ll)
+                    : mapProj.fromLonLat(ll);
+                if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]))
+                    return null;
+                const k = (j * G + i) * 2;
+                grid[k] = p[0];
+                grid[k + 1] = -p[1];
+                sumX += p[0];
+                sumZ += -p[1];
+            }
+        }
+        const mapCX = sumX / gridSize;
+        const mapCZ = sumZ / gridSize;
+        // Якорь в центре: все ячейки grid — относительно mapCX/mapCZ.
+        for (let k = 0; k < gridSize * 2; k += 2) {
+            grid[k] -= mapCX;
+            grid[k + 1] -= mapCZ;
+        }
+        // Вырожденность — по четырём углам (те же, что и раньше).
+        const c00x = grid[0], c00z = grid[1];
+        const c10x = grid[K * 2], c10z = grid[K * 2 + 1];
+        const c01x = grid[K * G * 2], c01z = grid[K * G * 2 + 1];
+        const c11x = grid[(K * G + K) * 2], c11z = grid[(K * G + K) * 2 + 1];
+        const maxSide = Math.max(Math.hypot(c10x - c00x, c10z - c00z), Math.hypot(c01x - c00x, c01z - c00z), Math.hypot(c11x - c10x, c11z - c10z), Math.hypot(c11x - c01x, c11z - c01z));
         if (!Number.isFinite(maxSide))
             return null;
         if (maxSide > Math.max(tsX, tsY) * 20)
             return null;
-        return { c00, c10, c01, c11, mapCX, mapCZ, htX, htY };
+        return { grid, K, mapCX, mapCZ, tileCX, tileCZ, tsX, tsY, htX, htY };
     },
-    _bilinear(df, lx, lz, out) {
-        const u = (lx + df.htX) / (2 * df.htX);
-        const v = (lz + df.htY) / (2 * df.htY);
-        const { c00, c10, c01, c11 } = df;
-        const x = (1 - u) * (1 - v) * c00.x + u * (1 - v) * c10.x +
-            (1 - u) * v * c01.x + u * v * c11.x;
-        const z = (1 - u) * (1 - v) * c00.z + u * (1 - v) * c10.z +
-            (1 - u) * v * c01.z + u * v * c11.z;
-        out.x = x - df.mapCX;
-        out.z = z - df.mapCZ;
+    _tileToMapLocal(lx, lz, df, out) {
+        const K = df.K;
+        const u = (lx + df.htX) / df.tsX; // 0..1 внутри тайла
+        const v = (lz + df.htY) / df.tsY;
+        const fu = Math.max(0, Math.min(K, u * K));
+        const fv = Math.max(0, Math.min(K, v * K));
+        const i0 = Math.floor(fu);
+        const j0 = Math.floor(fv);
+        const i1 = i0 < K ? i0 + 1 : K;
+        const j1 = j0 < K ? j0 + 1 : K;
+        const tu = fu - i0;
+        const tv = fv - j0;
+        const G = K + 1;
+        const k00 = (j0 * G + i0) * 2;
+        const k10 = (j0 * G + i1) * 2;
+        const k01 = (j1 * G + i0) * 2;
+        const k11 = (j1 * G + i1) * 2;
+        const g = df.grid;
+        const w00 = (1 - tu) * (1 - tv);
+        const w10 = tu * (1 - tv);
+        const w01 = (1 - tu) * tv;
+        const w11 = tu * tv;
+        out.x = w00 * g[k00] + w10 * g[k10] + w01 * g[k01] + w11 * g[k11];
+        out.z = w00 * g[k00 + 1] + w10 * g[k10 + 1] + w01 * g[k01 + 1] + w11 * g[k11 + 1];
+        return true;
     },
+    // Точная проекция массива позиций (заменяет _deformArray).
     _deformArray(pos, df) {
         const tmp = { x: 0, z: 0 };
         for (let i = 0; i < pos.length; i += 3) {
-            this._bilinear(df, pos[i], pos[i + 2], tmp);
-            pos[i] = tmp.x;
-            pos[i + 2] = tmp.z;
+            if (this._tileToMapLocal(pos[i], pos[i + 2], df, tmp)) {
+                pos[i] = tmp.x;
+                pos[i + 2] = tmp.z;
+            }
+            // иначе оставляем как есть (вершина вне домена проекции —
+            // крайне редкий случай, см. ниже)
         }
+    },
+    // Точечная версия для textPoints / textLines / points.
+    _deformXZ(x, z, df) {
+        const out = { x: 0, z: 0 };
+        if (!this._tileToMapLocal(x, z, df, out))
+            return { x, z };
+        return out;
     },
     _deformGeometry(geom, df) {
         const attr = geom.attributes.position;
         this._deformArray(attr.array, df);
         attr.needsUpdate = true;
-    },
-    _deformXZ(x, z, df) {
-        const out = { x: 0, z: 0 };
-        this._bilinear(df, x, z, out);
-        return out;
     },
     // ── Сборка группы ─────────────────────────────────────────────────────
     _buildGroupFromWorkerResult(group, result, sourceZoom) {
@@ -404,12 +453,35 @@ export const VectorTileWorkerMixin = {
         }
         return out;
     },
+    _subdivideSegments(segs, maxSegLen) {
+        const result = [];
+        for (let i = 0; i < segs.length; i += 6) {
+            const ax = segs[i], ay = segs[i + 1], az = segs[i + 2];
+            const bx = segs[i + 3], by = segs[i + 4], bz = segs[i + 5];
+            const dx = bx - ax, dy = by - ay, dz = bz - az;
+            const len = Math.hypot(dx, dz);
+            if (len <= maxSegLen) {
+                result.push(ax, ay, az, bx, by, bz);
+                continue;
+            }
+            const nSub = Math.ceil(len / maxSegLen);
+            for (let k = 0; k < nSub; k++) {
+                const t0 = k / nSub;
+                const t1 = (k + 1) / nSub;
+                result.push(ax + dx * t0, ay + dy * t0, az + dz * t0, ax + dx * t1, ay + dy * t1, az + dz * t1);
+            }
+        }
+        return new Float32Array(result);
+    },
     _addFatLineFromPositions(group, positions, material, renderOrder, deform = null) {
-        const segs = this._fatLineSegmentsFromPositions(positions);
+        let segs = this._fatLineSegmentsFromPositions(positions);
         if (!segs)
             return;
-        if (deform)
+        if (deform) {
+            const maxSegLen = Math.min(deform.tsX, deform.tsY) / deform.K;
+            segs = this._subdivideSegments(segs, maxSegLen);
             this._deformArray(segs, deform);
+        }
         const lGeo = new LineSegmentsGeometry();
         lGeo.setPositions(segs);
         const lineObj = new Line2(lGeo, material);

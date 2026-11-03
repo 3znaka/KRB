@@ -17,6 +17,7 @@ import { CoreCoordinatesMixin } from './CoreCoordinates.js';
 import { CoreLayersMixin } from './CoreLayers.js';
 import { CoreInputMixin } from './CoreInput.js';
 import { CoreLifecycleMixin } from './CoreLifecycle.js';
+import { CoreEventsMixin } from './CoreEvents.js';
 
 // =====================================================================
 // ИНТЕРФЕЙСЫ
@@ -152,6 +153,18 @@ export class KrbMap {
     _panLastMoveTime: number;
     _panLastWorldX: number;
     _panLastWorldZ: number;
+
+    // ── события ──
+_eventHandlers: Map<string, Set<(payload?: any) => void>>;
+_lastCamState: { centerX: number; centerZ: number; zoom: number; pitch: number; bearing: number } | null;
+_moveActive: boolean;
+_zoomActive: boolean;
+_rotateActive: boolean;
+_pitchActive: boolean;
+_lastMoveTime: number;
+_lastMoveEndTime: number;
+_idleFired: boolean;
+_firstRenderDone: boolean;
 
 
 
@@ -392,7 +405,7 @@ this._refreshExtents();
         this._io = null;
         this._rafId = null;
         this._abortController = null;
-
+this._initEvents(); 
 
         this._backgroundColor = options.backgroundColor ?? null;
 this._backgroundExplicit = options.backgroundColor !== undefined;
@@ -633,3 +646,4 @@ applyMixin(KrbMap.prototype, CoreCoordinatesMixin);
 applyMixin(KrbMap.prototype, CoreLayersMixin);
 applyMixin(KrbMap.prototype, CoreInputMixin);
 applyMixin(KrbMap.prototype, CoreLifecycleMixin);
+applyMixin(KrbMap.prototype, CoreEventsMixin); 

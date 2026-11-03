@@ -619,6 +619,7 @@ onTouchEnd(e: TouchEvent) {
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
         this.maybeUpdateVisibleTiles();
+         this._emitResize(w, h); 
     },
 
     onClick(e) {
@@ -695,10 +696,10 @@ onTouchEnd(e: TouchEvent) {
         });
     },
 
-    bindEvents() {
-        this._abortController = new AbortController();
-        const signal = this._abortController.signal;
-        const el = this.renderer.domElement;
+bindEvents() {
+    this._abortController = new AbortController();
+    const signal = this._abortController.signal;
+    const el = this.renderer.domElement;
         el.addEventListener('mousedown', (e: MouseEvent) => this.onMouseDown(e), { signal });
         window.addEventListener('mousemove', (e: MouseEvent) => this.onMouseMove(e), { signal });
         window.addEventListener('mouseup', () => this.onMouseUp(), { signal });
@@ -709,6 +710,7 @@ onTouchEnd(e: TouchEvent) {
         el.addEventListener('touchend', (e: TouchEvent) => this.onTouchEnd(e), { signal });
         el.addEventListener('touchcancel', (e: TouchEvent) => this.onTouchEnd(e), { signal });
         el.addEventListener('click', (e: MouseEvent) => this.onClick(e), { signal });
+         this._bindPointerEvents(); 
     },
 
     shiftWorld(dx, dz) {

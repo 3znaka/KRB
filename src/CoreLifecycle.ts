@@ -92,10 +92,13 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
     isPaused() { return this._paused; },
     isDisposed() { return this._disposed; },
 
-    dispose() {
-        if (this._disposed) return;
-        this._disposed = true;
-        if (this._onVisChange) {
+ dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+
+    this._disposeEvents();  
+
+    if (this._onVisChange) {
             try { document.removeEventListener('visibilitychange', this._onVisChange); }
             catch (e) { console.warn(e); }
             this._onVisChange = null;
@@ -266,15 +269,24 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
 
         this.camera.updateMatrixWorld(true);
         this.worldGroup.updateMatrixWorld(true);
-        this.maybeUpdateVisibleTiles();
+       this.maybeUpdateVisibleTiles();
 
-        for (const layer of this._getLayersInOrder()) {
+this._updateMoveEvents();  
+
+for (const layer of this._getLayersInOrder()) {
             if (typeof layer._postUpdate !== 'function') continue;
             if (layer._map && layer._map !== this) continue;
             layer._postUpdate(this);
         }
         if (this.textManager) this.textManager.update();
         this.renderer.render(this.scene, this.camera);
+
+        if (!this._firstRenderDone) {        
+    this._firstRenderDone = true;
+    requestAnimationFrame(() => {
+        if (!this._disposed) this.emit('load');
+    });
+}
     },
 };
 

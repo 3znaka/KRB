@@ -645,6 +645,7 @@ get _layerCrs() {
     /** @private */
     async loadTile(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
+         let texUrl = null;    
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
             const srcKey = getVirtKey(inst.z, srcX, inst.y);
@@ -685,6 +686,13 @@ get _layerCrs() {
                 this.requestElevation(inst);
             } else {
                 inst.ready = true;
+                this.engine.emit?.('error', {                  
+            source: 'tile',
+            layer: this.layer,
+            z: inst.z, x: inst.virtX, y: inst.y,
+            url: texUrl,
+            error: err,
+        });
             }
         } catch (err) {
             if (this.tiles.get(k) !== inst) return;

@@ -15,6 +15,7 @@ import { CoreCoordinatesMixin } from './CoreCoordinates.js';
 import { CoreLayersMixin } from './CoreLayers.js';
 import { CoreInputMixin } from './CoreInput.js';
 import { CoreLifecycleMixin } from './CoreLifecycle.js';
+import { CoreEventsMixin } from './CoreEvents.js';
 // =====================================================================
 // КЛАСС КАРТЫ
 // =====================================================================
@@ -80,6 +81,17 @@ export class KrbMap {
     _panLastMoveTime;
     _panLastWorldX;
     _panLastWorldZ;
+    // ── события ──
+    _eventHandlers;
+    _lastCamState;
+    _moveActive;
+    _zoomActive;
+    _rotateActive;
+    _pitchActive;
+    _lastMoveTime;
+    _lastMoveEndTime;
+    _idleFired;
+    _firstRenderDone;
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene;
     camera;
@@ -276,6 +288,7 @@ export class KrbMap {
         this._io = null;
         this._rafId = null;
         this._abortController = null;
+        this._initEvents();
         this._backgroundColor = options.backgroundColor ?? null;
         this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
@@ -488,3 +501,4 @@ applyMixin(KrbMap.prototype, CoreCoordinatesMixin);
 applyMixin(KrbMap.prototype, CoreLayersMixin);
 applyMixin(KrbMap.prototype, CoreInputMixin);
 applyMixin(KrbMap.prototype, CoreLifecycleMixin);
+applyMixin(KrbMap.prototype, CoreEventsMixin);

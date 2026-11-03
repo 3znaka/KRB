@@ -90,6 +90,7 @@ export const CoreLifecycleMixin = {
         if (this._disposed)
             return;
         this._disposed = true;
+        this._disposeEvents();
         if (this._onVisChange) {
             try {
                 document.removeEventListener('visibilitychange', this._onVisChange);
@@ -322,6 +323,7 @@ export const CoreLifecycleMixin = {
         this.camera.updateMatrixWorld(true);
         this.worldGroup.updateMatrixWorld(true);
         this.maybeUpdateVisibleTiles();
+        this._updateMoveEvents();
         for (const layer of this._getLayersInOrder()) {
             if (typeof layer._postUpdate !== 'function')
                 continue;
@@ -332,5 +334,12 @@ export const CoreLifecycleMixin = {
         if (this.textManager)
             this.textManager.update();
         this.renderer.render(this.scene, this.camera);
+        if (!this._firstRenderDone) {
+            this._firstRenderDone = true;
+            requestAnimationFrame(() => {
+                if (!this._disposed)
+                    this.emit('load');
+            });
+        }
     },
 };

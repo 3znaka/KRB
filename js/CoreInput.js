@@ -535,6 +535,7 @@ export const CoreInputMixin = {
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
         this.maybeUpdateVisibleTiles();
+        this._emitResize(w, h);
     },
     onClick(e) {
         if (!e.shiftKey)
@@ -634,6 +635,7 @@ export const CoreInputMixin = {
         el.addEventListener('touchend', (e) => this.onTouchEnd(e), { signal });
         el.addEventListener('touchcancel', (e) => this.onTouchEnd(e), { signal });
         el.addEventListener('click', (e) => this.onClick(e), { signal });
+        this._bindPointerEvents();
     },
     shiftWorld(dx, dz) {
         this.worldGroup.position.x -= dx;

@@ -1,41 +1,8 @@
-// @ts-nocheck
 /**
- * Vector3D.js — направленный 3D-вектор (отрезок/ломаная) со стрелкой.
- *
- * Первоклассный объект карты, аналог {@link Polyline}, но с двумя
- * дополнительными возможностями:
- *  - третья координата точек интерпретируется как высота и умножается
- *    на `heightScale` + сдвигается на `altitudeOffset` (вертикальное
- *    преувеличение);
- *  - на последнем сегменте рисуется коническая стрелка.
- *
- * Позиции задаются как `[x, y, z]` в СК `crs`:
- *  - если `crs` — геоцентрическая СК (EPSG:4978, 10176, 7901..7912, 8403,
- *    8404), то `[x, y, z]` — это ECEF-координаты в метрах;
- *  - иначе `[x, y]` — плоские координаты в `crs`, `z` — высота над
- *    эллипсоидом WGS84 в метрах.
- *
- * Подписи:
- *  - `titleStart` (`title` — алиас) — текст в начале линии;
- *  - `titleEnd` — текст в конце линии.
- *  Обе могут быть заданы одновременно.
- *
- * Анимации (опция `animation` — объект или массив):
- *  - `movingArrow` — конус скользит по ломаной;
- *  - `flowArrows`  — несколько конусов текут вдоль вектора;
- *  - `pulse`       — концевой конус пульсирует размером;
- *  - `part`        — частичная отрисовка линии.
- *
- * Режимы `part` — визуально РАЗНЫЕ:
- *  - `'extend'`    — «пила»: линия линейно растёт 0→1, в конце периода
- *                    мгновенно сбрасывается в 0 и начинает заново
- *                    (`/|/|/|`). По умолчанию `easing: 'linear'`.
- *  - `'boomerang'` — «туда-обратно»: плавно вырос, плавно вернулся
- *                    (`∧∧∧`). По умолчанию `easing: 'easeInOut'`.
- *  - `'center'`    — растёт от середины наружу и обратно (`<>`).
- *                    По умолчанию `easing: 'sine'`.
- *  - `'dash'`      — пунктир, бегущий вдоль линии.
- *                    По умолчанию `easing: 'linear'`.
+ * Vector3D — направленный 3D-вектор (ломаная со стрелкой) и опциональной
+ * анимацией. После `addTo()` мутабелен: точки, цвет, толщина, размер
+ * стрелки, прозрачность, видимость, высотный масштаб, подписи и тултип
+ * меняются без пересоздания.
  *
  * @module Vector3D
  */
@@ -51,26 +18,191 @@ import {
     LineSegmentsGeometry,
 } from './js_TP/tpb.js';
 
+// =====================================================================
+// Типы
+// =====================================================================
 
-/* ================================================================
-   ECEF ↔ Geodetic — экспортируемые утилиты
-   ================================================================ */
+export type LonLat = [number, number];
+export type Vector3DPosition = [number, number, number];
+export type Vector3DColor = string | number;
+export type ArrowSizeMode = 'px' | 'world';
+export type TitleAlignH = 'left' | 'center' | 'right';
+export type TitleAlignV = 'top' | 'middle' | 'bottom';
+export type AnimationType = 'movingArrow' | 'flowArrows' | 'pulse' | 'part' | 'none';
+export type PartMode = 'extend' | 'center' | 'boomerang' | 'dash';
+export type Easing = 'linear' | 'sine' | 'easeIn' | 'easeOut' | 'easeInOut';
+export type DashLengthMode = 'world' | 'fraction';
+export type TitleRole = 'start' | 'end';
+
+export interface Vector3DTitleOptions {
+    text: string;
+    style: Record<string, string | number>;
+    minZoom: number;
+    maxZoom: number;
+    align: TitleAlignH;
+    verticalAlign: TitleAlignV;
+    offset: [number, number];
+    allowOverflow: boolean;
+    priority: number;
+}
+
+export interface AnimationSpec {
+    type: AnimationType;
+    period?: number;
+    speed?: number;
+    paused?: boolean;
+    reverse?: boolean;
+    fadeRatio?: number;
+    color?: Vector3DColor | null;
+    size?: number | null;
+    sizeMode?: ArrowSizeMode | null;
+    opacity?: number | null;
+
+    // movingArrow
+    easing?: Easing;
+    hideStaticArrow?: boolean;
+
+    // flowArrows
+    count?: number;
+    spacing?: number | null;
+
+    // pulse
+    minScale?: number;
+    maxScale?: number;
+
+    // part
+    mode?: PartMode;
+    dashLength?: number;
+    dashLengthMode?: DashLengthMode;
+    gapRatio?: number;
+    offsetStep?: number;
+    headCone?: boolean;
+    headConeSize?: number | null;
+    headConeColor?: Vector3DColor | null;
+    width?: number | null;
+    hideBaseLine?: boolean;
+    fadeEdges?: boolean;
+}
+
+export interface Vector3DOptions {
+    positions: Vector3DPosition[];
+    crs?: string;
+    color?: Vector3DColor;
+    width?: number;
+    arrowSize?: number;
+    arrowSizeMode?: ArrowSizeMode;
+    opacity?: number;
+    depthTest?: boolean;
+    heightScale?: number;
+    altitudeOffset?: number;
+    minZoom?: number;
+    maxZoom?: number;
+
+    // Подписи
+    title?: string;
+    titleStart?: string;
+    titleEnd?: string;
+    titlePlacement?: TitleRole;
+    titleStyle?: Record<string, string | number>;
+    titleMinZoom?: number;
+    titleMaxZoom?: number;
+    titleAlign?: TitleAlignH;
+    titleVerticalAlign?: TitleAlignV;
+    titleOffset?: [number, number];
+    titleAllowOverflow?: boolean;
+    titlePriority?: number;
+
+    // Per-role overrides
+    titleStartStyle?: Record<string, string | number>;
+    titleStartMinZoom?: number;
+    titleStartMaxZoom?: number;
+    titleStartAlign?: TitleAlignH;
+    titleStartVerticalAlign?: TitleAlignV;
+    titleStartOffset?: [number, number];
+    titleStartAllowOverflow?: boolean;
+    titleStartPriority?: number;
+
+    titleEndStyle?: Record<string, string | number>;
+    titleEndMinZoom?: number;
+    titleEndMaxZoom?: number;
+    titleEndAlign?: TitleAlignH;
+    titleEndVerticalAlign?: TitleAlignV;
+    titleEndOffset?: [number, number];
+    titleEndAllowOverflow?: boolean;
+    titleEndPriority?: number;
+
+    tooltip?: string;
+    onClick?: (event: MouseEvent, vector: Vector3D) => void;
+    onHover?: (hovered: boolean) => void;
+
+    animation?: AnimationSpec | string | Array<AnimationSpec | string> | null;
+}
+
+/** Разобранный config анимации — со всеми полями по умолчанию. */
+interface ParsedAnimation {
+    type: AnimationType;
+    period: number;
+    speed: number;
+    paused: boolean;
+    reverse: boolean;
+    fadeRatio: number;
+    color: Vector3DColor | null;
+    size: number | null;
+    sizeMode: ArrowSizeMode | null;
+    opacity: number | null;
+    // может быть всё, что угодно из AnimationSpec с дефолтами
+    easing?: Easing;
+    hideStaticArrow?: boolean;
+    count?: number;
+    spacing?: number | null;
+    minScale?: number;
+    maxScale?: number;
+    mode?: PartMode;
+    dashLength?: number;
+    dashLengthMode?: DashLengthMode;
+    gapRatio?: number;
+    offsetStep?: number;
+    headCone?: boolean;
+    headConeSize?: number | null;
+    headConeColor?: Vector3DColor | null;
+    width?: number | null;
+    hideBaseLine?: boolean;
+    fadeEdges?: boolean;
+}
+
+/** Runtime-слот анимации: config + созданные GPU-ресурсы. */
+interface AnimSlot {
+    config: ParsedAnimation;
+    time: number;
+    cone?: any;
+    group?: any;
+    cones?: any[];
+    overlay?: any;
+    overlayGeo?: any;
+    overlayMat?: any;
+    headConeGroup?: any;
+    headConePool?: any[];
+}
+
+interface LabelEntry {
+    role: TitleRole;
+    handle: any;
+    facade: any;
+}
+
+// =====================================================================
+// Константы и утилиты ECEF
+// =====================================================================
 
 const _A  = 6378137.0;
 const _F  = 1 / 298.257222101;
 const _B  = _A * (1 - _F);
 const _E2 = 1 - (_B * _B) / (_A * _A);
 
-/**
- * ECEF (X, Y, Z, м) → геодезические (lon°, lat°, h м) на GRS-80.
- *
- * @param {number} X @param {number} Y @param {number} Z
- * @returns {[number, number, number]} [lon, lat, h]
- */
-export function ecefToGeodetic(X, Y, Z) {
-    const p   = Math.sqrt(X * X + Y * Y);
+export function ecefToGeodetic(X: number, Y: number, Z: number): [number, number, number] {
+    const p = Math.sqrt(X * X + Y * Y);
     const lon = Math.atan2(Y, X);
-    let lat   = Math.atan2(Z, p * (1 - _E2));
+    let lat = Math.atan2(Z, p * (1 - _E2));
     for (let i = 0; i < 10; i++) {
         const s = Math.sin(lat);
         const N = _A / Math.sqrt(1 - _E2 * s * s);
@@ -78,218 +210,147 @@ export function ecefToGeodetic(X, Y, Z) {
     }
     const sL = Math.sin(lat);
     const cL = Math.cos(lat);
-    const N  = _A / Math.sqrt(1 - _E2 * sL * sL);
-    const h  = cL > 1e-10 ? p / cL - N : Math.abs(Z) - _B;
+    const N = _A / Math.sqrt(1 - _E2 * sL * sL);
+    const h = cL > 1e-10 ? p / cL - N : Math.abs(Z) - _B;
     return [lon * 180 / Math.PI, lat * 180 / Math.PI, h];
 }
 
-/**
- * Локальное смещение ENU → приращение ECEF в окрестности (lonRad, latRad).
- *
- * @param {number} e @param {number} n @param {number} u
- * @param {number} lonRad @param {number} latRad
- * @returns {[number, number, number]}
- */
-export function enuToEcefDelta(e, n, u, lonRad, latRad) {
+export function enuToEcefDelta(e: number, n: number, u: number, lonRad: number, latRad: number): [number, number, number] {
     const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
     const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
     return [
         -sLo * e - sLa * cLo * n + cLa * cLo * u,
          cLo * e - sLa * sLo * n + cLa * sLo * u,
-                      cLa * n    + sLa * u
+                      cLa * n    + sLa * u,
     ];
 }
 
-/** @type {Set<string>} */
-export const ECEF_CODES = new Set([
-    'EPSG:4978',  'EPSG:10176',
-    'EPSG:7901',  'EPSG:7902',  'EPSG:7903',  'EPSG:7904',
-    'EPSG:7905',  'EPSG:7906',  'EPSG:7907',  'EPSG:7908',
-    'EPSG:7909',  'EPSG:7910',  'EPSG:7911',  'EPSG:7912',
-    'EPSG:8403',  'EPSG:8404',
+export const ECEF_CODES = new Set<string>([
+    'EPSG:4978', 'EPSG:10176',
+    'EPSG:7901', 'EPSG:7902', 'EPSG:7903', 'EPSG:7904',
+    'EPSG:7905', 'EPSG:7906', 'EPSG:7907', 'EPSG:7908',
+    'EPSG:7909', 'EPSG:7910', 'EPSG:7911', 'EPSG:7912',
+    'EPSG:8403', 'EPSG:8404',
 ]);
 
-/** @param {string|null|undefined} code @returns {boolean} */
-export function isEcefCrs(code) {
+export function isEcefCrs(code: string | null | undefined): boolean {
     return code ? ECEF_CODES.has(code.toUpperCase()) : false;
 }
 
+const CONE_RADIUS_RATIO = 0.35;
+const FLOW_MAX_CONES = 50;
+const MAX_DASH_SEGMENTS = 500;
+const MAX_HEAD_CONES = 100;
 
-/* ================================================================
-   Vector3D
-   ================================================================ */
-
-/** @private */ const CONE_RADIUS_RATIO  = 0.35;
-/** @private */ const FLOW_MAX_CONES     = 50;
-/** @private */ const MAX_DASH_SEGMENTS  = 500;
-/** @private */ const MAX_HEAD_CONES     = 100;
+// =====================================================================
+// Vector3D
+// =====================================================================
 
 export class Vector3D {
-    /**
-     * @param {Object} options
-     * @param {Array<[number, number, number]>} options.positions - Минимум 2 точки.
-     * @param {string} [options.crs]
-     * @param {string} [options.color='#3388ff']
-     * @param {number} [options.width=2]
-     * @param {number} [options.arrowSize=10]
-     * @param {'px'|'world'} [options.arrowSizeMode='px']
-     * @param {number} [options.opacity=1]
-     * @param {boolean} [options.depthTest=false]
-     * @param {number} [options.heightScale=1]
-     * @param {number} [options.altitudeOffset=0]
-     * @param {number} [options.minZoom=-Infinity]
-     * @param {number} [options.maxZoom=Infinity]
-     *
-     * @param {string} [options.title=''] - Алиас `titleStart`.
-     * @param {string} [options.titleStart=''] - Текст в начале линии.
-     * @param {string} [options.titleEnd=''] - Текст в конце линии.
-     *
-     * Общие настройки для обеих подписей (переопределяются per-role):
-     * @param {Object} [options.titleStyle={}]
-     * @param {number} [options.titleMinZoom=-Infinity]
-     * @param {number} [options.titleMaxZoom=Infinity]
-     * @param {'left'|'center'|'right'} [options.titleAlign='center']
-     * @param {'top'|'middle'|'bottom'} [options.titleVerticalAlign]
-     * @param {[number, number]} [options.titleOffset]
-     * @param {boolean} [options.titleAllowOverflow=false]
-     * @param {number} [options.titlePriority=0]
-     *
-     * Per-role переопределения (все опциональны):
-     *  - `titleStartStyle`, `titleEndStyle`
-     *  - `titleStartMinZoom`, `titleEndMinZoom`
-     *  - `titleStartMaxZoom`, `titleEndMaxZoom`
-     *  - `titleStartAlign`, `titleEndAlign`
-     *  - `titleStartVerticalAlign`, `titleEndVerticalAlign`
-     *  - `titleStartOffset`, `titleEndOffset`
-     *  - `titleStartAllowOverflow`, `titleEndAllowOverflow`
-     *  - `titleStartPriority`, `titleEndPriority`
-     *
-     * @param {string} [options.tooltip='']
-     * @param {Function|null} [options.onClick=null]
-     * @param {Function|null} [options.onHover=null]
-     *
-     * @param {Object|string|Array|null} [options.animation=null]
-     *     Одна анимация или массив анимаций. Каждая — объект или строка
-     *     (`'movingArrow' | 'flowArrows' | 'pulse' | 'part' | 'none'`).
-     *     Общие поля: `type`, `period`, `speed`, `paused`, `reverse`,
-     *     `fadeRatio`, `color`, `size`, `sizeMode`, `opacity`,
-     *     `hideStaticArrow`.
-     *
-     *     `type: 'movingArrow'` — один конус скользит по ломаной.
-     *     `type: 'flowArrows'`  — N конусов (поле `count` / `spacing`).
-     *     `type: 'pulse'`       — концевой конус пульсирует (`_cone`).
-     *         Доп. поля: `minScale`, `maxScale`, `easing`.
-     *     `type: 'part'` — частичная отрисовка линии. Поля:
-     *       @param {'extend'|'center'|'boomerang'|'dash'} [options.animation.mode='extend']
-     *       @param {number} [options.animation.dashLength=20] - В world-метрах
-     *           (или в долях от длины линии при `dashLengthMode: 'fraction'`).
-     *       @param {'world'|'fraction'} [options.animation.dashLengthMode='world']
-     *       @param {number} [options.animation.gapRatio=1] - Отношение gap/dashLength.
-     *       @param {number} [options.animation.offsetStep=1] - Сколько «шагов»
-     *           (dash+gap) смещать за период. Для бесшовного цикла — целое.
-     *       @param {boolean} [options.animation.headCone=false] - Конус на краю
-     *           каждого dash (marching ants).
-     *       @param {number|null} [options.animation.headConeSize=null]
-     *       @param {string|null} [options.animation.headConeColor=null]
-     *       @param {number|null} [options.animation.width=null] - Толщина линии.
-     *       @param {boolean} [options.animation.hideBaseLine=true] - Скрыть
-     *           базовую `Line2` (обязательно true, если вы не хотите смешивать
-     *           её с overlay).
-     *       @param {'linear'|'sine'|'easeIn'|'easeOut'|'easeInOut'} [options.animation.easing]
-     *           Значение по умолчанию зависит от `mode`:
-     *             - `extend`    → `'linear'`    (пила, мгновенный сброс)
-     *             - `boomerang` → `'easeInOut'` (плавный одиночный пик)
-     *             - `center`    → `'sine'`      (плавный out-and-back)
-     *             - `dash`      → `'linear'`    (равномерное течение)
-     */
-    constructor(options = {}) {
+    // ── Данные ──
+    private _positions: Vector3DPosition[];
+    private _crsCode: string | null;
+    private _crs: any | null;
+    private _isEcef: boolean;
+
+    // ── Оформление ──
+    private _color: Vector3DColor;
+    private _width: number;
+    private _arrowSize: number;
+    private _arrowSizeMode: ArrowSizeMode;
+    private _opacity: number;
+    private _depthTest: boolean;
+    private _minZoom: number;
+    private _maxZoom: number;
+    private _heightScale: number;
+    private _altitudeOffset: number;
+
+    // ── Подписи ──
+    private _titles: { start: Vector3DTitleOptions; end: Vector3DTitleOptions };
+
+    // ── Интерактив ──
+    private _tooltip: string;
+    private _onClick: ((event: MouseEvent, vec: Vector3D) => void) | null;
+    private _onHover: ((hovered: boolean) => void) | null;
+    private _unregisterInteraction: (() => void) | null = null;
+
+    // ── Присоединение ──
+    private _map: any = null;
+    private _layer: Layer | null = null;
+    private _group: any;
+
+    // ── 3D-объекты ──
+    private _line: any = null;
+    private _material: any = null;
+    private _geometry: any = null;
+    private _cone: any = null;
+    private _lastSegLen = 0;
+
+    private _labels: LabelEntry[] = [];
+    private _worldPoints: Vector3DPosition[] = [];
+
+    // ── Анимации ──
+    private _animList: AnimSlot[] = [];
+    private _animPolyline: { lengths: number[]; total: number } | null = null;
+    private _lastUpdateTime = 0;
+
+    // ── Временные ──
+    private _tempVecA: any;
+    private _tempVecB: any;
+    private _Y_AXIS: any;
+
+    // ── NEW: видимость ──
+    private _userVisible = true;
+
+    constructor(options: Vector3DOptions) {
         if (!options.positions || options.positions.length < 2) {
             throw new Error('Vector3D: options.positions required, at least 2 points');
         }
 
-        /** @private */ this._positions = options.positions;
-        /** @private @type {string|null} */ this._crsCode = options.crs ?? null;
-        /** @private @type {import('./Projections.js').Projection|null} */ this._crs = null;
-        /** @private */ this._isEcef = isEcefCrs(this._crsCode);
+        this._positions = options.positions;
+        this._crsCode = options.crs ?? null;
+        this._crs = null;
+        this._isEcef = isEcefCrs(this._crsCode);
 
-        /** @private */ this._color     = options.color ?? '#3388ff';
-        /** @private */ this._width     = options.width ?? 2;
-        /** @private */ this._arrowSize = options.arrowSize ?? 10;
-        /** @private @type {'px'|'world'} */
+        this._color = options.color ?? '#3388ff';
+        this._width = options.width ?? 2;
+        this._arrowSize = options.arrowSize ?? 10;
         this._arrowSizeMode = options.arrowSizeMode === 'world' ? 'world' : 'px';
-        /** @private */ this._opacity   = options.opacity ?? 1;
-        /** @private */ this._depthTest = options.depthTest ?? false;
-        /** @private */ this._minZoom   = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom   = options.maxZoom ?? Infinity;
-        /** @private */ this._heightScale    = options.heightScale ?? 1;
-        /** @private */ this._altitudeOffset = options.altitudeOffset ?? 0;
+        this._opacity = options.opacity ?? 1;
+        this._depthTest = options.depthTest ?? false;
+        this._minZoom = options.minZoom ?? -Infinity;
+        this._maxZoom = options.maxZoom ?? Infinity;
+        this._heightScale = options.heightScale ?? 1;
+        this._altitudeOffset = options.altitudeOffset ?? 0;
 
-        // ---------- Подписи ----------
-        /**
-         * @type {{start: Object, end: Object}}
-         * @private
-         */
         this._titles = {
             start: this._parseTitleOptions(options, 'start'),
-            end:   this._parseTitleOptions(options, 'end'),
+            end: this._parseTitleOptions(options, 'end'),
         };
 
-        /** @private */ this._tooltip = options.tooltip ?? '';
-        /** @private */ this._onClick = options.onClick ?? null;
-        /** @private */ this._onHover = options.onHover ?? null;
+        this._tooltip = options.tooltip ?? '';
+        this._onClick = options.onClick ?? null;
+        this._onHover = options.onHover ?? null;
 
-        /** @private */ this._map = null;
-        /** @private */ this._layer = null;
-        /** @private */ this._group = new THREE.Group();
+        this._group = new THREE.Group();
 
-        /** @private */ this._line = null;
-        /** @private */ this._material = null;
-        /** @private */ this._geometry = null;
-        /** @private */ this._cone = null;
+        this._tempVecA = new THREE.Vector3();
+        this._tempVecB = new THREE.Vector3();
+        this._Y_AXIS = new THREE.Vector3(0, 1, 0);
 
-        /** @private @type {number} */
-        this._lastSegLen = 0;
-
-        /** @private @type {Array<{role:string, handle:any, facade:any}>} */
-        this._labels = [];
-        /** @private */ this._unregisterInteraction = null;
-
-        /** @private @type {Array<[number,number,number]>} */
-        this._worldPoints = [];
-
-        /* ---------- Анимации ---------- */
-        /** @private @type {Array<{config: Object, time: number}>} */
-        this._animList = [];
         this._parseAnimationsInto(options.animation);
-
-        /** @private @type {{lengths:number[], total:number}|null} */
-        this._animPolyline = null;
-        /** @private */ this._lastUpdateTime = 0;
-
-        /* ---------- Temp-векторы ---------- */
-        /** @private */ this._tempVecA = new THREE.Vector3();
-        /** @private */ this._tempVecB = new THREE.Vector3();
-        /** @private */ this._Y_AXIS   = new THREE.Vector3(0, 1, 0);
     }
 
-    /* ================================================================
-       Подписи
-       ================================================================ */
+    // =================================================================
+    // Разбор подписей и анимаций
+    // =================================================================
 
-    /**
-     * @param {Object} options
-     * @param {'start'|'end'} role
-     * @returns {{text:string, style:Object, minZoom:number, maxZoom:number,
-     *            align:string, verticalAlign:string, offset:[number,number],
-     *            allowOverflow:boolean, priority:number}}
-     * @private
-     */
-    _parseTitleOptions(options, role) {
+    private _parseTitleOptions(options: Vector3DOptions, role: TitleRole): Vector3DTitleOptions {
         const isStart = role === 'start';
         const sfx = isStart ? 'Start' : 'End';
         const placement = options.titlePlacement;
 
-        let text;
+        let text: string;
         if (isStart) {
             text = options.titleStart
                 ?? (placement === 'end' ? '' : (options.title ?? ''));
@@ -298,30 +359,25 @@ export class Vector3D {
                 ?? (placement === 'end' ? (options.title ?? '') : '');
         }
 
-        const pick = (common, specific, def) =>
-            options[specific] ?? options[common] ?? def;
+        const pick = <K extends keyof Vector3DOptions>(common: K, specific: K, def: any): any =>
+            (options as any)[specific] ?? (options as any)[common] ?? def;
 
         return {
             text,
-            style:         pick('titleStyle',         `title${sfx}Style`,         {}),
-            minZoom:       pick('titleMinZoom',       `title${sfx}MinZoom`,       -Infinity),
-            maxZoom:       pick('titleMaxZoom',       `title${sfx}MaxZoom`,       Infinity),
-            align:         pick('titleAlign',         `title${sfx}Align`,         'center'),
-            verticalAlign: pick('titleVerticalAlign', `title${sfx}VerticalAlign`,
-                                isStart ? 'bottom' : 'top'),
-            offset:        pick('titleOffset',        `title${sfx}Offset`,
-                                isStart ? [0, -10] : [0, 10]),
-            allowOverflow: pick('titleAllowOverflow', `title${sfx}AllowOverflow`, false),
-            priority:      pick('titlePriority',      `title${sfx}Priority`,      0),
+            style: pick('titleStyle', `title${sfx}Style` as any, {}),
+            minZoom: pick('titleMinZoom', `title${sfx}MinZoom` as any, -Infinity),
+            maxZoom: pick('titleMaxZoom', `title${sfx}MaxZoom` as any, Infinity),
+            align: pick('titleAlign', `title${sfx}Align` as any, 'center'),
+            verticalAlign: pick('titleVerticalAlign', `title${sfx}VerticalAlign` as any,
+                isStart ? 'bottom' : 'top'),
+            offset: pick('titleOffset', `title${sfx}Offset` as any,
+                isStart ? [0, -10] : [0, 10]),
+            allowOverflow: pick('titleAllowOverflow', `title${sfx}AllowOverflow` as any, false),
+            priority: pick('titlePriority', `title${sfx}Priority` as any, 0),
         };
     }
 
-    /**
-     * @param {'start'|'end'} role
-     * @returns {Object}
-     * @private
-     */
-    _makeLabelFacade(role) {
+    private _makeLabelFacade(role: TitleRole): any {
         const v = this;
         const t = () => v._titles[role];
         return {
@@ -334,9 +390,9 @@ export class Vector3D {
                 textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
             }, t().style),
             getTextZoomBounds: () => ({ min: t().minZoom, max: t().maxZoom }),
-            getLabelType: () => 'point',
+            getLabelType: () => 'point' as const,
             isVisible: () => {
-                if (!v._layer || !v._layer.visible) return false;
+                if (!v._layer || !(v._layer as any).visible) return false;
                 if (!v._map) return false;
                 const z = v._map.continuousZoom;
                 return z >= t().minZoom && z <= t().maxZoom;
@@ -350,12 +406,7 @@ export class Vector3D {
         };
     }
 
-    /**
-     * @param {'start'|'end'} role
-     * @returns {{x:number,y:number}|null}
-     * @private
-     */
-    _getScreenPositionAt(role) {
+    private _getScreenPositionAt(role: TitleRole): { x: number; y: number } | null {
         if (!this._map || this._worldPoints.length < 2) return null;
         const pt = role === 'end'
             ? this._worldPoints[this._worldPoints.length - 1]
@@ -376,79 +427,61 @@ export class Vector3D {
         };
     }
 
-    /* ================================================================
-       Парсинг анимаций
-       ================================================================ */
-
-    /**
-     * @param {Object|string|Array|null|undefined|false} anim
-     * @private
-     */
-    _parseAnimationsInto(anim) {
-        // Полная замена списка. Старые ресурсы к этому моменту уже должны
-        // быть освобождены через _teardownAnimations() (в setAnimation).
+    private _parseAnimationsInto(anim: Vector3DOptions['animation']): void {
         this._animList = [];
         if (!anim) return;
-        const arr = Array.isArray(anim) ? anim : [anim];
-        for (const a of arr) {
-            const cfg = this._parseOneAnimation(a);
-            if (cfg) this._animList.push({ config: cfg, time: 0 });
-        }
+const arr = Array.isArray(anim) ? anim : [anim];
+for (const a of arr) {
+    const cfg = this._parseOneAnimation(a);   // ← без as any
+    if (cfg) this._animList.push({ config: cfg, time: 0 });
+}
     }
 
-    /**
-     * @param {Object|string|null|undefined|false} anim
-     * @returns {Object|null}
-     * @private
-     */
-    _parseOneAnimation(anim) {
-        if (!anim || anim === false) return null;
-        if (typeof anim === 'string') anim = { type: anim };
-        const type = anim.type ?? 'none';
+private _parseOneAnimation(
+    anim: AnimationSpec | string | null | undefined | false
+): ParsedAnimation | null {
+    if (!anim) return null;   // ← ловит null, undefined, '', false
+    const src: AnimationSpec = (typeof anim === 'string')
+        ? { type: anim as AnimationType }
+        : anim;
+        const type: AnimationType = src.type ?? 'none';
         if (type === 'none') return null;
 
-        const base = {
+        const base: ParsedAnimation = {
             type,
-            period:  anim.period  ?? 3,
-            speed:   anim.speed   ?? 1,
-            paused:  anim.paused  ?? false,
-            reverse: anim.reverse ?? false,
-            fadeRatio: Math.min(0.5, Math.max(0, anim.fadeRatio ?? 0.15)),
-
-            color:    anim.color    ?? null,
-            size:     anim.size     ?? null,
-            sizeMode: anim.sizeMode ?? null,
-            opacity:  anim.opacity  ?? null,
+            period: src.period ?? 3,
+            speed: src.speed ?? 1,
+            paused: src.paused ?? false,
+            reverse: src.reverse ?? false,
+            fadeRatio: Math.min(0.5, Math.max(0, src.fadeRatio ?? 0.15)),
+            color: src.color ?? null,
+            size: src.size ?? null,
+            sizeMode: src.sizeMode ?? null,
+            opacity: src.opacity ?? null,
         };
 
         if (type === 'movingArrow') {
-            base.easing = anim.easing ?? 'sine';
-            base.hideStaticArrow = anim.hideStaticArrow ?? true;
+            base.easing = src.easing ?? 'sine';
+            base.hideStaticArrow = src.hideStaticArrow ?? true;
         }
 
         if (type === 'flowArrows') {
-            base.count   = anim.count   ?? 3;
-            base.spacing = anim.spacing ?? null;
-            base.hideStaticArrow = anim.hideStaticArrow ?? true;
+            base.count = src.count ?? 3;
+            base.spacing = src.spacing ?? null;
+            base.hideStaticArrow = src.hideStaticArrow ?? true;
         }
 
         if (type === 'pulse') {
-            base.minScale = anim.minScale ?? 0.4;
-            base.maxScale = anim.maxScale ?? 1.2;
-            base.easing   = anim.easing   ?? 'sine';
-            base.hideStaticArrow = anim.hideStaticArrow ?? false;
+            base.minScale = src.minScale ?? 0.4;
+            base.maxScale = src.maxScale ?? 1.2;
+            base.easing = src.easing ?? 'sine';
+            base.hideStaticArrow = src.hideStaticArrow ?? false;
         }
 
         if (type === 'part') {
-            base.mode = anim.mode ?? 'extend';
+            base.mode = src.mode ?? 'extend';
 
-            // Дефолтный easing зависит от режима — именно это делает
-            // `extend` и `boomerang` визуально РАЗНЫМИ:
-            //   extend    — пила (линейный рост + мгновенный сброс);
-            //   boomerang — плавный одиночный out-and-back;
-            //   center    — плавный рост от середины;
-            //   dash      — равномерное течение пунктира.
-            let defaultEasing;
+            let defaultEasing: Easing;
             switch (base.mode) {
                 case 'dash':      defaultEasing = 'linear';    break;
                 case 'extend':    defaultEasing = 'linear';    break;
@@ -456,67 +489,41 @@ export class Vector3D {
                 case 'center':
                 default:          defaultEasing = 'sine';      break;
             }
-            base.easing = anim.easing ?? defaultEasing;
+            base.easing = src.easing ?? defaultEasing;
 
-            base.dashLength     = anim.dashLength     ?? 20;
-            base.dashLengthMode = anim.dashLengthMode ?? 'world';
-            base.gapRatio       = anim.gapRatio       ?? 1;
-            base.offsetStep     = anim.offsetStep     ?? 1;
-            base.headCone       = anim.headCone       ?? false;
-            base.headConeSize   = anim.headConeSize   ?? null;
-            base.headConeColor  = anim.headConeColor  ?? null;
-            base.width          = anim.width          ?? null;
-            base.hideBaseLine   = anim.hideBaseLine   ?? true;
-            base.fadeEdges      = anim.fadeEdges      ?? false;
-            base.hideStaticArrow = anim.hideStaticArrow ?? true;
+            base.dashLength = src.dashLength ?? 20;
+            base.dashLengthMode = src.dashLengthMode ?? 'world';
+            base.gapRatio = src.gapRatio ?? 1;
+            base.offsetStep = src.offsetStep ?? 1;
+            base.headCone = src.headCone ?? false;
+            base.headConeSize = src.headConeSize ?? null;
+            base.headConeColor = src.headConeColor ?? null;
+            base.width = src.width ?? null;
+            base.hideBaseLine = src.hideBaseLine ?? true;
+            base.fadeEdges = src.fadeEdges ?? false;
+            base.hideStaticArrow = src.hideStaticArrow ?? true;
         }
 
         return base;
     }
 
-    /**
-     * Применяет функцию плавности к фазе `phase ∈ [0, 1]`.
-     *
-     *  - `'linear'`    — `f(t) = t`.                                     (пила при `extend`)
-     *  - `'sine'`      — `f(t) = 0.5 − 0.5·cos(2πt)`: 0→1→0.             (полный цикл)
-     *  - `'easeIn'`    — `t²`: медленный старт.
-     *  - `'easeOut'`   — `1 − (1−t)²`: быстрый старт.
-     *  - `'easeInOut'` — S-кривая 0→1: плавный старт и финиш.
-     *
-     * Для `boomerang` (где поверх этой кривой ещё накладывается
-     * треугольная волна) корректны только `'linear'`, `'easeIn'`,
-     * `'easeOut'`, `'easeInOut'` — они монотонны на `[0,1]` и дают
-     * одиночный пик. `'sine'` не монотонен и даст две осцилляции.
-     *
-     * @param {string} easing
-     * @param {number} phase
-     * @returns {number}
-     * @private
-     */
-    _applyEasing(easing, phase) {
-        if (easing === 'linear')    return phase;
-        if (easing === 'easeIn')    return phase * phase;
-        if (easing === 'easeOut')   return 1 - (1 - phase) * (1 - phase);
+    private _applyEasing(easing: Easing, phase: number): number {
+        if (easing === 'linear') return phase;
+        if (easing === 'easeIn') return phase * phase;
+        if (easing === 'easeOut') return 1 - (1 - phase) * (1 - phase);
         if (easing === 'easeInOut') {
-            // FIX: монотонная S-кривая 0→1 (не путать с 'sine' ниже,
-            // который даёт 0→1→0).
             return phase < 0.5
                 ? 2 * phase * phase
                 : 1 - 2 * (1 - phase) * (1 - phase);
         }
-        // 'sine' или неизвестное: 0→1→0 (полный цикл за фазу)
         return 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
     }
 
-    /* ================================================================
-       Геометрия маршрута
-       ================================================================ */
+    // =================================================================
+    // Геометрия маршрута
+    // =================================================================
 
-    /**
-     * @returns {{lengths:number[], total:number}|null}
-     * @private
-     */
-    _computePolylineData() {
+    private _computePolylineData(): { lengths: number[]; total: number } | null {
         const pts = this._worldPoints;
         if (!pts || pts.length < 2) return null;
         const lengths = [0];
@@ -532,15 +539,7 @@ export class Vector3D {
         return { lengths, total };
     }
 
-    /**
-     * Точка и тангенс на ломаной при параметре `t ∈ [0,1]`.
-     * @param {number} t
-     * @param {THREE.Vector3} outPos
-     * @param {THREE.Vector3} outTangent
-     * @returns {boolean}
-     * @private
-     */
-    _getPointAtT(t, outPos, outTangent) {
+    private _getPointAtT(t: number, outPos: any, outTangent: any): boolean {
         const poly = this._animPolyline;
         if (!poly || poly.total <= 0) return false;
 
@@ -550,8 +549,8 @@ export class Vector3D {
         if (i >= poly.lengths.length) i = poly.lengths.length - 1;
 
         const segStart = poly.lengths[i - 1];
-        const segLen   = poly.lengths[i] - segStart;
-        const localT   = segLen > 0 ? (len - segStart) / segLen : 0;
+        const segLen = poly.lengths[i] - segStart;
+        const localT = segLen > 0 ? (len - segStart) / segLen : 0;
 
         const p0 = this._worldPoints[i - 1];
         const p1 = this._worldPoints[i];
@@ -567,13 +566,7 @@ export class Vector3D {
         return true;
     }
 
-    /**
-     * @param {number} t0
-     * @param {number} t1
-     * @param {number[]} out
-     * @private
-     */
-    _emitRangeSegments(t0, t1, out) {
+    private _emitRangeSegments(t0: number, t1: number, out: number[]): void {
         const poly = this._animPolyline;
         if (!poly) return;
         const L = poly.total;
@@ -587,8 +580,8 @@ export class Vector3D {
 
         while (i < poly.lengths.length && poly.lengths[i - 1] < b) {
             const segStart = poly.lengths[i - 1];
-            const segEnd   = poly.lengths[i];
-            const segLen   = segEnd - segStart;
+            const segEnd = poly.lengths[i];
+            const segLen = segEnd - segStart;
             if (segLen <= 0) { i++; continue; }
 
             const u0 = Math.max(0, (a - segStart) / segLen);
@@ -610,20 +603,16 @@ export class Vector3D {
         }
     }
 
-    /* ================================================================
-       Setup / teardown анимационных ресурсов
-       ================================================================ */
+    // =================================================================
+    // Setup / teardown анимаций (внутренние)
+    // =================================================================
 
-    /**
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @private
-     */
-    _setupAnimations(map) {
+    private _setupAnimations(map: any): void {
         this._animPolyline = this._computePolylineData();
         if (!this._animPolyline) return;
 
         for (const anim of this._animList) {
-            anim.time = 0;                              // FIX: свежий старт
+            anim.time = 0;
             this._setupOneAnimation(anim, map);
         }
 
@@ -633,12 +622,7 @@ export class Vector3D {
         }
     }
 
-    /**
-     * @param {{config:Object, time:number}} anim
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @private
-     */
-    _setupOneAnimation(anim, map) {
+    private _setupOneAnimation(anim: AnimSlot, map: any): void {
         const o = anim.config;
 
         if (o.type === 'movingArrow') {
@@ -665,13 +649,13 @@ export class Vector3D {
             anim.group = group;
             anim.cones = [];
 
-            let count = o.count;
-            if (o.spacing > 0 && this._animPolyline.total > 0) {
+            let count = o.count!;
+            if (o.spacing != null && o.spacing > 0 && this._animPolyline && this._animPolyline.total > 0) {
                 count = Math.round(this._animPolyline.total / o.spacing);
             }
             count = Math.max(1, Math.min(FLOW_MAX_CONES, count));
 
-            const color   = o.color   ?? this._color;
+            const color = o.color ?? this._color;
             const opacity = o.opacity ?? this._opacity;
 
             for (let i = 0; i < count; i++) {
@@ -711,7 +695,7 @@ export class Vector3D {
             overlay.visible = false;
             overlay.frustumCulled = false;
             this._group.add(overlay);
-            anim.overlay    = overlay;
+            anim.overlay = overlay;
             anim.overlayGeo = geo;
             anim.overlayMat = mat;
 
@@ -725,14 +709,7 @@ export class Vector3D {
         }
     }
 
-    /**
-     * Освобождает GPU-ресурсы всех анимаций, но **сохраняет** конфиги
-     * в `_animList` — чтобы после повторного `_attach()` анимации могли
-     * быть созданы заново.
-     *
-     * @private
-     */
-    _teardownAnimations() {
+    private _teardownAnimations(): void {
         for (const anim of this._animList) {
             const o = anim.config;
 
@@ -740,17 +717,17 @@ export class Vector3D {
                 anim.cone.geometry.dispose();
                 anim.cone.material.dispose();
                 if (anim.cone.parent) anim.cone.parent.remove(anim.cone);
-                anim.cone = null;
+                anim.cone = undefined;
             }
 
             if (o.type === 'flowArrows' && anim.group) {
-                for (const c of anim.cones) {
+                for (const c of anim.cones || []) {
                     c.geometry.dispose();
                     c.material.dispose();
                 }
                 if (anim.group.parent) anim.group.parent.remove(anim.group);
-                anim.group = null;
-                anim.cones = null;
+                anim.group = undefined;
+                anim.cones = undefined;
             }
 
             if (o.type === 'part') {
@@ -758,26 +735,25 @@ export class Vector3D {
                     anim.overlay.geometry.dispose();
                     anim.overlay.material.dispose();
                     if (anim.overlay.parent) anim.overlay.parent.remove(anim.overlay);
-                    anim.overlay    = null;
-                    anim.overlayGeo = null;
-                    anim.overlayMat = null;
+                    anim.overlay = undefined;
+                    anim.overlayGeo = undefined;
+                    anim.overlayMat = undefined;
                 }
                 if (anim.headConeGroup) {
-                    for (const c of anim.headConePool) {
+                    for (const c of anim.headConePool || []) {
                         c.geometry.dispose();
                         c.material.dispose();
                     }
                     if (anim.headConeGroup.parent) {
                         anim.headConeGroup.parent.remove(anim.headConeGroup);
                     }
-                    anim.headConeGroup = null;
-                    anim.headConePool = null;
+                    anim.headConeGroup = undefined;
+                    anim.headConePool = undefined;
                 }
                 if (o.hideBaseLine && this._line) this._line.visible = true;
             }
         }
 
-        // НЕ очищаем _animList — конфиги должны переживать remove().
         this._animPolyline = null;
 
         if (this._cone) {
@@ -790,16 +766,11 @@ export class Vector3D {
         }
     }
 
-    /* ================================================================
-       Шаг анимаций
-       ================================================================ */
+    // =================================================================
+    // Шаг анимаций
+    // =================================================================
 
-    /**
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {number} deltaTime
-     * @private
-     */
-    _stepAllAnimations(map, deltaTime) {
+    private _stepAllAnimations(map: any, deltaTime: number): void {
         for (const anim of this._animList) {
             const o = anim.config;
             if (!o.paused) anim.time += deltaTime * o.speed;
@@ -815,8 +786,7 @@ export class Vector3D {
         }
     }
 
-    /** @private */
-    _stepMovingArrow(anim, map, phase) {
+    private _stepMovingArrow(anim: AnimSlot, map: any, phase: number): void {
         const o = anim.config;
         if (!anim.cone) return;
         anim.cone.visible = true;
@@ -840,10 +810,8 @@ export class Vector3D {
         this._applyConeScale(map, anim.cone, o.size, o.sizeMode);
     }
 
-    /** @private */
-    _stepFlowArrows(anim, map, phase) {
+    private _stepFlowArrows(anim: AnimSlot, map: any, phase: number): void {
         if (!anim.cones || !anim.cones.length) return;
-
         const o = anim.config;
         const n = anim.cones.length;
         const baseOpacity = o.opacity ?? this._opacity;
@@ -874,23 +842,11 @@ export class Vector3D {
         }
     }
 
-    /**
-     * Пульс масштаба концевого конуса.
-     *
-     * `easing` управляет формой волны:
-     *  - `'sine'`      — плавный 0→1→0 (по умолчанию);
-     *  - `'linear'`    — треугольная волна 0→1→0 (резкая);
-     *  - `'easeIn'`    — `easeIn(tri(t))` — медленный рост/спад;
-     *  - `'easeOut'`   — `easeOut(tri(t))` — быстрый рост/спад;
-     *  - `'easeInOut'` — `easeInOut(tri(t))` — S-кривая.
-     *
-     * @private
-     */
-    _stepPulse(anim, map, phase) {
+    private _stepPulse(anim: AnimSlot, map: any, phase: number): void {
         const o = anim.config;
         if (!this._cone || !this._cone.visible) return;
 
-        let s;
+        let s: number;
         if (o.easing === 'linear') {
             s = phase < 0.5 ? phase * 2 : 2 - phase * 2;
         } else if (o.easing === 'sine' || !o.easing) {
@@ -900,89 +856,55 @@ export class Vector3D {
             s = this._applyEasing(o.easing, tri);
         }
 
-        const mult = o.minScale + (o.maxScale - o.minScale) * s;
+        const mult = o.minScale! + (o.maxScale! - o.minScale!) * s;
         const base = o.size ?? this._arrowSize;
         this._applyConeScale(map, this._cone, base * mult, o.sizeMode);
     }
 
-    /**
-     * Разные режимы `part` дают визуально разные анимации:
-     *
-     *  - `extend`    — `f = easing(phase)`;  диапазон `[0, f]`.
-     *                  По умолчанию `linear` — линейный рост, снап в 0
-     *                  в начале нового периода (пила `/|/|`).
-     *  - `center`    — `f = easing(phase)`;  диапазон `[0.5−f/2, 0.5+f/2]`.
-     *                  По умолчанию `sine` — плавный out-and-back от центра.
-     *  - `boomerang` — `f = easing(tri(phase))`, где `tri` — треугольная
-     *                  волна. По умолчанию `easeInOut` — плавный одиночный
-     *                  out-and-back.
-     *  - `dash`      — строит набор диапазонов через `_computeDashRanges`.
-     *
-     * @param {{config:Object, time:number}} anim
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {number} phase
-     * @private
-     */
-    _stepPart(anim, map, phase) {
+    private _stepPart(anim: AnimSlot, map: any, phase: number): void {
         const o = anim.config;
         if (!anim.overlay) return;
 
-        let ranges = [];
+        let ranges: Array<[number, number]> = [];
 
         if (o.mode === 'extend') {
-            // Пила: линейный рост (по умолчанию). Пользователь может
-            // переопределить easing — тогда рост будет с ускорением,
-            // но снап в 0 всё равно произойдёт в конце периода.
-            const f = this._applyEasing(o.easing, phase);
+            const f = this._applyEasing(o.easing!, phase);
             ranges = [o.reverse ? [1 - f, 1] : [0, f]];
         } else if (o.mode === 'center') {
-            const f = this._applyEasing(o.easing, phase);
+            const f = this._applyEasing(o.easing!, phase);
             ranges = [[0.5 - f / 2, 0.5 + f / 2]];
         } else if (o.mode === 'boomerang') {
-            // Треугольная волна 0→1→0, поверх неё — монотонный easing.
-            // По умолчанию `easeInOut` — плавный одиночный пик.
             const tri = 1 - Math.abs(2 * phase - 1);
-            const f = this._applyEasing(o.easing, tri);
+            const f = this._applyEasing(o.easing!, tri);
             ranges = [o.reverse ? [1 - f, 1] : [0, f]];
         } else if (o.mode === 'dash') {
-            const f = this._applyEasing(o.easing, phase);
+            const f = this._applyEasing(o.easing!, phase);
             ranges = this._computeDashRanges(o, f);
         }
 
         ranges = ranges.filter(([a, b]) => b > a);
-
         this._rebuildOverlay(anim, map, ranges);
         if (o.headCone) this._rebuildHeadCones(anim, map, ranges);
     }
 
-    /**
-     * Стартуем с `i = -1`, чтобы при integer `offsetStep` цикл
-     * dash-паттерна был бесшовным (первый «dash» на phase=1 совпадает
-     * с первым «dash» на phase=0).
-     *
-     * @param {Object} o
-     * @param {number} phase
-     * @returns {Array<[number, number]>}
-     * @private
-     */
-    _computeDashRanges(o, phase) {
+    private _computeDashRanges(o: ParsedAnimation, phase: number): Array<[number, number]> {
         if (!this._animPolyline) return [];
         const L = this._animPolyline.total;
         const dashLen = o.dashLengthMode === 'fraction'
-            ? o.dashLength * L
-            : o.dashLength;
+            ? o.dashLength! * L
+            : o.dashLength!;
         const gapLen = dashLen * (o.gapRatio ?? 1);
-        const step   = dashLen + gapLen;
+        const step = dashLen + gapLen;
         if (step <= 0) return [];
 
         const count = Math.min(MAX_DASH_SEGMENTS, Math.ceil(L / step) + 2);
         let shift = phase * step * (o.offsetStep ?? 1);
         if (o.reverse) shift = -shift;
 
-        const ranges = [];
+        const ranges: Array<[number, number]> = [];
         for (let i = -1; i < count; i++) {
             const startLen = i * step + shift;
-            const endLen   = startLen + dashLen;
+            const endLen = startLen + dashLen;
             const cs = Math.max(0, startLen);
             const ce = Math.min(L, endLen);
             if (ce > cs) ranges.push([cs / L, ce / L]);
@@ -990,14 +912,8 @@ export class Vector3D {
         return ranges;
     }
 
-    /**
-     * @param {{config:Object, overlay:any, overlayGeo:any}} anim
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {Array<[number, number]>} ranges
-     * @private
-     */
-    _rebuildOverlay(anim, map, ranges) {
-        const positions = [];
+    private _rebuildOverlay(anim: AnimSlot, map: any, ranges: Array<[number, number]>): void {
+        const positions: number[] = [];
         for (const [t0, t1] of ranges) {
             this._emitRangeSegments(t0, t1, positions);
             if (positions.length / 6 > MAX_DASH_SEGMENTS) break;
@@ -1013,21 +929,15 @@ export class Vector3D {
         anim.overlay.visible = true;
     }
 
-    /**
-     * @param {{config:Object, headConeGroup:any, headConePool:any[]}} anim
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {Array<[number, number]>} ranges
-     * @private
-     */
-    _rebuildHeadCones(anim, map, ranges) {
-        if (!anim.headConeGroup) return;
+    private _rebuildHeadCones(anim: AnimSlot, map: any, ranges: Array<[number, number]>): void {
+        if (!anim.headConeGroup || !anim.headConePool) return;
         const o = anim.config;
         const pool = anim.headConePool;
         const n = Math.min(ranges.length, MAX_HEAD_CONES);
 
-        const coneColor   = o.headConeColor ?? o.color ?? this._color;
+        const coneColor = o.headConeColor ?? o.color ?? this._color;
         const coneOpacity = o.opacity ?? this._opacity;
-        const headSize    = o.headConeSize ?? o.size ?? this._arrowSize;
+        const headSize = o.headConeSize ?? o.size ?? this._arrowSize;
         const headSizeMode = o.sizeMode ?? this._arrowSizeMode;
 
         while (pool.length < n) {
@@ -1062,7 +972,7 @@ export class Vector3D {
             if (o.reverse) this._tempVecB.negate();
             cone.quaternion.setFromUnitVectors(this._Y_AXIS, this._tempVecB);
 
-            cone.material.color.set(coneColor);
+            cone.material.color.set(coneColor as any);
             cone.material.opacity = coneOpacity;
             cone.material.transparent = coneOpacity < 1;
 
@@ -1070,14 +980,11 @@ export class Vector3D {
         }
     }
 
-    /**
-     * @private
-     */
-    _resetStaticConePosition() {
+    private _resetStaticConePosition(): void {
         if (!this._cone || !this._map || this._worldPoints.length < 2) return;
         const last = this._worldPoints.length - 1;
         const pFrom = new THREE.Vector3(...this._worldPoints[last - 1]);
-        const pTo   = new THREE.Vector3(...this._worldPoints[last]);
+        const pTo = new THREE.Vector3(...this._worldPoints[last]);
         const dir = new THREE.Vector3().subVectors(pTo, pFrom);
         const len = dir.length();
         if (len < 1e-6) return;
@@ -1088,15 +995,11 @@ export class Vector3D {
         this._applyConeScale(this._map);
     }
 
-    /* ================================================================
-       Публичное API анимации
-       ================================================================ */
+    // =================================================================
+    // Публичное API анимации
+    // =================================================================
 
-    /**
-     * @param {Object|string|Array|null} animation
-     * @returns {Vector3D}
-     */
-    setAnimation(animation) {
+    setAnimation(animation: Vector3DOptions['animation']): this {
         this._teardownAnimations();
         this._parseAnimationsInto(animation);
         if (this._map && this._line) {
@@ -1105,40 +1008,38 @@ export class Vector3D {
         return this;
     }
 
-    /** @param {number} index @returns {Vector3D} */
-    pauseAnimation(index = -1) {
+    pauseAnimation(index = -1): this {
         if (index < 0) this._animList.forEach(a => (a.config.paused = true));
         else if (this._animList[index]) this._animList[index].config.paused = true;
         return this;
     }
 
-    /** @param {number} index @returns {Vector3D} */
-    resumeAnimation(index = -1) {
+    resumeAnimation(index = -1): this {
         if (index < 0) this._animList.forEach(a => (a.config.paused = false));
         else if (this._animList[index]) this._animList[index].config.paused = false;
         return this;
     }
 
-    /** @param {number} speed @param {number} [index=-1] @returns {Vector3D} */
-    setAnimationSpeed(speed, index = -1) {
+    setAnimationSpeed(speed: number, index = -1): this {
         if (index < 0) this._animList.forEach(a => (a.config.speed = speed));
         else if (this._animList[index]) this._animList[index].config.speed = speed;
         return this;
     }
 
-    /* ================================================================
-       Attach
-       ================================================================ */
+    // =================================================================
+    // Присоединение / отсоединение
+    // =================================================================
 
-    /**
-     * `remove()` вызывается только если объект уже куда-то привязан.
-     * Иначе первый `_attach` уничтожал `_animList`.
-     *
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {Layer} layer
-     * @private
-     */
-    _attach(map, layer) {
+    addTo(map: any): this {
+        if (this._map === map && this._layer) return this;
+        if (this._map) this.remove();
+        const personalLayer = new Layer();
+        personalLayer.addTo(map);
+        (personalLayer as any).add(this);
+        return this;
+    }
+
+    _attach(map: any, layer: Layer): void {
         if (this._map === map && this._layer === layer) return;
         if (this._map || this._layer) this.remove();
         this._map = map;
@@ -1146,19 +1047,34 @@ export class Vector3D {
 
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
 
-        // --- Проецируем точки в world-метры --------------------------------
-        const worldPts = [];
+        this._recomputeWorldPoints();
+        if (this._worldPoints.length < 2) return;
+
+        this._buildLine(map);
+        this._buildStaticCone();
+        if (this._animList.length) this._setupAnimations(map);
+
+        map.worldGroup.add(this._group);
+
+        this._registerInteraction(map);
+        this._attachLabels(map);
+    }
+
+    /** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
+    private _recomputeWorldPoints(): void {
+        const worldPts: Vector3DPosition[] = [];
         for (let i = 0; i < this._positions.length; i++) {
             const p = this._positions[i];
             if (!Array.isArray(p) || p.length < 2) continue;
 
-            let xy = null, h = 0;
+            let xy: [number, number] | null = null;
+            let h = 0;
             if (this._isEcef) {
                 const [lon, lat, hh] = ecefToGeodetic(p[0], p[1], p[2] ?? 0);
-                xy = map.projectSafe([lon, lat], 'EPSG:4326');
+                xy = this._map.projectSafe([lon, lat], 'EPSG:4326');
                 h = hh;
             } else {
-                xy = map.projectSafe([p[0], p[1]], this._crs);
+                xy = this._map.projectSafe([p[0], p[1]], this._crs);
                 h = p[2] ?? 0;
             }
             if (!xy) continue;
@@ -1167,11 +1083,11 @@ export class Vector3D {
             worldPts.push([xy[0], worldY, xy[1]]);
         }
         this._worldPoints = worldPts;
-        if (worldPts.length < 2) return;
+    }
 
-        // --- Line2 ---------------------------------------------------------
-        const flat = [];
-        for (const wp of worldPts) flat.push(wp[0], wp[1], wp[2]);
+    private _buildLine(map: any): void {
+        const flat: number[] = [];
+        for (const wp of this._worldPoints) flat.push(wp[0], wp[1], wp[2]);
 
         this._geometry = new LineGeometry();
         this._geometry.setPositions(flat);
@@ -1191,108 +1107,109 @@ export class Vector3D {
         this._line.computeLineDistances();
         this._line.renderOrder = 999;
         this._group.add(this._line);
+    }
 
-        // --- Статичный концевой конус --------------------------------------
-        const last = worldPts.length - 1;
-        const pFrom = new THREE.Vector3(...worldPts[last - 1]);
-        const pTo   = new THREE.Vector3(...worldPts[last]);
-        const dir   = new THREE.Vector3().subVectors(pTo, pFrom);
-        const len   = dir.length();
+    private _buildStaticCone(): void {
+        const pts = this._worldPoints;
+        const last = pts.length - 1;
+        const pFrom = new THREE.Vector3(...pts[last - 1]);
+        const pTo = new THREE.Vector3(...pts[last]);
+        const dir = new THREE.Vector3().subVectors(pTo, pFrom);
+        const len = dir.length();
 
-        if (len > 1e-6) {
-            const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
-            cGeo.translate(0, 0.5, 0);
+        if (len <= 1e-6) return;
 
-            this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
-                color: this._color,
-                opacity: this._opacity,
-                transparent: this._opacity < 1,
-                depthTest: this._depthTest,
-                depthWrite: this._depthTest,
-            }));
-            this._cone.renderOrder = 999;
-            this._cone.position.copy(pTo);
-            this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
+        const cGeo = new THREE.ConeGeometry(CONE_RADIUS_RATIO, 1, 12);
+        cGeo.translate(0, 0.5, 0);
 
-            this._lastSegLen = len;
-            this._applyConeScale(map);
+        this._cone = new THREE.Mesh(cGeo, new THREE.MeshBasicMaterial({
+            color: this._color,
+            opacity: this._opacity,
+            transparent: this._opacity < 1,
+            depthTest: this._depthTest,
+            depthWrite: this._depthTest,
+        }));
+        this._cone.renderOrder = 999;
+        this._cone.position.copy(pTo);
+        this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
 
-            this._group.add(this._cone);
+        this._lastSegLen = len;
+        this._applyConeScale(this._map);
+
+        this._group.add(this._cone);
+    }
+
+    private _registerInteraction(map: any): void {
+        if (!map.interaction) return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
         }
+        if (!this._onClick && !this._onHover && !this._tooltip) return;
 
-        // --- Анимации ------------------------------------------------------
-        if (this._animList.length) this._setupAnimations(map);
-
-        map.worldGroup.add(this._group);
-
-        // --- InteractionManager --------------------------------------------
-        if (map.interaction && (this._onClick || this._onHover || this._tooltip)) {
-            this._unregisterInteraction = map.interaction.register(this, {
-                getMeshes: () => {
-                    const meshes = [];
-                    if (this._line && this._line.visible) meshes.push(this._line);
-                    if (this._cone && this._cone.visible) meshes.push(this._cone);
-                    for (const anim of this._animList) {
-                        if (anim.config.type === 'flowArrows' && anim.cones) {
-                            for (const c of anim.cones) if (c.visible) meshes.push(c);
-                        }
-                        if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
-                            meshes.push(anim.cone);
-                        }
-                        if (anim.config.type === 'part' && anim.headConePool) {
-                            for (const c of anim.headConePool) if (c.visible) meshes.push(c);
-                        }
+        this._unregisterInteraction = map.interaction.register(this, {
+            getMeshes: () => {
+                const meshes: any[] = [];
+                if (this._line && this._line.visible) meshes.push(this._line);
+                if (this._cone && this._cone.visible) meshes.push(this._cone);
+                for (const anim of this._animList) {
+                    if (anim.config.type === 'flowArrows' && anim.cones) {
+                        for (const c of anim.cones) if (c.visible) meshes.push(c);
                     }
-                    return meshes;
-                },
-                onClick:    this._onClick || null,
-                onHover:    this._onHover || null,
-                getTooltip: this._tooltip ? () => this._tooltip : null,
-                isVisible:  () => this._group.visible,
-            });
-        }
+                    if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
+                        meshes.push(anim.cone);
+                    }
+                    if (anim.config.type === 'part' && anim.headConePool) {
+                        for (const c of anim.headConePool) if (c.visible) meshes.push(c);
+                    }
+                }
+                return meshes;
+            },
+            onClick: this._onClick || null,
+            onHover: this._onHover || null,
+            getTooltip: this._tooltip ? () => this._tooltip : null,
+            isVisible: () => this._group.visible,
+        });
+    }
 
-        // --- TextManager (две подписи) -------------------------------------
-        if (map.textManager) {
-            for (const role of ['start', 'end']) {
-                const title = this._titles[role];
-                if (!title.text) continue;
-                const facade = this._makeLabelFacade(role);
-                const handle = map.textManager.addLabel(facade);
-                this._labels.push({ role, handle, facade });
-            }
+    private _attachLabels(map: any): void {
+        if (!map.textManager) return;
+        for (const role of ['start', 'end'] as TitleRole[]) {
+            const title = this._titles[role];
+            if (!title.text) continue;
+            const facade = this._makeLabelFacade(role);
+            const handle = map.textManager.addLabel(facade);
+            this._labels.push({ role, handle, facade });
         }
     }
 
-    /**
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {THREE.Mesh} [cone=this._cone]
-     * @param {number|null} [size=null]
-     * @param {'px'|'world'|null} [sizeMode=null]
-     * @private
-     */
-    _applyConeScale(map, cone = this._cone, size = null, sizeMode = null) {
+    private _applyConeScale(
+        map: any,
+        cone: any = this._cone,
+        size: number | null = null,
+        sizeMode: ArrowSizeMode | null = null
+    ): void {
         if (!cone) return;
 
-        const s    = size ?? this._arrowSize;
+        const s = size ?? this._arrowSize;
         const mode = sizeMode ?? this._arrowSizeMode;
 
-        let h;
+        let h: number;
         if (mode === 'world') {
             h = s;
             if (this._lastSegLen > 0) h = Math.min(h, this._lastSegLen * 0.4);
         } else {
             const wgPos = map.worldGroup.position;
-            const pos   = cone.position;
-            const dist  = map.camera.position.distanceTo(
+            const pos = cone.position;
+            const dist = map.camera.position.distanceTo(
                 map.getVec3().set(
                     pos.x + wgPos.x,
                     pos.y + wgPos.y,
                     pos.z + wgPos.z
                 )
             );
-            const canvas  = map.renderer.domElement;
-            const fovRad  = map.camera.fov * Math.PI / 180;
+            const canvas = map.renderer.domElement;
+            const fovRad = map.camera.fov * Math.PI / 180;
             const hPixels = Math.max(1, canvas.clientHeight);
             const worldPerPixel = (2 * dist * Math.tan(fovRad / 2)) / hPixels;
             h = s * worldPerPixel;
@@ -1302,13 +1219,17 @@ export class Vector3D {
         cone.scale.setScalar(h);
     }
 
-    /**
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @param {number} [deltaTime]
-     * @private
-     */
-    _update(map, deltaTime) {
+    // =================================================================
+    // Обновление на кадре
+    // =================================================================
+
+    _update(map: any, deltaTime?: number): void {
         if (!this._map || !this._line) return;
+
+        if (!this._userVisible) {
+            this._group.visible = false;
+            return;
+        }
 
         if (typeof deltaTime !== 'number' || !isFinite(deltaTime) || deltaTime < 0) {
             const now = performance.now();
@@ -1320,7 +1241,7 @@ export class Vector3D {
         this._lastUpdateTime = performance.now();
 
         const zoom = map.continuousZoom;
-        let visible = (this._layer ? this._layer.visible : true)
+        let visible = (this._layer ? (this._layer as any).visible : true)
             && zoom >= this._minZoom && zoom <= this._maxZoom;
 
         if (visible && map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
@@ -1357,27 +1278,258 @@ export class Vector3D {
         }
     }
 
-    /**
-     * Если уже на этой карте — ранний выход; иначе `remove()` с
-     * последующим созданием персонального слоя.
-     *
-     * @param {import('./KrbMap.js').KrbMap} map
-     * @returns {Vector3D}
-     */
-    addTo(map) {
-        if (this._map === map && this._layer) return this;
-        if (this._map) this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
+    // =================================================================
+    // Мутабельность
+    // =================================================================
+
+    /** Управляет видимостью (перекрывает зум и видимость слоя). */
+    setVisible(visible: boolean): this {
+        this._userVisible = !!visible;
+        if (!this._group) return this;
+        if (!this._userVisible) this._group.visible = false;
+        return this;
+    }
+
+    /** Меняет цвет линии и конусов (где не задан явный override). */
+    setColor(color: Vector3DColor): this {
+        this._color = color;
+        if (this._material?.color) this._material.color.set(color as any);
+        if (this._cone?.material?.color) this._cone.material.color.set(color as any);
+        for (const anim of this._animList) {
+            const o = anim.config;
+            if (o.color == null) {
+                if (anim.cone?.material?.color) anim.cone.material.color.set(color as any);
+                if (anim.cones) {
+                    for (const c of anim.cones) c.material.color.set(color as any);
+                }
+                if (anim.overlayMat?.color) anim.overlayMat.color.set(color as any);
+                if (anim.headConePool && o.headConeColor == null) {
+                    for (const c of anim.headConePool) c.material.color.set(color as any);
+                }
+            }
+        }
+        return this;
+    }
+
+    /** Меняет толщину линии. */
+    setWidth(width: number): this {
+        if (!(width >= 0)) return this;
+        this._width = width;
+        if (this._material) {
+            this._material.linewidth = width;
+            this._material.needsUpdate = true;
+        }
+        for (const anim of this._animList) {
+            if (anim.config.type === 'part' && anim.overlayMat && anim.config.width == null) {
+                anim.overlayMat.linewidth = width;
+                anim.overlayMat.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+
+    /** Меняет прозрачность линии и конусов (где не задан явный override). */
+    setOpacity(opacity: number): this {
+        const v = Math.max(0, Math.min(1, opacity));
+        this._opacity = v;
+        const applyOpacity = (mat: any) => {
+            mat.opacity = v;
+            const t = v < 1;
+            if (mat.transparent !== t) {
+                mat.transparent = t;
+                mat.needsUpdate = true;
+            }
+        };
+        if (this._material) applyOpacity(this._material);
+        if (this._cone?.material) applyOpacity(this._cone.material);
+        for (const anim of this._animList) {
+            if (anim.config.opacity != null) continue;
+            if (anim.cone?.material) applyOpacity(anim.cone.material);
+            if (anim.cones) for (const c of anim.cones) applyOpacity(c.material);
+            if (anim.overlayMat) applyOpacity(anim.overlayMat);
+            if (anim.headConePool) for (const c of anim.headConePool) applyOpacity(c.material);
+        }
+        return this;
+    }
+
+    /** Меняет размер стрелки (пиксели или world — зависит от `arrowSizeMode`). */
+    setArrowSize(size: number): this {
+        if (!(size > 0)) return this;
+        this._arrowSize = size;
+        if (this._cone && this._map) this._applyConeScale(this._map);
+        return this;
+    }
+
+    /** Меняет режим размера стрелки. */
+    setArrowSizeMode(mode: ArrowSizeMode): this {
+        this._arrowSizeMode = mode;
+        if (this._cone && this._map) this._applyConeScale(this._map);
+        return this;
+    }
+
+    /** Включает/отключает depthTest во всех материалах. */
+    setDepthTest(depthTest: boolean): this {
+        this._depthTest = !!depthTest;
+        const all: any[] = [];
+        if (this._material) all.push(this._material);
+        if (this._cone?.material) all.push(this._cone.material);
+        for (const anim of this._animList) {
+            if (anim.cone?.material) all.push(anim.cone.material);
+            if (anim.cones) for (const c of anim.cones) all.push(c.material);
+            if (anim.overlayMat) all.push(anim.overlayMat);
+            if (anim.headConePool) for (const c of anim.headConePool) all.push(c.material);
+        }
+        for (const m of all) {
+            if (m.depthTest !== this._depthTest) {
+                m.depthTest = this._depthTest;
+                m.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+
+    /** Устанавливает границы видимости по зуму. */
+    setZoomBounds(minZoom: number, maxZoom: number): this {
+        this._minZoom = minZoom;
+        this._maxZoom = maxZoom;
+        return this;
+    }
+
+    /** Меняет вертикальное преувеличение. */
+    setHeightScale(scale: number): this {
+        this._heightScale = scale;
+        if (!this._map) return this;
+        this._recomputeWorldPoints();
+        this._refreshGeometryAfterPositionsChange();
+        return this;
+    }
+
+    /** Меняет высотное смещение (world-метры). */
+    setAltitudeOffset(offset: number): this {
+        this._altitudeOffset = offset;
+        if (!this._map) return this;
+        this._recomputeWorldPoints();
+        this._refreshGeometryAfterPositionsChange();
         return this;
     }
 
     /**
-     * Удаляет вектор с карты, освобождает ресурсы и снимает регистрации.
-     * Сохраняет `_animList` (см. `_teardownAnimations`).
+     * Заменяет точки. Пересчитывает `_worldPoints`, обновляет линию,
+     * позицию статического конуса и пересоздаёт анимации.
      */
-    remove() {
+    setPositions(positions: Vector3DPosition[]): this {
+        if (!positions || positions.length < 2) return this;
+        this._positions = positions;
+        if (!this._map) return this;
+
+        this._recomputeWorldPoints();
+        if (this._worldPoints.length < 2) return this;
+        this._refreshGeometryAfterPositionsChange();
+        return this;
+    }
+
+    /** Меняет тултип. При необходимости — перерегистрирует интерактив. */
+    setTooltip(html: string): this {
+        this._tooltip = html ?? '';
+        if (this._map) this._registerInteraction(this._map);
+        return this;
+    }
+
+    /** Меняет стартовую подпись. */
+    setTitleStart(text: string): this {
+        return this._setTitleText('start', text ?? '');
+    }
+
+    /** Меняет конечную подпись. */
+    setTitleEnd(text: string): this {
+        return this._setTitleText('end', text ?? '');
+    }
+
+    private _setTitleText(role: TitleRole, text: string): this {
+        this._titles[role].text = text;
+        const tm = this._map?.textManager;
+        if (!tm) return this;
+
+        const entry = this._labels.find(l => l.role === role);
+        if (entry) {
+            if (text) {
+                if (typeof tm.updateLabel === 'function') tm.updateLabel(entry.handle);
+                // else: facade.getText уже видит новый текст, но без
+                // updateLabel нет способа форсировать пересчёт. Оставляем
+                // как есть — большинство пользователей будет с новой
+                // версией TextManager.
+            } else {
+                tm.removeLabel(entry.handle);
+                this._labels = this._labels.filter(l => l !== entry);
+            }
+        } else if (text) {
+            const facade = this._makeLabelFacade(role);
+            const handle = tm.addLabel(facade);
+            this._labels.push({ role, handle, facade });
+        }
+        return this;
+    }
+
+    /** Пересобирает геометрию и анимации после изменения `_worldPoints`. */
+    private _refreshGeometryAfterPositionsChange(): void {
+        if (!this._map || !this._line) return;
+
+        const flat: number[] = [];
+        for (const wp of this._worldPoints) flat.push(wp[0], wp[1], wp[2]);
+        this._geometry.setPositions(flat);
+        this._line.computeLineDistances();
+
+        // Обновляем позицию статического конуса.
+        if (this._cone) {
+            const last = this._worldPoints.length - 1;
+            const pFrom = new THREE.Vector3(...this._worldPoints[last - 1]);
+            const pTo = new THREE.Vector3(...this._worldPoints[last]);
+            const dir = new THREE.Vector3().subVectors(pTo, pFrom);
+            const len = dir.length();
+            if (len > 1e-6) {
+                this._cone.position.copy(pTo);
+                this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
+                this._lastSegLen = len;
+                this._applyConeScale(this._map);
+            }
+        }
+
+        // Пересоздаём анимации.
+        this._teardownAnimations();
+        if (this._animList.length) this._setupAnimations(this._map);
+    }
+
+    // =================================================================
+    // Геттеры
+    // =================================================================
+
+    getPositions(): Vector3DPosition[] {
+        return this._positions.map(p => [p[0], p[1], p[2]] as Vector3DPosition);
+    }
+
+    getColor(): Vector3DColor { return this._color; }
+    getWidth(): number { return this._width; }
+    getOpacity(): number { return this._opacity; }
+    getArrowSize(): number { return this._arrowSize; }
+    getArrowSizeMode(): ArrowSizeMode { return this._arrowSizeMode; }
+    getHeightScale(): number { return this._heightScale; }
+    getAltitudeOffset(): number { return this._altitudeOffset; }
+
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter(): LonLat | null {
+        const b = this.getBounds('EPSG:4326');
+        if (!b) return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
+    }
+
+    // =================================================================
+    // Удаление
+    // =================================================================
+
+    remove(): void {
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
@@ -1417,11 +1569,11 @@ export class Vector3D {
         this._map = null;
     }
 
-    /**
-     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326']
-     * @returns {Array<Array<number>>|null}
-     */
-    getBounds(crs = 'EPSG:4326') {
+    // =================================================================
+    // KrbMap#fitTo / getBounds
+    // =================================================================
+
+    getBounds(crs: string | any = 'EPSG:4326'): [LonLat, LonLat] | null {
         let mnx = Infinity, mnz = Infinity, mxx = -Infinity, mxz = -Infinity;
         for (const p of this._worldPoints) {
             if (p[0] < mnx) mnx = p[0];
@@ -1439,11 +1591,13 @@ export class Vector3D {
         return [[mnx, mnz], [mxx, mxz]];
     }
 
-    /* ---------------- Legacy-геттеры (делегируют к start) ---------------- */
+    // =================================================================
+    // Legacy-геттеры (делегируют к start)
+    // =================================================================
 
-    /** @returns {string} */ getText() { return this._titles.start.text; }
-    /** @returns {Object} */
-    getTextStyle() {
+    getText(): string { return this._titles.start.text; }
+
+    getTextStyle(): Record<string, string | number> {
         return Object.assign({
             fontFamily: 'sans-serif',
             color: '#ffffff',
@@ -1452,23 +1606,27 @@ export class Vector3D {
             textShadow: '1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9)',
         }, this._titles.start.style);
     }
-    /** @returns {{min:number,max:number}} */
-    getTextZoomBounds() {
+
+    getTextZoomBounds(): { min: number; max: number } {
         return { min: this._titles.start.minZoom, max: this._titles.start.maxZoom };
     }
-    /** @returns {'point'} */ getLabelType() { return 'point'; }
-    /** @returns {boolean} */
-    isVisible() {
-        if (!this._layer || !this._layer.visible) return false;
+
+    getLabelType(): 'point' { return 'point'; }
+
+    isVisible(): boolean {
+        if (!this._layer || !(this._layer as any).visible) return false;
         if (!this._map) return false;
         const zoom = this._map.continuousZoom;
         return zoom >= this._titles.start.minZoom && zoom <= this._titles.start.maxZoom;
     }
-    /** @returns {{x:number,y:number}|null} */
-    getScreenPosition() { return this._getScreenPositionAt('start'); }
-    /** @returns {'left'|'center'|'right'} */ getTitleAlign() { return this._titles.start.align; }
-    /** @returns {'top'|'middle'|'bottom'} */ getTitleVerticalAlign() { return this._titles.start.verticalAlign; }
-    /** @returns {[number, number]} */ getTitleOffset() { return this._titles.start.offset; }
-    /** @returns {boolean} */ getAllowOverflow() { return this._titles.start.allowOverflow; }
-    /** @returns {number} */ getPriority() { return this._titles.start.priority; }
+
+    getScreenPosition(): { x: number; y: number } | null {
+        return this._getScreenPositionAt('start');
+    }
+
+    getTitleAlign(): TitleAlignH { return this._titles.start.align; }
+    getTitleVerticalAlign(): TitleAlignV { return this._titles.start.verticalAlign; }
+    getTitleOffset(): [number, number] { return this._titles.start.offset; }
+    getAllowOverflow(): boolean { return this._titles.start.allowOverflow; }
+    getPriority(): number { return this._titles.start.priority; }
 }

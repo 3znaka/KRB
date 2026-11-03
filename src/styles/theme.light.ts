@@ -163,7 +163,7 @@ poiCategories: {
       fontSize: '14px',
       textFontStyle: 'italic',
       textPlacement: 'along',
-      textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff',
+textFilter: 'drop-shadow(0 0 2px #ffffff)',
       textZoomMin: 10,
       textZoomMax: 21,
       textPriority: 50,
@@ -377,13 +377,14 @@ poiCategories: {
       fontSize: '14px',
       textFontStyle: 'italic',
       textPlacement: 'along',
-      textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff,0 0 3px #ffffff, 0 0 3px #ffffff',
+
       textZoomMin: 10,
       textZoomMax: 21,
       textPriority: 45,
       textMinSegmentLength: 0.1,
       textVerticalAlign: 'top',
       textOffset: [0, -2],
+      textFilter: 'drop-shadow(0 0 2px #ffffff)',
     },
 
     // ─────────────────────────────────────────────────────────────
@@ -412,7 +413,7 @@ poiCategories: {
       iconCircleScale: 1,
       iconGlyphRatio: 1,
       textColor: '#666666',
-      textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff',
+
       fontSize: '12px',
       fontWeight: 'normal',
       textOffset: [0, -8],
@@ -421,6 +422,7 @@ poiCategories: {
       textZoomMin: 13,
       textZoomMax: 24,
       textPriority: 60,
+       textStroke: '2px #ffffff', 
     },
 
     // ─────────────────────────────────────────────────────────────
@@ -441,7 +443,7 @@ poiCategories: {
       fontSize: { type: 'zoom', stops: [[13, 12], [14, 13]] },
       fontWeight: 'normal',
       textPlacement: 'along',
-      textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff',
+
       textZoomMin: 12,
       textZoomMax: 21,
       textPriority: {
@@ -463,6 +465,7 @@ poiCategories: {
       textMinSegmentLength: 0.05,
       textVerticalAlign: 'middle',
       textOffset: [0, 0],
+       textFilter: 'drop-shadow(0 0 1.5px #ffffff)',
     },
 
     // ─────────────────────────────────────────────────────────────
@@ -490,6 +493,7 @@ poiCategories: {
       textZoomMin: 10,
       textZoomMax: 24,
       textPriority: 110,
+      textStroke: '2px #ffffff',
     },
 
     // ─────────────────────────────────────────────────────────────
@@ -569,8 +573,7 @@ poiCategories: {
           _default: [0, -6],
         },
       },
-         textShadow: '0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff, 0 0 3px #ffffff',
-     
+
       textAlign: 'center',
       textVerticalAlign: 'center',
       textZoomMin: 0,
@@ -584,6 +587,7 @@ poiCategories: {
           _default: 130,
         },
       },
+      textStroke: '2px #ffffff',
     },
   },
 

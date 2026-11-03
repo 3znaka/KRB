@@ -209,8 +209,8 @@ this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibl
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
 
         // Ограничение плотности подписей по экранной сетке
-        this.labelScreenGridSize = options.labelScreenGridSize ?? 256;
-        this.labelMaxPerCell = Math.max(1, options.labelMaxPerCell ?? 3);
+        this.labelScreenGridSize = options.labelScreenGridSize ?? 128;
+        this.labelMaxPerCell = Math.max(1, options.labelMaxPerCell ?? 2);
         this._lastSelectedLabelIds = new Set<string>();
 
         this.lineLabelTracking = options.lineLabelTracking ?? 1.35;
@@ -236,7 +236,7 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
         this._groupCacheMaxSize = options.groupCacheMaxSize ?? 100;
 
-        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.5;
+        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.8;
         this.buildings3dEdgeOpacity = options.buildings3dEdgeOpacity ?? this.buildings3dOpacity;
 
         this._workerScriptUrls = rawScripts.map((s) => {

@@ -168,8 +168,8 @@ export class VectorTile {
         this.labelCullMargin = options.labelCullMargin ?? 250;
         this.labelMaxCameraDistance = options.labelMaxCameraDistance ?? 0;
         // Ограничение плотности подписей по экранной сетке
-        this.labelScreenGridSize = options.labelScreenGridSize ?? 256;
-        this.labelMaxPerCell = Math.max(1, options.labelMaxPerCell ?? 3);
+        this.labelScreenGridSize = options.labelScreenGridSize ?? 128;
+        this.labelMaxPerCell = Math.max(1, options.labelMaxPerCell ?? 2);
         this._lastSelectedLabelIds = new Set();
         this.lineLabelTracking = options.lineLabelTracking ?? 1.35;
         this.lineLabelPriorityMode = options.lineLabelPriorityMode ?? 'tile';
@@ -189,7 +189,7 @@ export class VectorTile {
         this._throttle = options.updateThrottle ?? 500;
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
         this._groupCacheMaxSize = options.groupCacheMaxSize ?? 100;
-        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.5;
+        this.buildings3dOpacity = options.buildings3dOpacity ?? 0.8;
         this.buildings3dEdgeOpacity = options.buildings3dEdgeOpacity ?? this.buildings3dOpacity;
         this._workerScriptUrls = rawScripts.map((s) => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/'))

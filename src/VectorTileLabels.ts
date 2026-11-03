@@ -29,6 +29,8 @@ class VectorPointLabelSource {
     getText() { return this.text; }
     getLabelType() { return 'point'; }
 
+
+    
     getIcon() {
         const name = this.options.iconName;
         if (!name)
@@ -71,17 +73,21 @@ class VectorPointLabelSource {
 
     getTextStyle() {
         const o = this.options;
-        return {
-            color: o.textColor || '#333333',
-            fontSize: o.fontSize || '12px',
-            fontFamily: o.fontFamily || 'sans-serif',
-            fontWeight: o.fontWeight || 'normal',
-            textShadow: o.textShadow || '',
-            textTransform: o.textTransform || '',
-            fontStyle: o.textFontStyle || '',
-            letterSpacing: o.textLetterSpacing || '',
-        };
-    }
+    return {
+        color: o.textColor || '#333333',
+        fontSize: o.fontSize || '12px',
+        fontFamily: o.fontFamily || 'sans-serif',
+        fontWeight: o.fontWeight || 'normal',
+        textShadow: o.textShadow || '',
+        textTransform: o.textTransform || '',
+        fontStyle: o.textFontStyle || '',
+        letterSpacing: o.textLetterSpacing || '',
+        // NEW:
+        webkitTextStroke: o.textStroke || '',
+        paintOrder: o.textStroke ? 'stroke fill' : '',
+        filter: o.textFilter || '',
+    };
+}
 
     getPriority() { return this.options.priority || 0; }
     getTitleAlign() { return this.options.textAlign || 'center'; }
@@ -133,6 +139,14 @@ interface LabelRefreshState {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+function _getLayerHalo(styles: any, name: string | undefined) {
+    const s = name ? (styles[name] || {}) : {};
+    return {
+        textStroke: s.textStroke || undefined,
+        textFilter: s.textFilter || undefined,
+    };
+}
 
 function _pointRank(pt: WorkerTextPoint): number {
     const hasIcon = !!pt.iconName;
@@ -276,9 +290,7 @@ export const VectorTileLabelsMixin = {
         if (candidates.length === 0) {
             selected = [];
         } else {
-            // Fix #6: effPriority уже посчитан в collection (с учётом sticky).
-            // NEW: при равном приоритете побеждает icon+text, потом icon-only,
-            // потом text-only, потом линии.
+
             candidates.sort((a: LabelCandidate, b: LabelCandidate) => {
                 if (a.effPriority !== b.effPriority) return b.effPriority - a.effPriority;
                 const aR = _candRank(a);
@@ -301,24 +313,32 @@ export const VectorTileLabelsMixin = {
             let source: any;
             if (cand.type === 'line') {
                 if (!group.userData.lineLabelSources) group.userData.lineLabelSources = [];
-                let cached = group.userData.lineLabelSources[cand.lnIndex];
-                if (!cached) {
-                    cached = new VectorLineLabelSource(map, cand.ln, group, {
-                        tracking: this.lineLabelTracking,
-                        priorityMode: this.lineLabelPriorityMode,
-                        hysteresisPx: this.lineLabelHysteresisPx,
-                        placement: this.lineLabelPlacement,
-                    });
-                    group.userData.lineLabelSources[cand.lnIndex] = cached;
-                }
+let cached = group.userData.lineLabelSources[cand.lnIndex];
+if (!cached) {
+const lnAny = cand.ln as any;
+const layerName = lnAny.sourceLayer || lnAny.layerName || '';
+const halo = _getLayerHalo(this._styles, layerName);
+
+    cached = new VectorLineLabelSource(map, cand.ln, group, {
+        tracking: this.lineLabelTracking,
+        priorityMode: this.lineLabelPriorityMode,
+        hysteresisPx: this.lineLabelHysteresisPx,
+        placement: this.lineLabelPlacement,
+        textStroke: halo.textStroke,    
+        textFilter: halo.textFilter,   
+    });
+    group.userData.lineLabelSources[cand.lnIndex] = cached;
+}
                 source = cached;
-            }             else {
-const pt = cand.pt;
-const rawPos = pt.labelPosition;
-const labelPosition: PoiLabelPosition =
-    (rawPos === 'left' || rawPos === 'right' || rawPos === 'top' || rawPos === 'bottom')
-        ? rawPos
-        : this.labelPosition;
+           } else {
+    const pt = cand.pt;
+    const rawPos = pt.labelPosition;
+    const labelPosition: PoiLabelPosition =
+        (rawPos === 'left' || rawPos === 'right' || rawPos === 'top' || rawPos === 'bottom')
+            ? rawPos : this.labelPosition;
+
+    const layerName = pt.sourceLayer || pt.layerName || '';
+    const halo = _getLayerHalo(this._styles, layerName);
 
 source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
                     textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
@@ -335,7 +355,9 @@ source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.p
                     iconCircleScale: pt.iconCircleScale, 
                     iconGlyphRatio: pt.iconGlyphRatio,   
                     sprite: this.sprite,
-                    labelPosition
+                    labelPosition,
+                    textStroke: halo.textStroke,   
+        textFilter: halo.textFilter, 
                 });
             }
 

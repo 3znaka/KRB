@@ -322,6 +322,7 @@ if (hasIcon) {
 }
         const styleObj = source.getTextStyle ? source.getTextStyle() : {};
         Object.assign(el.style, styleObj);
+
         el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
@@ -347,7 +348,7 @@ if (hasIcon) {
             _pendingChosenT: null,
             _pendingChosenIsFlipped: false,
             _staleAt: null,
-            // NEW:
+            _lastAnchor: null as { x: number; y: number } | null,
             _display: hasIcon ? 'inline-flex' : 'block',
             _hasIcon: hasIcon,
             _icon: icon || null,
@@ -375,11 +376,11 @@ if (hasIcon) {
         const oldStyle = oldSource && oldSource.getTextStyle ? oldSource.getTextStyle() : {};
         const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
 
-        label.source = newSource;
-        if (oldSource !== newSource) {
-            label._chosenT = null;
-            label._chosenIsFlipped = false;
-        }
+label.source = newSource;
+if (oldSource !== newSource && newType !== 'line-curved') {
+    label._chosenT = null;
+    label._chosenIsFlipped = false;
+}
 
         Object.assign(el.style, newStyle);
 
@@ -918,6 +919,16 @@ _computeAnchor(label, rotationDeg) {
 
         const wasStable = this._wasStable;
 
+
+// в update():
+if (moved !== this._lastMoved) {
+    const wc = moved ? 'transform' : 'auto';
+    for (const lbl of this.labels) {
+        if (lbl.element) lbl.element.style.willChange = wc;
+    }
+    this._lastMoved = moved;
+}
+
         if (moved) {
             if (zoomChanged && (this._stableFrameCount > 0 || wasStable)) {
                 this._hideAllLineLabels();
@@ -1127,11 +1138,10 @@ _computeAnchor(label, rotationDeg) {
                     }
                 }
             } else {
-                lbl._chosenT = null;
-                lbl._pendingChosenT = null;
-                lbl._pendingChosenIsFlipped = false;
-                lbl._bbox = null;
-                lbl.hiddenByPriority = true;
+ lbl._pendingChosenT = null;
+    lbl._pendingChosenIsFlipped = false;
+    lbl._bbox = null;
+    lbl.hiddenByPriority = true;
             }
         }
     }
@@ -1152,19 +1162,31 @@ _computeAnchor(label, rotationDeg) {
             const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
 if (!shouldBeVisible) {
+    const el = label.element;
     const isFadingOut = label._hideTimeout != null;
+    const isFullyHidden = !isFadingOut && el.style.display === 'none';
+
+    if (isFullyHidden) {
+        if (isCurved) {
+            label._chosenT = null;
+            label._chosenIsFlipped = false;
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
+        }
+        continue;
+    }
+
     if (!isFadingOut) {
         if (isCurved && label._pendingChosenT != null) {
             label._pendingChosenT = null;
             label._pendingChosenIsFlipped = false;
         }
         this._setLabelVisible(label, false);
-        continue;
+        if (!isCurved) continue;
     }
-
 }
-
 if (isCurved) {
+    let inTransition = false;
 
     if (shouldBeVisible && label._pendingChosenT != null) {
         const el = label.element;
@@ -1174,27 +1196,60 @@ if (isCurved) {
             if (label._hideTimeout == null) {
                 this._setLabelVisible(label, false);
             }
-            continue;
+            inTransition = true;
+        } else {
+            label._chosenT = label._pendingChosenT;
+            label._chosenIsFlipped = label._pendingChosenIsFlipped;
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
         }
-        label._chosenT = label._pendingChosenT;
-        label._chosenIsFlipped = label._pendingChosenIsFlipped;
-        label._pendingChosenT = null;
-        label._pendingChosenIsFlipped = false;
     }
 
     if (label._chosenT == null) {
         if (shouldBeVisible) this._setLabelVisible(label, false);
         continue;
     }
+
     const charLayout = src.getCharLayoutAtT(
         label._chosenT, label._chosenIsFlipped
     );
-    if (!charLayout) {
-        if (shouldBeVisible) this._setLabelVisible(label, false);
+
+    if (charLayout) {
+        this._renderLineChars(label, charLayout);
+
+        const data = src._getScreenData();
+        if (data) {
+            const anchorPx = src._tToPx(data, label._chosenT);
+            const anchor = src._samplePx(data, anchorPx);
+            if (anchor) label._lastAnchor = anchor;
+        }
+
+        if (shouldBeVisible && !inTransition) {
+            this._setLabelVisible(label, true);
+        }
         continue;
     }
-    this._renderLineChars(label, charLayout);
-    if (shouldBeVisible) this._setLabelVisible(label, true);  // ← guard!
+
+    if (shouldBeVisible && !inTransition) {
+        this._setLabelVisible(label, false);
+      
+    }
+
+    if (label._lastAnchor) {
+        const data = src._getScreenData();
+        if (data) {
+            const curAnchorPx = src._tToPx(data, label._chosenT);
+            const curAnchor = src._samplePx(data, curAnchorPx);
+            if (curAnchor) {
+                const dx = curAnchor.x - label._lastAnchor.x;
+                const dy = curAnchor.y - label._lastAnchor.y;
+                if (dx !== 0 || dy !== 0) {
+                    label.element.style.transform =
+                        `translate3d(${dx}px, ${dy}px, 0)`;
+                }
+            }
+        }
+    }
     continue;
 }
 
@@ -1217,7 +1272,10 @@ if (isCurved) {
             if (type === 'line' && src.getPlacement() === 'along') {
                 transform += ` rotate(${rotation}deg)`;
             }
-            label.element.style.transform = transform;
+if (label.element.__lastTransform !== transform) {
+    label.element.style.transform = transform;
+    label.element.__lastTransform = transform;
+}
 
             if (shouldBeVisible) {
                 this._setLabelVisible(label, true);

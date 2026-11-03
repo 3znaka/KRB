@@ -25,6 +25,8 @@ export class VectorLineLabelSource {
         this._charWidths = null;
         this._stableTs = null;
         this._lastFlipState = null;
+        this.textStroke = options.textStroke ?? '';
+        this.textFilter = options.textFilter ?? '';
     }
     getText() { return this.lineData.text || ''; }
     getLabelType() { return 'line-curved'; }
@@ -37,15 +39,20 @@ export class VectorLineLabelSource {
     getTitleVerticalAlign() { return this.lineData.textVerticalAlign || 'middle'; }
     getTitleOffset() { return this.lineData.textOffset || [0, 0]; }
     getTextStyle() {
+        const d = this.lineData;
         return {
-            color: this.lineData.textColor || '#333333',
-            fontSize: this.lineData.fontSize || '11px',
-            fontFamily: this.lineData.fontFamily || 'sans-serif',
-            fontWeight: this.lineData.fontWeight || 'normal',
-            textShadow: this.lineData.textShadow || '',
-            textTransform: this.lineData.textTransform || '',
-            fontStyle: this.lineData.textFontStyle || '',
-            letterSpacing: this.lineData.textLetterSpacing || ''
+            color: d.textColor || '#333333',
+            fontSize: d.fontSize || '11px',
+            fontFamily: d.fontFamily || 'sans-serif',
+            fontWeight: d.fontWeight || 'normal',
+            textShadow: d.textShadow || '',
+            textTransform: d.textTransform || '',
+            fontStyle: d.textFontStyle || '',
+            letterSpacing: d.textLetterSpacing || '',
+            // NEW:
+            webkitTextStroke: this.textStroke || '',
+            paintOrder: this.textStroke ? 'stroke fill' : '',
+            filter: this.textFilter || '',
         };
     }
     // ── Дебаг-диагностика ────────────────────────────────────────

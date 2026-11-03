@@ -69,6 +69,10 @@ class VectorPointLabelSource {
             textTransform: o.textTransform || '',
             fontStyle: o.textFontStyle || '',
             letterSpacing: o.textLetterSpacing || '',
+            // NEW:
+            webkitTextStroke: o.textStroke || '',
+            paintOrder: o.textStroke ? 'stroke fill' : '',
+            filter: o.textFilter || '',
         };
     }
     getPriority() { return this.options.priority || 0; }
@@ -81,6 +85,13 @@ class VectorPointLabelSource {
 // ============================================================================
 // Helpers
 // ============================================================================
+function _getLayerHalo(styles, name) {
+    const s = name ? (styles[name] || {}) : {};
+    return {
+        textStroke: s.textStroke || undefined,
+        textFilter: s.textFilter || undefined,
+    };
+}
 function _pointRank(pt) {
     const hasIcon = !!pt.iconName;
     const hasText = !!(pt.text && pt.text.length);
@@ -213,9 +224,6 @@ export const VectorTileLabelsMixin = {
             selected = [];
         }
         else {
-            // Fix #6: effPriority уже посчитан в collection (с учётом sticky).
-            // NEW: при равном приоритете побеждает icon+text, потом icon-only,
-            // потом text-only, потом линии.
             candidates.sort((a, b) => {
                 if (a.effPriority !== b.effPriority)
                     return b.effPriority - a.effPriority;
@@ -241,11 +249,16 @@ export const VectorTileLabelsMixin = {
                     group.userData.lineLabelSources = [];
                 let cached = group.userData.lineLabelSources[cand.lnIndex];
                 if (!cached) {
+                    const lnAny = cand.ln;
+                    const layerName = lnAny.sourceLayer || lnAny.layerName || '';
+                    const halo = _getLayerHalo(this._styles, layerName);
                     cached = new VectorLineLabelSource(map, cand.ln, group, {
                         tracking: this.lineLabelTracking,
                         priorityMode: this.lineLabelPriorityMode,
                         hysteresisPx: this.lineLabelHysteresisPx,
                         placement: this.lineLabelPlacement,
+                        textStroke: halo.textStroke,
+                        textFilter: halo.textFilter,
                     });
                     group.userData.lineLabelSources[cand.lnIndex] = cached;
                 }
@@ -255,8 +268,9 @@ export const VectorTileLabelsMixin = {
                 const pt = cand.pt;
                 const rawPos = pt.labelPosition;
                 const labelPosition = (rawPos === 'left' || rawPos === 'right' || rawPos === 'top' || rawPos === 'bottom')
-                    ? rawPos
-                    : this.labelPosition;
+                    ? rawPos : this.labelPosition;
+                const layerName = pt.sourceLayer || pt.layerName || '';
+                const halo = _getLayerHalo(this._styles, layerName);
                 source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
                     textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
                     fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
@@ -272,7 +286,9 @@ export const VectorTileLabelsMixin = {
                     iconCircleScale: pt.iconCircleScale,
                     iconGlyphRatio: pt.iconGlyphRatio,
                     sprite: this.sprite,
-                    labelPosition
+                    labelPosition,
+                    textStroke: halo.textStroke,
+                    textFilter: halo.textFilter,
                 });
             }
             const label = textManager.addLabel(source, id, this);

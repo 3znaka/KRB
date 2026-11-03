@@ -6,6 +6,54 @@ const HARDCODED = {
     'EPSG:3857': '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs +type=crs',
     'EPSG:3395': '+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs',
 };
+const ELLIPSOID_A = {
+    'APL4.9': 6378137.0,
+    'CPM': 6375738.7,
+    'GRS67': 6378160.0,
+    'GRS80': 6378137.0,
+    'GSK2011': 6378136.5,
+    'IAU76': 6378140.0,
+    'MERIT': 6378137.0,
+    'NWL9D': 6378145.0,
+    'PZ90': 6378136.0,
+    'SEasia': 6378155.0,
+    'SGS85': 6378136.0,
+    'WGS60': 6378165.0,
+    'WGS66': 6378145.0,
+    'WGS72': 6378135.0,
+    'WGS84': 6378137.0,
+    'airy': 6377563.396,
+    'andrae': 6377104.43,
+    'aust_SA': 6378160.0,
+    'bess_nam': 6377483.865,
+    'bessel': 6377397.155,
+    'clrk66': 6378206.4,
+    'clrk80': 6378249.145,
+    'clrk80ign': 6378249.2,
+    'danish': 6377019.2563,
+    'delmbr': 6376428.0,
+    'engelis': 6378136.05,
+    'evrst30': 6377276.345,
+    'evrst48': 6377304.063,
+    'evrst56': 6377301.243,
+    'evrst69': 6377295.664,
+    'evrstSS': 6377298.556,
+    'fschr60': 6378166.0,
+    'fschr60m': 6378155.0,
+    'fschr68': 6378150.0,
+    'helmert': 6378200.0,
+    'hough': 6378270.0,
+    'intl': 6378388.0,
+    'kaula': 6378163.0,
+    'krass': 6378245.0,
+    'lerch': 6378139.0,
+    'mod_airy': 6377340.189,
+    'mprts': 6397300.0,
+    'new_intl': 6378157.5,
+    'plessis': 6376523.0,
+    'sphere': 6370997.0,
+    'walbeck': 6376896.0,
+};
 /**
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
@@ -58,6 +106,48 @@ export class Projection {
          * @type {number}
          */
         this.maxAbsCoord = 2.5e7;
+        this._semiMajor = this._parseSemiMajor(def);
+        this._halfExtentX = undefined;
+        this._halfExtentY = undefined;
+    }
+    _parseSemiMajor(def) {
+        const a = def.match(/\+a=([\d.eE+-]+)/);
+        if (a)
+            return parseFloat(a[1]);
+        const ellps = def.match(/\+ellps=(\w+)/);
+        if (ellps && ELLIPSOID_A[ellps[1].toUpperCase()]) {
+            return ELLIPSOID_A[ellps[1].toUpperCase()];
+        }
+        const datum = def.match(/\+datum=(\w+)/);
+        if (datum && ELLIPSOID_A[datum[1].toUpperCase()]) {
+            return ELLIPSOID_A[datum[1].toUpperCase()];
+        }
+        return 6378137;
+    }
+    /** Полуось a из PROJ-строки. */
+    get semiMajor() { return this._semiMajor; }
+    /** Полу-ширина домена в координатах проекции (map or tile). */
+    get halfExtentX() {
+        if (this._halfExtentX !== undefined)
+            return this._halfExtentX;
+        if (this.isMercator)
+            return (this._halfExtentX = Math.PI * this._semiMajor);
+        if (this.isGeographic)
+            return (this._halfExtentX = 180);
+        const p = this.fromLonLatSafe([180, 0]);
+        return (this._halfExtentX = p ? Math.abs(p[0]) : Math.PI * this._semiMajor);
+    }
+    /** Полу-высота домена в координатах проекции. */
+    get halfExtentY() {
+        if (this._halfExtentY !== undefined)
+            return this._halfExtentY;
+        if (this.isMercator)
+            return (this._halfExtentY = Math.PI * this._semiMajor);
+        if (this.isGeographic)
+            return (this._halfExtentY = 90);
+        const lat = this.maxLatDeg ?? 85.05112878;
+        const p = this.fromLonLatSafe([0, lat]) || this.fromLonLatSafe([0, 90]);
+        return (this._halfExtentY = p ? Math.abs(p[1]) : Math.PI * this._semiMajor);
     }
     /** @private */
     _parseLon0(def) {

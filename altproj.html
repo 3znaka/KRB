@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <link href="/KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+import * as KRB from '/js/KRB.js';
+
+const map = new KRB.Map({
+    target: 'map',
+    crs: 'EPSG:3395',
+    layers: [
+        new KRB.Tile({
+            texture: 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=3.2008.0&x={x}&y={y}&z={z}&scale=1&lang=ru_RU',
+            attributionTitle: 'YandexMaps',
+			crs: 'EPSG:3395',
+            attributionUrl: 'https://ya.ru/'
+        })
+    ],
+    view: new KRB.View({
+        centerLonLat: [37.6178, 55.7558],
+        zoom: 8,
+        maxZoom: 18
+    })
+});
+
+await KRB.Projections.ensure('EPSG:32637');
+
+const marker = new KRB.Marker({
+    position: [413500, 6178000],
+    crs: 'EPSG:32637',
+    title: 'UTM-точка'
+});
+marker.addTo(map);
+</script>
+</body>
+</html>

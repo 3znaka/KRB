@@ -87,36 +87,31 @@ export const CoreElevationMixin: CoreElevationMethods & ThisType<KrbMap> = {
         return { width, height, size: Math.max(width, height) };
     },
 
-    _calibrateBaseDistance() {
-        if (this.projection.isMercator) return;
-        const refLayer = this._rasterLayers[0] ?? null;
-        if (!refLayer) return;
-        const z = this.currentDiscreteZoom;
-        const target = this.controls.target;
-        const crs = refLayer.crs ?? 'EPSG:3857';
-        const m = this._measureTileScreenSize(z, target.x, target.z, crs);
-        if (!m || !Number.isFinite(m.size) || m.size <= 0.01) {
-            console.warn(`KrbMap: не удалось измерить экранный размер тайла для ${this.projection.code}, BASE_DISTANCE оставлен по умолчанию. Укажите options.baseDistance вручную, если масштаб выглядит неверно.`);
-            return;
-        }
-        const factor = m.size / this.TILE_PIXELS;
-        if (!Number.isFinite(factor) || factor <= 0) return;
-        const oldBD = this.BASE_DISTANCE;
-        const oldExtent = this.WORLD_EXTENT;
-        const newBD = oldBD * factor;
-        const newExtent = this.WORLD_SIZE * factor;
-        if (!Number.isFinite(newBD) || newBD <= 0 || !Number.isFinite(newExtent) || newExtent <= 0) return;
-        this.BASE_DISTANCE = newBD;
-        this.WORLD_EXTENT = newExtent;
-        console.info(`KrbMap: BASE_DISTANCE калиброван для ${this.projection.code}: ${oldBD.toFixed(0)} → ${newBD.toFixed(0)} (factor=${factor.toFixed(3)}), WORLD_EXTENT ${oldExtent.toFixed(0)} → ${newExtent.toFixed(0)}`);
-        const newDist = this.getTargetDistanceForZoom(this.continuousZoom);
-        const dir = new THREE.Vector3().subVectors(this.camera.position, target);
-        if (dir.lengthSq() < 1e-6) return;
-        dir.normalize().multiplyScalar(newDist);
-        this.camera.position.copy(target).add(dir);
-        this.camera.lookAt(target);
-        this.controls.update();
-    },
+_calibrateBaseDistance() {
+    if (this.projection.isMercator) return;
+    const refLayer = this._rasterLayers[0] ?? null;
+    if (!refLayer) return;
+
+    const z = this.currentDiscreteZoom;
+    const target = this.controls.target;
+    const crs = refLayer.crs ?? 'EPSG:3857';
+    const m = this._measureTileScreenSize(z, target.x, target.z, crs);
+    if (!m || !Number.isFinite(m.size) || m.size <= 0.01) {
+        console.warn(
+            `KrbMap: не удалось измерить экранный размер тайла для ${this.projection.code}. ` +
+            `Если масштаб тайлов выглядит неверно, задайте options.baseDistance вручную.`
+        );
+        return;
+    }
+
+    const factor = m.size / this.TILE_PIXELS;
+    if (!Number.isFinite(factor) || factor <= 0) return;
+
+    console.info(
+        `KrbMap: калибровка камеры для ${this.projection.code}: tile screen size = ` +
+        `${m.size.toFixed(1)}px vs TILE_PIXELS = ${this.TILE_PIXELS} (factor=${factor.toFixed(3)}).`
+    );
+},
 
     _setSurfaceMaxHeight(key, value) {
         this._surfaceMaxHeightCache.delete(key);

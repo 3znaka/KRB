@@ -96,38 +96,43 @@ export const CoreLayersMixin: CoreLayersMethods & ThisType<KrbMap> = {
 
     get tileManager() { return this._tileManagers?.[0] ?? null; },
 
-    createStaticBackgroundLayer() {
-        if (this._rasterLayers.length === 0) return;
-        const bgLayer = this._rasterLayers[0];
-        if (!this._isLayerLinear(bgLayer)) return;
-        while (this.staticBgGroup.children.length > 0) {
-            const child = this.staticBgGroup.children[0];
-            this.staticBgGroup.remove(child);
-            if (child.geometry) child.geometry.dispose();
-            if (child.material) {
-                if (child.material.map) child.material.map.dispose();
-                child.material.dispose();
-            }
+createStaticBackgroundLayer() {
+    if (this._rasterLayers.length === 0) return;
+    const bgLayer = this._rasterLayers[0];
+    if (!this._isLayerLinear(bgLayer)) return;
+    while (this.staticBgGroup.children.length > 0) {
+        const child = this.staticBgGroup.children[0];
+        this.staticBgGroup.remove(child);
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+            if (child.material.map) child.material.map.dispose();
+            child.material.dispose();
         }
-        const mgr = this._tileManagers[0];
-        if (!mgr) return;
-        const z = this.staticBgZoom;
-        const tileSize = this.WORLD_SIZE / Math.pow(2, z);
-        const maxTile = (1 << z) - 1;
-        for (let y = 0; y <= maxTile; y++) {
-            const originZ = getOriginZ(y, tileSize, this.MAX_MERCATOR);
-            for (let x = 0; x <= maxTile; x++) {
-                const originX = x * tileSize - this.MAX_MERCATOR;
-                const texUrl = this.getTextureUrl(bgLayer, z, x, y);
-                const mesh = mgr.createStaticTileMesh(tileSize, originX, originZ, null);
-                this.staticBgGroup.add(mesh);
-                mgr.loadTextureAsync(texUrl).then((tex: any) => {
-                    if (this._disposed || !mgr || !this.staticBgGroup) return;
-                    if (tex && mesh.parent === this.staticBgGroup) mgr.setMeshTexture(mesh, tex);
-                }).catch(() => {});
-            }
+    }
+    const mgr = this._tileManagers[0];
+    if (!mgr) return;
+
+    // После extent-рефакторинга всё считаем от map-экстента проекции.
+    const halfX = this.mapHalfExtentX;
+    const halfY = this.mapHalfExtentY;
+
+    const z = this.staticBgZoom;
+    const tileSize = (2 * halfX) / Math.pow(2, z);
+    const maxTile = (1 << z) - 1;
+    for (let y = 0; y <= maxTile; y++) {
+        const originZ = getOriginZ(y, tileSize, halfY);
+        for (let x = 0; x <= maxTile; x++) {
+            const originX = x * tileSize - halfX;
+            const texUrl = this.getTextureUrl(bgLayer, z, x, y);
+            const mesh = mgr.createStaticTileMesh(tileSize, originX, originZ, null);
+            this.staticBgGroup.add(mesh);
+            mgr.loadTextureAsync(texUrl).then((tex: any) => {
+                if (this._disposed || !mgr || !this.staticBgGroup) return;
+                if (tex && mesh.parent === this.staticBgGroup) mgr.setMeshTexture(mesh, tex);
+            }).catch(() => {});
         }
-    },
+    }
+},
 
     maybeUpdateVisibleTiles(force = false) {
         if (this._disposed) return;

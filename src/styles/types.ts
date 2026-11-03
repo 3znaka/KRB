@@ -22,7 +22,6 @@ export interface TileSpec {
 
 export interface Theme {
   name: string;
-  /** Цвет фона сцены. Строка (CSS) или hex. По умолчанию — белый. */
   backgroundColor?: string;
   poiCategories: Record<string, string>;
   poiIconOverrides?: Record<string, string>;

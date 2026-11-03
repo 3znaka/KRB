@@ -246,6 +246,20 @@ export class KrbMap {
 private _backgroundColor: any = null;
 private _backgroundExplicit = false;
 
+private _refreshExtents(): void {
+    this.WORLD_SIZE    = 2 * this.projection.halfExtentX;
+    this.MAX_MERCATOR  = this.projection.halfExtentX;
+    this.WORLD_EXTENT  = this.WORLD_SIZE;
+}
+
+/* Extent MAP-проекции (мир, в котором живут worldGroup-меши) */
+get mapHalfExtentX() { return this.projection.halfExtentX; }
+get mapHalfExtentY() { return this.projection.halfExtentY; }
+
+/* Extent TILE-CRS (домен сетки z/x/y, определяется layer.crs) */
+get tileHalfExtentX() { return this.tileCRS.halfExtentX; }
+get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
+
     constructor(options: KrbMapOptions) {
         if (!options) throw new Error('Map constructor: options object is required');
 
@@ -317,10 +331,18 @@ private _backgroundExplicit = false;
             ? this._rasterLayers.some((l: any) => !this._isLayerLinear(l))
             : !(this.tileCRS === this.projection && this.projection.isMercator);
 
-        this.R = options.R ?? DEFAULTS.R;
-        this.WORLD_SIZE = 2 * Math.PI * this.R;
-        this.MAX_MERCATOR = this.WORLD_SIZE / 2;
-        this.WORLD_EXTENT = this.WORLD_SIZE;
+
+this.R = options.R ?? this.projection.semiMajor;
+if (options.R !== undefined && Math.abs(options.R - this.projection.semiMajor) > 1) {
+    console.warn(
+        `KrbMap: options.R=${options.R} не совпадает с semi-major проекции ` +
+        `${this.projection.code} (${this.projection.semiMajor}). ` +
+        `Extent тайлов берётся из проекции; options.R влияет только на ` +
+        `калибровку камеры. Уберите options.R и задайте нужный CRS.`
+    );
+}
+
+this._refreshExtents();
 
         this.TILE_PIXELS = 256;
         this.SEGMENTS = options.segments ?? DEFAULTS.SEGMENTS;

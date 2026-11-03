@@ -207,6 +207,31 @@ export class TileManager {
     }
 
     /* ================================================================
+       Extent-хелперы (единая точка правды)
+
+       Вся координатная математика тайлов идёт через эти геттеры, чтобы
+       нигде в коде не было «голых» `MAX_MERCATOR` / `WORLD_SIZE`.
+       В норме источник — `engine.mapHalfExtentX/Y` (вычисляются из
+       `projection.halfExtentX/Y`, а те — из PROJ-строки).
+       ================================================================ */
+
+    /** Полу-ширина мира (map-CRS) в world-единицах. */
+    get _mapHalfX() {
+        const v = this.engine.mapHalfExtentX;
+        if (v !== undefined) return v;
+        console.warn('TileManager: engine.mapHalfExtentX отсутствует — используйте правки в Core.ts. Fallback: MAX_MERCATOR.');
+        return this.engine.MAX_MERCATOR;
+    }
+
+    /** Полу-высота мира (map-CRS) в world-единицах. */
+    get _mapHalfY() {
+        const v = this.engine.mapHalfExtentY;
+        if (v !== undefined) return v;
+        console.warn('TileManager: engine.mapHalfExtentY отсутствует — используйте правки в Core.ts. Fallback: MAX_MERCATOR.');
+        return this.engine.MAX_MERCATOR;
+    }
+
+    /* ================================================================
        Рельеф: источник, зум-границы, смена провайдера
        ================================================================ */
 
@@ -257,19 +282,19 @@ export class TileManager {
         return this.layer?.minNativeZoom ?? 0;
     }
 
-get _maxElevationNativeZoom() {
-    const p = this._elevationProvider;
-    if (p && p.elevationMaxZoom != null) return p.elevationMaxZoom;   // ← было p.maxZoom
-    if (this.layer?.elevation) return this.layer.maxElevationNativeZoom;
-    return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
-}
+    get _maxElevationNativeZoom() {
+        const p = this._elevationProvider;
+        if (p && p.elevationMaxZoom != null) return p.elevationMaxZoom;
+        if (this.layer?.elevation) return this.layer.maxElevationNativeZoom;
+        return this.engine.MAX_RELIEF_Z ?? DEFAULTS.MAX_RELIEF_Z;
+    }
 
-get _minElevationNativeZoom() {
-    const p = this._elevationProvider;
-    if (p && p.elevationMinZoom != null) return p.elevationMinZoom;   // ← было p.minZoom
-    if (this.layer?.elevation) return this.layer.minElevationNativeZoom;
-    return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
-}
+    get _minElevationNativeZoom() {
+        const p = this._elevationProvider;
+        if (p && p.elevationMinZoom != null) return p.elevationMinZoom;
+        if (this.layer?.elevation) return this.layer.minElevationNativeZoom;
+        return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
+    }
 
     get _baseRenderOrder() {
         return this.layer?.baseRenderOrder ?? 0;
@@ -403,9 +428,11 @@ get _minElevationNativeZoom() {
 
         const layerCrs = this.layer?.crs;
         const isDeformed = this._isDeformed;
-        const cullUnit = isDeformed
-            ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
-            : this.engine.WORLD_SIZE;
+
+        // В обеих ветках камера и `worldGroupPos` живут в map-координатах,
+        // поэтому cullUnit — это ширина MAP-мира. Для Mercator-семейства
+        // `_mapHalfX === _mapHalfY`, и квадратной сетки достаточно.
+        const cullUnit = 2 * this._mapHalfX;
 
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
@@ -483,9 +510,12 @@ get _minElevationNativeZoom() {
                 yMin = Math.max(0, Math.floor(minTy) - 1);
                 yMax = Math.min(maxTile, Math.ceil(maxTy) + 1);
             } else {
-                const halfExtent = (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE) / 2;
-                if (maxX > -halfExtent && minX < halfExtent &&
-                    maxZ > -halfExtent && minZ < halfExtent) {
+                // Ни одна сэмплированная точка не дала валидный tile-index.
+                // Если фрустум вообще пересекает мир — отрисовываем весь зум-уровень.
+                const halfX = this._mapHalfX;
+                const halfY = this._mapHalfY;
+                if (maxX > -halfX && minX < halfX &&
+                    maxZ > -halfY && minZ < halfY) {
                     xMin = 0; xMax = maxTile;
                     yMin = 0; yMax = maxTile;
                 } else {
@@ -493,11 +523,15 @@ get _minElevationNativeZoom() {
                 }
             }
         } else {
+            // Линейный режим (map-CRS === tile-CRS, обе Mercator).
+            // Камера/controlsTarget — в map-world, tileSize — в тех же единицах.
             const off = worldGroupPos;
-            xMin = Math.floor((minX - off.x + this.engine.MAX_MERCATOR) / tileSize);
-            xMax = Math.floor((maxX - off.x + this.engine.MAX_MERCATOR) / tileSize);
-            yMin = Math.max(0, Math.floor((minZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
-            yMax = Math.min(maxTile, Math.floor((maxZ - off.z + this.engine.MAX_MERCATOR) / tileSize));
+            const halfX = this._mapHalfX;
+            const halfY = this._mapHalfY;
+            xMin = Math.floor((minX - off.x + halfX) / tileSize);
+            xMax = Math.floor((maxX - off.x + halfX) / tileSize);
+            yMin = Math.max(0, Math.floor((minZ - off.z + halfY) / tileSize));
+            yMax = Math.min(maxTile, Math.floor((maxZ - off.z + halfY) / tileSize));
         }
 
         const visibleKeys = new Set();
@@ -678,10 +712,10 @@ get _minElevationNativeZoom() {
         }
 
         const { z, virtX, y } = inst;
-        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, z);
+        const tileSize = (2 * this._mapHalfX) / Math.pow(2, z);
         const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
-        const originX = virtX * tileSize - this.engine.MAX_MERCATOR;
-        const originZ = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR);
+        const originX = virtX * tileSize - this._mapHalfX;
+        const originZ = getOriginZ(y, tileSize, this._mapHalfY);
 
         let geometry;
         if (!this.hasElevation && this.flatTileGeometry) {
@@ -707,7 +741,11 @@ get _minElevationNativeZoom() {
         const n = 1 << z;
         const mapProj = this.engine.projection;
         const tileCrs = this._layerCrs;
-        const MAX = this.engine.MAX_MERCATOR;
+
+        // ВАЖНО: extent тайловой сетки принадлежит tile-CRS, а не map-проекции.
+        // Обе оси берём из tile-CRS, чтобы поддержать неквадратные CRS.
+        const tileHalfX = tileCrs.halfExtentX;
+        const tileHalfY = tileCrs.halfExtentY;
 
         const seg = this.hasElevation ? this.engine.SEGMENTS : DEFORM_SEGMENTS_FLAT;
         const grid = seg + 1;
@@ -724,11 +762,11 @@ get _minElevationNativeZoom() {
         for (let j = 0; j < grid; j++) {
             const v = j / seg;
             const tileY = y + v;
-            const tileWorldY = MAX - (tileY / n) * 2 * MAX;
+            const tileWorldY = tileHalfY - (tileY / n) * 2 * tileHalfY;
             for (let i = 0; i < grid; i++) {
                 const u = i / seg;
                 const tileX = virtX + u;
-                const tileWorldX = (tileX / n) * 2 * MAX - MAX;
+                const tileWorldX = (tileX / n) * 2 * tileHalfX - tileHalfX;
 
                 const lonLat = tileCrs.toLonLat([tileWorldX, tileWorldY]);
                 const k = (j * grid + i) * 3;
@@ -892,9 +930,9 @@ get _minElevationNativeZoom() {
                 if (!heights) {
                     const elevUrl = this.srcKeyToElevUrl.get(srcKey);
                     if (elevUrl) {
-                        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
-                        const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
-                        const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
+                        const tileSize = (2 * this._mapHalfX) / Math.pow(2, inst.z);
+                        const originX = inst.virtX * tileSize - this._mapHalfX;
+                        const originZ = getOriginZ(inst.y, tileSize, this._mapHalfY);
                         heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
                     }
                 }
@@ -986,9 +1024,9 @@ get _minElevationNativeZoom() {
         const parentData = await this.getParentElevData(fz, pSrcX, pY);
         if (!parentData) throw new Error('No parent data');
 
-        const tileSize = this.engine.WORLD_SIZE / Math.pow(2, inst.z);
-        const originX = inst.virtX * tileSize - this.engine.MAX_MERCATOR;
-        const originZ = getOriginZ(inst.y, tileSize, this.engine.MAX_MERCATOR);
+        const tileSize = (2 * this._mapHalfX) / Math.pow(2, inst.z);
+        const originX = inst.virtX * tileSize - this._mapHalfX;
+        const originZ = getOriginZ(inst.y, tileSize, this._mapHalfY);
         const dx = srcX % scale, dy = inst.y % scale;
 
         const imageDataCopy = new ImageData(
@@ -1111,9 +1149,9 @@ get _minElevationNativeZoom() {
 
         const isDeformed = this._isDeformed;
         const layerCrs = this.layer?.crs;
-        const cullUnit = isDeformed
-            ? (this.engine.WORLD_EXTENT ?? this.engine.WORLD_SIZE)
-            : this.engine.WORLD_SIZE;
+
+        // В обеих ветках работаем в map-координатах, поэтому cullUnit — map-world.
+        const cullUnit = 2 * this._mapHalfX;
         const tileSize = cullUnit / Math.pow(2, z);
         const margin = 2;
         const radius = tileSize * margin;
@@ -1144,8 +1182,9 @@ get _minElevationNativeZoom() {
             yMin = Math.max(0, Math.floor(minTy));
             yMax = Math.min(maxTile, Math.ceil(maxTy));
         } else {
-            xMin = Math.floor((center.x - radius - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
-            xMax = Math.floor((center.x + radius - worldGroupPos.x + this.engine.MAX_MERCATOR) / tileSize);
+            const halfX = this._mapHalfX;
+            xMin = Math.floor((center.x - radius - worldGroupPos.x + halfX) / tileSize);
+            xMax = Math.floor((center.x + radius - worldGroupPos.x + halfX) / tileSize);
             xMin = Math.max(0, xMin);
             xMax = Math.min(maxTile, xMax);
             yMin = 0;
@@ -1156,7 +1195,8 @@ get _minElevationNativeZoom() {
 
         for (let y = yMin; y <= yMax; y++) {
             if (!isDeformed) {
-                const oz = getOriginZ(y, tileSize, this.engine.MAX_MERCATOR) + worldGroupPos.z;
+                // FIX: было MAX_MERCATOR → теперь _mapHalfY.
+                const oz = getOriginZ(y, tileSize, this._mapHalfY) + worldGroupPos.z;
                 if (oz + tileSize < center.z - radius || oz > center.z + radius) continue;
             }
             for (let x = xMin; x <= xMax; x++) {

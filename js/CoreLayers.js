@@ -100,13 +100,16 @@ export const CoreLayersMixin = {
         const mgr = this._tileManagers[0];
         if (!mgr)
             return;
+        // После extent-рефакторинга всё считаем от map-экстента проекции.
+        const halfX = this.mapHalfExtentX;
+        const halfY = this.mapHalfExtentY;
         const z = this.staticBgZoom;
-        const tileSize = this.WORLD_SIZE / Math.pow(2, z);
+        const tileSize = (2 * halfX) / Math.pow(2, z);
         const maxTile = (1 << z) - 1;
         for (let y = 0; y <= maxTile; y++) {
-            const originZ = getOriginZ(y, tileSize, this.MAX_MERCATOR);
+            const originZ = getOriginZ(y, tileSize, halfY);
             for (let x = 0; x <= maxTile; x++) {
-                const originX = x * tileSize - this.MAX_MERCATOR;
+                const originX = x * tileSize - halfX;
                 const texUrl = this.getTextureUrl(bgLayer, z, x, y);
                 const mesh = mgr.createStaticTileMesh(tileSize, originX, originZ, null);
                 this.staticBgGroup.add(mesh);

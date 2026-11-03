@@ -87,54 +87,77 @@ export const CoreCoordinatesMixin: CoreCoordinatesMethods & ThisType<KrbMap> = {
         return this.projection.toLonLat([x, -z]);
     },
 
-    worldToTileIndex(worldX, worldZ, z, crs = null) {
-        const useCrs = crs
-            ? (typeof crs === 'string' ? Projections.get(crs) : crs)
-            : this._layerCrsOrProjection();
-        const isLinear = useCrs === this.projection && this.projection.isMercator;
-        const lx = worldX - this.worldGroup.position.x;
-        const lz = worldZ - this.worldGroup.position.z;
-        const n = 1 << z;
-        if (isLinear) {
-            const tileSize = this.WORLD_SIZE / n;
-            return [(lx + this.MAX_MERCATOR) / tileSize, (lz + this.MAX_MERCATOR) / tileSize];
-        }
-        const lonLat = this.unprojectToLonLat(lx, lz);
-        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return [NaN, NaN];
-        if (Math.abs(lonLat[0]) > 180.0001 || Math.abs(lonLat[1]) > 90.0001) return [NaN, NaN];
-        const tileWorld = typeof useCrs.fromLonLatSafe === 'function'
-            ? useCrs.fromLonLatSafe(lonLat)
-            : useCrs.fromLonLat(lonLat);
-        if (!tileWorld || !Number.isFinite(tileWorld[0]) || !Number.isFinite(tileWorld[1])) return [NaN, NaN];
-        return [
-            (tileWorld[0] + this.MAX_MERCATOR) / (2 * this.MAX_MERCATOR) * n,
-            (this.MAX_MERCATOR - tileWorld[1]) / (2 * this.MAX_MERCATOR) * n,
-        ];
-    },
+worldToTileIndex(worldX, worldZ, z, crs = null) {
+    const useCrs = crs
+        ? (typeof crs === 'string' ? Projections.get(crs) : crs)
+        : this._layerCrsOrProjection();
 
-    tileIndexToWorld(tx, ty, z, crs = null) {
-        const useCrs = crs
-            ? (typeof crs === 'string' ? Projections.get(crs) : crs)
-            : this._layerCrsOrProjection();
-        const isLinear = useCrs === this.projection && this.projection.isMercator;
-        const n = 1 << z;
-        if (isLinear) {
-            const tileSize = this.WORLD_SIZE / n;
-            return [
-                tx * tileSize - this.MAX_MERCATOR + this.worldGroup.position.x,
-                ty * tileSize - this.MAX_MERCATOR + this.worldGroup.position.z,
-            ];
-        }
-        const tileWorldX = (tx / n) * 2 * this.MAX_MERCATOR - this.MAX_MERCATOR;
-        const tileWorldY = this.MAX_MERCATOR - (ty / n) * 2 * this.MAX_MERCATOR;
-        const lonLat = useCrs.toLonLat([tileWorldX, tileWorldY]);
-        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return [NaN, NaN];
-        const proj = typeof this.projection.fromLonLatSafe === 'function'
-            ? this.projection.fromLonLatSafe(lonLat)
-            : this.projection.fromLonLat(lonLat);
-        if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) return [NaN, NaN];
-        return [proj[0] + this.worldGroup.position.x, -proj[1] + this.worldGroup.position.z];
-    },
+    const isLinear = useCrs === this.projection && this.projection.isMercator;
+    const lx = worldX - this.worldGroup.position.x;
+    const lz = worldZ - this.worldGroup.position.z;
+    const n = 1 << z;
+
+    if (isLinear) {
+        // map-local coords → tile indices. map === tileCRS, поэтому
+        // используем map-экстенты (они совпадают с tile-экстентами).
+        const halfX = this.mapHalfExtentX;
+        const halfY = this.mapHalfExtentY;
+        const tileSizeX = (2 * halfX) / n;
+        const tileSizeY = (2 * halfY) / n;
+        return [(lx + halfX) / tileSizeX, (lz + halfY) / tileSizeY];
+    }
+
+    const lonLat = this.unprojectToLonLat(lx, lz);
+    if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return [NaN, NaN];
+    if (Math.abs(lonLat[0]) > 180.0001 || Math.abs(lonLat[1]) > 90.0001) return [NaN, NaN];
+
+    const tileWorld = typeof useCrs.fromLonLatSafe === 'function'
+        ? useCrs.fromLonLatSafe(lonLat)
+        : useCrs.fromLonLat(lonLat);
+    if (!tileWorld || !Number.isFinite(tileWorld[0]) || !Number.isFinite(tileWorld[1])) return [NaN, NaN];
+
+    const halfX = useCrs.halfExtentX;
+    const halfY = useCrs.halfExtentY;
+    return [
+        ((tileWorld[0] + halfX) / (2 * halfX)) * n,
+        ((halfY - tileWorld[1]) / (2 * halfY)) * n,
+    ];
+},
+
+tileIndexToWorld(tx, ty, z, crs = null) {
+    const useCrs = crs
+        ? (typeof crs === 'string' ? Projections.get(crs) : crs)
+        : this._layerCrsOrProjection();
+
+    const isLinear = useCrs === this.projection && this.projection.isMercator;
+    const n = 1 << z;
+
+    if (isLinear) {
+        const halfX = this.mapHalfExtentX;
+        const halfY = this.mapHalfExtentY;
+        const tileSizeX = (2 * halfX) / n;
+        const tileSizeY = (2 * halfY) / n;
+        return [
+            tx * tileSizeX - halfX + this.worldGroup.position.x,
+            ty * tileSizeY - halfY + this.worldGroup.position.z,
+        ];
+    }
+
+    const halfX = useCrs.halfExtentX;
+    const halfY = useCrs.halfExtentY;
+    const tileWorldX = (tx / n) * 2 * halfX - halfX;
+    const tileWorldY = halfY - (ty / n) * 2 * halfY;
+
+    const lonLat = useCrs.toLonLat([tileWorldX, tileWorldY]);
+    if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return [NaN, NaN];
+
+    const proj = typeof this.projection.fromLonLatSafe === 'function'
+        ? this.projection.fromLonLatSafe(lonLat)
+        : this.projection.fromLonLat(lonLat);
+    if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) return [NaN, NaN];
+
+    return [proj[0] + this.worldGroup.position.x, -proj[1] + this.worldGroup.position.z];
+},
 
     _layerCrsOrProjection() {
         const layer = this._tileLayer;

@@ -165,7 +165,7 @@ _lastMoveTime: number;
 _lastMoveEndTime: number;
 _idleFired: boolean;
 _firstRenderDone: boolean;
-
+_padding: { top: number; right: number; bottom: number; left: number } | null = null;
 
 
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---

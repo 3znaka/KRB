@@ -536,6 +536,8 @@ export const CoreInputMixin = {
         this.renderer.setSize(w, h);
         this.maybeUpdateVisibleTiles();
         this._emitResize(w, h);
+        if (this._padding)
+            this._applyPadding(this._padding);
     },
     onClick(e) {
         if (!e.shiftKey)

@@ -1,266 +1,134 @@
-// @ts-nocheck
 /**
- * Модуль для отображения плоских изображений на карте.
- * Поддерживает позиционирование по четырём угловым точкам (узлам)
- * с билинейной деформацией, а также альтернативное позиционирование
- * через якорь (anchor), размер и углы поворота.
- * Источником может быть URL, HTMLImageElement или HTMLCanvasElement.
- * Поддерживаются прозрачность и режимы смешивания.
- *
- * ### Z-fighting с тайлами
- *
- * Primary-тайлы карты пишут depth и на нулевом уровне высот оказываются
- * строго coplanar с плоскостью изображения (`alt = 0`) — классический
- * z-fighting. Решение — `polygonOffset` в материале: значение глубины
- * сдвигается «к камере», не трогая геометрию. См. опции `alwaysOnTop`
- * (полное отключение depthTest) и `elevationOffset` (подъём над y=0).
+ * Image — плоское изображение на карте. После `addTo()` мутабелен:
+ * позиция/узлы, размер, поворот, anchor, прозрачность, blending,
+ * цвет фона (через blending), видимость, подпись и тултип меняются
+ * без пересоздания объекта.
  *
  * @module Image
  */
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
-/**
- * Рендерит изображения поверх тайлов с высоким приоритетом.
- * @private
- */
 const IMAGE_RENDER_ORDER = 997;
-/**
- * Величина `polygonOffsetFactor`/`polygonOffsetUnits` по умолчанию.
- *
- * Подобрана так, чтобы уверенно перекрывать coplanar-тайлы на любых
- * разумных дистанциях камеры и при этом не «просвечивать» сквозь
- * рельеф, стоящий перед камерой. Увеличивайте, если z-fighting всё
- * ещё пробивается на дальних зумах; уменьшайте, если изображение
- * «светится» сквозь холмы.
- * @private
- */
 const DEFAULT_POLYGON_OFFSET = -4;
-/**
- * Класс, представляющий плоское изображение на карте.
- *
- * Координаты узлов (`nodes`) и альтернативной позиции (`position`)
- * задаются в системе координат `options.crs`. Если `crs` не указан,
- * используется `map.inputCRS` (по умолчанию WGS84). Внутри карты
- * координаты автоматически преобразуются в метры проекции карты
- * (`map.projection`) через {@link KrbMap#project}.
- *
- * @example
- * // Создание изображения по четырём узлам (углам)
- * const img = new Image({
- *     source: 'https://example.com/image.png',
- *     nodes: [
- *         { lon: 30.0, lat: 50.0, alt: 100 },
- *         { lon: 30.1, lat: 50.0, alt: 100 },
- *         { lon: 30.1, lat: 50.1, alt: 120 },
- *         { lon: 30.0, lat: 50.1, alt: 120 }
- *     ],
- *     opacity: 0.8,
- *     blending: 'multiply',
- *     minZoom: 5,
- *     maxZoom: 18
- * });
- * img.addTo(map);
- *
- * // Альтернативное позиционирование через якорь и поворот
- * const img2 = new Image({
- *     source: canvasElement,
- *     position: [30.5, 50.5, 200],
- *     size: [500, 300], // ширина, высота в метрах
- *     anchor: [0.5, 0.5], // центр изображения в точке position
- *     rotation: [0, 0, Math.PI / 4], // поворот на 45° вокруг оси Z
- *     opacity: 0.9
- * });
- * img2.addTo(map);
- */
+// =====================================================================
+// Image
+// =====================================================================
 export class Image {
-    /**
-     * Инициализирует новое изображение.
-     *
-     * @param {Object} options - Настройки изображения.
-     * @param {string|HTMLImageElement|HTMLCanvasElement} options.source - Источник изображения: URL, готовый элемент или канвас.
-     * @param {Array.<Object>} [options.nodes] - Массив из 3 или 4 узлов (углов изображения). Каждый узел: { lon, lat, alt } — координаты в СК `options.crs` (по умолчанию WGS84). Порядок: [нижний левый, нижний правый, верхний левый, верхний правый] (соответствует вершинам PlaneGeometry). Если задано 3 узла, четвёртый игнорируется (будет треугольник). Если 4 узла не лежат в одной плоскости, четвёртый проецируется на плоскость первых трёх.
-     * @param {string} [options.crs] - Код системы координат для `nodes` и `position`
-     *     (например, 'EPSG:4326', 'EPSG:3857', 'EPSG:32637').
-     *     Если не указан — используется `map.inputCRS`.
-     *     Перед созданием изображения соответствующая проекция должна быть
-     *     зарегистрирована в `Projections` (см. `Projections.ensure`).
-     * @param {Array.<number>} [options.position] - Позиция [x, y, alt] в СК `options.crs` для альтернативного позиционирования (используется, если не заданы nodes). По умолчанию — [долгота, широта, высота] в WGS84.
-     * @param {Array.<number>} [options.size] - Размеры изображения [width, height] в метрах (для альтернативного позиционирования).
-     * @param {Array.<number>} [options.anchor=[0.5,0.5]] - Точка привязки внутри изображения в нормализованных координатах (0..1). Например, (0,0) – нижний левый угол, (1,1) – верхний правый.
-     * @param {Array.<number>} [options.rotation=[0,0,0]] - Углы поворота [x, y, z] в радианах (для альтернативного позиционирования).
-     * @param {number} [options.opacity=1] - Прозрачность изображения (0..1).
-     * @param {string|THREE.Blending} [options.blending='normal'] - Режим смешивания: 'normal', 'additive', 'multiply', 'subtract' или константа THREE.Blending.
-     * @param {number} [options.minZoom=-Infinity] - Минимальный зум видимости.
-     * @param {number} [options.maxZoom=Infinity] - Максимальный зум видимости.
-     *
-     * @param {boolean} [options.alwaysOnTop=false] - Отключить depthTest
-     *     у материала: изображение рисуется поверх всей сцены. Полезно
-     *     для чисто 2D-оверлеев (компас, легенда, баннеры), но ломает
-     *     окклюзию рельефом. По умолчанию `false` — используется
-     *     `polygonOffset`, который сохраняет корректную окклюзию.
-     * @param {number} [options.elevationOffset=0] - Дополнительный
-     *     подъём плоскости над `alt` из `nodes`/`position` (world-метры).
-     *     Складывается с `alt` каждой вершины. Полезно, чтобы приподнять
-     *     маркеры/накладки над нулевым уровнем высот и над рельефом.
-     * @param {number} [options.polygonOffset=-4] - Значение
-     *     `polygonOffsetFactor`/`polygonOffsetUnits` (с отрицательным
-     *     знаком — «к камере»). Увеличивайте, если z-fighting всё ещё
-     *     пробивается; уменьшайте, если изображение «просвечивает»
-     *     сквозь рельеф, стоящий перед камерой. Игнорируется при
-     *     `alwaysOnTop: true`.
-     *
-     * @param {string} [options.title=''] - Текст подписи (отображается через TextManager).
-     * @param {Object} [options.titleStyle] - CSS-стили подписи.
-     * @param {number} [options.titleMinZoom=-Infinity] - Мин. зум для подписи.
-     * @param {number} [options.titleMaxZoom=Infinity] - Макс. зум для подписи.
-     * @param {string} [options.titleAlign='center'] - Горизонтальное выравнивание подписи.
-     * @param {Array.<number>} [options.titleOffset=[0,0]] - Смещение подписи в пикселях.
-     * @param {boolean} [options.titleAllowOverflow=false] - Разрешить выход подписи за границы экрана.
-     * @param {number} [options.titlePriority=0] - Приоритет подписи.
-     * @param {string} [options.tooltip=''] - Текст всплывающей подсказки (HTML).
-     * @param {Function} [options.onClick] - Обработчик клика (получает событие и экземпляр изображения).
-     * @param {Function} [options.onHover] - Обработчик наведения (получает true/false).
-     * @throws {Error} Если не задан source или nodes/position.
-     */
-    constructor(options = {}) {
+    // ── Данные ──
+    _source;
+    _nodes;
+    _position;
+    _crsCode;
+    _crs;
+    // ── Оформление ──
+    _size;
+    _anchor;
+    _rotation;
+    _opacity;
+    _blending;
+    _minZoom;
+    _maxZoom;
+    _alwaysOnTop;
+    _elevationOffset;
+    _polygonOffset;
+    // ── Подпись ──
+    _title;
+    _titleStyle;
+    _titleMinZoom;
+    _titleMaxZoom;
+    _titleAlign;
+    _titleOffset;
+    _titleAllowOverflow;
+    _titlePriority;
+    // ── Интерактив ──
+    _onClick;
+    _onHover;
+    _isHovered = false;
+    _tooltipText;
+    // ── Внутреннее состояние ──
+    _map = null;
+    _layer = null;
+    _group;
+    _mesh = null;
+    _geometry = null;
+    _material = null;
+    _texture = null;
+    _textLabel = null;
+    _isVisible = false;
+    _userVisible = true;
+    _worldPositions = [];
+    _centroidWorld;
+    _lastWorldGroupPos;
+    _lastDiscreteZoom = -1;
+    _boundingSphereRadius = 0;
+    _tempVec3;
+    _dirtyGeometry = true;
+    // ── Статический реестр интерактивных ──
+    static _interactiveImages = new Set();
+    static _eventListenersAttached = false;
+    static _delegatedHandlers = null;
+    static _pointerDownX = 0;
+    static _pointerDownY = 0;
+    static _pointerDownActive = false;
+    static _clickMoveThreshold = 5;
+    constructor(options) {
         if (!options.source) {
             throw new Error('Image: options.source is required');
         }
-        /** @private */ this._source = options.source;
-        /** @private */ this._nodes = options.nodes || null;
-        /** @private */ this._position = options.position || null;
-        /**
-         * Код СК узлов и позиции; null — использовать `map.inputCRS`.
-         * @private
-         * @type {string|null}
-         */
+        this._source = options.source;
+        this._nodes = options.nodes ?? null;
+        this._position = options.position ?? null;
         this._crsCode = options.crs ?? null;
-        /**
-         * Зарезолвленный объект Projection. Устанавливается в `_attach`.
-         * @private
-         * @type {import('./Projections.js').Projection|null}
-         */
         this._crs = null;
-        /** @private */ this._size = options.size || [100, 100];
-        /** @private */ this._anchor = options.anchor || [0.5, 0.5];
-        /** @private */ this._rotation = options.rotation || [0, 0, 0];
-        /** @private */ this._opacity = options.opacity ?? 1;
-        /** @private */ this._blending = options.blending || 'normal';
-        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-        // --- Z-fighting / рендер над тайлами ---
-        /**
-         * Не проверять depth-буфер: изображение всегда поверх сцены.
-         * @private @type {boolean}
-         */
+        this._size = options.size ?? [100, 100];
+        this._anchor = options.anchor ?? [0.5, 0.5];
+        this._rotation = options.rotation ?? [0, 0, 0];
+        this._opacity = options.opacity ?? 1;
+        this._blending = options.blending ?? 'normal';
+        this._minZoom = options.minZoom ?? -Infinity;
+        this._maxZoom = options.maxZoom ?? Infinity;
         this._alwaysOnTop = options.alwaysOnTop === true;
-        /**
-         * Дополнительный подъём плоскости над `alt` (world-метры).
-         * Складывается с `alt` каждой вершины.
-         * @private @type {number}
-         */
         this._elevationOffset = Number.isFinite(options.elevationOffset)
             ? options.elevationOffset
             : 0;
-        /**
-         * Значение `polygonOffsetFactor`/`polygonOffsetUnits`.
-         * @private @type {number}
-         */
         this._polygonOffset = Number.isFinite(options.polygonOffset)
             ? options.polygonOffset
             : DEFAULT_POLYGON_OFFSET;
-        // Подпись
-        /** @private */ this._title = options.title || '';
-        /** @private */ this._titleStyle = options.titleStyle || {};
-        /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleOffset = options.titleOffset || [0, 0];
-        /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
-        /** @private */ this._titlePriority = options.titlePriority ?? 0;
-        // События
-        /** @private */ this._onClick = options.onClick || null;
-        /** @private */ this._onHover = options.onHover || null;
-        /** @private */ this._isHovered = false;
-        // Тултип
-        /** @private */ this._tooltipText = options.tooltip || '';
-        // Внутреннее состояние
-        /** @private */ this._map = null;
-        /** @private */ this._layer = null;
-        /** @private */ this._group = new THREE.Group();
-        /** @private */ this._mesh = null;
-        /** @private */ this._geometry = null;
-        /** @private */ this._material = null;
-        /** @private */ this._texture = null;
-        /** @private */ this._textLabel = null;
-        /** @private */ this._isVisible = false;
-        /** @private */ this._worldPositions = []; // мировые координаты узлов (без worldGroup)
-        /** @private */ this._centroidWorld = new THREE.Vector3(); // центр изображения в координатах worldGroup
-        /** @private */ this._lastWorldGroupPos = new THREE.Vector3();
-        /** @private */ this._lastDiscreteZoom = -1;
-        /** @private */ this._boundingSphereRadius = 0;
-        /** @private */ this._boundingSphereWorld = new THREE.Sphere();
-        /** @private */ this._tempVec3 = new THREE.Vector3();
-        /** @private */ this._dirtyGeometry = true; // флаг, что геометрию нужно перестроить
-        // Регистрация в реестре интерактивных объектов, если есть обработчики
+        this._title = options.title ?? '';
+        this._titleStyle = options.titleStyle ?? {};
+        this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        this._titleAlign = options.titleAlign ?? 'center';
+        this._titleOffset = options.titleOffset ?? [0, 0];
+        this._titleAllowOverflow = options.titleAllowOverflow ?? false;
+        this._titlePriority = options.titlePriority ?? 0;
+        this._onClick = options.onClick ?? null;
+        this._onHover = options.onHover ?? null;
+        this._tooltipText = options.tooltip ?? '';
+        this._group = new THREE.Group();
+        this._centroidWorld = new THREE.Vector3();
+        this._lastWorldGroupPos = new THREE.Vector3();
+        this._tempVec3 = new THREE.Vector3();
         if (this._onClick || this._onHover || this._tooltipText) {
             Image._registerInteractive(this);
         }
     }
-    /* ================================================================
-       Статический реестр интерактивных изображений и делегирование событий
-       ================================================================ */
-    /** @private */ static _interactiveImages = new Set();
-    /** @private */ static _eventListenersAttached = false;
-    /** @private */ static _delegatedHandlers = null;
-    /**
-     * Координаты последнего pointerdown и флаг его активности.
-     * Используются, чтобы отличить реальный клик от отпускания мыши
-     * после панорамирования: браузер может сгенерировать `click` даже
-     * при заметном смещении указателя между нажатием и отпусканием.
-     *
-     * @private
-     */
-    /** @private */ static _pointerDownX = 0;
-    /** @private */ static _pointerDownY = 0;
-    /** @private */ static _pointerDownActive = false;
-    /** @private */ static _clickMoveThreshold = 5;
-    /**
-     * Регистрирует изображение для обработки событий мыши.
-     * @param {Image} image - Экземпляр изображения.
-     * @private
-     */
+    // =================================================================
+    // Статический реестр интерактивных
+    // =================================================================
     static _registerInteractive(image) {
         Image._interactiveImages.add(image);
         if (!Image._eventListenersAttached) {
             Image._attachGlobalListeners();
         }
     }
-    /**
-     * Удаляет изображение из реестра интерактивных.
-     * @param {Image} image - Экземпляр изображения.
-     * @private
-     */
     static _unregisterInteractive(image) {
         Image._interactiveImages.delete(image);
         if (Image._interactiveImages.size === 0 && Image._eventListenersAttached) {
             Image._detachGlobalListeners();
         }
     }
-    /**
-     * Добавляет глобальные обработчики событий на canvas.
-     *
-     * Слушаем:
-     *  - `pointerdown` — чтобы запомнить точку нажатия (для отсечения
-     *    «клика после панорамирования»);
-     *  - `mousemove` — для hover;
-     *  - `click` — для onClick и показа тултипа.
-     *
-     * Все обработчики — в фазе capture.
-     *
-     * @private
-     */
     static _attachGlobalListeners() {
         const canvas = Image._getCanvas();
         if (!canvas)
@@ -268,17 +136,13 @@ export class Image {
         Image._delegatedHandlers = {
             pointerdown: (e) => Image._handleGlobalPointerDown(e),
             mousemove: (e) => Image._handleGlobalMouseMove(e),
-            click: (e) => Image._handleGlobalClick(e)
+            click: (e) => Image._handleGlobalClick(e),
         };
         canvas.addEventListener('pointerdown', Image._delegatedHandlers.pointerdown, true);
         canvas.addEventListener('mousemove', Image._delegatedHandlers.mousemove, true);
         canvas.addEventListener('click', Image._delegatedHandlers.click, true);
         Image._eventListenersAttached = true;
     }
-    /**
-     * Удаляет глобальные обработчики.
-     * @private
-     */
     static _detachGlobalListeners() {
         const canvas = Image._getCanvas();
         if (!canvas || !Image._delegatedHandlers)
@@ -289,77 +153,41 @@ export class Image {
         Image._delegatedHandlers = null;
         Image._eventListenersAttached = false;
     }
-    /**
-     * Возвращает canvas, к которому привязаны обработчики.
-     * @returns {HTMLCanvasElement|null}
-     * @private
-     */
     static _getCanvas() {
         for (const img of Image._interactiveImages) {
-            if (img._map && img._map.renderer && img._map.renderer.domElement) {
+            if (img._map?.renderer?.domElement) {
                 return img._map.renderer.domElement;
             }
         }
         return null;
     }
-    /**
-     * Запоминает точку нажатия. Нужен, чтобы в `_handleGlobalClick`
-     * отличить реальный клик от отпускания мыши после панорамирования.
-     *
-     * @param {PointerEvent} event - Событие нажатия.
-     * @private
-     */
     static _handleGlobalPointerDown(event) {
         Image._pointerDownX = event.clientX;
         Image._pointerDownY = event.clientY;
         Image._pointerDownActive = true;
     }
-    /**
-     * Глобальный обработчик mousemove.
-     * @param {MouseEvent} event - Событие мыши.
-     * @private
-     */
     static _handleGlobalMouseMove(event) {
         for (const img of Image._interactiveImages) {
             img._handleMouseMove(event);
         }
     }
-    /**
-     * Глобальный обработчик click.
-     *
-     * Перед обработкой проверяется, не было ли между pointerdown и click
-     * заметного смещения указателя — если да, клик отбрасывается как
-     * результат панорамирования. Это устраняет ложные срабатывания
-     * onClick при перетаскивании карты, начатом и законченном внутри
-     * контура изображения.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @private
-     */
     static _handleGlobalClick(event) {
-        // Проверка «это точно клик, а не конец драга?»
         const hadPointerDown = Image._pointerDownActive;
         Image._pointerDownActive = false;
         if (hadPointerDown) {
             const dx = event.clientX - Image._pointerDownX;
             const dy = event.clientY - Image._pointerDownY;
             const threshold = Image._clickMoveThreshold;
-            if (dx * dx + dy * dy > threshold * threshold) {
-                return; // было панорамирование, не клик
-            }
+            if (dx * dx + dy * dy > threshold * threshold)
+                return;
         }
         for (const img of Image._interactiveImages) {
             img._handleClick(event);
         }
     }
-    /* ================================================================
-       Публичные методы
-       ================================================================ */
-    /**
-     * Добавляет изображение на карту в персональный слой.
-     * @param {Object} map - Экземпляр карты.
-     * @returns {Image} Текущий экземпляр.
-     */
+    // =================================================================
+    // Присоединение / отсоединение
+    // =================================================================
     addTo(map) {
         if (this._map)
             this.remove();
@@ -368,19 +196,12 @@ export class Image {
         personalLayer.add(this);
         return this;
     }
-    /**
-     * Присоединяет изображение к карте и слою, строит геометрию.
-     * @param {Object} map - Экземпляр карты.
-     * @param {Layer} layer - Слой-владелец.
-     * @private
-     */
     _attach(map, layer) {
         if (this._map === map && this._layer === layer)
             return;
         this.remove();
         this._map = map;
         this._layer = layer;
-        // Резолвим проекцию изображения: либо заданную явно, либо inputCRS карты.
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
@@ -390,25 +211,18 @@ export class Image {
         if (this._title && map.textManager) {
             this._textLabel = map.textManager.addLabel(this);
         }
-        if (this._onClick || this._onHover || this._tooltipText) {
-            if (!Image._eventListenersAttached) {
-                Image._attachGlobalListeners();
-            }
+        if ((this._onClick || this._onHover || this._tooltipText)
+            && !Image._eventListenersAttached) {
+            Image._attachGlobalListeners();
         }
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastDiscreteZoom = map.currentDiscreteZoom;
     }
-    /**
-     * Удаляет изображение с карты и освобождает ресурсы.
-     * @returns {void}
-     */
     remove() {
-        if (this._map) {
+        if (this._map)
             Image._unregisterInteractive(this);
-        }
-        if (this._group.parent) {
+        if (this._group.parent)
             this._group.parent.remove(this._group);
-        }
         this._disposeGeometry();
         this._disposeTexture();
         if (this._textLabel && this._map?.textManager) {
@@ -422,11 +236,10 @@ export class Image {
         this._isVisible = false;
         this._worldPositions.length = 0;
     }
-    /**
-     * Обновляет источник изображения (URL, HTMLImageElement или Canvas).
-     * @param {string|HTMLImageElement|HTMLCanvasElement} source - Новый источник.
-     * @returns {Image} Текущий экземпляр.
-     */
+    // =================================================================
+    // Мутабельность
+    // =================================================================
+    /** Меняет источник (URL / HTMLImageElement / Canvas). */
     setSource(source) {
         if (!source) {
             console.warn('Image.setSource: source is empty');
@@ -443,11 +256,7 @@ export class Image {
         }
         return this;
     }
-    /**
-     * Устанавливает прозрачность.
-     * @param {number} opacity - Прозрачность (0..1).
-     * @returns {Image} Текущий экземпляр.
-     */
+    /** Меняет прозрачность (0..1). */
     setOpacity(opacity) {
         this._opacity = Math.max(0, Math.min(1, opacity));
         if (this._material) {
@@ -456,11 +265,7 @@ export class Image {
         }
         return this;
     }
-    /**
-     * Устанавливает режим смешивания.
-     * @param {string|THREE.Blending} blending - Строка ('normal', 'additive', 'multiply', 'subtract') или константа THREE.Blending.
-     * @returns {Image} Текущий экземпляр.
-     */
+    /** Меняет режим смешивания. */
     setBlending(blending) {
         this._blending = blending;
         if (this._material) {
@@ -468,27 +273,71 @@ export class Image {
         }
         return this;
     }
+    /** Управляет видимостью (перекрывает зум-ограничения и видимость слоя). */
+    setVisible(visible) {
+        this._userVisible = !!visible;
+        if (!this._group)
+            return this;
+        if (!this._userVisible) {
+            this._group.visible = false;
+            this._isVisible = false;
+        }
+        return this;
+    }
+    /** Меняет текст подписи (пустая строка — убрать). */
+    setTitle(text) {
+        this._title = text ?? '';
+        const tm = this._map?.textManager;
+        if (!tm)
+            return this;
+        if (this._textLabel) {
+            if (typeof tm.updateLabel === 'function') {
+                tm.updateLabel(this._textLabel);
+            }
+            else {
+                tm.removeLabel(this._textLabel);
+                this._textLabel = null;
+                if (this._title)
+                    this._textLabel = tm.addLabel(this);
+            }
+        }
+        else if (this._title) {
+            this._textLabel = tm.addLabel(this);
+        }
+        return this;
+    }
     /**
-     * Устанавливает новые узлы (углы) изображения.
-     * @param {Array.<Object>} nodes - Массив из 3 или 4 узлов.
-     * @returns {Image} Текущий экземпляр.
+     * Меняет тултип. Если ранее не было ни `onClick`, ни `onHover`,
+     * ни `tooltip` — регистрирует изображение в статическом реестре
+     * интерактивных и привязывает глобальные слушатели.
      */
+    setTooltip(html) {
+        const wasEmpty = !this._tooltipText;
+        this._tooltipText = html ?? '';
+        if (this._map && wasEmpty && this._tooltipText
+            && !Image._interactiveImages.has(this)) {
+            Image._registerInteractive(this);
+        }
+        return this;
+    }
+    /** Устанавливает границы видимости по зуму. */
+    setZoomBounds(minZoom, maxZoom) {
+        this._minZoom = minZoom;
+        this._maxZoom = maxZoom;
+        return this;
+    }
+    /** Устанавливает узлы (углы) изображения. */
     setNodes(nodes) {
         if (!Array.isArray(nodes) || (nodes.length !== 3 && nodes.length !== 4)) {
             throw new Error('Image.setNodes: nodes must be an array of 3 or 4 objects');
         }
         this._nodes = nodes;
         this._dirtyGeometry = true;
-        if (this._map) {
+        if (this._map)
             this._buildGeometry(this._map);
-        }
         return this;
     }
-    /**
-     * Устанавливает альтернативное позиционирование (позиция, размер, якорь, поворот).
-     * @param {Object} params - Параметры: { position, size, anchor, rotation }.
-     * @returns {Image} Текущий экземпляр.
-     */
+    /** Меняет всё сразу: позицию, размер, anchor и поворот. */
     setPositionRotation(params = {}) {
         if (params.position)
             this._position = params.position;
@@ -499,18 +348,87 @@ export class Image {
         if (params.rotation)
             this._rotation = params.rotation;
         this._dirtyGeometry = true;
-        if (this._map) {
+        if (this._map)
             this._buildGeometry(this._map);
+        return this;
+    }
+    /** Меняет только позицию (в режиме anchor). */
+    setPosition(position) {
+        return this.setPositionRotation({ position });
+    }
+    /** Меняет только размер (в режиме anchor). */
+    setSize(size) {
+        return this.setPositionRotation({ size });
+    }
+    /** Меняет только anchor (в режиме anchor). */
+    setAnchor(anchor) {
+        return this.setPositionRotation({ anchor });
+    }
+    /** Меняет только поворот (в режиме anchor). */
+    setRotation(rotation) {
+        return this.setPositionRotation({ rotation });
+    }
+    /** Меняет дополнительный подъём над `alt` (world-метры). */
+    setElevationOffset(offset) {
+        if (!Number.isFinite(offset))
+            return this;
+        this._elevationOffset = offset;
+        this._dirtyGeometry = true;
+        if (this._map)
+            this._buildGeometry(this._map);
+        return this;
+    }
+    /** Отключает/включает depthTest (изображение поверх всей сцены). */
+    setAlwaysOnTop(alwaysOnTop) {
+        this._alwaysOnTop = !!alwaysOnTop;
+        if (this._material) {
+            this._material.depthTest = !this._alwaysOnTop;
+            this._material.polygonOffset = !this._alwaysOnTop;
+            this._material.needsUpdate = true;
         }
         return this;
     }
-    /* ================================================================
-       Внутренние методы
-       ================================================================ */
-    /**
-     * Загружает текстуру из источника.
-     * @private
-     */
+    /** Устанавливает polygonOffset (отрицательное значение — к камере). */
+    setPolygonOffset(offset) {
+        if (!Number.isFinite(offset))
+            return this;
+        this._polygonOffset = offset;
+        if (this._material) {
+            this._material.polygonOffsetFactor = offset;
+            this._material.polygonOffsetUnits = offset;
+        }
+        return this;
+    }
+    // =================================================================
+    // Геттеры
+    // =================================================================
+    getSource() { return this._source; }
+    getNodes() {
+        return this._nodes
+            ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
+            : null;
+    }
+    getPosition() {
+        return this._position ? [...this._position] : null;
+    }
+    getSize() { return [...this._size]; }
+    getAnchor() { return [...this._anchor]; }
+    getRotation() { return [...this._rotation]; }
+    getOpacity() { return this._opacity; }
+    getBlending() { return this._blending; }
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter() {
+        const b = this.getBounds('EPSG:4326');
+        if (!b)
+            return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
+    }
+    // =================================================================
+    // Внутренние — текстура / геометрия / материал
+    // =================================================================
     _loadTexture() {
         if (!this._source)
             return;
@@ -531,20 +449,12 @@ export class Image {
             console.warn('Image: unsupported source type', this._source);
         }
     }
-    /**
-     * Освобождает текущую текстуру.
-     * @private
-     */
     _disposeTexture() {
         if (this._texture) {
             this._texture.dispose();
             this._texture = null;
         }
     }
-    /**
-     * Освобождает геометрию и материал.
-     * @private
-     */
     _disposeGeometry() {
         if (this._geometry) {
             this._geometry.dispose();
@@ -554,64 +464,38 @@ export class Image {
             this._material.dispose();
             this._material = null;
         }
-        if (this._mesh) {
-            this._mesh = null;
-        }
+        this._mesh = null;
     }
-    /**
-     * Преобразует строковый режим смешивания в константу THREE.
-     * @param {string|THREE.Blending} blending - Входной режим.
-     * @returns {THREE.Blending} Константа смешивания.
-     * @private
-     */
     _normalizeBlending(blending) {
         if (typeof blending === 'number')
             return blending;
         switch (blending.toLowerCase()) {
-            case 'additive':
-                return THREE.AdditiveBlending;
-            case 'multiply':
-                return THREE.MultiplyBlending;
-            case 'subtract':
-                return THREE.SubtractiveBlending;
+            case 'additive': return THREE.AdditiveBlending;
+            case 'multiply': return THREE.MultiplyBlending;
+            case 'subtract': return THREE.SubtractiveBlending;
             case 'normal':
-            default:
-                return THREE.NormalBlending;
+            default: return THREE.NormalBlending;
         }
     }
-    /**
-     * Вычисляет мировые координаты (без worldGroup) для заданных узлов.
-     * Координаты узлов интерпретируются в СК `this._crs`.
-     *
-     * К `node.alt` каждой вершины добавляется `_elevationOffset` —
-     * это единый подъём всей плоскости над нулевым уровнем. Нужен,
-     * чтобы приподнять изображение над рельефом и уменьшить
-     * зависимость от `polygonOffset` на дальних зумах.
-     *
-     * @returns {Array.<THREE.Vector3>} Массив векторов.
-     * @private
-     */
     _computeWorldPositionsFromNodes() {
         if (!this._nodes || this._nodes.length < 3)
             return [];
         const map = this._map;
         const yOffset = this._elevationOffset;
         const positions = this._nodes.map(node => {
-            // Узел задаётся объектом { lon, lat, alt }; проект только первые два.
             const [x, z] = map.project([node.lon, node.lat], this._crs);
             const y = (node.alt || 0) + yOffset;
             return new THREE.Vector3(x, y, z);
         });
-        // Если задано 4 узла и они не компланарны, проецируем 4-й на плоскость первых трёх
         if (positions.length === 4) {
             const [p0, p1, p2, p3] = positions;
-            const normal = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0));
+            const normal = new THREE.Vector3().subVectors(p1, p0)
+                .cross(new THREE.Vector3().subVectors(p2, p0));
             const denom = normal.lengthSq();
             if (denom > 1e-10) {
                 normal.normalize();
                 const dist = new THREE.Vector3().subVectors(p3, p0).dot(normal);
                 if (Math.abs(dist) > 1e-6) {
-                    // Четвёртая точка не в плоскости, проецируем
                     const projected = p3.clone().addScaledVector(normal, -dist);
                     positions[3] = projected;
                 }
@@ -619,14 +503,6 @@ export class Image {
         }
         return positions;
     }
-    /**
-     * Вычисляет мировые координаты узлов из альтернативного позиционирования (anchor, rotation, size).
-     * Первые два элемента `_position` интерпретируются в СК `this._crs`,
-     * третий элемент (`alt`) — как мировая Y-координата. К ней
-     * прибавляется `_elevationOffset`.
-     * @returns {Array.<THREE.Vector3>} Массив из четырёх векторов в порядке [нижний левый, нижний правый, верхний левый, верхний правый].
-     * @private
-     */
     _computeWorldPositionsFromAnchor() {
         if (!this._position)
             return [];
@@ -635,47 +511,24 @@ export class Image {
         const [ax, ay] = this._anchor;
         const [rx, ry, rz] = this._rotation;
         const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-        // Подъём применяем к центру — все 4 угла получат его же
-        // (в локальных координатах они лежат в плоскости XZ).
         const center = new THREE.Vector3(worldX, (alt || 0) + this._elevationOffset, worldZ);
         const halfW = width / 2;
         const halfH = height / 2;
-        // Локальные координаты углов в плоскости XZ (Y=0), центр в (0,0,0)
         const cornersLocal = [
             new THREE.Vector3(-halfW, 0, -halfH),
             new THREE.Vector3(halfW, 0, -halfH),
             new THREE.Vector3(-halfW, 0, halfH),
-            new THREE.Vector3(halfW, 0, halfH)
+            new THREE.Vector3(halfW, 0, halfH),
         ];
-        // Смещение из-за якоря: точка якоря должна оказаться в центре (0,0,0) локально
         const anchorOffset = new THREE.Vector3((0.5 - ax) * width, 0, (0.5 - ay) * height);
         cornersLocal.forEach(c => c.add(anchorOffset));
-        // Применяем вращение
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const quaternion = new THREE.Quaternion().setFromEuler(euler);
         const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
-        // Добавляем к центру в мировых координатах (без перестановки осей)
-        const worldCorners = rotatedCorners.map(local => {
-            return new THREE.Vector3(center.x + local.x, center.y + local.y, center.z + local.z);
-        });
-        return worldCorners;
+        return rotatedCorners.map(local => new THREE.Vector3(center.x + local.x, center.y + local.y, center.z + local.z));
     }
-    /**
-     * Строит геометрию плоскости с вершинами в мировых координатах (локально относительно центроида).
-     *
-     * **Z-fighting.** Материал получает `polygonOffset` (по умолчанию
-     * `factor = units = -4`): значение глубины сдвигается «к камере»,
-     * не трогая геометрию. Это гарантирует, что изображение перекрывает
-     * coplanar-тайлы карты. При `alwaysOnTop: true` depthTest
-     * отключается полностью — изображение рисуется поверх всей сцены.
-     *
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
     _buildGeometry(map) {
-        // Очищаем старую геометрию и материал, но не трогаем текстуру (она загружается отдельно)
         this._disposeGeometry();
-        // Получаем мировые позиции узлов (без учёта worldGroup)
         let worldPositions;
         if (this._nodes) {
             worldPositions = this._computeWorldPositionsFromNodes();
@@ -692,17 +545,12 @@ export class Image {
             return;
         }
         this._worldPositions = worldPositions;
-        // Вычисляем центроид (среднее по всем точкам)
         const centroid = new THREE.Vector3();
         worldPositions.forEach(p => centroid.add(p));
         centroid.divideScalar(worldPositions.length);
         this._centroidWorld.copy(centroid);
-        // Создаём PlaneGeometry с 4 вершинами (для треугольника можно использовать также, но 4-я вершина будет продублирована)
-        // Если узлов 3, создадим треугольную геометрию: используем три первые вершины, четвёртую ставим в ту же точку, что и третью?
-        // Но текстура будет искажена. Лучше создать геометрию с 3 вершинами и индексами.
         let geometry;
         if (worldPositions.length === 3) {
-            // Треугольник
             geometry = new THREE.BufferGeometry();
             const vertices = new Float32Array(9);
             worldPositions.forEach((p, i) => {
@@ -712,24 +560,18 @@ export class Image {
             });
             geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
             geometry.setIndex([0, 1, 2]);
-            // UV для треугольника: сопоставим углам изображения (0,0), (1,0), (0,1) или (0,1), (1,1), (0,0)?
-            // Для простоты установим UV: (0,0), (1,0), (0,1) в порядке вершин.
             const uvs = new Float32Array([0, 0, 1, 0, 0, 1]);
             geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
         }
         else {
-            // Четырёхугольник (PlaneGeometry с переопределёнными вершинами)
             geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
             const pos = geometry.attributes.position;
-            // Переопределяем вершины в порядке: 0:(0,0) – нижний левый, 1:(1,0) – нижний правый, 2:(0,1) – верхний левый, 3:(1,1) – верхний правый
-            // Заменяем координаты на локальные (относительно центроида)
             for (let i = 0; i < 4; i++) {
                 pos.setXYZ(i, worldPositions[i].x - centroid.x, worldPositions[i].y - centroid.y, worldPositions[i].z - centroid.z);
             }
             pos.needsUpdate = true;
             geometry.computeVertexNormals();
         }
-        // Материал с polygonOffset — против z-fighting с coplanar-тайлами.
         const onTop = this._alwaysOnTop;
         const material = new THREE.MeshBasicMaterial({
             map: this._texture || null,
@@ -737,26 +579,20 @@ export class Image {
             transparent: this._opacity < 1,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
-            // depthTest выключается только при alwaysOnTop. В обычном
-            // режиме изображение корректно окклюдируется рельефом,
-            // стоящим перед камерой, но перекрывает coplanar-тайлы
-            // за счёт polygonOffset.
             depthTest: !onTop,
             depthWrite: false,
             polygonOffset: !onTop,
             polygonOffsetFactor: this._polygonOffset,
-            polygonOffsetUnits: this._polygonOffset
+            polygonOffsetUnits: this._polygonOffset,
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.renderOrder = IMAGE_RENDER_ORDER;
-        // Добавляем в группу
         this._group.clear();
         this._group.add(mesh);
-        this._group.position.copy(centroid); // позиция группы в координатах worldGroup
+        this._group.position.copy(centroid);
         this._geometry = geometry;
         this._material = material;
         this._mesh = mesh;
-        // Вычисляем ограничивающую сферу
         let maxRadiusSq = 0;
         worldPositions.forEach(p => {
             const dx = p.x - centroid.x;
@@ -769,21 +605,13 @@ export class Image {
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
         this._dirtyGeometry = false;
     }
-    /**
-     * Пересобирает геометрию, если изменились узлы или позиционирование.
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
     _rebuildGeometryIfNeeded(map) {
-        if (this._dirtyGeometry) {
+        if (this._dirtyGeometry)
             this._buildGeometry(map);
-        }
     }
-    /**
-     * Обрабатывает mousemove для делегированного события.
-     * @param {MouseEvent} event - Событие мыши.
-     * @private
-     */
+    // =================================================================
+    // Обработчики событий
+    // =================================================================
     _handleMouseMove(event) {
         if (!this._map || !this._isVisible)
             return;
@@ -791,54 +619,33 @@ export class Image {
         if (hit) {
             if (!this._isHovered) {
                 this._isHovered = true;
-                if (this._onHover) {
+                if (this._onHover)
                     this._onHover(true);
-                }
                 else if (this._tooltipText && this._map.popupManager) {
                     this._map.popupManager.show(this, this._tooltipText);
                 }
             }
         }
-        else {
-            if (this._isHovered) {
-                this._isHovered = false;
-                if (this._onHover) {
-                    this._onHover(false);
-                }
-                else if (this._tooltipText && this._map.popupManager) {
-                    this._map.popupManager.hide();
-                }
+        else if (this._isHovered) {
+            this._isHovered = false;
+            if (this._onHover)
+                this._onHover(false);
+            else if (this._tooltipText && this._map.popupManager) {
+                this._map.popupManager.hide();
             }
         }
     }
-    /**
-     * Обрабатывает click для делегированного события.
-     * @param {MouseEvent} event - Событие мыши.
-     * @private
-     */
     _handleClick(event) {
         if (!this._map || !this._isVisible)
             return;
         if (this._raycastImage(event)) {
-            if (this._onClick) {
+            if (this._onClick)
                 this._onClick(event, this);
-            }
             else if (this._tooltipText && this._map.popupManager) {
                 this._map.popupManager.show(this, this._tooltipText);
             }
         }
     }
-    /**
-     * Проверяет, находится ли точка экрана над изображением.
-     *
-     * `polygonOffset` влияет только на рендер, не на рейкастинг —
-     * попадание по изображению работает независимо от того, что
-     * визуально оно может перекрывать тайл.
-     *
-     * @param {MouseEvent} event - Событие мыши.
-     * @returns {boolean} true, если луч пересекает изображение.
-     * @private
-     */
     _raycastImage(event) {
         if (!this._mesh || !this._mesh.visible)
             return false;
@@ -846,17 +653,19 @@ export class Image {
         const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, this._map.camera);
-        const intersects = raycaster.intersectObject(this._mesh, false);
-        return intersects.length > 0;
+        return raycaster.intersectObject(this._mesh, false).length > 0;
     }
-    /**
-     * Обновляет состояние изображения: видимость, геометрию, подпись.
-     * @param {Object} map - Экземпляр карты.
-     * @private
-     */
+    // =================================================================
+    // Обновление на кадре
+    // =================================================================
     _update(map) {
         if (!this._map || !this._group)
             return;
+        if (!this._userVisible) {
+            this._group.visible = false;
+            this._isVisible = false;
+            return;
+        }
         const zoom = this._map.continuousZoom;
         if (this._layer && !this._layer.visible) {
             this._group.visible = false;
@@ -868,9 +677,7 @@ export class Image {
             this._isVisible = false;
             return;
         }
-        // Пересобираем геометрию, если нужно
         this._rebuildGeometryIfNeeded(map);
-        // Проверка расстояния через ограничивающую сферу
         if (this._boundingSphereRadius > 0) {
             const maxDist = map.maxObjectDistance;
             if (maxDist !== Infinity) {
@@ -885,53 +692,28 @@ export class Image {
         }
         this._group.visible = true;
         this._isVisible = true;
-        // Обновляем подпись
-        if (this._textLabel) {
-            // Обновление подписи происходит в TextManager через getScreenPosition
-        }
     }
-    // ---------- Интерфейс для TextManager ----------
-    /**
-     * Возвращает текст подписи.
-     * @returns {string}
-     */
+    // =================================================================
+    // TextManager contract
+    // =================================================================
     getText() { return this._title; }
-    /**
-     * Возвращает стили подписи.
-     * @returns {Object}
-     */
     getTextStyle() {
         return Object.assign({
             fontFamily: 'sans-serif',
             color: '#333',
             fontSize: '12px',
-            textAlign: this._titleAlign
+            textAlign: this._titleAlign,
         }, this._titleStyle);
     }
-    /**
-     * Возвращает границы зума для подписи.
-     * @returns {Object}
-     */
-    getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
-    /**
-     * Возвращает тип подписи.
-     * @returns {string}
-     */
+    getTextZoomBounds() {
+        return { min: this._titleMinZoom, max: this._titleMaxZoom };
+    }
     getLabelType() { return 'image'; }
-    /**
-     * Проверяет видимость изображения.
-     * @returns {boolean}
-     */
     isVisible() { return this._isVisible; }
-    /**
-     * Возвращает экранную позицию для подписи (центр изображения).
-     * @returns {Object|null}
-     */
     getScreenPosition() {
         if (!this._isVisible || !this._group)
             return null;
         const worldPos = this._tempVec3.copy(this._group.position).add(this._map.worldGroup.position);
-        // Добавляем небольшую высоту, чтобы подпись была над изображением
         worldPos.y += this._boundingSphereRadius * 0.1;
         const screenPos = worldPos.clone().project(this._map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
@@ -939,68 +721,24 @@ export class Image {
         const canvas = this._map.renderer.domElement;
         return {
             x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
+            y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
-    /**
-     * Возвращает горизонтальное выравнивание подписи.
-     * @returns {string}
-     */
     getTitleAlign() { return this._titleAlign; }
-    /**
-     * Возвращает смещение подписи.
-     * @returns {Array.<number>}
-     */
     getTitleOffset() { return this._titleOffset; }
-    /**
-     * Возвращает вертикальное выравнивание подписи.
-     * @returns {string}
-     */
     getTitleVerticalAlign() { return 'bottom'; }
-    /**
-     * Проверяет разрешение выхода подписи за границы.
-     * @returns {boolean}
-     */
     getAllowOverflow() { return this._titleAllowOverflow; }
-    /**
-     * Возвращает приоритет подписи.
-     * @returns {number}
-     */
     getPriority() { return this._titlePriority; }
-    // ---------- Интерфейс для KrbMap#fitTo / getBounds ----------
-    /**
-     * Возвращает прямоугольник (bounding box), охватывающий изображение.
-     *
-     * Логика зависит от способа позиционирования:
-     *  - Если заданы `nodes`, прямоугольник считается по «сырым»
-     *    координатам всех узлов (в СК `options.crs`); карта не требуется.
-     *  - Если заданы `position` + `size` + `anchor` + `rotation`,
-     *    и изображение уже добавлено на карту (`_map` доступен), берутся
-     *    4 мировые вершины через `_computeWorldPositionsFromAnchor()`
-     *    и переводятся в целевую СК через `map.unproject`. Если карта
-     *    ещё не привязана, возвращается вырожденный прямоугольник по
-     *    точке `position` (без карты размер в метрах и поворот однозначно
-     *    в градусы не выражаются).
-     *
-     * `elevationOffset` на bounds не влияет: unproject использует только
-     * X/Z мировые координаты, Y игнорируется.
-     *
-     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326'] -
-     *     Целевая СК для результата (код или объект Projection).
-     * @returns {Array.<Array.<number>>|null} [[minX, minY], [maxX, maxY]]
-     *     или null, если изображение не имеет ни узлов, ни позиции.
-     *
-     * @example
-     * const b = img.getBounds();                 // → [[30.0, 50.0], [30.1, 50.1]]
-     * const bUtm = img.getBounds('EPSG:32637');  // → [[..., ...], [..., ...]]
-     */
+    // =================================================================
+    // KrbMap#fitTo / getBounds
+    // =================================================================
     getBounds(crs = 'EPSG:4326') {
         const srcCrs = this._crs
             ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
         const dstCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
         if (!srcCrs || !dstCrs)
             return null;
-        // --- Режим 1: nodes — считаем по «сырым» координатам ---
+        // Режим 1: nodes — считаем по «сырым» координатам.
         if (this._nodes && this._nodes.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let count = 0;
@@ -1017,9 +755,9 @@ export class Image {
                 }
                 else {
                     const lonLat = srcCrs.toLonLat([px, py]);
-                    const converted = dstCrs.fromLonLat(lonLat);
-                    x = converted[0];
-                    y = converted[1];
+                    const conv = dstCrs.fromLonLat(lonLat);
+                    x = conv[0];
+                    y = conv[1];
                 }
                 if (x < minX)
                     minX = x;
@@ -1035,10 +773,9 @@ export class Image {
                 return null;
             return [[minX, minY], [maxX, maxY]];
         }
-        // --- Режим 2: position + size + anchor + rotation ---
+        // Режим 2: position + size + anchor + rotation.
         if (this._position) {
             if (this._map) {
-                // Считаем 4 мировые вершины (без worldGroup) и переводим в target CRS.
                 const worldCorners = this._computeWorldPositionsFromAnchor();
                 if (worldCorners.length >= 3) {
                     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -1057,12 +794,11 @@ export class Image {
                             maxY = coord[1];
                         count++;
                     }
-                    if (count > 0 && isFinite(minX)) {
+                    if (count > 0 && isFinite(minX))
                         return [[minX, minY], [maxX, maxY]];
-                    }
                 }
             }
-            // Fallback: карта ещё не привязана — возвращаем точку position.
+            // Fallback: карта не привязана — возвращаем точку position.
             const px = this._position[0], py = this._position[1];
             if (!isFinite(px) || !isFinite(py))
                 return null;
@@ -1073,9 +809,9 @@ export class Image {
             }
             else {
                 const lonLat = srcCrs.toLonLat([px, py]);
-                const converted = dstCrs.fromLonLat(lonLat);
-                x = converted[0];
-                y = converted[1];
+                const conv = dstCrs.fromLonLat(lonLat);
+                x = conv[0];
+                y = conv[1];
             }
             return [[x, y], [x, y]];
         }

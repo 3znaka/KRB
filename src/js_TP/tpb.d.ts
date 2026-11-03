@@ -9,6 +9,8 @@ export namespace THREE {
     // Math
     // ----------------------------------------------------------------
 
+  export const MultiplyBlending: number;
+
     export class Vector2 {
         constructor(x?: number, y?: number);
         [key: string]: any;
@@ -83,11 +85,16 @@ export namespace THREE {
     }
 
     export class Euler {
-        constructor(x?: number, y?: number, z?: number);
+        constructor(x?: number, y?: number, z?: number, order?: string);
         [key: string]: any;
         x: number;
         y: number;
         z: number;
+        order: string;
+        set(x: number, y: number, z: number, order?: string): this;
+        setFromQuaternion(q: Quaternion, order?: string): this;
+        copy(e: Euler): this;
+        clone(): Euler;
     }
 
     export class Color {
@@ -420,9 +427,31 @@ export namespace THREE {
     }
 
     export class Texture {
-        constructor();
+        constructor(
+            image?: any,
+            mapping?: number,
+            wrapS?: number,
+            wrapT?: number,
+            magFilter?: number,
+            minFilter?: number,
+            format?: number,
+            type?: number,
+            anisotropy?: number,
+            colorSpace?: string
+        );
         [key: string]: any;
+        image: any;
+        mapping: number;
+        wrapS: number;
+        wrapT: number;
+        magFilter: number;
+        minFilter: number;
+        format: number;
+        type: number;
+        anisotropy: number;
+        colorSpace: string;
         needsUpdate: boolean;
+        flipY: boolean;
         dispose(): void;
     }
     export class CanvasTexture extends Texture {

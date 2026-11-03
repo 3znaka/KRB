@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <link href="/KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+import * as KRB from '/js/KRB.js';
+
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [
+        new KRB.Tile({
+            texture: 'demo',
+            elevation: 'demo',
+        })
+    ],
+    view: new KRB.View({
+        centerLonLat: [37.6178, 55.7558],
+        zoom: 14,
+        maxZoom: 18,
+        pitch: 55
+    })
+});
+
+// На земле
+new KRB.Marker3D({
+    position: [37.60, 55.75],
+    primitiveType: 'box',
+    size: 300,
+    color: 0x00cc88,
+    altitudeMode: 'clampToGround',
+    altitude: 0,
+    title: 'altitude: 0',
+    titlePlacement: 'bottom'
+}).addTo(map);
+
+// Приподнят на 600 м
+new KRB.Marker3D({
+    position: [37.63, 55.75],
+    primitiveType: 'box',
+    size: 300,
+    color: 0xff4488,
+    altitudeMode: 'clampToGround',
+    altitude: 600,
+    title: 'altitude: 600',
+    titlePlacement: 'bottom'
+}).addTo(map);
+</script>
+</body>
+</html>

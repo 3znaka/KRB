@@ -132,11 +132,12 @@ get elevationMaxZoom() { return Infinity; }
      * @param {import('./Core.js').KrbMap} map
      * @returns {number|null}
      */
-    sampleAtWorld(worldX, worldZ, map) {
-        const lonLat = map.unprojectToLonLat(worldX, worldZ);
-        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
-        return this._heightAt(lonLat[0], lonLat[1]);
-    }
+sampleAtWorld(worldX, worldZ, map) {
+    const wgPos = map.worldGroup.position;
+    const lonLat = map.unprojectToLonLat(worldX - wgPos.x, worldZ - wgPos.z);
+    if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
+    return this._heightAt(lonLat[0], lonLat[1]);
+}
 
     /**
      * Максимальная высота в тайле. Дёшево (max по сетке), используется

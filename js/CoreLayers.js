@@ -1,3 +1,4 @@
+// CoreLayers.ts
 import { Projections } from './Projections.js';
 import { getOriginZ } from './Utils.js';
 export const CoreLayersMixin = {

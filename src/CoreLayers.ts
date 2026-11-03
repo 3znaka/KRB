@@ -1,5 +1,4 @@
 // CoreLayers.ts
-import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { getOriginZ } from './Utils.js';
 import type { KrbMap } from './Core.js';

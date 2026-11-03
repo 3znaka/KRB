@@ -1,25 +1,161 @@
-// @ts-nocheck
-// TextManager.js
+// TextManager.ts
 
-import {
-  THREE,
-} from './js_TP/tpb.js';
+import { THREE } from './js_TP/tpb.js';
+
+// =====================================================================
+// Публичные типы
+// =====================================================================
+
+export type LabelType = 'point' | 'line' | 'line-curved';
+export type TitleAlignH = 'left' | 'center' | 'right';
+export type TitleAlignV = 'top' | 'center' | 'bottom';
+export type IconPosition = 'left' | 'right' | 'top' | 'bottom';
+export type LinePlacement = 'along' | 'horizontal';
+
+export interface LabelScreenPoint {
+    x: number;
+    y: number;
+}
+
+export interface IconOptions {
+    name: string;
+    scale?: number;
+    bgColor?: string;
+    circleScale?: number;
+    glyphRatio?: number;
+    offset?: [number, number];
+    cssStyle?: any;
+    sprite?: any;
+}
+
+export interface LabelBBox {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+    perChar?: LabelBBox[];
+}
+
+export interface LineCandidate {
+    t: number;
+    isFlipped: boolean;
+    bbox: LabelBBox;
+}
+
+export interface CharLayout {
+    char: string;
+    x: number;
+    y: number;
+    w: number;
+    angle: number;
+}
 
 /**
- * Простой пространственный индекс (равномерная сетка).
- * @private
+ * Контракт между TextManager и источником подписи (Marker, VectorTileLayer
+ * и т.п.).
+ *
+ * Обязательны только `getText`, `getTextStyle`, `getTextZoomBounds`,
+ * `isVisible` и `getLabelType` — их код вызывает без `?.`. Остальное
+ * опционально и проверяется на месте.
+ *
+ * Методы группы `line-*` нужны только источникам с
+ * `getLabelType() === 'line' | 'line-curved'`.
  */
-class _GridIndex {
+export interface LabelSource {
+    // ── обязательные ──
+    getText(): string;
+    getTextStyle(): Record<string, string | number>;
+    getTextZoomBounds(): { min: number; max: number };
+    isVisible(): boolean;
+    getLabelType(): LabelType;
+
+    // ── опциональные (point / line) ──
+    getPriority?(): number;
+    getAllowOverflow?(): boolean;
+    getScreenPosition?(): LabelScreenPoint | null;
+    getTitleOffset?(): [number, number] | null;
+    getTitleAlign?(): TitleAlignH;
+    getTitleVerticalAlign?(): TitleAlignV;
+    getLabelPosition?(): IconPosition;
+    getIcon?(): IconOptions | null;
+    getPlacement?(): LinePlacement;
+
+    // ── только для линий ──
+    getScreenPositionAt?(t: number): LabelScreenPoint | null;
+    getScreenAngleAt?(t: number): number;
+    getVisibleInterval?(): { min: number; max: number } | null;
+    getLabelParameter?(): number;
+    setLabelParameter?(t: number): void;
+    getCandidates?(): LineCandidate[];
+    getCandidateAtT?(t: number): LineCandidate | null;
+    getCharLayoutAtT?(t: number, isFlipped: boolean): CharLayout[] | null;
+    /** Внутренние методы LineLayer — оставляем `any`, чтобы не тянуть типы. */
+    _getScreenData?(): any;
+    _tToPx?(data: any, t: number): number;
+    _samplePx?(data: any, px: number): LabelScreenPoint | null;
+}
+
+export interface Label {
+    source: LabelSource;
+    element: HTMLDivElement & { __lastTransform?: string };
+    stableId: any | null;
+    t: number;
+    width: number;
+    height: number;
+    hiddenByPriority: boolean;
+    priority: number;
+    allowOverflow: boolean;
+    _fontSize: number;
+    _bbox: LabelBBox | null;
+    _needsMeasure: boolean;
+    _queuedForMeasure: boolean;
+    _chosenT: number | null;
+    _chosenIsFlipped: boolean;
+    _pendingChosenT: number | null;
+    _pendingChosenIsFlipped: boolean;
+    _staleAt: number | null;
+    _lastAnchor: LabelScreenPoint | null;
+    _display: string;
+    _hasIcon: boolean;
+    _icon: IconOptions | null;
+    _iconCenterX: number | null;
+    _iconCenterY: number | null;
+    _vectorOwner: any;
+    _hideTimeout: ReturnType<typeof setTimeout> | null;
+    rect?: LabelScreenPoint[];
+
+    // ── NEW: кэш для корректного updateLabel ──
+    _cachedText: string;
+    _cachedStyle: Record<string, string | number>;
+}
+
+export interface PruneStaleOptions {
+    fade?: boolean;
+    graceMs?: number;
+}
+
+// =====================================================================
+// Пространственный индекс
+// =====================================================================
+
+class _GridIndex<T> {
+    cellSize: number;
+    grid: Map<string, T[]>;
+
     constructor(cellSize = 128) {
         this.cellSize = cellSize;
         this.grid = new Map();
     }
 
-    _key(col, row) { return col + ',' + row; }
+    _key(col: number, row: number): string {
+        return col + ',' + row;
+    }
 
-    clear() { this.grid.clear(); }
+    clear(): void {
+        this.grid.clear();
+    }
 
-    insert(bbox, value) {
+    insert(bbox: LabelBBox, value: T): void {
         const cs = this.cellSize;
         const c0 = Math.floor(bbox.minX / cs);
         const c1 = Math.floor(bbox.maxX / cs);
@@ -35,14 +171,14 @@ class _GridIndex {
         }
     }
 
-    query(bbox) {
+    query(bbox: LabelBBox): T[] {
         const cs = this.cellSize;
         const c0 = Math.floor(bbox.minX / cs);
         const c1 = Math.floor(bbox.maxX / cs);
         const r0 = Math.floor(bbox.minY / cs);
         const r1 = Math.floor(bbox.maxY / cs);
-        const result = [];
-        const seen = new Set();
+        const result: T[] = [];
+        const seen = new Set<T>();
         for (let c = c0; c <= c1; c++) {
             for (let r = r0; r <= r1; r++) {
                 const cell = this.grid.get(this._key(c, r));
@@ -59,37 +195,43 @@ class _GridIndex {
     }
 }
 
-/**
- * Сколько кадров подряд камера должна быть неподвижна, чтобы
- * считаться «стабильной» и показать линейные подписи.
- */
 const STABLE_FRAMES = 5;
 
+// =====================================================================
+// TextManager
+// =====================================================================
+
 export class TextManager {
-    constructor(map) {
+    map: any;
+    labels: Label[] = [];
+    _labelsById: Map<any, Label> = new Map();
+    pane: HTMLElement | null = null;
+    maxLabels = 500;
+
+    _gridIndex: _GridIndex<Label>;
+    _measureQueue: Label[] = [];
+    _measureScheduled = false;
+    _dirty = true;
+
+    _stableFrameCount = 0;
+    _wasStable = false;
+
+    _stableRefPos: any = null;
+    _stableRefQ: any = null;
+    _stableRefWp: any = null;
+    _stableRefZoom: number | null = null;
+
+    _lastMoved: boolean | null = null;
+
+    _onKeyDown: (e: KeyboardEvent) => void;
+
+    constructor(map: any) {
         this.map = map;
-        this.labels = [];
-        this._labelsById = new Map();
-        this.pane = null;
-        this.maxLabels = 500;
-
-        this._gridIndex = new _GridIndex(128);
-        this._measureQueue = [];
-        this._measureScheduled = false;
-        this._dirty = true;
-
-        this._stableFrameCount = 0;
-        this._wasStable = false;
-
-        this._stableRefPos = null;
-        this._stableRefQ = null;
-        this._stableRefWp = null;
-        this._stableRefZoom = null;
+        this._gridIndex = new _GridIndex<Label>(128);
 
         this._initPane();
 
-        // ── Дебаг по Ctrl+Shift+L ──────────────────────────────────
-        this._onKeyDown = (e) => {
+        this._onKeyDown = (e: KeyboardEvent) => {
             if (e.ctrlKey && e.shiftKey && e.code === 'KeyL') {
                 this.debugLabels();
             }
@@ -97,32 +239,41 @@ export class TextManager {
         window.addEventListener('keydown', this._onKeyDown);
     }
 
-    setMaxLabels(max) {
+    setMaxLabels(max: number): void {
         if (typeof max === 'number' && max > 0) this.maxLabels = max;
     }
 
-    getDebugStats() {
+    getDebugStats(): {
+        total: number;
+        visible: number;
+        hiddenByPriority: number;
+        withIcon: number;
+        maxLabels: number;
+        stableIds: number;
+        stableFrames: number;
+        isStable: boolean;
+    } {
         let visible = 0, hidden = 0, icons = 0;
         for (const l of this.labels) {
             if (l.hiddenByPriority) hidden++;
             else if (l.element && l.element.style.display !== 'none') visible++;
-            if (l._hasIcon) icons++; // NEW
+            if (l._hasIcon) icons++;
         }
         return {
             total: this.labels.length,
             visible,
             hiddenByPriority: hidden,
-            withIcon: icons, // NEW
+            withIcon: icons,
             maxLabels: this.maxLabels,
             stableIds: this._labelsById.size,
             stableFrames: this._stableFrameCount,
-            isStable: this._stableFrameCount >= STABLE_FRAMES
+            isStable: this._stableFrameCount >= STABLE_FRAMES,
         };
     }
 
-    _initPane() {
-        const target = this.map.targetElement;
-        let pane = target.querySelector('#krb-label-pane');
+    _initPane(): void {
+        const target: HTMLElement = this.map.targetElement;
+        let pane = target.querySelector('#krb-label-pane') as HTMLElement | null;
         if (!pane) {
             pane = document.createElement('div');
             pane.id = 'krb-label-pane';
@@ -131,14 +282,14 @@ export class TextManager {
                 top: '0', left: '0',
                 width: '100%', height: '100%',
                 pointerEvents: 'none',
-                zIndex: '625'
+                zIndex: '625',
             });
             target.appendChild(pane);
         }
         this.pane = pane;
     }
 
-    dispose() {
+    dispose(): void {
         window.removeEventListener('keydown', this._onKeyDown);
         for (const label of this.labels) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
@@ -162,37 +313,33 @@ export class TextManager {
         this._stableRefZoom = null;
     }
 
-    _resolveIconStyle(icon) {
-        if (!icon)
-            return null;
-        if (icon.cssStyle)
-            return icon.cssStyle;
+    _resolveIconStyle(icon: IconOptions | null): any | null {
+        if (!icon) return null;
+        if (icon.cssStyle) return icon.cssStyle;
 
         const sprite = icon.sprite || (this.map && this.map.sprite);
-        
         if (sprite && typeof sprite.cssStyle === 'function') {
             return sprite.cssStyle(
-                icon.name, 
-                icon.scale || 1, 
-                icon.bgColor, 
-                icon.circleScale, 
+                icon.name,
+                icon.scale || 1,
+                icon.bgColor,
+                icon.circleScale,
                 icon.glyphRatio
             );
         }
         return null;
     }
 
-      _setupIcon(el, iconStyle, icon) {
-        let iconEl = el.querySelector('.krb-icon');
+    _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
+        let iconEl = el.querySelector('.krb-icon') as HTMLSpanElement | null;
         if (!iconEl) {
             iconEl = document.createElement('span');
             iconEl.className = 'krb-icon';
             el.insertBefore(iconEl, el.firstChild);
         }
         const off = (icon && icon.offset) || [0, 0];
-        
+
         if (iconStyle._inner) {
-            // Есть фон - настраиваем внешний круг
             Object.assign(iconEl.style, {
                 display: iconStyle.display,
                 alignItems: iconStyle.alignItems,
@@ -207,17 +354,14 @@ export class TextManager {
                 transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
             });
 
-            // Настраиваем внутреннюю иконку (она обрежет соседние иконки)
-            let innerEl = iconEl.querySelector('.krb-icon-inner');
+            let innerEl = iconEl.querySelector('.krb-icon-inner') as HTMLSpanElement | null;
             if (!innerEl) {
                 innerEl = document.createElement('span');
                 innerEl.className = 'krb-icon-inner';
                 iconEl.appendChild(innerEl);
             }
             Object.assign(innerEl.style, iconStyle._inner);
-            
         } else {
-            // Старое поведение (без фона)
             const innerEl = iconEl.querySelector('.krb-icon-inner');
             if (innerEl) innerEl.remove();
 
@@ -235,35 +379,34 @@ export class TextManager {
         }
     }
 
-    _removeIcon(el) {
+    _removeIcon(el: HTMLDivElement): void {
         const iconEl = el.querySelector('.krb-icon');
         if (iconEl) iconEl.remove();
     }
 
-    addLabel(source, stableId = null, owner = null) {
+    addLabel(source: LabelSource, stableId: any = null, owner: any = null): Label {
         if (stableId != null) {
             const existing = this._labelsById.get(stableId);
             if (existing) {
                 existing._vectorOwner = owner;
-                // Если подпись возвращается в активный набор — снимаем stale-метку.
-                if (existing._staleAt != null) {
-                    existing._staleAt = null;
-                }
+                if (existing._staleAt != null) existing._staleAt = null;
                 this._updateLabelSource(existing, source);
                 this._dirty = true;
                 return existing;
             }
         }
 
-        const type = source.getLabelType ? source.getLabelType() : 'point';
+        const type: LabelType = source.getLabelType ? source.getLabelType() : 'point';
         const isCurved = type === 'line-curved';
 
-        // NEW: иконки поддерживаем только для point/line.
         const icon = (!isCurved && source.getIcon) ? source.getIcon() : null;
         const iconStyle = icon ? this._resolveIconStyle(icon) : null;
         const hasIcon = !!iconStyle;
 
-        const el = document.createElement('div');
+        const initialText = source.getText ? source.getText() : '';
+        const initialStyle = source.getTextStyle ? source.getTextStyle() : {};
+
+        const el = document.createElement('div') as HTMLDivElement & { __lastTransform?: string };
         el.className = 'krb-text-label';
         Object.assign(el.style, {
             position: 'absolute',
@@ -279,57 +422,52 @@ export class TextManager {
             transformOrigin: '0 0',
             left: '0',
             top: '0',
-            willChange: 'transform'
+            willChange: 'transform',
         });
-if (hasIcon) {
-    const pos = source.getLabelPosition ? source.getLabelPosition() : 'right';
 
-    let flexDirection: string;
-    if (pos === 'left')        flexDirection = 'row-reverse';
-    else if (pos === 'top')    flexDirection = 'column-reverse';
-    else if (pos === 'bottom') flexDirection = 'column';
-    else                       flexDirection = 'row';
+        if (hasIcon) {
+            const pos: IconPosition = source.getLabelPosition ? source.getLabelPosition() : 'right';
+            let flexDirection: string;
+            if (pos === 'left')        flexDirection = 'row-reverse';
+            else if (pos === 'top')    flexDirection = 'column-reverse';
+            else if (pos === 'bottom') flexDirection = 'column';
+            else                       flexDirection = 'row';
 
-    Object.assign(el.style, {
-        display: 'inline-flex',
-        flexDirection,
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '4px',
-    });
-    if (pos === 'top' || pos === 'bottom') {
-        el.style.textAlign = 'center';
-    }
+            Object.assign(el.style, {
+                display: 'inline-flex',
+                flexDirection,
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+            });
+            if (pos === 'top' || pos === 'bottom') {
+                el.style.textAlign = 'center';
+            }
 
-    // ── ЭТО БЫЛО ПОТЕРЯНО ───────────────────────────────────────
-    this._setupIcon(el, iconStyle, icon);
-    const txt = source.getText ? source.getText() : '';
-    if (txt) {
-        const textSpan = document.createElement('span');
-        textSpan.className = 'krb-text';
-        textSpan.style.whiteSpace = type === 'point' ? 'pre-line' : 'nowrap';
-        textSpan.textContent = type === 'point'
-            ? this._wrapPointText(txt, el.style.fontSize)
-            : txt;
-        el.appendChild(textSpan);
-    }
-    // ────────────────────────────────────────────────────────────
-} else if (type === 'point') {
-    el.style.whiteSpace = 'pre-line';
-    el.textContent = this._wrapPointText(source.getText(), el.style.fontSize);
-} else if (!isCurved) {
-    el.textContent = source.getText();
-}
-        const styleObj = source.getTextStyle ? source.getTextStyle() : {};
-        Object.assign(el.style, styleObj);
+            this._setupIcon(el, iconStyle, icon);
+            if (initialText) {
+                const textSpan = document.createElement('span');
+                textSpan.className = 'krb-text';
+                textSpan.style.whiteSpace = type === 'point' ? 'pre-line' : 'nowrap';
+                textSpan.textContent = type === 'point'
+                    ? this._wrapPointText(initialText, el.style.fontSize)
+                    : initialText;
+                el.appendChild(textSpan);
+            }
+        } else if (type === 'point') {
+            el.style.whiteSpace = 'pre-line';
+            el.textContent = this._wrapPointText(initialText, el.style.fontSize);
+        } else if (!isCurved) {
+            el.textContent = initialText;
+        }
 
+        Object.assign(el.style, initialStyle);
         el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
+        this.pane!.appendChild(el);
 
-        this.pane.appendChild(el);
-
-        const label = {
+        const label: Label = {
             source,
             element: el,
             stableId,
@@ -339,7 +477,7 @@ if (hasIcon) {
             hiddenByPriority: true,
             priority: source.getPriority ? source.getPriority() : 0,
             allowOverflow: source.getAllowOverflow ? source.getAllowOverflow() : false,
-            _fontSize: parseFloat(styleObj.fontSize) || 12,
+            _fontSize: parseFloat(initialStyle.fontSize as string) || 12,
             _bbox: null,
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
@@ -348,15 +486,18 @@ if (hasIcon) {
             _pendingChosenT: null,
             _pendingChosenIsFlipped: false,
             _staleAt: null,
-            _lastAnchor: null as { x: number; y: number } | null,
+            _lastAnchor: null,
             _display: hasIcon ? 'inline-flex' : 'block',
             _hasIcon: hasIcon,
             _icon: icon || null,
-                _iconCenterX: null as number | null,  
-    _iconCenterY: null as number | null, 
+            _iconCenterX: null,
+            _iconCenterY: null,
+            _vectorOwner: owner,
+            _hideTimeout: null,
+            _cachedText: initialText,
+            _cachedStyle: { ...initialStyle },
         };
 
-        label._vectorOwner = owner;
         this.labels.push(label);
         if (stableId != null) this._labelsById.set(stableId, label);
 
@@ -366,45 +507,64 @@ if (hasIcon) {
         return label;
     }
 
-    _updateLabelSource(label, newSource) {
-        const oldSource = label.source;
-        const el = label.element;
-        const newType = newSource.getLabelType ? newSource.getLabelType() : 'point';
+    /**
+     * NEW: обновляет текст и/или стиль подписи без пересоздания DOM.
+     * Работает корректно и при `newSource === label.source` (случай
+     * `Marker.setTitle`), потому что старые значения берутся из кэша
+     * `label._cachedText/_cachedStyle`, а не запрашиваются повторно
+     * у source.
+     */
+    updateLabel(label: Label): void {
+        if (!label) return;
+        this._updateLabelSource(label, label.source);
+        this._dirty = true;
+    }
 
-        const oldText = oldSource && oldSource.getText ? oldSource.getText() : '';
+    _updateLabelSource(label: Label, newSource: LabelSource): void {
+        const prevSource = label.source;
+        const el = label.element;
+        const newType: LabelType = newSource.getLabelType ? newSource.getLabelType() : 'point';
+
+        // NEW: сравниваем с кэшем, а не с prevSource — иначе in-place
+        // мутация источника (Marker.setTitle) не видна.
+        const oldText = label._cachedText;
         const newText = newSource.getText ? newSource.getText() : '';
-        const oldStyle = oldSource && oldSource.getTextStyle ? oldSource.getTextStyle() : {};
+        const oldStyle = label._cachedStyle;
         const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
 
-label.source = newSource;
-if (oldSource !== newSource && newType !== 'line-curved') {
-    label._chosenT = null;
-    label._chosenIsFlipped = false;
-}
+        label.source = newSource;
+        label._cachedText = newText;
+        label._cachedStyle = { ...newStyle };
+
+        if (prevSource !== newSource && newType !== 'line-curved') {
+            label._chosenT = null;
+            label._chosenIsFlipped = false;
+        }
 
         Object.assign(el.style, newStyle);
 
         if (newType === 'line-curved') {
-            label._fontSize = parseFloat(newStyle.fontSize) || 12;
+            label._fontSize = parseFloat(newStyle.fontSize as string) || 12;
             return;
         }
 
         const textChanged = oldText !== newText;
         const fontChanged = [
             'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
-            'letterSpacing', 'lineHeight', 'textTransform'
+            'letterSpacing', 'lineHeight', 'textTransform',
         ].some(key => oldStyle[key] !== newStyle[key]);
 
-if (label._hasIcon) {
-    const pos = newSource.getLabelPosition ? newSource.getLabelPosition() : 'right';
-    const dir = pos === 'left'        ? 'row-reverse'
-              : pos === 'top'         ? 'column-reverse'
-              : pos === 'bottom'      ? 'column'
-              : 'row';
-    el.style.flexDirection = dir;
-    el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
+        if (label._hasIcon) {
+            const pos: IconPosition = newSource.getLabelPosition ? newSource.getLabelPosition() : 'right';
+            const dir = pos === 'left'  ? 'row-reverse'
+                      : pos === 'top'   ? 'column-reverse'
+                      : pos === 'bottom' ? 'column'
+                      : 'row';
+            el.style.flexDirection = dir;
+            el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
+
             if (textChanged || fontChanged) {
-                let textSpan = el.querySelector('.krb-text');
+                let textSpan = el.querySelector('.krb-text') as HTMLSpanElement | null;
                 if (newText) {
                     if (!textSpan) {
                         textSpan = document.createElement('span');
@@ -424,7 +584,6 @@ if (label._hasIcon) {
             return;
         }
 
-        // Обычный (без иконки) путь — как раньше.
         if (textChanged || (newType === 'point' && fontChanged)) {
             if (newType === 'point') {
                 el.style.whiteSpace = 'pre-line';
@@ -440,7 +599,7 @@ if (label._hasIcon) {
         }
     }
 
-    removeLabel(label) {
+    removeLabel(label: Label): void {
         if (!label) return;
         if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
         label._staleAt = null;
@@ -458,16 +617,12 @@ if (label._hasIcon) {
         this._dirty = true;
     }
 
-    /**
-     * Удалить подписи, которых нет в activeIds.
-     * (Поведение не изменилось.)
-     */
-    pruneStaleLabels(activeIds, owner = null, opts = {}) {
+    pruneStaleLabels(activeIds: Set<any> | null, owner: any = null, opts: PruneStaleOptions = {}): void {
         if (!activeIds) return;
         const fade = opts.fade === true;
         const graceMs = opts.graceMs ?? 10;
         const now = performance.now();
-        const toRemove = [];
+        const toRemove: Label[] = [];
         let changed = false;
 
         for (const [id, label] of this._labelsById) {
@@ -501,11 +656,11 @@ if (label._hasIcon) {
         if (changed || toRemove.length > 0) this._dirty = true;
     }
 
-    _wrapPointText(text, fontSize) {
+    _wrapPointText(text: string, fontSize: string | number): string {
         if (!text || text.indexOf(' ') === -1) return text;
         const words = text.split(/\s+/).filter(w => w.length > 0);
         if (words.length <= 1) return text;
-        const fontPx = parseFloat(fontSize) || 12;
+        const fontPx = parseFloat(String(fontSize)) || 12;
         const charWidth = fontPx * 0.6;
         const spaceWidth = fontPx * 0.3;
         const wordWidths = words.map(w => w.length * charWidth);
@@ -517,8 +672,8 @@ if (label._hasIcon) {
         let targetLines = Math.max(2, Math.round(Math.sqrt(totalSingleLineWidth / lineHeight)));
         targetLines = Math.min(targetLines, 5);
         const targetLineWidth = totalSingleLineWidth / targetLines;
-        const lines = [];
-        let currentLine = [];
+        const lines: string[] = [];
+        let currentLine: string[] = [];
         let currentWidth = 0;
         for (let i = 0; i < words.length; i++) {
             const word = words[i], w = wordWidths[i];
@@ -539,7 +694,7 @@ if (label._hasIcon) {
         return lines.join('\n');
     }
 
-    _scheduleMeasure(label) {
+    _scheduleMeasure(label: Label): void {
         if (label._queuedForMeasure) return;
         label._queuedForMeasure = true;
         this._measureQueue.push(label);
@@ -550,53 +705,50 @@ if (label._hasIcon) {
         }
     }
 
-    _flushMeasurements() {
+    _flushMeasurements(): void {
         if (!this._measureScheduled) return;
         this._measureScheduled = false;
 
         const queue = this._measureQueue;
         this._measureQueue = [];
-        const states = [];
+        const states: Array<{ label: Label; el: HTMLDivElement; display: string; visibility: string }> = [];
 
         try {
-            // Сначала все записи в DOM, затем все измерения.
             for (const label of queue) {
                 label._queuedForMeasure = false;
                 const el = label.element;
                 if (!el || el.parentNode !== this.pane) continue;
 
                 states.push({ label, el, display: el.style.display, visibility: el.style.visibility });
-                // NEW: сохраняем правильный display (block или inline-flex).
-                // Раньше здесь жёстко ставился 'block', что сломало бы
-                // измерение flex-контейнера с gap.
                 if (el.style.display === 'none' || !el.style.display) {
                     el.style.display = label._display || 'block';
                 }
                 el.style.visibility = 'hidden';
             }
-for (const { label, el } of states) {
-    label.width  = el.offsetWidth;
-    label.height = el.offsetHeight;
-    label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
 
-    if (label._hasIcon) {
-        const iconEl = el.querySelector('.krb-icon');
-        if (iconEl) {
-            const savedTransform = el.style.transform;
-            el.style.transform = 'none';            // чтобы rect'ы были в layout-координатах
-            try {
-                const labelRect = el.getBoundingClientRect();
-                const iconRect  = iconEl.getBoundingClientRect();
-                label._iconCenterX = (iconRect.left + iconRect.right)  * 0.5 - labelRect.left;
-                label._iconCenterY = (iconRect.top  + iconRect.bottom) * 0.5 - labelRect.top;
-            } finally {
-                el.style.transform = savedTransform;
+            for (const { label, el } of states) {
+                label.width = el.offsetWidth;
+                label.height = el.offsetHeight;
+                label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
+
+                if (label._hasIcon) {
+                    const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
+                    if (iconEl) {
+                        const savedTransform = el.style.transform;
+                        el.style.transform = 'none';
+                        try {
+                            const labelRect = el.getBoundingClientRect();
+                            const iconRect = iconEl.getBoundingClientRect();
+                            label._iconCenterX = (iconRect.left + iconRect.right) * 0.5 - labelRect.left;
+                            label._iconCenterY = (iconRect.top + iconRect.bottom) * 0.5 - labelRect.top;
+                        } finally {
+                            el.style.transform = savedTransform;
+                        }
+                    }
+                }
+
+                label._needsMeasure = false;
             }
-        }
-    }
-
-    label._needsMeasure = false;
-}
         } finally {
             for (const { el, display, visibility } of states) {
                 el.style.display = display;
@@ -607,12 +759,11 @@ for (const { label, el } of states) {
         if (states.length) this._dirty = true;
     }
 
-    _setLabelVisible(label, visible) {
+    _setLabelVisible(label: Label, visible: boolean): void {
         const el = label.element;
         if (visible) {
             if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
             if (el.style.display === 'none') {
-                // NEW: восстанавливаем правильный display (block или inline-flex).
                 el.style.display = label._display || 'block';
                 el.style.opacity = '0';
                 void el.offsetWidth;
@@ -631,7 +782,7 @@ for (const { label, el } of states) {
         }
     }
 
-    _hideAllLineLabels() {
+    _hideAllLineLabels(): void {
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
             if (label.source.getLabelType() !== 'line-curved') continue;
@@ -650,56 +801,58 @@ for (const { label, el } of states) {
         }
     }
 
-_computeAnchor(label, rotationDeg) {
-    const src = label.source;
-    if (label._needsMeasure) this._flushMeasurements();
-    const w = label.width;
-    const h = label.height;
-    const [offX, offY] = src.getTitleOffset ? src.getTitleOffset() : [0, 0];
+    _computeAnchor(label: Label, rotationDeg: number): {
+        dx: number; dy: number; offX: number; offY: number;
+        w: number; h: number; cos: number; sin: number;
+    } {
+        const src = label.source;
+        if (label._needsMeasure) this._flushMeasurements();
+        const w = label.width;
+        const h = label.height;
+        const offset = src.getTitleOffset ? src.getTitleOffset() : null;
+        const offX = offset ? offset[0] : 0;
+        const offY = offset ? offset[1] : 0;
 
-    const rad = rotationDeg * Math.PI / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
+        const rad = rotationDeg * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
 
-    // NEW: плашки с иконкой якорятся по центру иконки,
-    // чтобы мировая точка приходилась именно на krb-icon.
-    if (label._hasIcon && label._iconCenterX != null && label._iconCenterY != null) {
-        const anchorX = label._iconCenterX;
-        const anchorY = label._iconCenterY;
+        if (label._hasIcon && label._iconCenterX != null && label._iconCenterY != null) {
+            const anchorX = label._iconCenterX;
+            const anchorY = label._iconCenterY;
+            const dx = -anchorX * cos + anchorY * sin;
+            const dy = -anchorX * sin - anchorY * cos;
+            return { dx, dy, offX, offY, w, h, cos, sin };
+        }
+
+        const align: TitleAlignH = src.getTitleAlign ? src.getTitleAlign() : 'center';
+        const vAlign: TitleAlignV = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+        let anchorX: number;
+        if (align === 'left')       anchorX = 0;
+        else if (align === 'right') anchorX = w;
+        else                        anchorX = w / 2;
+        let anchorY: number;
+        if (vAlign === 'top')         anchorY = 0;
+        else if (vAlign === 'bottom') anchorY = h;
+        else                          anchorY = h / 2;
+
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
         return { dx, dy, offX, offY, w, h, cos, sin };
     }
 
-    // Старое поведение для текстовых плашек без иконки.
-    const align  = src.getTitleAlign ? src.getTitleAlign() : 'center';
-    const vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
-    let anchorX;
-    if (align === 'left')       anchorX = 0;
-    else if (align === 'right') anchorX = w;
-    else                        anchorX = w / 2;
-    let anchorY;
-    if (vAlign === 'top')       anchorY = 0;
-    else if (vAlign === 'bottom') anchorY = h;
-    else                          anchorY = h / 2;
-
-    const dx = -anchorX * cos + anchorY * sin;
-    const dy = -anchorX * sin - anchorY * cos;
-    return { dx, dy, offX, offY, w, h, cos, sin };
-}
-
-    _getLabelCorners(label, tOverride = null) {
+    _getLabelCorners(label: Label, tOverride: number | null = null): LabelScreenPoint[] | null {
         const src = label.source;
         const isLine = src.getLabelType() === 'line';
-        let scrX, scrY, rotation = 0;
+        let scrX: number, scrY: number, rotation = 0;
         if (isLine) {
             const t = tOverride !== null ? tOverride : label.t;
-            const pos = src.getScreenPositionAt(t);
+            const pos = src.getScreenPositionAt!(t);
             if (!pos) return null;
             scrX = pos.x; scrY = pos.y;
-            rotation = src.getScreenAngleAt(t);
+            rotation = src.getScreenAngleAt!(t);
         } else {
-            const pos = src.getScreenPosition();
+            const pos = src.getScreenPosition!();
             if (!pos) return null;
             scrX = pos.x; scrY = pos.y;
         }
@@ -707,11 +860,11 @@ _computeAnchor(label, rotationDeg) {
         const { dx, dy, offX, offY, w, h, cos, sin } = a;
         const top = scrY + dy + offY;
         const left = scrX + dx + offX;
-        const corners = [
+        const corners: LabelScreenPoint[] = [
             { x: left,      y: top },
             { x: left + w,  y: top },
             { x: left + w,  y: top + h },
-            { x: left,      y: top + h }
+            { x: left,      y: top + h },
         ];
         if (rotation !== 0) {
             const cx = left, cy = top;
@@ -724,7 +877,7 @@ _computeAnchor(label, rotationDeg) {
         return corners;
     }
 
-    _getBBox(corners) {
+    _getBBox(corners: LabelScreenPoint[]): LabelBBox {
         let minX = Infinity, minY = Infinity;
         let maxX = -Infinity, maxY = -Infinity;
         for (const c of corners) {
@@ -736,11 +889,11 @@ _computeAnchor(label, rotationDeg) {
         return { minX, minY, maxX, maxY };
     }
 
-    _bboxOverlap(a, b) {
+    _bboxOverlap(a: LabelBBox, b: LabelBBox): boolean {
         return !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY);
     }
 
-    _projectPolygon(axis, poly) {
+    _projectPolygon(axis: LabelScreenPoint, poly: LabelScreenPoint[]): { min: number; max: number } {
         let min = axis.x * poly[0].x + axis.y * poly[0].y;
         let max = min;
         for (let i = 1; i < poly.length; i++) {
@@ -751,7 +904,7 @@ _computeAnchor(label, rotationDeg) {
         return { min, max };
     }
 
-    _rectsIntersect(rectA, rectB) {
+    _rectsIntersect(rectA: LabelScreenPoint[], rectB: LabelScreenPoint[]): boolean {
         if (!rectA || !rectB) return false;
         const polys = [rectA, rectB];
         for (const poly of polys) {
@@ -768,7 +921,7 @@ _computeAnchor(label, rotationDeg) {
         return true;
     }
 
-    _perCharOverlap(a, b) {
+    _perCharOverlap(a: LabelBBox[], b: LabelBBox[]): boolean {
         for (let i = 0; i < a.length; i++) {
             const ca = a[i];
             for (let j = 0; j < b.length; j++) {
@@ -782,7 +935,7 @@ _computeAnchor(label, rotationDeg) {
         return false;
     }
 
-    _collidesWithGrid(bbox, selfLabel = null) {
+    _collidesWithGrid(bbox: LabelBBox, selfLabel: Label | null = null): boolean {
         const others = this._gridIndex.query(bbox);
         for (let i = 0; i < others.length; i++) {
             const other = others[i];
@@ -799,7 +952,7 @@ _computeAnchor(label, rotationDeg) {
         return false;
     }
 
-    _renderLineChars(label, charLayout) {
+    _renderLineChars(label: Label, charLayout: CharLayout[]): void {
         const el = label.element;
         const need = charLayout.length;
         while (el.children.length < need) {
@@ -811,12 +964,12 @@ _computeAnchor(label, rotationDeg) {
             el.appendChild(span);
         }
         while (el.children.length > need) {
-            el.removeChild(el.lastChild);
+            el.removeChild(el.lastChild!);
         }
         const fs = label._fontSize || 12;
         for (let i = 0; i < need; i++) {
             const c = charLayout[i];
-            const span = el.children[i];
+            const span = el.children[i] as HTMLSpanElement;
             if (span.textContent !== c.char) span.textContent = c.char;
             const tx = c.x - c.w * 0.5;
             const ty = c.y - fs * 0.5;
@@ -829,8 +982,8 @@ _computeAnchor(label, rotationDeg) {
     // Дебаг
     // ═══════════════════════════════════════════════════════════════
 
-    debugLabels() {
-        console.log("%c=== LINE LABELS DEBUG ===", "color: #00ff00; font-weight: bold; font-size: 14px");
+    debugLabels(): void {
+        console.log('%c=== LINE LABELS DEBUG ===', 'color: #00ff00; font-weight: bold; font-size: 14px');
         const zoom = this.map.continuousZoom;
         let visibleCount = 0;
         let hiddenCount = 0;
@@ -842,50 +995,55 @@ _computeAnchor(label, rotationDeg) {
             const text = src.getText();
             const zb = src.getTextZoomBounds();
 
-            let status = "UNKNOWN";
-            let reason = "";
+            let status = 'UNKNOWN';
+            let reason = '';
 
             if (zoom < zb.min || zoom > zb.max) {
-                status = "HIDDEN";
+                status = 'HIDDEN';
                 reason = `Zoom ${zoom.toFixed(2)} out of bounds [${zb.min}, ${zb.max}]`;
             } else if (!src.isVisible()) {
-                status = "HIDDEN";
-                reason = "Source isVisible() false";
+                status = 'HIDDEN';
+                reason = 'Source isVisible() false';
             } else if (label.hiddenByPriority) {
-                status = "HIDDEN";
-                reason = label._chosenT == null ? "No valid candidate found (collision or filters)" : "Collision with other label";
+                status = 'HIDDEN';
+                reason = label._chosenT == null
+                    ? 'No valid candidate found (collision or filters)'
+                    : 'Collision with other label';
             } else {
-                status = "VISIBLE";
+                status = 'VISIBLE';
             }
 
-            if (status === "VISIBLE") visibleCount++;
+            if (status === 'VISIBLE') visibleCount++;
             else hiddenCount++;
 
-            const color = status === "VISIBLE" ? "color: #00ff00" : "color: #ffaa00";
+            const color = status === 'VISIBLE' ? 'color: #00ff00' : 'color: #ffaa00';
             console.group(`%c[${status}] "${text}" — ${reason}`, color);
 
-            const data = src._getScreenData();
+            const data = src._getScreenData?.();
             if (data) {
                 console.log(`tMidVisible: ${data.tMidVisible.toFixed(2)}`);
-                console.log(`Diagnose tMidVisible:`, src.diagnose(data.tMidVisible));
-                if (label._chosenT != null) {
-                    console.log(`Diagnose chosenT (${label._chosenT.toFixed(2)}):`, src.diagnose(label._chosenT));
+                if ((src as any).diagnose) {
+                    console.log('Diagnose tMidVisible:', (src as any).diagnose(data.tMidVisible));
+                    if (label._chosenT != null) {
+                        console.log(`Diagnose chosenT (${label._chosenT.toFixed(2)}):`,
+                            (src as any).diagnose(label._chosenT));
+                    }
                 }
             } else {
-                console.log("getScreenData() returned null (line invisible or fully behind camera)");
+                console.log('getScreenData() returned null (line invisible or fully behind camera)');
             }
             console.groupEnd();
         }
 
-        console.log(`%cSummary: ${visibleCount} visible, ${hiddenCount} hidden.`, "font-weight: bold;");
-        console.log("If a line is missing entirely from this list, it was rejected by VectorTileLayer._collectLabelCandidates.");
+        console.log(`%cSummary: ${visibleCount} visible, ${hiddenCount} hidden.`, 'font-weight: bold;');
+        console.log('If a line is missing entirely from this list, it was rejected by VectorTileLayer._collectLabelCandidates.');
     }
 
     // ═══════════════════════════════════════════════════════════════
     // Главный цикл
     // ═══════════════════════════════════════════════════════════════
 
-    update() {
+    update(): void {
         if (this._measureQueue.length > 0) {
             if (!this._measureScheduled) this._measureScheduled = true;
             this._flushMeasurements();
@@ -909,25 +1067,17 @@ _computeAnchor(label, rotationDeg) {
         const dZoom = Math.abs(this._stableRefZoom - zoom);
         const dQ = this._quatDeltaSq(this._stableRefQ, q);
 
-        const moved =
-            dPos > 0.01 ||
-            dWp > 1 ||
-            dZoom > 0.01 ||
-            dQ > 1e-5;
-
+        const moved = dPos > 0.01 || dWp > 1 || dZoom > 0.01 || dQ > 1e-5;
         const zoomChanged = dZoom > 0.01;
-
         const wasStable = this._wasStable;
 
-
-// в update():
-if (moved !== this._lastMoved) {
-    const wc = moved ? 'transform' : 'auto';
-    for (const lbl of this.labels) {
-        if (lbl.element) lbl.element.style.willChange = wc;
-    }
-    this._lastMoved = moved;
-}
+        if (moved !== this._lastMoved) {
+            const wc = moved ? 'transform' : 'auto';
+            for (const lbl of this.labels) {
+                if (lbl.element) lbl.element.style.willChange = wc;
+            }
+            this._lastMoved = moved;
+        }
 
         if (moved) {
             if (zoomChanged && (this._stableFrameCount > 0 || wasStable)) {
@@ -945,9 +1095,7 @@ if (moved !== this._lastMoved) {
         const isStable = this._stableFrameCount >= STABLE_FRAMES;
         this._wasStable = isStable;
 
-        if (isStable && !wasStable) {
-            this._dirty = true;
-        }
+        if (isStable && !wasStable) this._dirty = true;
 
         if (this._dirty) {
             this._updateVisibility(zoom, isStable);
@@ -957,13 +1105,13 @@ if (moved !== this._lastMoved) {
         this._applyTransforms();
     }
 
-    _quatDeltaSq(a, b) {
+    _quatDeltaSq(a: any, b: any): number {
         const dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
         return 2 * (1 - Math.abs(dot));
     }
 
-    _updateVisibility(zoom, placeLines) {
-        const visibleLabels = [];
+    _updateVisibility(zoom: number, placeLines: boolean): void {
+        const visibleLabels: Label[] = [];
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
             const src = label.source;
@@ -984,24 +1132,26 @@ if (moved !== this._lastMoved) {
             label.hiddenByPriority = false;
 
             if (type === 'line') {
-                const iv = src.getVisibleInterval();
+                const iv = src.getVisibleInterval!();
                 if (!iv) { label.hiddenByPriority = true; continue; }
-                label.t = src.getLabelParameter();
+                label.t = src.getLabelParameter!();
                 if (!label.allowOverflow) {
                     if (label.t < iv.min || label.t > iv.max) {
                         label.t = Math.max(iv.min, Math.min(iv.max, label.t));
-                        src.setLabelParameter(label.t);
+                        src.setLabelParameter!(label.t);
                     }
                 } else {
                     label.t = Math.max(0, Math.min(1, label.t));
                 }
-                label.rect = this._getLabelCorners(label);
-                if (!label.rect) { label.hiddenByPriority = true; continue; }
+                const rect = this._getLabelCorners(label);
+                if (!rect) { label.hiddenByPriority = true; continue; }
+                label.rect = rect;
             } else {
-                const pos = src.getScreenPosition();
+                const pos = src.getScreenPosition!();
                 if (!pos) { label.hiddenByPriority = true; continue; }
-                label.rect = this._getLabelCorners(label);
-                if (!label.rect) { label.hiddenByPriority = true; continue; }
+                const rect = this._getLabelCorners(label);
+                if (!rect) { label.hiddenByPriority = true; continue; }
+                label.rect = rect;
             }
             visibleLabels.push(label);
         }
@@ -1017,7 +1167,7 @@ if (moved !== this._lastMoved) {
         this._gridIndex.clear();
         for (let i = 0; i < sorted.length; i++) {
             const lbl = sorted[i];
-            const bbox = this._getBBox(lbl.rect);
+            const bbox = this._getBBox(lbl.rect!);
             lbl._bbox = bbox;
 
             const others = this._gridIndex.query(bbox);
@@ -1025,7 +1175,7 @@ if (moved !== this._lastMoved) {
             for (let j = 0; j < others.length; j++) {
                 const other = others[j];
                 if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
-                if (this._rectsIntersect(lbl.rect, other.rect)) { overlaps = true; break; }
+                if (this._rectsIntersect(lbl.rect!, other.rect!)) { overlaps = true; break; }
             }
             if (!overlaps) {
                 this._gridIndex.insert(bbox, lbl);
@@ -1035,11 +1185,9 @@ if (moved !== this._lastMoved) {
             }
         }
 
-        if (placeLines) {
-            this._placeLineLabels(zoom);
-        }
+        if (placeLines) this._placeLineLabels(zoom);
 
-        const visibleSet = new Set(sorted);
+        const visibleSet = new Set<Label>(sorted);
         if (placeLines) {
             for (let i = 0; i < this.labels.length; i++) {
                 const lbl = this.labels[i];
@@ -1063,17 +1211,15 @@ if (moved !== this._lastMoved) {
                 }
                 continue;
             }
-            if (isCurved && lbl._pendingChosenT != null) {
-                continue;
-            }
+            if (isCurved && lbl._pendingChosenT != null) continue;
 
             const shouldBeVisible = visibleSet.has(lbl) && !lbl.hiddenByPriority;
             this._setLabelVisible(lbl, shouldBeVisible);
         }
     }
 
-    _placeLineLabels(zoom) {
-        const lineLabels = [];
+    _placeLineLabels(zoom: number): void {
+        const lineLabels: Label[] = [];
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
             const src = label.source;
@@ -1092,16 +1238,14 @@ if (moved !== this._lastMoved) {
             const lbl = lineLabels[i];
             const src = lbl.source;
 
-            let chosen = null;
+            let chosen: LineCandidate | null = null;
             if (lbl._chosenT != null) {
-                const keep = src.getCandidateAtT(lbl._chosenT);
-                if (keep && !this._collidesWithGrid(keep.bbox, lbl)) {
-                    chosen = keep;
-                }
+                const keep = src.getCandidateAtT!(lbl._chosenT);
+                if (keep && !this._collidesWithGrid(keep.bbox, lbl)) chosen = keep;
             }
 
             if (!chosen) {
-                const candidates = src.getCandidates();
+                const candidates = src.getCandidates!();
                 for (let j = 0; j < candidates.length; j++) {
                     const c = candidates[j];
                     if (!this._collidesWithGrid(c.bbox, lbl)) { chosen = c; break; }
@@ -1131,22 +1275,22 @@ if (moved !== this._lastMoved) {
                         lbl._pendingChosenT = null;
                         lbl._pendingChosenIsFlipped = false;
                     } else if (sameAsPending) {
-                        // Уже ждём этого места — ничего не меняем.
+                        // уже ждём
                     } else {
                         lbl._pendingChosenT = chosen.t;
                         lbl._pendingChosenIsFlipped = chosen.isFlipped;
                     }
                 }
             } else {
- lbl._pendingChosenT = null;
-    lbl._pendingChosenIsFlipped = false;
-    lbl._bbox = null;
-    lbl.hiddenByPriority = true;
+                lbl._pendingChosenT = null;
+                lbl._pendingChosenIsFlipped = false;
+                lbl._bbox = null;
+                lbl.hiddenByPriority = true;
             }
         }
     }
 
-    _applyTransforms() {
+    _applyTransforms(): void {
         const zoom = this.map.continuousZoom;
 
         for (let i = 0; i < this.labels.length; i++) {
@@ -1156,106 +1300,94 @@ if (moved !== this._lastMoved) {
             const isCurved = type === 'line-curved';
 
             const zb = src.getTextZoomBounds();
-            const sourceVisible =
-                src.isVisible() &&
-                zoom >= zb.min && zoom <= zb.max;
+            const sourceVisible = src.isVisible() && zoom >= zb.min && zoom <= zb.max;
             const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
-if (!shouldBeVisible) {
-    const el = label.element;
-    const isFadingOut = label._hideTimeout != null;
-    const isFullyHidden = !isFadingOut && el.style.display === 'none';
+            if (!shouldBeVisible) {
+                const el = label.element;
+                const isFadingOut = label._hideTimeout != null;
+                const isFullyHidden = !isFadingOut && el.style.display === 'none';
 
-    if (isFullyHidden) {
-        if (isCurved) {
-            label._chosenT = null;
-            label._chosenIsFlipped = false;
-            label._pendingChosenT = null;
-            label._pendingChosenIsFlipped = false;
-        }
-        continue;
-    }
+                if (isFullyHidden) {
+                    if (isCurved) {
+                        label._chosenT = null;
+                        label._chosenIsFlipped = false;
+                        label._pendingChosenT = null;
+                        label._pendingChosenIsFlipped = false;
+                    }
+                    continue;
+                }
 
-    if (!isFadingOut) {
-        if (isCurved && label._pendingChosenT != null) {
-            label._pendingChosenT = null;
-            label._pendingChosenIsFlipped = false;
-        }
-        this._setLabelVisible(label, false);
-        if (!isCurved) continue;
-    }
-}
-if (isCurved) {
-    let inTransition = false;
-
-    if (shouldBeVisible && label._pendingChosenT != null) {
-        const el = label.element;
-        const fadeOutDone =
-            label._hideTimeout == null && el.style.display === 'none';
-        if (!fadeOutDone) {
-            if (label._hideTimeout == null) {
-                this._setLabelVisible(label, false);
-            }
-            inTransition = true;
-        } else {
-            label._chosenT = label._pendingChosenT;
-            label._chosenIsFlipped = label._pendingChosenIsFlipped;
-            label._pendingChosenT = null;
-            label._pendingChosenIsFlipped = false;
-        }
-    }
-
-    if (label._chosenT == null) {
-        if (shouldBeVisible) this._setLabelVisible(label, false);
-        continue;
-    }
-
-    const charLayout = src.getCharLayoutAtT(
-        label._chosenT, label._chosenIsFlipped
-    );
-
-    if (charLayout) {
-        this._renderLineChars(label, charLayout);
-
-        const data = src._getScreenData();
-        if (data) {
-            const anchorPx = src._tToPx(data, label._chosenT);
-            const anchor = src._samplePx(data, anchorPx);
-            if (anchor) label._lastAnchor = anchor;
-        }
-
-        if (shouldBeVisible && !inTransition) {
-            this._setLabelVisible(label, true);
-        }
-        continue;
-    }
-
-    if (shouldBeVisible && !inTransition) {
-        this._setLabelVisible(label, false);
-      
-    }
-
-    if (label._lastAnchor) {
-        const data = src._getScreenData();
-        if (data) {
-            const curAnchorPx = src._tToPx(data, label._chosenT);
-            const curAnchor = src._samplePx(data, curAnchorPx);
-            if (curAnchor) {
-                const dx = curAnchor.x - label._lastAnchor.x;
-                const dy = curAnchor.y - label._lastAnchor.y;
-                if (dx !== 0 || dy !== 0) {
-                    label.element.style.transform =
-                        `translate3d(${dx}px, ${dy}px, 0)`;
+                if (!isFadingOut) {
+                    if (isCurved && label._pendingChosenT != null) {
+                        label._pendingChosenT = null;
+                        label._pendingChosenIsFlipped = false;
+                    }
+                    this._setLabelVisible(label, false);
+                    if (!isCurved) continue;
                 }
             }
-        }
-    }
-    continue;
-}
 
-            let pos;
-            if (type === 'line') pos = src.getScreenPositionAt(label.t);
-            else                  pos = src.getScreenPosition();
+            if (isCurved) {
+                let inTransition = false;
+
+                if (shouldBeVisible && label._pendingChosenT != null) {
+                    const el = label.element;
+                    const fadeOutDone = label._hideTimeout == null && el.style.display === 'none';
+                    if (!fadeOutDone) {
+                        if (label._hideTimeout == null) this._setLabelVisible(label, false);
+                        inTransition = true;
+                    } else {
+                        label._chosenT = label._pendingChosenT;
+                        label._chosenIsFlipped = label._pendingChosenIsFlipped;
+                        label._pendingChosenT = null;
+                        label._pendingChosenIsFlipped = false;
+                    }
+                }
+
+                if (label._chosenT == null) {
+                    if (shouldBeVisible) this._setLabelVisible(label, false);
+                    continue;
+                }
+
+                const charLayout = src.getCharLayoutAtT!(label._chosenT, label._chosenIsFlipped);
+
+                if (charLayout) {
+                    this._renderLineChars(label, charLayout);
+
+                    const data = src._getScreenData?.();
+                    if (data) {
+                        const anchorPx = src._tToPx!(data, label._chosenT);
+                        const anchor = src._samplePx!(data, anchorPx);
+                        if (anchor) label._lastAnchor = anchor;
+                    }
+
+                    if (shouldBeVisible && !inTransition) this._setLabelVisible(label, true);
+                    continue;
+                }
+
+                if (shouldBeVisible && !inTransition) this._setLabelVisible(label, false);
+
+                if (label._lastAnchor) {
+                    const data = src._getScreenData?.();
+                    if (data) {
+                        const curAnchorPx = src._tToPx!(data, label._chosenT);
+                        const curAnchor = src._samplePx!(data, curAnchorPx);
+                        if (curAnchor) {
+                            const dx = curAnchor.x - label._lastAnchor.x;
+                            const dy = curAnchor.y - label._lastAnchor.y;
+                            if (dx !== 0 || dy !== 0) {
+                                label.element.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let pos: LabelScreenPoint | null | undefined;
+            if (type === 'line') pos = src.getScreenPositionAt!(label.t);
+            else                 pos = src.getScreenPosition!();
 
             if (!pos) {
                 if (!shouldBeVisible) continue;
@@ -1263,23 +1395,21 @@ if (isCurved) {
                 continue;
             }
 
-            const rotation = type === 'line' ? src.getScreenAngleAt(label.t) : 0;
+            const rotation = type === 'line' ? src.getScreenAngleAt!(label.t) : 0;
             const a = this._computeAnchor(label, rotation);
             const { dx, dy, offX, offY } = a;
             const top = pos.y + dy + offY;
 
             let transform = `translate3d(${pos.x + dx + offX}px, ${top}px, 0)`;
-            if (type === 'line' && src.getPlacement() === 'along') {
+            if (type === 'line' && src.getPlacement?.() === 'along') {
                 transform += ` rotate(${rotation}deg)`;
             }
-if (label.element.__lastTransform !== transform) {
-    label.element.style.transform = transform;
-    label.element.__lastTransform = transform;
-}
-
-            if (shouldBeVisible) {
-                this._setLabelVisible(label, true);
+            if (label.element.__lastTransform !== transform) {
+                label.element.style.transform = transform;
+                label.element.__lastTransform = transform;
             }
+
+            if (shouldBeVisible) this._setLabelVisible(label, true);
         }
     }
 }

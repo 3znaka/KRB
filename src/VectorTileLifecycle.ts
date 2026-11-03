@@ -47,10 +47,27 @@ _mergeStyles(base: any, overrides: any): any {
   return out;
 },
 
-    addTo(this: any, map: any): any {
-        if (this._map) this.removeFromMap();
-        this._map = map;
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+addTo(this: any, map: any): any {
+    if (this._map) this.removeFromMap();
+    this._map = map;
+
+    // exclusion-CRS — то, в чём задан пользовательский GeoJSON для addExclusionArea.
+    // По умолчанию map.inputCRS (обычно EPSG:4326).
+    this._exclusionCrs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+
+    // tile-CRS — то, в чём задана сетка z/x/y в URL (pbf-тайлы по спеке — всегда Mercator).
+    // Приоритет: options.crs → map.tileCRS (если Mercator) → EPSG:3857.
+    this._tileCrs = this._crsCode
+        ? Projections.get(this._crsCode)
+        : (map.tileCRS?.isMercator ? map.tileCRS : Projections.get('EPSG:3857'));
+
+    if (this._tileCrs !== map.projection) {
+        console.warn(
+            `VectorTile: tile-CRS ${this._tileCrs.code} не совпадает с map-проекцией ` +
+            `${map.projection.code}. Деформация тайлов пока не поддерживается — ` +
+            `тайлы будут позиционироваться как Mercator-подобные.`
+        );
+    }
 
         if (typeof map._getDynamicLayerRenderOrder === 'function') {
             this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
@@ -99,8 +116,9 @@ _mergeStyles(base: any, overrides: any): any {
         const index = this._map._dynamicLayers.indexOf(this);
         if (index > -1) this._map._dynamicLayers.splice(index, 1);
 
-        this._map = null;
-        this._crs = null;
+this._map = null;
+this._tileCrs = null;
+this._exclusionCrs = null;
 
         this._fillMaterialCache.forEach((m: THREE.Material) => m.dispose());
         this._lineMaterialCache.forEach((m: THREE.Material) => m.dispose());
@@ -138,7 +156,7 @@ _mergeStyles(base: any, overrides: any): any {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
 
-        const crs = this._crsCode ? Projections.get(this._crsCode) : this._map.inputCRS;
+const crs = this._exclusionCrs;
         const worldPolygons: Array<Array<{ x: number; z: number }>> = [];
 
         for (const geom of geometries) {
@@ -315,24 +333,27 @@ if (this._lineMaterialsSet.size > 0) {
             }
         }
 
-        const maxMerc = map.MAX_MERCATOR;
-        const target = map.controls.target;
-        const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
-        const targetX = target.x, targetZ = target.z;
-        const unsortedNewKeys: Array<{ key: string; distSq: number }> = [];
+// Extent считается по tile-CRS, а не по map-проекции. Для Mercator-to-Mercator
+// (текущий поддерживаемый сценарий) это те же числа, но семантика корректна.
+const tileHalfX = this._tileCrs.halfExtentX;
+const tileHalfY = this._tileCrs.halfExtentY;
+const target = map.controls.target;
+const tileSizeAtZoom = (2 * tileHalfX) / (1 << sourceZoom);
+const targetX = target.x, targetZ = target.z;
+const unsortedNewKeys: Array<{ key: string; distSq: number }> = [];
 
-        visibleTiles.forEach((key: string) => {
-            if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
-            const c1 = key.indexOf(',');
-            const c2 = key.indexOf(',', c1 + 1);
-            const x = +key.slice(c1 + 1, c2);
-            const y = +key.slice(c2 + 1);
-            const centerX = x * tileSizeAtZoom - maxMerc + tileSizeAtZoom / 2;
-            const centerZ = -maxMerc + y * tileSizeAtZoom + tileSizeAtZoom / 2;
-            const dx = centerX - targetX;
-            const dz = centerZ - targetZ;
-            unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });
-        });
+visibleTiles.forEach((key: string) => {
+    if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
+    const c1 = key.indexOf(',');
+    const c2 = key.indexOf(',', c1 + 1);
+    const x = +key.slice(c1 + 1, c2);
+    const y = +key.slice(c2 + 1);
+    const centerX = x * tileSizeAtZoom - tileHalfX + tileSizeAtZoom / 2;
+    const centerZ = -tileHalfY + y * tileSizeAtZoom + tileSizeAtZoom / 2;
+    const dx = centerX - targetX;
+    const dz = centerZ - targetZ;
+    unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });
+});
 
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
         const newKeys = unsortedNewKeys.map((it) => it.key);

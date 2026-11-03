@@ -50,7 +50,19 @@ export const VectorTileLifecycleMixin = {
         if (this._map)
             this.removeFromMap();
         this._map = map;
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        // exclusion-CRS — то, в чём задан пользовательский GeoJSON для addExclusionArea.
+        // По умолчанию map.inputCRS (обычно EPSG:4326).
+        this._exclusionCrs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        // tile-CRS — то, в чём задана сетка z/x/y в URL (pbf-тайлы по спеке — всегда Mercator).
+        // Приоритет: options.crs → map.tileCRS (если Mercator) → EPSG:3857.
+        this._tileCrs = this._crsCode
+            ? Projections.get(this._crsCode)
+            : (map.tileCRS?.isMercator ? map.tileCRS : Projections.get('EPSG:3857'));
+        if (this._tileCrs !== map.projection) {
+            console.warn(`VectorTile: tile-CRS ${this._tileCrs.code} не совпадает с map-проекцией ` +
+                `${map.projection.code}. Деформация тайлов пока не поддерживается — ` +
+                `тайлы будут позиционироваться как Mercator-подобные.`);
+        }
         if (typeof map._getDynamicLayerRenderOrder === 'function') {
             this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
         }
@@ -99,7 +111,8 @@ export const VectorTileLifecycleMixin = {
         if (index > -1)
             this._map._dynamicLayers.splice(index, 1);
         this._map = null;
-        this._crs = null;
+        this._tileCrs = null;
+        this._exclusionCrs = null;
         this._fillMaterialCache.forEach((m) => m.dispose());
         this._lineMaterialCache.forEach((m) => m.dispose());
         this._lineMaterialsSet.clear();
@@ -137,7 +150,7 @@ export const VectorTileLifecycleMixin = {
         else {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
-        const crs = this._crsCode ? Projections.get(this._crsCode) : this._map.inputCRS;
+        const crs = this._exclusionCrs;
         const worldPolygons = [];
         for (const geom of geometries) {
             if (!geom)
@@ -296,9 +309,12 @@ export const VectorTileLifecycleMixin = {
                 this._labelsDirty = true;
             }
         }
-        const maxMerc = map.MAX_MERCATOR;
+        // Extent считается по tile-CRS, а не по map-проекции. Для Mercator-to-Mercator
+        // (текущий поддерживаемый сценарий) это те же числа, но семантика корректна.
+        const tileHalfX = this._tileCrs.halfExtentX;
+        const tileHalfY = this._tileCrs.halfExtentY;
         const target = map.controls.target;
-        const tileSizeAtZoom = map.WORLD_SIZE / (1 << sourceZoom);
+        const tileSizeAtZoom = (2 * tileHalfX) / (1 << sourceZoom);
         const targetX = target.x, targetZ = target.z;
         const unsortedNewKeys = [];
         visibleTiles.forEach((key) => {
@@ -308,8 +324,8 @@ export const VectorTileLifecycleMixin = {
             const c2 = key.indexOf(',', c1 + 1);
             const x = +key.slice(c1 + 1, c2);
             const y = +key.slice(c2 + 1);
-            const centerX = x * tileSizeAtZoom - maxMerc + tileSizeAtZoom / 2;
-            const centerZ = -maxMerc + y * tileSizeAtZoom + tileSizeAtZoom / 2;
+            const centerX = x * tileSizeAtZoom - tileHalfX + tileSizeAtZoom / 2;
+            const centerZ = -tileHalfY + y * tileSizeAtZoom + tileSizeAtZoom / 2;
             const dx = centerX - targetX;
             const dz = centerZ - targetZ;
             unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });

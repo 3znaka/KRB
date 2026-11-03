@@ -68,11 +68,15 @@ export class VectorTile {
     lineLabelPlacement: string;
 sprite;
     _needsDefaultSprite;
+    
     // Internals
     private _debug: boolean;
     private _styles: Record<string, any>;
-    private _crsCode: string | null;
-    private _crs: any;
+private _crsCode: string | null;
+/** CRS тайловой сетки (z/x/y в URL). Для VT всегда Mercator (pbf-спека), по умолчанию EPSG:3857. */
+private _tileCrs: any = null;
+/** CRS пользовательского GeoJSON в addExclusionArea. По умолчанию map.inputCRS (обычно EPSG:4326). */
+private _exclusionCrs: any = null;
     private _labelIdPrefix: string;
     private _themeRef: any = null;
 
@@ -152,8 +156,9 @@ sprite;
         this.url = options.url;
         const rawScripts = options.workerScripts ?? _DEFAULT_WORKER_SCRIPTS;
 
-        this._crsCode = options.crs ?? null;
-        this._crs = null;
+this._crsCode = options.crs ?? null;
+this._tileCrs = null;
+this._exclusionCrs = null;
         this._labelIdPrefix = `vt:${_nextVectorLabelLayerId++}:`;
 
         this.attributionTitle = options.attributionTitle || '';
@@ -197,8 +202,10 @@ this.depthTest = options.depthTest ?? true;
         this.maxVisibleTiles = (options as any).maxVisibleTiles ?? 50;
 this.maxTileDistanceFactor = (options as any).maxTileDistanceFactor ?? 4;
 
-this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));
-this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibleTiles * 2);
+this._tileDataCacheMaxSize = options.tileDataCacheMaxSize
+    ?? Math.max(200, this.maxVisibleTiles * 2);
+this._groupCacheMaxSize = options.groupCacheMaxSize
+    ?? Math.max(100, Math.ceil(this.maxVisibleTiles * 1.5));
 
         this.maxTextLabels = options.maxTextLabels ?? 150;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;

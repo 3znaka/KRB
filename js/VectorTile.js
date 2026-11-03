@@ -54,7 +54,10 @@ export class VectorTile {
     _debug;
     _styles;
     _crsCode;
-    _crs;
+    /** CRS тайловой сетки (z/x/y в URL). Для VT всегда Mercator (pbf-спека), по умолчанию EPSG:3857. */
+    _tileCrs = null;
+    /** CRS пользовательского GeoJSON в addExclusionArea. По умолчанию map.inputCRS (обычно EPSG:4326). */
+    _exclusionCrs = null;
     _labelIdPrefix;
     _themeRef = null;
     _tileGroupRenderOrder;
@@ -120,7 +123,8 @@ export class VectorTile {
         this.url = options.url;
         const rawScripts = options.workerScripts ?? _DEFAULT_WORKER_SCRIPTS;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._tileCrs = null;
+        this._exclusionCrs = null;
         this._labelIdPrefix = `vt:${_nextVectorLabelLayerId++}:`;
         this.attributionTitle = options.attributionTitle || '';
         this.attributionUrl = options.attributionUrl || '';
@@ -158,8 +162,10 @@ export class VectorTile {
         this.buildingEdges = options.buildingEdges ?? true;
         this.maxVisibleTiles = options.maxVisibleTiles ?? 50;
         this.maxTileDistanceFactor = options.maxTileDistanceFactor ?? 4;
-        this._groupCacheMaxSize = Math.max(this._groupCacheMaxSize, Math.ceil(this.maxVisibleTiles * 1.5));
-        this._tileDataCacheMaxSize = Math.max(this._tileDataCacheMaxSize, this.maxVisibleTiles * 2);
+        this._tileDataCacheMaxSize = options.tileDataCacheMaxSize
+            ?? Math.max(200, this.maxVisibleTiles * 2);
+        this._groupCacheMaxSize = options.groupCacheMaxSize
+            ?? Math.max(100, Math.ceil(this.maxVisibleTiles * 1.5));
         this.maxTextLabels = options.maxTextLabels ?? 150;
         this.maxTextPointsPerTile = options.maxTextPointsPerTile ?? 500;
         this.maxTextLinesPerTile = options.maxTextLinesPerTile ?? 500;

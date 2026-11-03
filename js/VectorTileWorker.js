@@ -393,7 +393,9 @@ export const VectorTileWorkerMixin = {
             return null;
         const map = this._map;
         const id = ++this._requestId;
-        const tileSize = map.WORLD_SIZE / (1 << z);
+        // tileSize в единицах tile-CRS: для Mercator === map.WORLD_SIZE / 2^z.
+        const tileHalfX = this._tileCrs.halfExtentX;
+        const tileSize = (2 * tileHalfX) / (1 << z);
         const effectiveStyleZoom = Number.isFinite(styleZoom)
             ? styleZoom
             : this._getCurrentTileStyleZoom(map);
@@ -406,7 +408,7 @@ export const VectorTileWorkerMixin = {
         const exclusionLayers = hasExclusions ? this._exclusionLayersArray : [];
         const msg = {
             type: 'process', id, buffer, z, x, y, tileSize,
-            maxMerc: map.MAX_MERCATOR,
+            maxMerc: tileHalfX,
             is3d,
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,
@@ -441,12 +443,15 @@ export const VectorTileWorkerMixin = {
         const sourceZoom = this._lastSourceZoom >= 0
             ? this._lastSourceZoom
             : Math.max(this.minNativeZoom, Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxNativeZoom));
-        const tileSize = map.WORLD_SIZE / (1 << sourceZoom);
+        // tile-CRS extent: для Mercator === map.WORLD_SIZE / 2^z и map.MAX_MERCATOR.
+        const tileHalfX = this._tileCrs.halfExtentX;
+        const tileHalfY = this._tileCrs.halfExtentY;
+        const tileSize = (2 * tileHalfX) / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
         const localX = sceneX - map.worldGroup.position.x;
         const localZ = sceneZ - map.worldGroup.position.z;
-        const tx = (localX + map.MAX_MERCATOR) / tileSize;
-        const tz = (localZ + map.MAX_MERCATOR) / tileSize;
+        const tx = (localX + tileHalfX) / tileSize;
+        const tz = (localZ + tileHalfY) / tileSize;
         const xSlippy = Math.floor(tx);
         const ySlippy = Math.floor(tz);
         if (xSlippy < 0 || xSlippy >= numTiles || ySlippy < 0 || ySlippy >= numTiles) {
@@ -473,8 +478,8 @@ export const VectorTileWorkerMixin = {
                 return { error: `fetch failed: ${err.message}` };
             }
         }
-        const centerX = xSlippy * tileSize - map.MAX_MERCATOR + tileSize / 2;
-        const centerZ = -map.MAX_MERCATOR + ySlippy * tileSize + tileSize / 2;
+        const centerX = xSlippy * tileSize - tileHalfX + tileSize / 2;
+        const centerZ = -tileHalfY + ySlippy * tileSize + tileSize / 2;
         const clickLocalX = localX - centerX;
         const clickLocalZ = localZ - centerZ;
         return new Promise((resolve, reject) => {
@@ -492,7 +497,7 @@ export const VectorTileWorkerMixin = {
                 this._worker.postMessage({
                     type: 'identify', id, buffer,
                     z: sourceZoom, x: xSlippy, y: ySlippy,
-                    tileSize, maxMerc: map.MAX_MERCATOR,
+                    tileSize, maxMerc: tileHalfX,
                     continuousZoom: map.continuousZoom + this.zoomOffset,
                     styleZoom: Number.isFinite(this._transitionStyleZoom)
                         ? this._transitionStyleZoom

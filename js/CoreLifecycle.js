@@ -320,6 +320,7 @@ export const CoreLifecycleMixin = {
             this._wrapLongitudeIfNeeded();
         if (!this._cameraAnimation)
             this.applyZoomDistance();
+        this._enforceMaxBounds();
         this.camera.updateMatrixWorld(true);
         this.worldGroup.updateMatrixWorld(true);
         this.maybeUpdateVisibleTiles();

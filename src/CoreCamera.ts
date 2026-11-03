@@ -36,6 +36,23 @@ export interface CoreCameraMethods {
     }): void;
     setPadding(padding: number | { top?: number; right?: number; bottom?: number; left?: number }): void;
     _applyPadding(padding: number | { top?: number; right?: number; bottom?: number; left?: number }): void;
+getZoom(): number;
+    getCenter(): [number, number];
+    getBounds(): [[number, number], [number, number]] | null;
+    getPitch(): number;
+    getBearing(): number;
+    jumpTo(options: {
+        center?: [number, number];
+        zoom?: number;
+        pitch?: number;
+        bearing?: number;
+        padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
+    }): void;
+    setMaxBounds(bounds: [[number, number], [number, number]] | null): void;
+    _enforceMaxBounds(): void;
+
+
+
 }
 
 export const CoreCameraMixin: CoreCameraMethods & ThisType<KrbMap> = {
@@ -94,7 +111,13 @@ this._panVelZ = 0;
     // 5. End state
     let endTarget = startTarget.clone();
     if (center) {
-        const [cx, cz] = this.projectLonLat(center[0], center[1]);
+ let tx = center[0], ty = center[1];
+   if (this._maxBounds) {
+       const b = this._maxBounds;
+        tx = Math.max(b.minLon, Math.min(b.maxLon, tx));
+        ty = Math.max(b.minLat, Math.min(b.maxLat, ty));
+   }
+    const [cx, cz] = this.projectLonLat(tx, ty);
         const off = this.worldGroup.position;
         endTarget.set(cx + off.x, 0, cz + off.z);
     }
@@ -180,6 +203,123 @@ this._panVelZ = 0;
         this._cameraAnimFrame = requestAnimationFrame(animateStep);
     };
     this._cameraAnimFrame = requestAnimationFrame(animateStep);
+},
+
+getZoom(): number {
+    return this.continuousZoom;
+},
+
+getCenter(): [number, number] {
+    const off = this.worldGroup.position;
+    return this.unprojectToLonLat(
+        this.controls.target.x - off.x,
+        this.controls.target.z - off.z
+    );
+},
+
+getPitch(): number {
+    const cam = this.camera.position;
+    const tgt = this.controls.target;
+    const dx = cam.x - tgt.x, dy = cam.y - tgt.y, dz = cam.z - tgt.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < 1e-9) return 0;
+    const pitchRad = Math.acos(Math.max(-1, Math.min(1, dy / d)));
+    return (pitchRad * 180) / Math.PI;
+},
+
+getBearing(): number {
+    const cam = this.camera.position;
+    const tgt = this.controls.target;
+    const dx = cam.x - tgt.x, dz = cam.z - tgt.z;
+    if (Math.abs(dx) < 1e-9 && Math.abs(dz) < 1e-9) return 0;
+    const bearingRad = Math.atan2(-dx, dz);
+    return (bearingRad * 180) / Math.PI;
+},
+
+getBounds() {
+    const canvas = this.renderer?.domElement;
+    if (!canvas) return null;
+    this.camera.updateMatrixWorld(true);
+    const rect = canvas.getBoundingClientRect();
+    const W = rect.width, H = rect.height;
+    const off = this.worldGroup.position;
+    const corners = [
+        [rect.left,          rect.top],
+        [rect.left + W,      rect.top],
+        [rect.left + W,      rect.top + H],
+        [rect.left,          rect.top + H],
+    ];
+    const lons: number[] = [];
+    const lats: number[] = [];
+    const tmp = new THREE.Vector3();
+    for (const [px, py] of corners) {
+        const world = this._raycastToGround(px, py, tmp);
+        if (!world) continue;                     // луч ушёл в горизонт
+        const [lon, lat] = this.unprojectToLonLat(
+            world.x - off.x, world.z - off.z
+        );
+        if (Number.isFinite(lon) && Number.isFinite(lat)) {
+            lons.push(lon);
+            lats.push(lat);
+        }
+    }
+    if (lons.length === 0) return null;
+    return [
+        [Math.min(...lons), Math.min(...lats)],
+        [Math.max(...lons), Math.max(...lats)],
+    ];
+},
+
+jumpTo(options) {
+    this.easeTo({ ...options, duration: 0 });
+},
+
+setMaxBounds(bounds) {
+    if (!bounds) {
+        this._maxBounds = null;
+        return;
+    }
+    const [[lng1, lat1], [lng2, lat2]] = bounds;
+    this._maxBounds = {
+        minLon: Math.min(lng1, lng2),
+        maxLon: Math.max(lng1, lng2),
+        minLat: Math.min(lat1, lat2),
+        maxLat: Math.max(lat1, lat2),
+    };
+    this._enforceMaxBounds();
+    this.maybeUpdateVisibleTiles(true);
+},
+
+/**
+ * Clamp эффективного центра в maxBounds через сдвиг worldGroup.
+ * Вызывается: из pan-путей (CoreInput), из animate() каждый кадр (catch-all),
+ * из easeTo (см. патч ниже).
+ */
+_enforceMaxBounds() {
+    if (!this._maxBounds) return;
+    if (!this.controls || !this.worldGroup) return;
+
+    const off = this.worldGroup.position;
+    let [lon, lat] = this.unprojectToLonLat(
+        this.controls.target.x - off.x,
+        this.controls.target.z - off.z
+    );
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
+    // Нормализуем lon — вдруг worldGroup был на «обёрнутой» позиции
+    while (lon < -180) lon += 360;
+    while (lon >  180) lon -= 360;
+
+    const b = this._maxBounds;
+    const newLon = Math.max(b.minLon, Math.min(b.maxLon, lon));
+    const newLat = Math.max(b.minLat, Math.min(b.maxLat, lat));
+    if (newLon === lon && newLat === lat) return;
+
+    // Сдвигаем worldGroup так, чтобы controls.target эффективно указывал
+    // в (newLon, newLat). Это то же самое, что «pan с упором в границу».
+    const [wx, wz] = this.projectLonLat(newLon, newLat);
+    this.worldGroup.position.x = this.controls.target.x - wx;
+    this.worldGroup.position.z = this.controls.target.z - wz;
 },
 
 setPadding(padding) { this._applyPadding(padding); },
@@ -370,6 +510,7 @@ this._cameraAnimation = animState;
     },
 
     _wrapLongitudeIfNeeded() {
+        if (this._maxBounds) return; 
         if (!this._wrapsLongitude()) return;
         const now = performance.now();
         if (now - this._lastWrapCheck < 1000) return;

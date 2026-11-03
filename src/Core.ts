@@ -166,7 +166,7 @@ _lastMoveEndTime: number;
 _idleFired: boolean;
 _firstRenderDone: boolean;
 _padding: { top: number; right: number; bottom: number; left: number } | null = null;
-
+_maxBounds: { minLon: number; maxLon: number; minLat: number; maxLat: number } | null = null;
 
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene: any;

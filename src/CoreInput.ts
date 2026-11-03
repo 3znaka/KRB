@@ -21,6 +21,7 @@ export interface CoreInputMethods {
     onClick(e: MouseEvent): void;
     bindEvents(): void;
     shiftWorld(dx: number, dz: number): void;
+    resize(): void;
 }
 
 export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
@@ -127,7 +128,7 @@ onMouseMove(e) {
         this.raycasterDragger.setFromCamera(this.mouse, this.camera);
         if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
             this.worldGroup.position.copy(this.intersection).sub(this.dragLocalPoint);
-
+this._enforceMaxBounds();
             // ── EMA pan-скорости ──
             const now = performance.now();
             const dt  = Math.max((now - this._panLastMoveTime) / 1000, 0.001);
@@ -424,7 +425,7 @@ if (this.touchDragActive && e.touches.length === 1) {
     this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
     if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
         this.worldGroup.position.copy(this.intersection).sub(this.touchDragLocalPoint);
-
+this._enforceMaxBounds();
         // ── EMA pan-скорости ──
         const now = performance.now();
         const dt  = Math.max((now - this._panLastMoveTime) / 1000, 0.001);
@@ -608,6 +609,10 @@ onTouchEnd(e: TouchEvent) {
             this._panVelZ = 0;
         }
     }
+},
+
+resize(): void {
+    this.onResize();
 },
 
     onResize() {

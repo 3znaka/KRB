@@ -184,11 +184,11 @@ export class KrbMap {
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(`KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`);
         }
-        this.projection = Projections.get(options.crs ?? options.projection ?? 'EPSG:3857');
+        this.projection = Projections.getWorld(options.crs ?? options.projection ?? 'EPSG:3857');
         this._resolveViewCenter();
         this.inputCRS = options.inputCRS
-            ? Projections.get(options.inputCRS)
-            : Projections.get('EPSG:4326');
+            ? Projections.getRaw(options.inputCRS)
+            : Projections.getRaw('EPSG:4326');
         this._rasterLayers = this.layers.filter((l) => !!l.texture);
         this._elevationLayer = this.layers.find((l) => !!l.elevation) ?? null;
         this._tileLayer = this._rasterLayers[0] ?? this._elevationLayer ?? null;
@@ -222,7 +222,7 @@ export class KrbMap {
             }
         }
         const tileCrsCode = this._tileLayer?.crs ?? this._tileLayer?.projection ?? 'EPSG:3857';
-        this.tileCRS = Projections.get(tileCrsCode);
+        this.tileCRS = Projections.getWorld(tileCrsCode);
         this.deformedTiles = this._rasterLayers.length > 0
             ? this._rasterLayers.some((l) => !this._isLayerLinear(l))
             : !(this.tileCRS === this.projection && this.projection.isMercator);

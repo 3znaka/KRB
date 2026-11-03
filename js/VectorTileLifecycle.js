@@ -50,18 +50,14 @@ export const VectorTileLifecycleMixin = {
         if (this._map)
             this.removeFromMap();
         this._map = map;
-        // exclusion-CRS — то, в чём задан пользовательский GeoJSON для addExclusionArea.
-        // По умолчанию map.inputCRS (обычно EPSG:4326).
-        this._exclusionCrs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
-        // tile-CRS — то, в чём задана сетка z/x/y в URL (pbf-тайлы по спеке — всегда Mercator).
-        // Приоритет: options.crs → map.tileCRS (если Mercator) → EPSG:3857.
+        this._exclusionCrs = this._crsCode
+            ? Projections.getRaw(this._crsCode) // ← пользовательский GeoJSON
+            : map.inputCRS; //   (inputCRS уже raw, см. Core.js)
         this._tileCrs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : (map.tileCRS?.isMercator ? map.tileCRS : Projections.get('EPSG:3857'));
-        if (this._tileCrs !== map.projection) {
-            console.warn(`VectorTile: tile-CRS ${this._tileCrs.code} не совпадает с map-проекцией ` +
-                `${map.projection.code}. Деформация тайлов пока не поддерживается — ` +
-                `тайлы будут позиционироваться как Mercator-подобные.`);
+            ? Projections.getWorld(this._crsCode) // ← сетка тайлов z/x/y
+            : (map.tileCRS?.isMercator ? map.tileCRS : Projections.getWorld('EPSG:3857'));
+        if (this._isDeformed && this._debug) {
+            console.info(`VectorTile: тайлы деформируются из ${this._tileCrs.code} в ${map.projection.code}`);
         }
         if (typeof map._getDynamicLayerRenderOrder === 'function') {
             this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
@@ -76,7 +72,6 @@ export const VectorTileLifecycleMixin = {
         if (map.textManager && map.textManager.setMaxLabels) {
             map.textManager.setMaxLabels(this.maxTextLabels);
         }
-        // ── Fix #2: реинициализация воркера при повторном addTo ──────────
         if (!this._worker) {
             this._workerReady = this._initWorker();
         }
@@ -91,7 +86,6 @@ export const VectorTileLifecycleMixin = {
             clearTimeout(this._queueTimer);
             this._queueTimer = null;
         }
-        // ── Fix #2: инвалидируем любой pending _initWorker ────────────────
         this._workerInitToken = (this._workerInitToken || 0) + 1;
         for (const pending of this._pendingWorkerRequests.values()) {
             try {
@@ -151,6 +145,7 @@ export const VectorTileLifecycleMixin = {
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
         const crs = this._exclusionCrs;
+        const deformed = this._isDeformed;
         const worldPolygons = [];
         for (const geom of geometries) {
             if (!geom)
@@ -165,15 +160,27 @@ export const VectorTileLifecycleMixin = {
                 continue;
             }
             for (const ring of rings) {
-                worldPolygons.push(ring.map((pt) => {
-                    const [x, z] = this._map.project(pt, crs);
-                    return { x, z };
-                }));
+                // Проекция в map-world, затем (при деформации) в tile-CRS —
+                // воркер ожидает exclusion-полигоны именно в tile-CRS.
+                const projected = ring.map((pt) => {
+                    const [mx, mz] = this._map.project(pt, crs);
+                    if (!deformed)
+                        return { x: mx, z: mz };
+                    return this._mapToTile(mx, mz);
+                });
+                let ok = projected.length >= 3;
+                for (const p of projected) {
+                    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok)
+                    worldPolygons.push(projected);
             }
         }
         this._exclusionAreas = worldPolygons;
         this._exclusionLayers = new Set(layers);
-        // ── Fix #3: кэшируем массив слоёв, чтобы не делать Array.from на каждый тайл.
         this._exclusionLayersArray = layers.slice();
         this._invalidateAllTiles();
         return this;
@@ -227,7 +234,6 @@ export const VectorTileLifecycleMixin = {
         }
         if (this._coverageDirty)
             this._resolveCoverage();
-        // ── Fix #7: refresh подписей с учётом факта «что-то изменилось» ──
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
@@ -309,13 +315,21 @@ export const VectorTileLifecycleMixin = {
                 this._labelsDirty = true;
             }
         }
-        // Extent считается по tile-CRS, а не по map-проекции. Для Mercator-to-Mercator
-        // (текущий поддерживаемый сценарий) это те же числа, но семантика корректна.
         const tileHalfX = this._tileCrs.halfExtentX;
         const tileHalfY = this._tileCrs.halfExtentY;
+        const tileSizeAtZoomX = (2 * tileHalfX) / (1 << sourceZoom);
+        const tileSizeAtZoomY = (2 * tileHalfY) / (1 << sourceZoom);
         const target = map.controls.target;
-        const tileSizeAtZoom = (2 * tileHalfX) / (1 << sourceZoom);
-        const targetX = target.x, targetZ = target.z;
+        let targetX, targetZ;
+        if (this._isDeformed) {
+            const t = this._mapToTile(target.x - map.worldGroup.position.x, target.z - map.worldGroup.position.z);
+            targetX = t ? t.x : 0;
+            targetZ = t ? t.z : 0;
+        }
+        else {
+            targetX = target.x;
+            targetZ = target.z;
+        }
         const unsortedNewKeys = [];
         visibleTiles.forEach((key) => {
             if (this._tileCache.has(key) || this._pendingLoads.has(key))
@@ -324,8 +338,8 @@ export const VectorTileLifecycleMixin = {
             const c2 = key.indexOf(',', c1 + 1);
             const x = +key.slice(c1 + 1, c2);
             const y = +key.slice(c2 + 1);
-            const centerX = x * tileSizeAtZoom - tileHalfX + tileSizeAtZoom / 2;
-            const centerZ = -tileHalfY + y * tileSizeAtZoom + tileSizeAtZoom / 2;
+            const centerX = x * tileSizeAtZoomX - tileHalfX + tileSizeAtZoomX / 2;
+            const centerZ = -tileHalfY + y * tileSizeAtZoomY + tileSizeAtZoomY / 2;
             const dx = centerX - targetX;
             const dz = centerZ - targetZ;
             unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });

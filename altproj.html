@@ -6,24 +6,31 @@
     <link href="/KRB.css" rel="stylesheet">
     <style>
         body { margin:0; overflow:hidden; }
-        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #hui { width:100%; height:100dvh; touch-action:none; position:relative; }
     </style>
 </head>
 <body>
-<div id="map"></div>
+<div id="hui"></div>
 <script type="module">
 import * as KRB from '/js/KRB.js';
 
-const map = new KRB.Map({
-    target: 'map',
-    crs: 'EPSG:3395',
+ await KRB.Projections.ensure('EPSG:32637');
+  await KRB.Projections.ensure('EPSG:8857');
+
+const KRBmap = new KRB.Map({
+    target: 'hui',
+            crs: 'EPSG:8857',
     layers: [
-        new KRB.Tile({
-            texture: 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=3.2008.0&x={x}&y={y}&z={z}&scale=1&lang=ru_RU',
-            attributionTitle: 'YandexMaps',
-			crs: 'EPSG:3395',
-            attributionUrl: 'https://ya.ru/'
-        })
+new KRB.VectorTile({
+            url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
+            maxNativeZoom: 14,
+            minZoom: 2,
+            maxZoom: 24,
+
+            zoomOffset: 0,
+            debug: true,
+          
+        }),
     ],
     view: new KRB.View({
         centerLonLat: [37.6178, 55.7558],
@@ -32,14 +39,17 @@ const map = new KRB.Map({
     })
 });
 
-await KRB.Projections.ensure('EPSG:32637');
+
 
 const marker = new KRB.Marker({
     position: [413500, 6178000],
     crs: 'EPSG:32637',
     title: 'UTM-точка'
 });
-marker.addTo(map);
+marker.addTo(KRBmap);
+
+window.KRBmap = KRBmap;
 </script>
 </body>
 </html>
+

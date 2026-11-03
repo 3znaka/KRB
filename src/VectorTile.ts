@@ -281,6 +281,78 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
             console.warn('VectorTile: Не удалось загрузить дефолтный спрайт. Иконки будут отключены.', err);
         }
     }
+
+    // ========================================================================
+    // Проекционные хелперы (tile-CRS ↔ map-CRS)
+    // ========================================================================
+
+    /**
+     * Нужна ли деформация геометрии из tile-CRS в map-CRS.
+     *
+     * Возвращает `false`, если проекции эквивалентны:
+     *  • один и тот же объект проекции;
+     *  • обе проекции принадлежат Mercator-семейству (численно совпадают
+     *    на уровне world-координат, деформация не требуется).
+     *
+     * В сценарии Mercator→Mercator (по умолчанию) деформация НЕ включается —
+     * вся ветка `if (this._isDeformed)` пропускается целиком, нулевая
+     * стоимость по сравнению с текущим поведением.
+     */
+get _isDeformed(): boolean {
+    const map = this._map;
+    const tileCrs = this._tileCrs;
+    if (!map || !tileCrs || !map.projection) return false;
+    if (tileCrs === map.projection) return false;
+    return tileCrs.code !== map.projection.code;
+}
+    /**
+     * Проецирует точку из tile-CRS в map-CRS.
+     *
+     * Обе системы — world-координаты Three.js, где Z-ось направлена «вниз»
+     * (юг), а внутренние проекционные координаты используют Y-вверх. То есть
+     * `projY = -worldZ`.
+     *
+     * @param wx tile-CRS world X
+     * @param wz tile-CRS world Z (Z-вниз)
+     * @returns `{x, z}` в map-CRS world или `null`, если точка вне домена
+     *          проекции (например, полюс в Mercator).
+     */
+    _tileToMap(wx: number, wz: number): { x: number; z: number } | null {
+        const map = this._map;
+        const tileCrs = this._tileCrs;
+        if (!map || !tileCrs) return null;
+
+        const lonLat = tileCrs.toLonLat([wx, -wz]);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
+
+        const p = typeof map.projection.fromLonLatSafe === 'function'
+            ? map.projection.fromLonLatSafe(lonLat)
+            : map.projection.fromLonLat(lonLat);
+        if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+
+        return { x: p[0], z: -p[1] };
+    }
+
+    /**
+     * Обратное к {@link _tileToMap}: map-CRS world → tile-CRS world.
+     * Нужно для `identify` (проекция клика) и для сортировки загрузки
+     * новых тайлов по расстоянию до цели камеры.
+     */
+    _mapToTile(mx: number, mz: number): { x: number; z: number } | null {
+        const map = this._map;
+        const tileCrs = this._tileCrs;
+        if (!map || !tileCrs) return null;
+
+        const lonLat = map.projection.toLonLat([mx, -mz]);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) return null;
+
+        const p = typeof tileCrs.fromLonLatSafe === 'function'
+            ? tileCrs.fromLonLatSafe(lonLat)
+            : tileCrs.fromLonLat(lonLat);
+        if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+
+        return { x: p[0], z: -p[1] };
+    }
 }
 
 // ============================================================================
@@ -288,6 +360,7 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
 // ============================================================================
 
 export interface VectorTile {
+
     // --- labels ---
     _forEachShownGroup(cb: (group: THREE.Group) => void): void;
     _getPointLabelId(pt: WorkerTextPoint, group: THREE.Group): string;

@@ -34,40 +34,36 @@ export const VectorTileLifecycleMixin = {
         this._groupCache.forEach((g: THREE.Group) => { g.renderOrder = baseOrder; });
     },
 
-_mergeStyles(base: any, overrides: any): any {
-  const out = structuredClone(base);
-  for (const key of Object.keys(overrides)) {
-    const v = overrides[key];
-    if (v && typeof v === 'object' && !Array.isArray(v) && out[key] && typeof out[key] === 'object') {
-      out[key] = this._mergeStyles(out[key], v);
-    } else {
-      out[key] = v;
-    }
-  }
-  return out;
-},
+    _mergeStyles(this: any, base: any, overrides: any): any {
+        const out = structuredClone(base);
+        for (const key of Object.keys(overrides)) {
+            const v = overrides[key];
+            if (v && typeof v === 'object' && !Array.isArray(v) && out[key] && typeof out[key] === 'object') {
+                out[key] = this._mergeStyles(out[key], v);
+            } else {
+                out[key] = v;
+            }
+        }
+        return out;
+    },
 
-addTo(this: any, map: any): any {
-    if (this._map) this.removeFromMap();
-    this._map = map;
+    addTo(this: any, map: any): any {
+        if (this._map) this.removeFromMap();
+        this._map = map;
 
-    // exclusion-CRS — то, в чём задан пользовательский GeoJSON для addExclusionArea.
-    // По умолчанию map.inputCRS (обычно EPSG:4326).
-    this._exclusionCrs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+this._exclusionCrs = this._crsCode
+    ? Projections.getRaw(this._crsCode)      // ← пользовательский GeoJSON
+    : map.inputCRS;                          //   (inputCRS уже raw, см. Core.js)
 
-    // tile-CRS — то, в чём задана сетка z/x/y в URL (pbf-тайлы по спеке — всегда Mercator).
-    // Приоритет: options.crs → map.tileCRS (если Mercator) → EPSG:3857.
-    this._tileCrs = this._crsCode
-        ? Projections.get(this._crsCode)
-        : (map.tileCRS?.isMercator ? map.tileCRS : Projections.get('EPSG:3857'));
-
-    if (this._tileCrs !== map.projection) {
-        console.warn(
-            `VectorTile: tile-CRS ${this._tileCrs.code} не совпадает с map-проекцией ` +
-            `${map.projection.code}. Деформация тайлов пока не поддерживается — ` +
-            `тайлы будут позиционироваться как Mercator-подобные.`
-        );
-    }
+this._tileCrs = this._crsCode
+    ? Projections.getWorld(this._crsCode)    // ← сетка тайлов z/x/y
+    : (map.tileCRS?.isMercator ? map.tileCRS : Projections.getWorld('EPSG:3857'));
+    
+        if (this._isDeformed && this._debug) {
+            console.info(
+                `VectorTile: тайлы деформируются из ${this._tileCrs.code} в ${map.projection.code}`
+            );
+        }
 
         if (typeof map._getDynamicLayerRenderOrder === 'function') {
             this._tileGroupRenderOrder = map._getDynamicLayerRenderOrder(this);
@@ -85,7 +81,6 @@ addTo(this: any, map: any): any {
             map.textManager.setMaxLabels(this.maxTextLabels);
         }
 
-        // ── Fix #2: реинициализация воркера при повторном addTo ──────────
         if (!this._worker) {
             this._workerReady = this._initWorker();
         }
@@ -99,7 +94,6 @@ addTo(this: any, map: any): any {
         if (!this._map) return;
         if (this._queueTimer) { clearTimeout(this._queueTimer); this._queueTimer = null; }
 
-        // ── Fix #2: инвалидируем любой pending _initWorker ────────────────
         this._workerInitToken = (this._workerInitToken || 0) + 1;
 
         for (const pending of this._pendingWorkerRequests.values()) {
@@ -116,9 +110,9 @@ addTo(this: any, map: any): any {
         const index = this._map._dynamicLayers.indexOf(this);
         if (index > -1) this._map._dynamicLayers.splice(index, 1);
 
-this._map = null;
-this._tileCrs = null;
-this._exclusionCrs = null;
+        this._map = null;
+        this._tileCrs = null;
+        this._exclusionCrs = null;
 
         this._fillMaterialCache.forEach((m: THREE.Material) => m.dispose());
         this._lineMaterialCache.forEach((m: THREE.Material) => m.dispose());
@@ -156,7 +150,8 @@ this._exclusionCrs = null;
             throw new Error('addExclusionArea: invalid GeoJSON object');
         }
 
-const crs = this._exclusionCrs;
+        const crs = this._exclusionCrs;
+        const deformed = this._isDeformed;
         const worldPolygons: Array<Array<{ x: number; z: number }>> = [];
 
         for (const geom of geometries) {
@@ -167,16 +162,23 @@ const crs = this._exclusionCrs;
             else { console.warn('addExclusionArea: unsupported geometry type', geom.type); continue; }
 
             for (const ring of rings) {
-                worldPolygons.push(ring.map((pt) => {
-                    const [x, z] = this._map.project(pt, crs);
-                    return { x, z };
-                }));
+                // Проекция в map-world, затем (при деформации) в tile-CRS —
+                // воркер ожидает exclusion-полигоны именно в tile-CRS.
+                const projected: Array<{ x: number; z: number } | null> = ring.map((pt) => {
+                    const [mx, mz] = this._map.project(pt, crs);
+                    if (!deformed) return { x: mx, z: mz };
+                    return this._mapToTile(mx, mz);
+                });
+                let ok = projected.length >= 3;
+                for (const p of projected) {
+                    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) { ok = false; break; }
+                }
+                if (ok) worldPolygons.push(projected as Array<{ x: number; z: number }>);
             }
         }
 
         this._exclusionAreas = worldPolygons;
         this._exclusionLayers = new Set(layers);
-        // ── Fix #3: кэшируем массив слоёв, чтобы не делать Array.from на каждый тайл.
         this._exclusionLayersArray = layers.slice();
 
         this._invalidateAllTiles();
@@ -214,12 +216,12 @@ const crs = this._exclusionCrs;
             this._lastWorldPos.copy(worldPos);
             this._lastMovementTime = performance.now();
         }
-if (this._lineMaterialsSet.size > 0) {
-    this._updateDynamicLineMaterials(
-        map.continuousZoom  + this.zoomOffset,
-        map.currentDiscreteZoom + this.zoomOffset,
-    );
-}
+        if (this._lineMaterialsSet.size > 0) {
+            this._updateDynamicLineMaterials(
+                map.continuousZoom  + this.zoomOffset,
+                map.currentDiscreteZoom + this.zoomOffset,
+            );
+        }
 
         const discreteZoom = map.currentDiscreteZoom;
         const inRange = discreteZoom >= this.minZoom && discreteZoom <= this.maxZoom;
@@ -241,7 +243,6 @@ if (this._lineMaterialsSet.size > 0) {
 
         if (this._coverageDirty) this._resolveCoverage();
 
-        // ── Fix #7: refresh подписей с учётом факта «что-то изменилось» ──
         const labelNow = performance.now();
         const timeSinceLastMove = labelNow - this._lastMovementTime;
         const isMoving = timeSinceLastMove < 1000;
@@ -333,27 +334,38 @@ if (this._lineMaterialsSet.size > 0) {
             }
         }
 
-// Extent считается по tile-CRS, а не по map-проекции. Для Mercator-to-Mercator
-// (текущий поддерживаемый сценарий) это те же числа, но семантика корректна.
 const tileHalfX = this._tileCrs.halfExtentX;
 const tileHalfY = this._tileCrs.halfExtentY;
+const tileSizeAtZoomX = (2 * tileHalfX) / (1 << sourceZoom);
+const tileSizeAtZoomY = (2 * tileHalfY) / (1 << sourceZoom);
 const target = map.controls.target;
-const tileSizeAtZoom = (2 * tileHalfX) / (1 << sourceZoom);
-const targetX = target.x, targetZ = target.z;
-const unsortedNewKeys: Array<{ key: string; distSq: number }> = [];
+let targetX: number, targetZ: number;
+if (this._isDeformed) {
+    const t = this._mapToTile(
+        target.x - map.worldGroup.position.x,
+        target.z - map.worldGroup.position.z,
+    );
+    targetX = t ? t.x : 0;
+    targetZ = t ? t.z : 0;
+} else {
+    targetX = target.x;
+    targetZ = target.z;
+}
 
-visibleTiles.forEach((key: string) => {
+        const unsortedNewKeys: Array<{ key: string; distSq: number }> = [];
+
+       visibleTiles.forEach((key: string) => {
     if (this._tileCache.has(key) || this._pendingLoads.has(key)) return;
     const c1 = key.indexOf(',');
     const c2 = key.indexOf(',', c1 + 1);
     const x = +key.slice(c1 + 1, c2);
     const y = +key.slice(c2 + 1);
-    const centerX = x * tileSizeAtZoom - tileHalfX + tileSizeAtZoom / 2;
-    const centerZ = -tileHalfY + y * tileSizeAtZoom + tileSizeAtZoom / 2;
-    const dx = centerX - targetX;
-    const dz = centerZ - targetZ;
-    unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });
-});
+    const centerX = x * tileSizeAtZoomX - tileHalfX + tileSizeAtZoomX / 2;
+    const centerZ = -tileHalfY + y * tileSizeAtZoomY + tileSizeAtZoomY / 2;
+            const dx = centerX - targetX;
+            const dz = centerZ - targetZ;
+            unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });
+        });
 
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
         const newKeys = unsortedNewKeys.map((it) => it.key);

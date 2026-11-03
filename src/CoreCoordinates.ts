@@ -23,30 +23,37 @@ export interface CoreCoordinatesMethods {
 }
 
 export const CoreCoordinatesMixin: CoreCoordinatesMethods & ThisType<KrbMap> = {
-    _resolveViewCenter() {
-        const v = this.view;
-        const mapCode = this.projection.code;
-        if (v.centerLonLat) {
-            const [x, y] = this.projection.fromLonLat(v.centerLonLat);
-            v.center = [x, -y];
-            v.projection = mapCode;
-            return;
-        }
-        const srcCode = v.projection ?? mapCode;
-        if (srcCode === mapCode) {
-            const [lon, lat] = this.projection.toLonLat([v.center![0], -v.center![1]]);
-            v.centerLonLat = [lon, lat];
-            v.projection = mapCode;
-            return;
-        }
-        console.warn(`KrbMap: view.center пересчитан из ${srcCode} в ${mapCode}. Если view.center уже был в ${mapCode}, укажите view.projection = '${mapCode}' или передавайте координаты в centerLonLat.`);
-        const src = typeof srcCode === 'string' ? Projections.get(srcCode) : srcCode;
-        const lonLat = src.toLonLat([v.center![0], -v.center![1]]);
-        const [x, y] = this.projection.fromLonLat(lonLat);
-        v.centerLonLat = lonLat;
+_resolveViewCenter() {
+    const v = this.view;
+    const mapCode = this.projection.code;      // строковый код (raw === world)
+
+    // 1) Явно задан lon/lat — самый приоритетный путь.
+    if (v.centerLonLat) {
+        const [x, y] = this.projection.fromLonLat(v.centerLonLat); // world
         v.center = [x, -y];
         v.projection = mapCode;
-    },
+        return;
+    }
+
+    // 2) v.center задан в v.projection (по умолчанию — mapCode).
+    //    Трактуем его как RAW-координаты и переводим в world map-CRS.
+    const srcCode = v.projection ?? mapCode;
+    const srcRaw = typeof srcCode === 'string'
+        ? Projections.getRaw(srcCode)
+        : srcCode;
+
+    const lonLat = srcRaw.toLonLat([v.center[0], -v.center[1]]);
+    const [x, y] = this.projection.fromLonLat(lonLat);         // world
+
+    v.centerLonLat = lonLat;         // фиксируем «канонический» вид
+    v.center = [x, -y];
+    v.projection = mapCode;
+
+    if (srcCode !== mapCode) {
+        console.warn(`KrbMap: view.center пересчитан из ${srcCode} в ${mapCode}. ` +
+            `Если view.center уже был в ${mapCode}, укажите view.projection = '${mapCode}'.`);
+    }
+},
 
     project(coord, fromCrs = this.inputCRS) {
         const src = typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs;

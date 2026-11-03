@@ -8,8 +8,6 @@ export const VectorTileLoadingMixin = {
         if (this._disposed) return;
         if (z < this.minNativeZoom || z > this.maxNativeZoom) return;
 
-        // Ограничиваем параллельные префетч-запросы. Если лимит упёрся —
-        // прогресс продолжится на следующем тике (метод дёргается из _postUpdate).
         const maxPrefetch = this._maxPrefetchInFlight
             ?? Math.min(this._maxConcurrent ?? 4, 2);
 
@@ -189,143 +187,234 @@ export const VectorTileLoadingMixin = {
     },
 
 _getVisibleTileKeys(this: any, z: number): Set<string> {
-    const map = this._map;
-    const camera = map.camera;
-    const numTiles = 1 << z;
-    const maxTile = numTiles - 1;
-    const tileSize = map.WORLD_SIZE / numTiles;
-    const maxMerc = map.MAX_MERCATOR;
-    const off = map.worldGroup.position;
-    const ray = this._raycaster;
-    const ndc = this._raycastNDC;
+        const map = this._map;
+        const camera = map.camera;
+        const numTiles = 1 << z;
+        const maxTile = numTiles - 1;
+        const off = map.worldGroup.position;
+        const ray = this._raycaster;
+        const ndc = this._raycastNDC;
 
-    camera.updateMatrixWorld();
+        camera.updateMatrixWorld();
 
-    // Всё считаем в локальных координатах worldGroup
-    const camX = camera.position.x - off.x;
-    const camZ = camera.position.z - off.z;
-    const target = map.controls.target;
-    const tX = target.x - off.x;
-    const tZ = target.z - off.z;
-    const camTargetDist = camera.position.distanceTo(target);
+        const camX = camera.position.x - off.x;
+        const camZ = camera.position.z - off.z;
+        const target = map.controls.target;
+        const tX = target.x - off.x;
+        const tZ = target.z - off.z;
+        const camTargetDist = camera.position.distanceTo(target);
 
-    // ── 1. Жёсткий радиус загрузки, привязанный к дистанции камеры ──
-    const factor = this.maxTileDistanceFactor ?? 4;
-    const maxDist = Math.max(camTargetDist * factor, tileSize * 2);
+        // maxDist — в map-world (hull тоже в map-world).
+        const factor = this.maxTileDistanceFactor ?? 4;
+        const sizeHintMap = (2 * (map.MAX_MERCATOR ?? map.WORLD_SIZE / 2)) / numTiles;
+        const maxDist = Math.max(camTargetDist * factor, sizeHintMap * 2);
 
-    // ── 2. Контур видимой области на земле (с подрезкой по maxDist) ──
-    const pts: number[] = [camX, camZ];
-    const addRay = (nx: number, ny: number) => {
-        ndc.set(nx, ny);
-        ray.setFromCamera(ndc, camera);
-        const o = ray.ray.origin;
-        const d = ray.ray.direction;
-        let px: number, pz: number;
-        if (d.y < -1e-6) {
-            const t = -o.y / d.y;
-            px = o.x + d.x * t - off.x;
-            pz = o.z + d.z * t - off.z;
-            const ddx = px - camX, ddz = pz - camZ;
-            const dist = Math.hypot(ddx, ddz);
-            if (dist > maxDist) {
-                const s = maxDist / dist;
-                px = camX + ddx * s;
-                pz = camZ + ddz * s;
+        const pts: number[] = [camX, camZ];
+        const addRay = (nx: number, ny: number) => {
+            ndc.set(nx, ny);
+            ray.setFromCamera(ndc, camera);
+            const o = ray.ray.origin;
+            const d = ray.ray.direction;
+            let px: number, pz: number;
+            if (d.y < -1e-6) {
+                const t = -o.y / d.y;
+                px = o.x + d.x * t - off.x;
+                pz = o.z + d.z * t - off.z;
+                const ddx = px - camX, ddz = pz - camZ;
+                const dist = Math.hypot(ddx, ddz);
+                if (dist > maxDist) {
+                    const s = maxDist / dist;
+                    px = camX + ddx * s;
+                    pz = camZ + ddz * s;
+                }
+            } else {
+                const hLen = Math.hypot(d.x, d.z);
+                if (hLen < 1e-9) return;
+                px = camX + (d.x / hLen) * maxDist;
+                pz = camZ + (d.z / hLen) * maxDist;
             }
-        } else {
-            // Луч выше горизонта: ставим точку на границу радиуса
-            const hLen = Math.hypot(d.x, d.z);
-            if (hLen < 1e-9) return;
-            px = camX + (d.x / hLen) * maxDist;
-            pz = camZ + (d.z / hLen) * maxDist;
+            pts.push(px, pz);
+        };
+
+        const steps = 8;
+        for (let i = 0; i <= steps; i++) {
+            const t = -1 + (2 * i) / steps;
+            addRay(t, -1); addRay(t, 1);
+            addRay(-1, t); addRay(1, t);
         }
-        pts.push(px, pz);
-    };
 
-    const steps = 8;
-    for (let i = 0; i <= steps; i++) {
-        const t = -1 + (2 * i) / steps;
-        addRay(t, -1); addRay(t, 1);
-        addRay(-1, t); addRay(1, t);
-    }
+        // Выпуклая оболочка (CCW).
+        const P: Array<[number, number]> = [];
+        for (let i = 0; i < pts.length; i += 2) P.push([pts[i], pts[i + 1]]);
+        P.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const cross = (o: number[], a: number[], b: number[]) =>
+            (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lower: Array<[number, number]> = [];
+        for (const p of P) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper: Array<[number, number]> = [];
+        for (let i = P.length - 1; i >= 0; i--) {
+            const p = P[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+            upper.push(p);
+        }
+        upper.pop(); lower.pop();
+        const hull = lower.concat(upper);
 
-    // ── 3. Выпуклая оболочка (monotone chain, CCW) ──
-    const P: Array<[number, number]> = [];
-    for (let i = 0; i < pts.length; i += 2) P.push([pts[i], pts[i + 1]]);
-    P.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const cross = (o: number[], a: number[], b: number[]) =>
-        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-    const lower: Array<[number, number]> = [];
-    for (const p of P) {
-        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-        lower.push(p);
-    }
-    const upper: Array<[number, number]> = [];
-    for (let i = P.length - 1; i >= 0; i--) {
-        const p = P[i];
-        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-        upper.push(p);
-    }
-    upper.pop(); lower.pop();
-    const hull = lower.concat(upper);
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const [x, zz] of hull) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (zz < minZ) minZ = zz; if (zz > maxZ) maxZ = zz;
+        }
 
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const [x, zz] of hull) {
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (zz < minZ) minZ = zz; if (zz > maxZ) maxZ = zz;
-    }
+        const distToHull = (x: number, zz: number): number => {
+            const n = hull.length;
+            if (n < 3) return Math.hypot(x - tX, zz - tZ);
+            let inside = true;
+            let best = Infinity;
+            for (let i = 0; i < n; i++) {
+                const a = hull[i], b = hull[(i + 1) % n];
+                const ex = b[0] - a[0], ez = b[1] - a[1];
+                if (ex * (zz - a[1]) - ez * (x - a[0]) < 0) inside = false;
+                const len2 = ex * ex + ez * ez || 1e-12;
+                let t = ((x - a[0]) * ex + (zz - a[1]) * ez) / len2;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                const qx = a[0] + ex * t - x, qz = a[1] + ez * t - zz;
+                const d = qx * qx + qz * qz;
+                if (d < best) best = d;
+            }
+            return inside ? 0 : Math.sqrt(best);
+        };
 
-    // Расстояние от точки до выпуклого полигона (0, если внутри)
-    const distToHull = (x: number, zz: number): number => {
+        const found = new Map<string, number>();
+        const limit = this.maxVisibleTiles ?? 96;
+
+        // ── Mercator→Mercator: hull в map-world === hull в tile-CRS ────
+        if (!this._isDeformed) {
+            const tileSize = map.WORLD_SIZE / numTiles;
+            const maxMerc = map.MAX_MERCATOR;
+            const margin = tileSize * 0.5;
+            const reach = tileSize * Math.SQRT1_2 + margin;
+
+            let xMin = Math.floor((minX - margin + maxMerc) / tileSize);
+            let xMax = Math.floor((maxX + margin + maxMerc) / tileSize);
+            if (xMax - xMin + 1 > numTiles) xMax = xMin + numTiles - 1;
+            const yMin = Math.max(0, Math.floor((minZ - margin + maxMerc) / tileSize));
+            const yMax = Math.min(maxTile, Math.floor((maxZ + margin + maxMerc) / tileSize));
+
+            for (let y = yMin; y <= yMax; y++) {
+                const cz = -maxMerc + (y + 0.5) * tileSize;
+                for (let x = xMin; x <= xMax; x++) {
+                    const cx = -maxMerc + (x + 0.5) * tileSize;
+                    if (distToHull(cx, cz) > reach) continue;
+                    const wx = ((x % numTiles) + numTiles) % numTiles;
+                    const key = `${z},${wx},${y}`;
+                    const d = (cx - tX) * (cx - tX) + (cz - tZ) * (cz - tZ);
+                    const prev = found.get(key);
+                    if (prev === undefined || d < prev) found.set(key, d);
+                }
+            }
+
+            const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);
+            if (sorted.length > limit) sorted.length = limit;
+            return new Set(sorted.map(([k]) => k));
+        }
+
+const tileHalfX = this._tileCrs.halfExtentX;
+const tileHalfY = this._tileCrs.halfExtentY;
+const tileSizeTCX = (2 * tileHalfX) / numTiles;
+const tileSizeTCY = (2 * tileHalfY) / numTiles;
+
+        let tMinX = Infinity, tMaxX = -Infinity, tMinZ = Infinity, tMaxZ = -Infinity;
+        const feedPoint = (mx: number, mz: number) => {
+            const t = this._mapToTile(mx, mz);
+            if (!t || !Number.isFinite(t.x) || !Number.isFinite(t.z)) return;
+            if (t.x < tMinX) tMinX = t.x;
+            if (t.x > tMaxX) tMaxX = t.x;
+            if (t.z < tMinZ) tMinZ = t.z;
+            if (t.z > tMaxZ) tMaxZ = t.z;
+        };
+
+        // 1. Плотное сэмплирование рёбер hull.
+        const SUBDIV = 8;
         const n = hull.length;
-        if (n < 3) return Math.hypot(x - tX, zz - tZ);
-        let inside = true;
-        let best = Infinity;
         for (let i = 0; i < n; i++) {
             const a = hull[i], b = hull[(i + 1) % n];
-            const ex = b[0] - a[0], ez = b[1] - a[1];
-            if (ex * (zz - a[1]) - ez * (x - a[0]) < 0) inside = false;
-            const len2 = ex * ex + ez * ez || 1e-12;
-            let t = ((x - a[0]) * ex + (zz - a[1]) * ez) / len2;
-            t = t < 0 ? 0 : t > 1 ? 1 : t;
-            const qx = a[0] + ex * t - x, qz = a[1] + ez * t - zz;
-            const d = qx * qx + qz * qz;
-            if (d < best) best = d;
+            for (let k = 0; k <= SUBDIV; k++) {
+                const tt = k / SUBDIV;
+                feedPoint(a[0] + (b[0] - a[0]) * tt, a[1] + (b[1] - a[1]) * tt);
+            }
         }
-        return inside ? 0 : Math.sqrt(best);
-    };
+        // 2. Сетка по bbox hull.
+        const GRID = 6;
+        for (let i = 0; i <= GRID; i++) {
+            for (let j = 0; j <= GRID; j++) {
+                feedPoint(
+                    minX + (maxX - minX) * (i / GRID),
+                    minZ + (maxZ - minZ) * (j / GRID),
+                );
+            }
+        }
+        // 3. Target и камера.
+        feedPoint(tX, tZ);
+        feedPoint(camX, camZ);
 
-    // ── 4. Перебор тайлов в bbox оболочки + точная проверка ──
-    const margin = tileSize * 0.5;
-    const reach = tileSize * Math.SQRT1_2 + margin;
+let reachMap = sizeHintMap * Math.SQRT1_2;
+const targetTC = this._mapToTile(tX, tZ);
+if (targetTC) {
+    const pX = this._tileToMap(targetTC.x + tileSizeTCX, targetTC.z);
+    const pZ = this._tileToMap(targetTC.x, targetTC.z + tileSizeTCY);
+    const lenX = pX ? Math.hypot(pX.x - tX, pX.z - tZ) : 0;
+    const lenZ = pZ ? Math.hypot(pZ.x - tX, pZ.z - tZ) : 0;
+    const side = Math.max(lenX, lenZ);
+    if (side > 0) reachMap = side * Math.SQRT1_2;
+}
+const reach = reachMap * 1.5 + sizeHintMap * 0.25;
 
-    let xMin = Math.floor((minX - margin + maxMerc) / tileSize);
-    let xMax = Math.floor((maxX + margin + maxMerc) / tileSize);
-    if (xMax - xMin + 1 > numTiles) xMax = xMin + numTiles - 1;
-    const yMin = Math.max(0, Math.floor((minZ - margin + maxMerc) / tileSize));
-    const yMax = Math.min(maxTile, Math.floor((maxZ + margin + maxMerc) / tileSize));
+if (Number.isFinite(tMinX)) {
+    const padX = tileSizeTCX;
+    const padY = tileSizeTCY;
+    const xMinT = Math.max(0, Math.floor((tMinX - padX + tileHalfX) / tileSizeTCX));
+    const xMaxT = Math.min(maxTile, Math.ceil((tMaxX + padX + tileHalfX) / tileSizeTCX));
+    const yMinT = Math.max(0, Math.floor((tMinZ - padY + tileHalfY) / tileSizeTCY));
+    const yMaxT = Math.min(maxTile, Math.ceil((tMaxZ + padY + tileHalfY) / tileSizeTCY));
 
-    const found = new Map<string, number>();
-    for (let y = yMin; y <= yMax; y++) {
-        const cz = -maxMerc + (y + 0.5) * tileSize;
-        for (let x = xMin; x <= xMax; x++) {
-            const cx = -maxMerc + (x + 0.5) * tileSize;
-            if (distToHull(cx, cz) > reach) continue;
-            const wx = ((x % numTiles) + numTiles) % numTiles;
-            const key = `${z},${wx},${y}`;
-            const d = (cx - tX) * (cx - tX) + (cz - tZ) * (cz - tZ);
+    for (let y = yMinT; y <= yMaxT; y++) {
+        const cz = -tileHalfY + (y + 0.5) * tileSizeTCY;
+        for (let x = xMinT; x <= xMaxT; x++) {
+            const cx = -tileHalfX + (x + 0.5) * tileSizeTCX;
+            const m = this._tileToMap(cx, cz);
+            if (!m) continue;
+            if (distToHull(m.x, m.z) > reach) continue;
+            const key = `${z},${x},${y}`;
+            const d = (m.x - tX) * (m.x - tX) + (m.z - tZ) * (m.z - tZ);
             const prev = found.get(key);
             if (prev === undefined || d < prev) found.set(key, d);
         }
     }
+}
 
-    // ── 5. Жёсткий лимит количества: ближайшие к центру экрана ──
-    const limit = this.maxVisibleTiles ?? 96;
-    const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);
-    if (sorted.length > limit) sorted.length = limit;
+// Fallback — при пустом bbox обходим весь уровень. Поднять до z<=10,
+// т.к. при 4326 и высоких z bbox может не собираться.
+if (found.size === 0 && z <= 10) {
+    for (let y = 0; y <= maxTile; y++) {
+        const cz = -tileHalfY + (y + 0.5) * tileSizeTCY;
+        for (let x = 0; x <= maxTile; x++) {
+            const cx = -tileHalfX + (x + 0.5) * tileSizeTCX;
+            const m = this._tileToMap(cx, cz);
+            if (!m) continue;
+            const d = (m.x - tX) * (m.x - tX) + (m.z - tZ) * (m.z - tZ);
+            found.set(`${z},${x},${y}`, d);
+        }
+    }
+}
 
-    return new Set(sorted.map(([k]) => k));
-},
+        const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);
+        if (sorted.length > limit) sorted.length = limit;
+        return new Set(sorted.map(([k]) => k));
+    },
 
     _setTileDataCache(this: any, key: string, buffer: ArrayBuffer): void {
         const existing = this._tileDataCache.get(key);
@@ -401,8 +490,6 @@ _getVisibleTileKeys(this: any, z: number): Set<string> {
                 }
             }
         });
-        // O(1) вместо while(remove(children[0])) — та была O(n) с memmove
-        // массива на каждой итерации (заметно при массовом диспоузе).
         if (typeof (group as any).clear === 'function') {
             (group as any).clear();
         } else {

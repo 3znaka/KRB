@@ -357,7 +357,7 @@ export const CoreCameraMixin = {
         const minInX = Math.min(ax, bx), maxInX = Math.max(ax, bx);
         const minInY = Math.min(ay, by), maxInY = Math.max(ay, by);
         const [padX, padY] = Array.isArray(padding) ? [padding[0], padding[1]] : [padding, padding];
-        const srcCrs = typeof crs === 'string' ? Projections.get(crs) : crs;
+        const srcCrs = typeof crs === 'string' ? Projections.getRaw(crs) : crs;
         let minWX = Infinity, maxWX = -Infinity, minWZ = Infinity, maxWZ = -Infinity;
         const corners = [[minInX, minInY], [maxInX, minInY], [minInX, maxInY], [maxInX, maxInY]];
         for (const [px, py] of corners) {
@@ -394,7 +394,7 @@ export const CoreCameraMixin = {
     fitTo(objectOrArray, options = {}) {
         const objs = Array.isArray(objectOrArray) ? objectOrArray : [objectOrArray];
         const crsCode = options.crs ?? 'EPSG:4326';
-        const crs = typeof crsCode === 'string' ? Projections.get(crsCode) : crsCode;
+        const crs = typeof crsCode === 'string' ? Projections.getRaw(crsCode) : crsCode;
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const obj of objs) {
             if (!obj || typeof obj.getBounds !== 'function')

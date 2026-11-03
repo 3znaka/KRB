@@ -175,6 +175,9 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         this._pauseReasons.clear();
         this._tileLayer = null;
         this._elevationLayer = null;
+
+
+        
     },
 
     _disposeObject3D(root) {

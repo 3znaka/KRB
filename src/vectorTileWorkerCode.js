@@ -41,16 +41,17 @@ function onMessage(e) {
         return;
     }
 if (msg.type === 'identify') {
-    const { id, buffer, z, x, y, tileSize, maxMerc, localX, localZ,
+    const {id, buffer, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, localX, localZ,
             tolerance, continuousZoom, styleZoom,
             visibleLayers = null, invisibleLayers = null } = msg;
     try {
         const tile = new VectorTile(new Protobuf(buffer));
-        const result = identifyAt(
-            tile, z, x, y, tileSize, maxMerc, localX, localZ, tolerance,
-            styleZoom ?? continuousZoom ?? z,
-            visibleLayers, invisibleLayers
-        );
+const result = identifyAt(
+    tile, z, x, y, tileSizeX, tileSizeY,
+    localX, localZ, tolerance,
+    styleZoom ?? continuousZoom ?? z,
+    visibleLayers, invisibleLayers,
+);
         self.postMessage({ id, result });
     } catch (err) {
         self.postMessage({ id, error: err.message });
@@ -59,8 +60,8 @@ if (msg.type === 'identify') {
 }
 if (msg.type === 'process') {
     const {
-        id, buffer, z, x, y, tileSize, maxMerc, is3d,
-        visibleLayers, invisibleLayers,        // ← добавить
+        id, buffer, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is3d,
+        visibleLayers, invisibleLayers,       
         buildingEdges,
         continuousZoom, styleZoom,
         exclusionPolygons = [], exclusionLayers = [],
@@ -69,13 +70,13 @@ if (msg.type === 'process') {
     } = msg;
     try {
         const tile = new VectorTile(new Protobuf(buffer));
-        const result = processTile(
-            tile, z, x, y, tileSize, maxMerc, is3d,
-            visibleLayers, invisibleLayers, buildingEdges,   // ← порядок: см. сигнатуру ниже
-            exclusionPolygons, exclusionLayers,
-            maxTextPointsPerTile, maxTextLinesPerTile,
-            styleZoom ?? continuousZoom ?? z
-        );
+const result = processTile(
+    tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is3d,
+    visibleLayers, invisibleLayers, buildingEdges,
+    exclusionPolygons, exclusionLayers,
+    maxTextPointsPerTile, maxTextLinesPerTile,
+    styleZoom ?? continuousZoom ?? z,
+);
             const transferList = [];
             const payload = { id, result };
             collectTransferables(payload, transferList);
@@ -371,12 +372,12 @@ function evalFilter(spec, feature) {
 // ГЕОМЕТРИЧЕСКИЕ УТИЛИТЫ
 // ════════════════════════════════════════════════════════════════════════
 
-function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine = false) {
+function toWorldCoords(feature, z, xSlippy, ySlippy, tileSizeX, tileSizeY, maxMercX, maxMercY, isLine = false) {
     const minLen = isLine ? 2 : 3;
-    const originZ = -maxMerc + ySlippy * tileSize;
-    const originX = xSlippy * tileSize - maxMerc;
-    const centerX = originX + tileSize / 2;
-    const centerZ = originZ + tileSize / 2;
+    const originZ = -maxMercY + ySlippy * tileSizeY;
+    const originX = xSlippy * tileSizeX - maxMercX;
+    const centerX = originX + tileSizeX / 2;
+    const centerZ = originZ + tileSizeY / 2;
     const geom = feature.loadGeometry();
 
     if (isLine) {
@@ -386,8 +387,8 @@ function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine =
             for (const seg of clippedSegments) {
                 if (seg.length >= minLen) {
                     resultRings.push(seg.map(p => ({
-                        x: originX + (p.x / 4095) * tileSize - centerX,
-                        z: originZ + (p.y / 4095) * tileSize - centerZ
+                        x: originX + (p.x / 4095) * tileSizeX - centerX,
+                        z: originZ + (p.y / 4095) * tileSizeY - centerZ,
                     })));
                 }
             }
@@ -398,8 +399,8 @@ function toWorldCoords(feature, z, xSlippy, ySlippy, tileSize, maxMerc, isLine =
             .map(ring => clipRingToTile(ring.map(p => ({ x: p.x, y: p.y })), 4095))
             .filter(ring => ring.length >= minLen)
             .map(ring => ring.map(p => ({
-                x: originX + (p.x / 4095) * tileSize - centerX,
-                z: originZ + (p.y / 4095) * tileSize - centerZ
+                x: originX + (p.x / 4095) * tileSizeX - centerX,
+                z: originZ + (p.y / 4095) * tileSizeY - centerZ,
             })));
     }
 }
@@ -544,20 +545,20 @@ function orientRing(ring, ccw) {
     return ring;
 }
 
-function isVertexOnTileBoundary(x, z, halfTile, eps) {
-    return Math.abs(Math.abs(x) - halfTile) < eps ||
-           Math.abs(Math.abs(z) - halfTile) < eps;
+function isVertexOnTileBoundary(x, z, halfTileX, halfTileY, eps) {
+    return Math.abs(Math.abs(x) - halfTileX) < eps ||
+           Math.abs(Math.abs(z) - halfTileY) < eps;
 }
 
-function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
-    const onXPlus1  = Math.abs(x1 - halfTile)  < eps;
-    const onXMinus1 = Math.abs(x1 + halfTile)  < eps;
-    const onZPlus1  = Math.abs(z1 - halfTile)  < eps;
-    const onZMinus1 = Math.abs(z1 + halfTile)  < eps;
-    const onXPlus2  = Math.abs(x2 - halfTile)  < eps;
-    const onXMinus2 = Math.abs(x2 + halfTile)  < eps;
-    const onZPlus2  = Math.abs(z2 - halfTile)  < eps;
-    const onZMinus2 = Math.abs(z2 + halfTile)  < eps;
+function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTileX, halfTileY, eps) {
+    const onXPlus1  = Math.abs(x1 - halfTileX)  < eps;
+    const onXMinus1 = Math.abs(x1 + halfTileX)  < eps;
+    const onZPlus1  = Math.abs(z1 - halfTileY)  < eps;
+    const onZMinus1 = Math.abs(z1 + halfTileY)  < eps;
+    const onXPlus2  = Math.abs(x2 - halfTileX)  < eps;
+    const onXMinus2 = Math.abs(x2 + halfTileX)  < eps;
+    const onZPlus2  = Math.abs(z2 - halfTileY)  < eps;
+    const onZMinus2 = Math.abs(z2 + halfTileY)  < eps;
     if (onXPlus1 && onXPlus2)   return true;
     if (onXMinus1 && onXMinus2) return true;
     if (onZPlus1 && onZPlus2)   return true;
@@ -565,15 +566,15 @@ function isEdgeOnTileBoundary(x1, z1, x2, z2, halfTile, eps) {
     return false;
 }
 
-function splitRingByBoundary(ring, halfTile, eps) {
-    const boundaryEps = Math.max(eps, halfTile * 1e-4);
+function splitRingByBoundary(ring, halfTileX, halfTileY, eps) {
+    const boundaryEps = Math.max(eps, Math.min(halfTileX, halfTileY) * 1e-4);
     const n = ring.length;
     if (n < 2) return [];
 
     const isBoundary = (i) => {
         const p0 = ring[i];
         const p1 = ring[(i + 1) % n];
-        return isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
+        return isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTileX, halfTileY, boundaryEps);
     };
 
     let start = -1;
@@ -629,12 +630,12 @@ function pushTriangle(positions, normals, ax, ay, az, bx, by, bz, cx, cy, cz, nx
     for (let i = 0; i < 3; i++) normals.push(nx, ny, nz);
 }
 
-function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true, halfTile = 0) {
+function extrudeBuilding(rings, height, minHeight, eps, includeEdges, halfTileX, halfTileY) {
     if (!rings || rings.length === 0 || height <= 0) return null;
     const cleaned = rings.map(r => dedupRing(r, eps)).filter(r => r.length >= 3);
     if (cleaned.length === 0) return null;
-    const checkBoundary = halfTile > 0;
-    const boundaryEps = Math.max(eps, halfTile * 1e-4);
+    const checkBoundary = halfTileX > 0 && halfTileY > 0;
+   const boundaryEps = Math.max(eps, Math.min(halfTileX, halfTileY) * 1e-4);
     const validRings = [];
     for (const ring of cleaned) {
         const area = ringArea(ring);
@@ -696,7 +697,7 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                 const nx = dz / len;
                 const nz = -dx / len;
                 const onBoundary = checkBoundary &&
-                    isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTile, boundaryEps);
+        isEdgeOnTileBoundary(p0.x, p0.z, p1.x, p1.z, halfTileX, halfTileY, boundaryEps);
                 if (!onBoundary) {
                     pushTriangle(positions, normals,
                         p0.x, minHeight, p0.z, p1.x, minHeight, p1.z,
@@ -715,8 +716,8 @@ function extrudeBuilding(rings, height, minHeight = 0, eps, includeEdges = true,
                     const dz2 = p2.z - p1.z;
                     const len2 = Math.hypot(dx2, dz2);
                     if (len2 > eps && (dx * dx2 + dz * dz2) / (len * len2) < sharpCos) {
-                        const cornerOnBoundary = checkBoundary &&
-                            isVertexOnTileBoundary(p1.x, p1.z, halfTile, boundaryEps);
+                         const cornerOnBoundary = checkBoundary &&
+        isVertexOnTileBoundary(p1.x, p1.z, halfTileX, halfTileY, boundaryEps);
                         if (!cornerOnBoundary) edges.push(p1.x, minHeight, p1.z, p1.x, height, p1.z);
                     }
                 }
@@ -781,10 +782,10 @@ function blendWithBackground(color, opacity) {
 // IDENTIFY
 // ════════════════════════════════════════════════════════════════════════
 
-function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ,
+function identifyAt(tile, z, x, y, tileSizeX, tileSizeY, localX, localZ,
                     tolerance, styleZoom, visibleLayers, invisibleLayers) {
     const zoom = styleZoom ?? z;
-    const tol  = tolerance || tileSize * 0.005;
+    const tol  = tolerance || Math.min(tileSizeX, tileSizeY) * 0.005;
     const tolSq = tol * tol;
     const results = [];
 
@@ -803,27 +804,27 @@ function identifyAt(tile, z, x, y, tileSize, maxMerc, localX, localZ,
             if (geomType === 1) {
                 const pt = geom[0] && geom[0][0];
                 if (pt) {
-                    const fx = (pt.x / 4095 - 0.5) * tileSize;
-                    const fz = (pt.y / 4095 - 0.5) * tileSize;
+                   const fx = (pt.x / 4095 - 0.5) * tileSizeX;
+    const fz = (pt.y / 4095 - 0.5) * tileSizeY;
                     const d2 = (fx - localX) * (fx - localX) + (fz - localZ) * (fz - localZ);
                     if (d2 < tolSq) { hit = true; minDistSq = d2; }
                 }
             } else if (geomType === 2) {
                 for (const ring of geom) {
                     for (let k = 0; k < ring.length - 1; k++) {
-                        const ax = (ring[k].x / 4095 - 0.5) * tileSize;
-                        const az = (ring[k].y / 4095 - 0.5) * tileSize;
-                        const bx = (ring[k + 1].x / 4095 - 0.5) * tileSize;
-                        const bz = (ring[k + 1].y / 4095 - 0.5) * tileSize;
+                      const ax = (ring[k].x   / 4095 - 0.5) * tileSizeX;
+    const az = (ring[k].y   / 4095 - 0.5) * tileSizeY;
+    const bx = (ring[k+1].x / 4095 - 0.5) * tileSizeX;
+    const bz = (ring[k+1].y / 4095 - 0.5) * tileSizeY;
                         const d2 = pointSegDistSq(localX, localZ, ax, az, bx, bz);
                         if (d2 < tolSq && d2 < minDistSq) { hit = true; minDistSq = d2; }
                     }
                 }
             } else if (geomType === 3) {
-                const rings2d = geom.map(ring => ring.map(p => ({
-                    x: (p.x / 4095 - 0.5) * tileSize,
-                    z: (p.y / 4095 - 0.5) * tileSize
-                })));
+               const rings2d = geom.map(ring => ring.map(p => ({
+        x: (p.x / 4095 - 0.5) * tileSizeX,
+        z: (p.y / 4095 - 0.5) * tileSizeY,
+    })));
                 if (pointInPolygonRings({ x: localX, z: localZ }, rings2d)) {
                     hit = true;
                     minDistSq = 0;
@@ -978,17 +979,16 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 // ОБРАБОТКА ТАЙЛА
 // ════════════════════════════════════════════════════════════════════════
 
-function processTile(tile, z, x, y, tileSize, maxMerc, is3d,
+function processTile(tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is3d,
                      visibleLayers, invisibleLayers, buildingEdges,
-                     exclusionPolygons = [], exclusionLayers = [],
-                     maxTextPointsPerTile = 300, maxTextLinesPerTile = 30,
-                     styleZoom = z) {
-    const eps = tileSize * 0.5 / 4096;
+                     exclusionPolygons, exclusionLayers,
+                     maxTextPointsPerTile, maxTextLinesPerTile, styleZoom) {
+    const eps = Math.min(tileSizeX, tileSizeY) * 0.5 / 4096;
     const pointScale = computePointScale(styleZoom);
-    const halfTile = tileSize / 2;
-
-    const centerX = x * tileSize - maxMerc + tileSize / 2;
-    const centerZ = -maxMerc + y * tileSize + tileSize / 2;
+   const halfTileX = tileSizeX / 2;
+    const halfTileY = tileSizeY / 2;
+    const centerX = x * tileSizeX - maxMercX + tileSizeX / 2;
+    const centerZ = -maxMercY + y * tileSizeY + tileSizeY / 2;
 
     const localExclusionPolygons = exclusionPolygons.map(poly => poly.map(p => ({
         x: p.x - centerX,
@@ -1035,8 +1035,8 @@ const processLayer = (name) => {
                 const pt = ring[0];
                 if (pt.x < 0 || pt.x > 4095 || pt.y < 0 || pt.y > 4095) continue;
 
-                const worldX = (pt.x / 4095 - 0.5) * tileSize;
-                const worldZ = (pt.y / 4095 - 0.5) * tileSize;
+        const worldX = (pt.x / 4095 - 0.5) * tileSizeX;
+const worldZ = (pt.y / 4095 - 0.5) * tileSizeY;
 
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
                     const localPt = { x: worldX, z: worldZ };
@@ -1090,7 +1090,7 @@ textPoints.push({
             }
 
             // ═══════════════════ POLYGON / LINESTRING ═══════════════════
-            const rings = toWorldCoords(feature, z, x, y, tileSize, maxMerc, geomType === 2);
+  const rings = toWorldCoords(feature, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, geomType === 2);
 
             if (geomType === 3) {
                 if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
@@ -1106,7 +1106,8 @@ textPoints.push({
                         const isPart = props['building:part'] === 'yes';
                         const isSimpleBuilding = props['building:part'] === undefined;
                         if (is3d && (isPart || isSimpleBuilding)) {
-                            const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTile);
+ const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTileX, halfTileY);
+
                             if (geo) {
                                 const bColor = resolveColor(layerStyle.color, props, styleZoom, geomType);
                                 const bStroke = resolveColor(layerStyle.stroke, props, styleZoom, geomType);
@@ -1191,7 +1192,7 @@ textPoints.push({
                     if (!strokeGroup) { strokeGroup = []; strokesMap.set(strokeKey, strokeGroup); }
 for (const ring of rings) {
     if (ring.length < 2) continue;
-    const chains = splitRingByBoundary(ring, halfTile, eps);
+const chains = splitRingByBoundary(ring, halfTileX, halfTileY, eps);
     for (const chain of chains) {
         if (chain.length >= 2) strokeGroup.push({ ring: chain, sortKey });
     }
@@ -1219,9 +1220,9 @@ for (const ring of rings) {
                         const dashPx = resolveArray(layerStyle.dash, props, styleZoom, geomType);
                         // dash фиксируем на зуме тайла; масштаб по continuousZoom
                         // докручивается в _updateDynamicLineMaterials.
-                        const dash = dashPx
-                            ? scaleDash(dashPx, tileSize, z, z)
-                            : null;
+const dash = dashPx
+? scaleDash(dashPx, Math.min(tileSizeX, tileSizeY), z, z)
+: null;
 
                         const finalColor = opacity < 1
                             ? blendWithBackground(color, opacity)
@@ -1309,7 +1310,7 @@ renderOrder: semanticOrder - 0.5,
 
                     const minSegmentFactor = resolveNumber(
                         layerStyle.textMinSegmentLength, props, styleZoom, 0.15, geomType);
-                    const minLen = tileSize * minSegmentFactor;
+                 const minLen = Math.min(tileSizeX, tileSizeY) * minSegmentFactor;
 
                     for (const ring of rings) {
                         if (ring.length < 2) continue;

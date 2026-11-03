@@ -317,10 +317,10 @@ export class TileManager {
         return this.engine.deformedTiles;
     }
 
-    get _layerCrs() {
-        const code = this.layer?.crs ?? 'EPSG:3857';
-        return typeof code === 'string' ? Projections.get(code) : code;
-    }
+get _layerCrs() {
+    const code = this.layer?.crs ?? 'EPSG:3857';
+    return typeof code === 'string' ? Projections.get(code) : code;
+}
 
     key(z, virtX, y) {
         return getVirtKey(z, virtX, y);

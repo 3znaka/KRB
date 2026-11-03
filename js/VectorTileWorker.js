@@ -2,23 +2,11 @@
 import { THREE, Line2, LineSegmentsGeometry } from './js_TP/tpb.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
-// ============================================================================
-// Module-level shared blob cache
-// ============================================================================
 const _MODULE_DIR = new URL('.', import.meta.url).href;
 export const _DEFAULT_WORKER_SCRIPTS = [
     new URL('./js_TP/tpb.js', _MODULE_DIR).href,
     new URL('./js_TP/earcut.js', _MODULE_DIR).href,
 ];
-/**
- * Fix #4: сознательно «вечный» кэш blob URL.
- *
- * Ключ — пара (tpbUrl, earcutUrl). Количество ключей ограничено числом
- * уникальных пар; blob URL не revoke'ается, т.к. разделяется всеми
- * экземплярами VectorTile с одинаковыми скриптами. Если когда-либо
- * понадобится динамическая смена скриптов — добавьте refcount:
- *   acquireWorkerBlobUrl(urls) / releaseWorkerBlobUrl(urls).
- */
 const _workerBlobUrlCache = new Map();
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const key = tpbUrl + '|' + earcutUrl;
@@ -41,18 +29,13 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     promise.catch(() => _workerBlobUrlCache.delete(key));
     return promise;
 }
-// ============================================================================
-// Mixin
-// ============================================================================
 export const VectorTileWorkerMixin = {
-    // ── Fix #2: токен против «осиротевшего» воркера ───────────────────────
     async _initWorker() {
         const token = (this._workerInitToken || 0) + 1;
         this._workerInitToken = token;
         const [tpbUrl, earcutUrl] = this._workerScriptUrls;
         try {
             const blobUrl = await _getSharedWorkerBlobUrl(tpbUrl, earcutUrl);
-            // Пока ждали fetch — слой мог быть снят с карты (removeFromMap).
             if (this._workerInitToken !== token)
                 return;
             if (!this._map)
@@ -101,7 +84,11 @@ export const VectorTileWorkerMixin = {
         }
         const group = pending.group || new THREE.Group();
         try {
-            this._buildGroupFromWorkerResult(group, data.result);
+            const built = this._buildGroupFromWorkerResult(group, data.result, pending.sourceZoom);
+            if (!built) {
+                pending.resolve(null);
+                return;
+            }
             group.userData.sourceZoom = pending.sourceZoom;
             group.userData.styleZoom = pending.styleZoom;
             group.userData.generation = pending.generation;
@@ -115,12 +102,73 @@ export const VectorTileWorkerMixin = {
         this._labelsDirty = true;
         pending.resolve(group);
     },
-    _buildGroupFromWorkerResult(group, result) {
+    // ── Деформация tile-CRS → map-CRS ─────────────────────────────────────
+    _computeTileDeform(z, tileCX, tileCZ) {
+        const tileCrs = this._tileCrs;
+        const halfX = tileCrs.halfExtentX;
+        const halfY = tileCrs.halfExtentY;
+        const tsX = (2 * halfX) / (1 << z);
+        const tsY = (2 * halfY) / (1 << z);
+        const htX = tsX / 2;
+        const htY = tsY / 2;
+        const c00 = this._tileToMap(tileCX - htX, tileCZ - htY);
+        const c10 = this._tileToMap(tileCX + htX, tileCZ - htY);
+        const c01 = this._tileToMap(tileCX - htX, tileCZ + htY);
+        const c11 = this._tileToMap(tileCX + htX, tileCZ + htY);
+        if (!c00 || !c10 || !c01 || !c11)
+            return null;
+        const mapCX = (c00.x + c10.x + c01.x + c11.x) / 4;
+        const mapCZ = (c00.z + c10.z + c01.z + c11.z) / 4;
+        // Порог вырожденности — по большему из размеров тайла в tile-CRS.
+        const maxSide = Math.max(Math.hypot(c10.x - c00.x, c10.z - c00.z), Math.hypot(c01.x - c00.x, c01.z - c00.z), Math.hypot(c11.x - c10.x, c11.z - c10.z), Math.hypot(c11.x - c01.x, c11.z - c01.z));
+        if (!Number.isFinite(maxSide))
+            return null;
+        if (maxSide > Math.max(tsX, tsY) * 20)
+            return null;
+        return { c00, c10, c01, c11, mapCX, mapCZ, htX, htY };
+    },
+    _bilinear(df, lx, lz, out) {
+        const u = (lx + df.htX) / (2 * df.htX);
+        const v = (lz + df.htY) / (2 * df.htY);
+        const { c00, c10, c01, c11 } = df;
+        const x = (1 - u) * (1 - v) * c00.x + u * (1 - v) * c10.x +
+            (1 - u) * v * c01.x + u * v * c11.x;
+        const z = (1 - u) * (1 - v) * c00.z + u * (1 - v) * c10.z +
+            (1 - u) * v * c01.z + u * v * c11.z;
+        out.x = x - df.mapCX;
+        out.z = z - df.mapCZ;
+    },
+    _deformArray(pos, df) {
+        const tmp = { x: 0, z: 0 };
+        for (let i = 0; i < pos.length; i += 3) {
+            this._bilinear(df, pos[i], pos[i + 2], tmp);
+            pos[i] = tmp.x;
+            pos[i + 2] = tmp.z;
+        }
+    },
+    _deformGeometry(geom, df) {
+        const attr = geom.attributes.position;
+        this._deformArray(attr.array, df);
+        attr.needsUpdate = true;
+    },
+    _deformXZ(x, z, df) {
+        const out = { x: 0, z: 0 };
+        this._bilinear(df, x, z, out);
+        return out;
+    },
+    // ── Сборка группы ─────────────────────────────────────────────────────
+    _buildGroupFromWorkerResult(group, result, sourceZoom) {
         this._removeTextLabelsForGroup(group);
         group.renderOrder = this._tileGroupRenderOrder;
-        if (result.centerX !== undefined && result.centerZ !== undefined) {
-            group.position.set(result.centerX, 0, result.centerZ);
+        const tileCX = result.centerX ?? 0;
+        const tileCZ = result.centerZ ?? 0;
+        let df = null;
+        if (this._isDeformed) {
+            df = this._computeTileDeform(sourceZoom, tileCX, tileCZ);
+            if (!df)
+                return false; // тайл вне домена / вырожден — пропускаем целиком
         }
+        group.position.set(df ? df.mapCX : tileCX, 0, df ? df.mapCZ : tileCZ);
         while (group.children.length) {
             const child = group.children[0];
             if (child.geometry && !this._managedGeometries.has(child.geometry))
@@ -132,23 +180,25 @@ export const VectorTileWorkerMixin = {
             }
             group.remove(child);
         }
+        // ── Fills ─────────────────────────────────────────────────────
         for (const fill of result.fills || []) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
             const geom = new THREE.BufferGeometry();
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices)
                 geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
+            if (df)
+                this._deformGeometry(geom, df);
             const mesh = new THREE.Mesh(geom, mat);
             const rawFillOrder = typeof fill.renderOrder === 'number' && Number.isFinite(fill.renderOrder)
                 ? fill.renderOrder
                 : VECTOR_TILE_RENDER_ORDER.FILL;
             const isTransportationFill = fill.layerName === 'transportation';
-            mesh.renderOrder = isTransportationFill
-                ? 200_000 + rawFillOrder
-                : rawFillOrder;
+            mesh.renderOrder = isTransportationFill ? 200_000 + rawFillOrder : rawFillOrder;
             mesh.position.y = isTransportationFill ? 0.04 : 0;
             group.add(mesh);
         }
+        // ── Buildings ─────────────────────────────────────────────────
         if (result.buildings && result.buildings.length > 0) {
             const byColor = new Map();
             for (const b of result.buildings) {
@@ -167,6 +217,10 @@ export const VectorTileWorkerMixin = {
                 const geom = new THREE.BufferGeometry();
                 geom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.pos), 3));
                 geom.setAttribute('normal', new THREE.BufferAttribute(this._concatF32(g.nrm), 3));
+                if (df) {
+                    this._deformGeometry(geom, df);
+                    geom.computeVertexNormals();
+                }
                 if (isTransparent) {
                     const depthMesh = new THREE.Mesh(geom, this._getBuildingDepthMaterial());
                     depthMesh.renderOrder = 900_000;
@@ -178,23 +232,32 @@ export const VectorTileWorkerMixin = {
                 if (this.buildingEdges && g.edg.length) {
                     const edgeGeom = new THREE.BufferGeometry();
                     edgeGeom.setAttribute('position', new THREE.BufferAttribute(this._concatF32(g.edg), 3));
+                    if (df)
+                        this._deformGeometry(edgeGeom, df);
                     const lines = new THREE.LineSegments(edgeGeom, this._getBuildingEdgeMaterial(g.stroke || 0x555555, isTransparent ? opacity * 0.35 : 1));
                     lines.renderOrder = VECTOR_TILE_RENDER_ORDER.EDGE;
                     group.add(lines);
                 }
             }
         }
+        // ── Lines / strokes ───────────────────────────────────────────
         for (const line of result.lines || []) {
             const mat = this._getDynamicLineMaterial(line);
             if (!mat)
                 continue;
-            this._addFatLineFromPositions(group, line.positions, mat, line.renderOrder);
+            this._addFatLineFromPositions(group, line.positions, mat, line.renderOrder, df);
         }
         for (const stroke of result.strokes || []) {
             const mat = this._getLineMaterialFromData(stroke.layerName, stroke.color, stroke.width, stroke.dash);
-            this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder);
+            this._addFatLineFromPositions(group, stroke.positions, mat, stroke.renderOrder, df);
         }
+        // ── Points ────────────────────────────────────────────────────
         for (const pt of result.points || []) {
+            if (df) {
+                const p = this._deformXZ(pt.x, pt.z, df);
+                pt.x = p.x;
+                pt.z = p.z;
+            }
             const fillKey = `fill:${pt.layerName}:${pt.color.toString(16)}:${pt.opacity}`;
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
@@ -203,16 +266,32 @@ export const VectorTileWorkerMixin = {
             mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
-        // NEW: обогащаем textPoints иконками из стиля (см. _enrichTextPointsWithIcons).
-        // Делаем это до присваивания group.userData.textPointsData, чтобы
-        // _refreshTextLabelsForVisibleTiles увидел уже готовые pt.iconName.
+        // ── TextPoints / TextLines ────────────────────────────────────
         const textPoints = result.textPoints || [];
+        if (df) {
+            for (const tp of textPoints) {
+                const p = this._deformXZ(tp.x, tp.z, df);
+                tp.x = p.x;
+                tp.z = p.z;
+            }
+        }
         this._enrichTextPointsWithIcons(textPoints);
         group.userData.textPointsData = textPoints;
-        group.userData.textLinesData = result.textLines || [];
+        const textLines = result.textLines || [];
+        if (df) {
+            for (const tl of textLines) {
+                for (const p of tl.points) {
+                    const r = this._deformXZ(p.x, p.z, df);
+                    p.x = r.x;
+                    p.z = r.z;
+                }
+            }
+        }
+        group.userData.textLinesData = textLines;
         group.userData.lineLabelSources = null;
         group.userData.textLabels = [];
         group.userData.is3d = !!result.is3d;
+        return true;
     },
     _enrichTextPointsWithIcons(points) {
         if (!points || points.length === 0)
@@ -220,7 +299,6 @@ export const VectorTileWorkerMixin = {
         const styles = this._styles;
         if (!styles)
             return;
-        // Локальный словарь удален — используем импортированный POI_COLORS
         for (let i = 0; i < points.length; i++) {
             const pt = points[i];
             if (pt.iconName)
@@ -238,36 +316,20 @@ export const VectorTileWorkerMixin = {
             if (!iconName)
                 continue;
             pt.iconName = iconName;
-            if (pt.iconScale == null) {
+            if (pt.iconScale == null)
                 pt.iconScale = style.iconScale ?? style['icon-scale'] ?? 1;
-            }
-            if (pt.iconOffset == null) {
+            if (pt.iconOffset == null)
                 pt.iconOffset = style.iconOffset ?? style['icon-offset'] ?? [0, 0];
-            }
-            if (pt.iconCircleScale == null) {
+            if (pt.iconCircleScale == null)
                 pt.iconCircleScale = style.iconCircleScale;
-            }
-            if (pt.iconGlyphRatio == null) {
+            if (pt.iconGlyphRatio == null)
                 pt.iconGlyphRatio = style.iconGlyphRatio;
-            }
             if (pt.iconColor == null) {
                 const cls = pt.properties?.class || pt.class;
                 pt.iconColor = style.classColors?.[cls] ?? '#888888';
             }
         }
     },
-    /**
-     * Резолвит `iconImage`-спеку из стиля в конкретное имя спрайта.
-     *
-     * Поддерживается:
-     *   • 'restaurant_11' — прямое имя;
-     *   • { type: 'match', by, values, _default } — по ключам from `by`.
-     *
-     * В отличие от воркера, `by` может быть как строкой, так и массивом:
-     * перебираем ключи по очереди и берём первое совпадение. Это
-     * соответствует тому, как мы используем match для иконок, и не
-     * требует полной реализации OMT-семантики.
-     */
     _evalIconImageSpec(spec, pt) {
         if (spec == null)
             return null;
@@ -283,7 +345,7 @@ export const VectorTileWorkerMixin = {
                 const key = keys[k];
                 const v = (pt.properties && pt.properties[key] !== undefined)
                     ? pt.properties[key]
-                    : pt[key]; // ← fallback: pt.class и т.п.
+                    : pt[key];
                 if (v == null)
                     continue;
                 const entry = values[String(v)];
@@ -300,7 +362,6 @@ export const VectorTileWorkerMixin = {
         }
         return null;
     },
-    // ── Fix #8: два прохода, без промежуточного JS-массива ────────────────
     _fatLineSegmentsFromPositions(positions) {
         if (!positions || positions.length < 6)
             return null;
@@ -343,10 +404,12 @@ export const VectorTileWorkerMixin = {
         }
         return out;
     },
-    _addFatLineFromPositions(group, positions, material, renderOrder) {
+    _addFatLineFromPositions(group, positions, material, renderOrder, deform = null) {
         const segs = this._fatLineSegmentsFromPositions(positions);
         if (!segs)
             return;
+        if (deform)
+            this._deformArray(segs, deform);
         const lGeo = new LineSegmentsGeometry();
         lGeo.setPositions(segs);
         const lineObj = new Line2(lGeo, material);
@@ -393,22 +456,20 @@ export const VectorTileWorkerMixin = {
             return null;
         const map = this._map;
         const id = ++this._requestId;
-        // tileSize в единицах tile-CRS: для Mercator === map.WORLD_SIZE / 2^z.
         const tileHalfX = this._tileCrs.halfExtentX;
-        const tileSize = (2 * tileHalfX) / (1 << z);
         const effectiveStyleZoom = Number.isFinite(styleZoom)
             ? styleZoom
             : this._getCurrentTileStyleZoom(map);
-        // ── Fix #3: не клонируем exclusion-данные, если их нет ─────────────
-        // (полное решение — отправка один раз через config — требует
-        //  поддержки со стороны воркера; частичный фикс — убрать клон
-        //  в самом частом случае, когда exclusion не используются.)
         const hasExclusions = this._exclusionAreas && this._exclusionAreas.length > 0;
         const exclusionPolygons = hasExclusions ? this._exclusionAreas : [];
         const exclusionLayers = hasExclusions ? this._exclusionLayersArray : [];
+        const tileHalfY = this._tileCrs.halfExtentY;
+        const tileSizeX = (2 * tileHalfX) / (1 << z);
+        const tileSizeY = (2 * tileHalfY) / (1 << z);
         const msg = {
-            type: 'process', id, buffer, z, x, y, tileSize,
-            maxMerc: tileHalfX,
+            type: 'process', id, buffer, z, x, y,
+            tileSizeX, tileSizeY,
+            maxMercX: tileHalfX, maxMercY: tileHalfY,
             is3d,
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,
@@ -443,15 +504,22 @@ export const VectorTileWorkerMixin = {
         const sourceZoom = this._lastSourceZoom >= 0
             ? this._lastSourceZoom
             : Math.max(this.minNativeZoom, Math.min(map.currentDiscreteZoom + this.zoomOffset, this.maxNativeZoom));
-        // tile-CRS extent: для Mercator === map.WORLD_SIZE / 2^z и map.MAX_MERCATOR.
         const tileHalfX = this._tileCrs.halfExtentX;
         const tileHalfY = this._tileCrs.halfExtentY;
-        const tileSize = (2 * tileHalfX) / (1 << sourceZoom);
+        const tileSizeX = (2 * tileHalfX) / (1 << sourceZoom);
+        const tileSizeY = (2 * tileHalfY) / (1 << sourceZoom);
         const numTiles = 1 << sourceZoom;
-        const localX = sceneX - map.worldGroup.position.x;
-        const localZ = sceneZ - map.worldGroup.position.z;
-        const tx = (localX + tileHalfX) / tileSize;
-        const tz = (localZ + tileHalfY) / tileSize;
+        let localX = sceneX - map.worldGroup.position.x;
+        let localZ = sceneZ - map.worldGroup.position.z;
+        if (this._isDeformed) {
+            const t = this._mapToTile(localX, localZ);
+            if (!t)
+                return { error: 'click outside projection domain' };
+            localX = t.x;
+            localZ = t.z;
+        }
+        const tx = (localX + tileHalfX) / tileSizeX;
+        const tz = (localZ + tileHalfY) / tileSizeY;
         const xSlippy = Math.floor(tx);
         const ySlippy = Math.floor(tz);
         if (xSlippy < 0 || xSlippy >= numTiles || ySlippy < 0 || ySlippy >= numTiles) {
@@ -478,8 +546,8 @@ export const VectorTileWorkerMixin = {
                 return { error: `fetch failed: ${err.message}` };
             }
         }
-        const centerX = xSlippy * tileSize - tileHalfX + tileSize / 2;
-        const centerZ = -tileHalfY + ySlippy * tileSize + tileSize / 2;
+        const centerX = xSlippy * tileSizeX - tileHalfX + tileSizeX / 2;
+        const centerZ = -tileHalfY + ySlippy * tileSizeY + tileSizeY / 2;
         const clickLocalX = localX - centerX;
         const clickLocalZ = localZ - centerZ;
         return new Promise((resolve, reject) => {
@@ -497,13 +565,13 @@ export const VectorTileWorkerMixin = {
                 this._worker.postMessage({
                     type: 'identify', id, buffer,
                     z: sourceZoom, x: xSlippy, y: ySlippy,
-                    tileSize, maxMerc: tileHalfX,
+                    tileSizeX, tileSizeY, maxMercX: tileHalfX, maxMercY: tileHalfY,
                     continuousZoom: map.continuousZoom + this.zoomOffset,
                     styleZoom: Number.isFinite(this._transitionStyleZoom)
                         ? this._transitionStyleZoom
                         : map.currentDiscreteZoom + this.zoomOffset,
                     localX: clickLocalX, localZ: clickLocalZ,
-                    tolerance: opts.tolerance || tileSize * 0.005,
+                    tolerance: opts.tolerance || Math.min(tileSizeX, tileSizeY) * 0.005,
                     visibleLayers: this.visibleLayers,
                     invisibleLayers: this.invisibleLayers,
                 }, [buffer]);
@@ -513,7 +581,6 @@ export const VectorTileWorkerMixin = {
                 reject(err);
             }
         }).then((result) => {
-            // ── автовызов диагностики ────────────────────────────────────
             if (this._debug) {
                 try {
                     this.diagnoseAt(sceneX, sceneZ, result);
@@ -522,7 +589,6 @@ export const VectorTileWorkerMixin = {
                     console.warn('[VT DIAG] diagnoseAt failed:', e);
                 }
             }
-            // ─────────────────────────────────────────────────────────────
             return result;
         });
     },

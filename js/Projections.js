@@ -1,6 +1,7 @@
 // @ts-nocheck
 // Projections.js
 import proj4 from './js_TP/proj4.js';
+const WORLD_HALF_X = 20037508.342789244;
 const HARDCODED = {
     'EPSG:4326': '+proj=longlat +datum=WGS84 +no_defs +type=crs',
     'EPSG:3857': '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs +type=crs',
@@ -54,6 +55,39 @@ const ELLIPSOID_A = {
     'sphere': 6370997.0,
     'walbeck': 6376896.0,
 };
+class ScaledProjection {
+    constructor(raw, worldScale) {
+        this._raw = raw;
+        this.worldScale = worldScale;
+        this.code = raw.code;
+        this.isMercator = raw.isMercator;
+        this.semiMajor = raw.semiMajor;
+        this.halfExtentX = raw.halfExtentX * worldScale;
+        this.halfExtentY = raw.halfExtentY * worldScale;
+    }
+    fromLonLat(ll) {
+        const p = this._raw.fromLonLat(ll);
+        return [p[0] * this.worldScale, p[1] * this.worldScale];
+    }
+    toLonLat(xy) {
+        return this._raw.toLonLat([xy[0] / this.worldScale, xy[1] / this.worldScale]);
+    }
+    fromLonLatSafe(ll) {
+        const p = this._raw.fromLonLatSafe
+            ? this._raw.fromLonLatSafe(ll)
+            : this._raw.fromLonLat(ll);
+        if (!p)
+            return null;
+        return [p[0] * this.worldScale, p[1] * this.worldScale];
+    }
+    toLonLatSafe(xy) {
+        if (this._raw.toLonLatSafe) {
+            return this._raw.toLonLatSafe([xy[0] / this.worldScale, xy[1] / this.worldScale]);
+        }
+        return this._raw.toLonLat([xy[0] / this.worldScale, xy[1] / this.worldScale]);
+    }
+}
+const _worldCache = new Map();
 /**
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
@@ -306,6 +340,26 @@ class ProjectionRegistry {
                 .then(r => r.json());
         }
         return this._defsPromise;
+    }
+    getRaw(codeOrProj) {
+        return typeof codeOrProj === 'string' ? this.get(codeOrProj) : codeOrProj;
+    }
+    /** Проекция в нормализованных world-единицах (≈ как Mercator). */
+    getWorld(codeOrProj) {
+        if (typeof codeOrProj !== 'string')
+            return codeOrProj;
+        const hit = _worldCache.get(codeOrProj);
+        if (hit)
+            return hit;
+        const raw = this.get(codeOrProj);
+        let scale = WORLD_HALF_X / raw.halfExtentX;
+        if (!Number.isFinite(scale) || scale <= 0)
+            scale = 1;
+        if (Math.abs(scale - 1) < 1e-9)
+            scale = 1; // Mercator: без дрейфа
+        const wrapped = scale === 1 ? raw : new ScaledProjection(raw, scale);
+        _worldCache.set(codeOrProj, wrapped);
+        return wrapped;
     }
 }
 /** Глобальный реестр. @type {ProjectionRegistry} */

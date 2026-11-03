@@ -1,162 +1,181 @@
-// @ts-nocheck
 /**
- * Модуль для рисования полилиний на карте.
- * Предоставляет класс {@link Polyline}, использующий "толстые" линии
- * из three.js (Line2/LineMaterial/LineGeometry) с поддержкой высот
- * (в т.ч. третьей координаты каждой вершины), видимости по зуму и
- * подписей через TextManager.
+ * Polyline — полилиния с толстой линией (Line2), высотами узлов,
+ * видимостью по зуму и подписью. После addTo() мутабелен:
+ * цвет / толщина / прозрачность / видимость / текст / вершины
+ * меняются без пересоздания объекта.
  *
  * @module polyline
  */
 
 import { Projections } from './Projections.js';
-import {
-  THREE,
-  Line2,
-  LineMaterial,
-  LineGeometry,
-} from './js_TP/tpb.js';
+import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { Layer } from './Layers.js';
 
-/**
- * Минимальное расстояние от точки до отрезка.
- * @private
- */
-function pointToSegmentDistance(point, a, b) {
+// =====================================================================
+// Типы
+// =====================================================================
+
+export type LonLat = [number, number];
+export type PolylinePosition = [number, number] | [number, number, number];
+export type PolylineTitleAlignH = 'left' | 'center' | 'right';
+export type PolylineTitleAlignV = 'top' | 'middle' | 'center' | 'bottom';
+export type PolylineTitlePlacement = 'center' | 'along';
+export type PolylineAltitudeMode = 'clampToGround' | 'absolute';
+
+export interface PolylineOptions {
+    positions: PolylinePosition[];
+    crs?: string;
+    color?: string | number;
+    opacity?: number;
+    width?: number;
+    altitudeMode?: PolylineAltitudeMode;
+    altitudeOffset?: number;
+    minZoom?: number;
+    maxZoom?: number;
+    depthTest?: boolean;
+    depthWrite?: boolean;
+    heightUpdateInterval?: number;
+    title?: string;
+    titleOffset?: [number, number];
+    titleAlign?: PolylineTitleAlignH;
+    titleStyle?: Record<string, string | number>;
+    titleMinZoom?: number;
+    titleMaxZoom?: number;
+    titlePlacement?: PolylineTitlePlacement;
+    titleVerticalAlign?: PolylineTitleAlignV;
+    titleAllowOverflow?: boolean;
+    titlePriority?: number;
+}
+
+function pointToSegmentDistance(point: any, a: any, b: any): number {
     const ab = new THREE.Vector3().subVectors(b, a);
     const ap = new THREE.Vector3().subVectors(point, a);
     const abLenSq = ab.lengthSq();
     if (abLenSq === 0) return point.distanceTo(a);
-
     let t = ap.dot(ab) / abLenSq;
     t = Math.max(0, Math.min(1, t));
     const closest = new THREE.Vector3().copy(a).addScaledVector(ab, t);
     return point.distanceTo(closest);
 }
 
-/**
- * Полилиния на карте. Каждая точка может задаваться как `[x, y]` или
- * `[x, y, height]`. Третья координата (world-метры) суммируется с
- * `altitudeOffset`, а при `altitudeMode: 'clampToGround'` — ещё и с
- * высотой рельефа в этой точке. Знак третьей координаты учитывается
- * (отрицательные значения опускают узел ниже поверхности).
- *
- * @example
- * const line = new Polyline({
- *   positions: [[30.5, 50.4, 50], [31.0, 50.5, 120]],
- *   color: '#ff0000',
- *   altitudeMode: 'clampToGround',
- *   altitudeOffset: 10,
- *   title: 'Моя линия'
- * }).addTo(map);
- */
+// =====================================================================
+// Polyline
+// =====================================================================
+
 export class Polyline {
-    /**
-     * @param {Object} options
-     * @param {Array<[number, number]|[number, number, number]>} options.positions -
-     *     Минимум 2 точки `[x, y]` или `[x, y, height]` в СК `options.crs`.
-     *     `height` (world-метры) — дополнительная высота узла.
-     * @param {string} [options.crs] - Код СК точек (по умолчанию `map.inputCRS`).
-     * @param {string} [options.color='#3388ff']
-     * @param {number} [options.opacity=1]
-     * @param {number} [options.width=2]
-     * @param {'clampToGround'|'absolute'} [options.altitudeMode='clampToGround']
-     * @param {number} [options.altitudeOffset=10] - Смещение над поверхностью
-     *     (или над 0 в режиме `absolute`). Суммируется с `height` узла.
-     * @param {number} [options.minZoom=-Infinity]
-     * @param {number} [options.maxZoom=Infinity]
-     * @param {boolean} [options.depthTest=false]
-     * @param {boolean} [options.depthWrite=false]
-     * @param {number} [options.heightUpdateInterval=500]
-     * @param {string} [options.title='']
-     * @param {[number, number]} [options.titleOffset=[0,0]]
-     * @param {'left'|'center'|'right'} [options.titleAlign='center']
-     * @param {Object} [options.titleStyle={}]
-     * @param {number} [options.titleMinZoom=-Infinity]
-     * @param {number} [options.titleMaxZoom=Infinity]
-     * @param {'center'|'along'} [options.titlePlacement='center']
-     * @param {'top'|'middle'|'bottom'} [options.titleVerticalAlign='center']
-     * @param {boolean} [options.titleAllowOverflow=false]
-     * @param {number} [options.titlePriority=0]
-     * @throws {Error} Если `positions` отсутствует или содержит < 2 точек.
-     */
-    constructor(options = {}) {
+    // ── Данные ──
+    private _positions: PolylinePosition[];
+    private _crsCode: string | null;
+    private _crs: any | null;
+
+    // ── Оформление ──
+    private _color: string | number;
+    private _opacity: number;
+    private _width: number;
+    private _altitudeMode: PolylineAltitudeMode;
+    private _altitudeOffset: number;
+    private _minZoom: number;
+    private _maxZoom: number;
+    private _depthTest: boolean;
+    private _depthWrite: boolean;
+
+    // ── Высоты ──
+    private _heightUpdateInterval: number;
+    private _lastHeightUpdateTime = 0;
+    private _absPositions: Array<[number, number]> = [];
+    private _nodeHeights: number[] = [];
+    private _cachedHeights: number[] | null = null;
+
+    // ── Подпись ──
+    private _title: string;
+    private _titleOffset: [number, number];
+    private _titleAlign: PolylineTitleAlignH;
+    private _titleStyle: Record<string, string | number>;
+    private _titleMinZoom: number;
+    private _titleMaxZoom: number;
+    private _titlePlacement: PolylineTitlePlacement;
+    private _titleVerticalAlign: PolylineTitleAlignV;
+    private _titleAllowOverflow: boolean;
+    private _titlePriority: number;
+
+    private _labelT = 0.5;
+    private _labelObj: any = null;
+
+    private _screenData: {
+        points3D: any[] | null;
+        segLengths: number[] | null;
+        totalLen: number;
+        visibleInterval: { min: number; max: number } | null;
+        camera: any;
+        map: any;
+        valid: boolean;
+    } = {
+        points3D: null,
+        segLengths: null,
+        totalLen: 0,
+        visibleInterval: null,
+        camera: null,
+        map: null,
+        valid: false,
+    };
+
+    // ── Присоединение ──
+    private _map: any = null;
+    private _layer: Layer | null = null;
+    private _line: any = null;
+    private _material: any = null;
+    private _geometry: any = null;
+
+    // ── NEW: пользовательская видимость ──
+    private _userVisible = true;
+
+    constructor(options: PolylineOptions) {
         if (!options.positions?.length || options.positions.length < 2) {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }
 
-        /** @private */ this._positions = options.positions;
-        /** @private @type {string|null} */ this._crsCode = options.crs ?? null;
-        /** @private */ this._crs = null;
+        this._positions = options.positions;
+        this._crsCode = options.crs ?? null;
+        this._crs = null;
 
-        /** @private */ this._color = options.color || '#3388ff';
-        /** @private */ this._opacity = options.opacity ?? 1;
-        /** @private */ this._width = options.width || 2;
-        /** @private */ this._altitudeMode = options.altitudeMode || 'clampToGround';
-        /** @private */ this._altitudeOffset = options.altitudeOffset ?? 10;
-        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-        /** @private */ this._depthTest = options.depthTest ?? false;
-        /** @private */ this._depthWrite = options.depthWrite ?? false;
+        this._color = options.color ?? '#3388ff';
+        this._opacity = options.opacity ?? 1;
+        this._width = options.width || 2;
+        this._altitudeMode = options.altitudeMode ?? 'clampToGround';
+        this._altitudeOffset = options.altitudeOffset ?? 10;
+        this._minZoom = options.minZoom ?? -Infinity;
+        this._maxZoom = options.maxZoom ?? Infinity;
+        this._depthTest = options.depthTest ?? false;
+        this._depthWrite = options.depthWrite ?? false;
 
-        /** @private */ this._heightUpdateInterval = options.heightUpdateInterval ?? 500;
-        /** @private */ this._lastHeightUpdateTime = 0;
-        /** @private */ this._absPositions = [];
-        /** @private @type {number[]} */ this._nodeHeights = [];
-        /** @private */ this._cachedHeights = null;
+        this._heightUpdateInterval = options.heightUpdateInterval ?? 500;
 
-        /** @private */ this._title = options.title || '';
-        /** @private */ this._titleOffset = options.titleOffset || [0, 0];
-        /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleStyle = options.titleStyle || {};
-        /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        /** @private */ this._titlePlacement = options.titlePlacement || 'center';
-        /** @private */ this._titleVerticalAlign = options.titleVerticalAlign || 'center';
+        this._title = options.title ?? '';
+        this._titleOffset = options.titleOffset ?? [0, 0];
+        this._titleAlign = options.titleAlign ?? 'center';
+        this._titleStyle = options.titleStyle ?? {};
+        this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        this._titlePlacement = options.titlePlacement ?? 'center';
+        this._titleVerticalAlign = options.titleVerticalAlign ?? 'center';
 
-        /** @private */ this._labelT = 0.5;
-        /** @private */ this._labelObj = null;
-
-        /** @private */ this._screenData = {
-            points3D: null,
-            segLengths: null,
-            totalLen: 0,
-            visibleInterval: null,
-            camera: null,
-            map: null,
-            valid: false
-        };
-
-        /** @private */ this._map = null;
-        /** @private */ this._layer = null;
-        /** @private */ this._line = null;
-        /** @private */ this._material = null;
-        /** @private */ this._geometry = null;
-
-        /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
-        /** @private */ this._titlePriority = options.titlePriority ?? 0;
+        this._titleAllowOverflow = options.titleAllowOverflow ?? false;
+        this._titlePriority = options.titlePriority ?? 0;
     }
 
-    /**
-     * Создаёт персональный слой, добавляет его на карту и помещает
-     * в него эту полилинию.
-     *
-     * @param {Object} map
-     * @returns {Polyline} this
-     */
-    addTo(map) {
+    // =================================================================
+    // Присоединение / отсоединение
+    // =================================================================
+
+    addTo(map: any): this {
         if (this._map) this.remove();
         const personalLayer = new Layer();
         personalLayer.addTo(map);
-        personalLayer.add(this);
+        (personalLayer as any).add(this);
         return this;
     }
 
-    /**
-     * Внутренний метод, вызываемый слоем при добавлении.
-     * @private
-     */
-    _attach(map, layer) {
+    _attach(map: any, layer: Layer): void {
         if (this._map === map && this._layer === layer) return;
         this.remove();
         this._map = map;
@@ -166,15 +185,13 @@ export class Polyline {
             ? Projections.get(this._crsCode)
             : map.inputCRS;
 
-        // Проекция горизонтальных координат + извлечение высоты узла
-        // (третьей координаты). Отсутствующая/невалидная — считается 0.
         this._absPositions = [];
         this._nodeHeights = [];
         for (let i = 0; i < this._positions.length; i++) {
             const pt = this._positions[i];
             this._absPositions.push(map.project(pt, this._crs));
             const h = pt?.[2];
-            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
+            this._nodeHeights.push(Number.isFinite(h) ? (h as number) : 0);
         }
         this._cachedHeights = null;
 
@@ -187,7 +204,7 @@ export class Polyline {
             transparent: this._opacity < 1,
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
-            resolution: new THREE.Vector2(canvas.width, canvas.height)
+            resolution: new THREE.Vector2(canvas.width, canvas.height),
         });
         this._line = new Line2(this._geometry, this._material);
         this._line.renderOrder = 999;
@@ -198,10 +215,7 @@ export class Polyline {
         }
     }
 
-    /**
-     * Удаляет полилинию с карты и освобождает ресурсы.
-     */
-    remove() {
+    remove(): void {
         if (this._line) {
             this._line.parent?.remove(this._line);
             this._geometry?.dispose();
@@ -221,16 +235,127 @@ export class Polyline {
         this._screenData.valid = false;
     }
 
+    // =================================================================
+    // Мутабельность
+    // =================================================================
+
+    /** Меняет цвет линии (O(1), без перестройки геометрии). */
+    setColor(color: string | number): this {
+        this._color = color;
+        if (this._material?.color) this._material.color.set(color as any);
+        return this;
+    }
+
+    /** Меняет толщину линии в пикселях. */
+    setWidth(width: number): this {
+        if (!(width > 0)) return this;
+        this._width = width;
+        if (this._material) {
+            this._material.linewidth = width;
+            this._material.needsUpdate = true;
+        }
+        return this;
+    }
+
+    /** Меняет прозрачность (0..1). */
+    setOpacity(opacity: number): this {
+        const v = Math.max(0, Math.min(1, opacity));
+        this._opacity = v;
+        if (this._material) {
+            this._material.opacity = v;
+            const transparent = v < 1;
+            if (this._material.transparent !== transparent) {
+                this._material.transparent = transparent;
+                this._material.needsUpdate = true;
+            }
+        }
+        return this;
+    }
+
+    /** Управляет видимостью (перекрывает зум-ограничения и видимость слоя). */
+    setVisible(visible: boolean): this {
+        this._userVisible = !!visible;
+        if (!this._line) return this;
+        if (!this._userVisible) {
+            this._line.visible = false;
+            this._screenData.valid = false;
+        }
+        return this;
+    }
+
+    /** Меняет текст подписи (или убирает, если пусто). */
+    setTitle(text: string): this {
+        this._title = text ?? '';
+        const tm = this._map?.textManager;
+        if (!tm) return this;
+
+        if (this._labelObj) {
+            if (typeof tm.updateLabel === 'function') {
+                tm.updateLabel(this._labelObj);
+            } else {
+                tm.removeLabel(this._labelObj);
+                this._labelObj = null;
+                if (this._title) this._labelObj = tm.addLabel(this);
+            }
+        } else if (this._title) {
+            this._labelObj = tm.addLabel(this);
+        }
+        return this;
+    }
+
     /**
-     * Обновление состояния линии на кадре.
-     * @private
+     * Заменяет вершины. Пересчитывает `_absPositions` (если линия уже
+     * на карте). Геометрия пересоберётся на следующем кадре через
+     * `_update` → `_applyPositions`.
      */
-    _update(map) {
+    setPositions(positions: PolylinePosition[]): this {
+        if (!positions || positions.length < 2) return this;
+        this._positions = positions;
+        this._screenData.valid = false;
+
+        if (!this._map) return this;
+
+        this._absPositions = [];
+        this._nodeHeights = [];
+        for (let i = 0; i < positions.length; i++) {
+            const pt = positions[i];
+            this._absPositions.push(this._map.project(pt, this._crs));
+            const h = pt?.[2];
+            this._nodeHeights.push(Number.isFinite(h) ? (h as number) : 0);
+        }
+        this._cachedHeights = null;
+        this._lastHeightUpdateTime = 0;   // force recompute
+        return this;
+    }
+
+    /** Возвращает копию исходных координат (в `crs` полилинии). */
+    getPositions(): PolylinePosition[] {
+        return this._positions.map(p => [...p] as PolylinePosition);
+    }
+
+    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
+    getCenter(): LonLat | null {
+        const b = this.getBounds('EPSG:4326');
+        if (!b) return null;
+        return [
+            (b[0][0] + b[1][0]) / 2,
+            (b[0][1] + b[1][1]) / 2,
+        ];
+    }
+
+    // =================================================================
+    // Обновление на кадре
+    // =================================================================
+
+    _update(map: any): void {
         if (!this._map || !this._line) return;
         const zoom = this._map.continuousZoom;
 
-        const visible = (this._layer ? this._layer.visible : true) &&
-                        zoom >= this._minZoom && zoom <= this._maxZoom;
+        const visible =
+            this._userVisible &&
+            (this._layer ? (this._layer as any).visible : true) &&
+            zoom >= this._minZoom && zoom <= this._maxZoom;
+
         this._line.visible = visible;
         if (!visible) {
             this._screenData.valid = false;
@@ -277,16 +402,7 @@ export class Polyline {
         }
     }
 
-    /**
-     * Обновляет кэш высот для всех вершин.
-     *
-     * Формула высоты узла:
-     *   y = clampToGround ? surface(x, z) + altitudeOffset + nodeHeight
-     *                     : altitudeOffset + nodeHeight
-     *
-     * @private
-     */
-    _updateHeights() {
+    private _updateHeights(): void {
         if (!this._map) return;
         const now = performance.now();
         if (now - this._lastHeightUpdateTime < this._heightUpdateInterval && this._cachedHeights) return;
@@ -298,7 +414,7 @@ export class Polyline {
         for (let i = 0; i < this._absPositions.length; i++) {
             const [absX, absZ] = this._absPositions[i];
             const nodeH = this._nodeHeights[i] ?? 0;
-            let y;
+            let y: number;
             if (clamp) {
                 const worldX = absX + wgPos.x;
                 const worldZ = absZ + wgPos.z;
@@ -312,13 +428,9 @@ export class Polyline {
         this._lastHeightUpdateTime = now;
     }
 
-    /**
-     * Передаёт позиции вершин в LineGeometry.
-     * @private
-     */
-    _applyPositions() {
+    private _applyPositions(): void {
         if (!this._map || !this._cachedHeights) return;
-        const arr = [];
+        const arr: number[] = [];
         for (let i = 0; i < this._absPositions.length; i++) {
             const [absX, absZ] = this._absPositions[i];
             arr.push(absX, this._cachedHeights[i], absZ);
@@ -327,12 +439,11 @@ export class Polyline {
         this._line.computeLineDistances();
     }
 
-    /* =================================================================
-     *  Экранные данные для подписи
-     * ================================================================= */
+    // =================================================================
+    // Экранные данные для подписи
+    // =================================================================
 
-    /** @private */
-    _computeScreenData() {
+    private _computeScreenData(): void {
         const map = this._map;
         if (!map) { this._screenData.valid = false; return; }
 
@@ -347,7 +458,7 @@ export class Polyline {
             return new THREE.Vector3(ax + wgPos.x, y + wgPos.y, az + wgPos.z);
         });
 
-        const segLengths = [];
+        const segLengths: number[] = [];
         let totalLen = 0;
         for (let i = 0; i < points3D.length - 1; i++) {
             const d = points3D[i].distanceTo(points3D[i + 1]);
@@ -356,7 +467,7 @@ export class Polyline {
         }
         if (totalLen < 1e-9) { this._screenData.valid = false; return; }
 
-        const pointAtT = (t) => {
+        const pointAtT = (t: number) => {
             let target = t * totalLen;
             let acc = 0;
             for (let i = 0; i < segLengths.length; i++) {
@@ -370,7 +481,7 @@ export class Polyline {
         };
 
         const samples = 200;
-        const visibleTs = [];
+        const visibleTs: number[] = [];
         for (let i = 0; i < samples; i++) {
             const t = i / (samples - 1);
             const pt = pointAtT(t);
@@ -387,7 +498,7 @@ export class Polyline {
             return;
         }
 
-        const segments = [];
+        const segments: Array<{ min: number; max: number }> = [];
         let start = visibleTs[0];
         let prev = start;
         const eps = 1.1 / (samples - 1);
@@ -412,7 +523,7 @@ export class Polyline {
             visibleInterval: best,
             camera: camera.clone(),
             map,
-            valid: true
+            valid: true,
         };
 
         if (this._labelT < best.min || this._labelT > best.max) {
@@ -420,67 +531,77 @@ export class Polyline {
         }
     }
 
-    /* =================================================================
-     *  Интерфейс для TextManager
-     * ================================================================= */
+    // =================================================================
+    // TextManager contract
+    // =================================================================
 
-    getText() { return this._title; }
+    getText(): string { return this._title; }
 
-    getTextStyle() {
+    getTextStyle(): Record<string, string | number> {
         return Object.assign({
             fontFamily: 'sans-serif',
             color: '#333',
             fontSize: '12px',
-            textAlign: this._titleAlign
+            textAlign: this._titleAlign,
         }, this._titleStyle);
     }
 
-    getTextZoomBounds() { return { min: this._titleMinZoom, max: this._titleMaxZoom }; }
-    getLabelType() { return 'line'; }
-    isVisible() { return this._line?.visible ?? false; }
-    getVisibleInterval() { return this._screenData.valid ? this._screenData.visibleInterval : null; }
-    getAllowOverflow() { return this._titleAllowOverflow; }
-    getPriority() { return this._titlePriority; }
+    getTextZoomBounds(): { min: number; max: number } {
+        return { min: this._titleMinZoom, max: this._titleMaxZoom };
+    }
 
-    /** @returns {{x:number,y:number}|null} */
-    getScreenPositionAt(t) {
+    getLabelType(): 'line' { return 'line'; }
+
+    isVisible(): boolean { return this._line?.visible ?? false; }
+
+    getVisibleInterval(): { min: number; max: number } | null {
+        return this._screenData.valid ? this._screenData.visibleInterval : null;
+    }
+
+    getAllowOverflow(): boolean { return this._titleAllowOverflow; }
+
+    getPriority(): number { return this._titlePriority; }
+
+    getScreenPositionAt(t: number): { x: number; y: number } | null {
         const data = this._screenData;
         if (!data.valid || !data.map) return null;
 
         const totalLen = data.totalLen;
         const target = t * totalLen;
         let acc = 0;
-        let pt3D = null;
-        for (let i = 0; i < data.segLengths.length; i++) {
-            if (target <= acc + data.segLengths[i]) {
-                const local = (target - acc) / data.segLengths[i];
-                pt3D = new THREE.Vector3().lerpVectors(data.points3D[i], data.points3D[i + 1], local);
+        let pt3D: any = null;
+        const segLengths = data.segLengths!;
+        const points3D = data.points3D!;
+        for (let i = 0; i < segLengths.length; i++) {
+            if (target <= acc + segLengths[i]) {
+                const local = (target - acc) / segLengths[i];
+                pt3D = new THREE.Vector3().lerpVectors(points3D[i], points3D[i + 1], local);
                 break;
             }
-            acc += data.segLengths[i];
+            acc += segLengths[i];
         }
-        if (!pt3D) pt3D = data.points3D[data.points3D.length - 1].clone();
+        if (!pt3D) pt3D = points3D[points3D.length - 1].clone();
 
         const scr = pt3D.clone().project(data.camera);
         if (scr.z <= 0 || scr.z >= 1) return null;
         const canvas = data.map.renderer.domElement;
         return {
             x: (scr.x * 0.5 + 0.5) * canvas.clientWidth,
-            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight
+            y: (-scr.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
 
-    /** @returns {number} */
-    getScreenAngleAt(t) {
+    getScreenAngleAt(t: number): number {
         if (this._titlePlacement !== 'along') return 0;
         const data = this._screenData;
         if (!data.valid) return 0;
 
         const segIdx = this._getSegmentIndex(t);
-        if (segIdx < 0 || segIdx >= data.points3D.length - 1) return 0;
+        const points3D = data.points3D!;
+        if (segIdx < 0 || segIdx >= points3D.length - 1) return 0;
 
-        const p1 = data.points3D[segIdx];
-        const p2 = data.points3D[segIdx + 1];
+        const p1 = points3D[segIdx];
+        const p2 = points3D[segIdx + 1];
         const s1 = p1.clone().project(data.camera);
         const s2 = p2.clone().project(data.camera);
         if (s1.z <= 0 || s2.z <= 0) return 0;
@@ -497,22 +618,22 @@ export class Polyline {
         return angle;
     }
 
-    /** @private */
-    _getSegmentIndex(t) {
+    private _getSegmentIndex(t: number): number {
         const data = this._screenData;
         if (!data.valid) return -1;
-        let target = t * data.totalLen;
+        const target = t * data.totalLen;
         let acc = 0;
-        for (let i = 0; i < data.segLengths.length; i++) {
-            if (target <= acc + data.segLengths[i] + 1e-9) return i;
-            acc += data.segLengths[i];
+        const segLengths = data.segLengths!;
+        for (let i = 0; i < segLengths.length; i++) {
+            if (target <= acc + segLengths[i] + 1e-9) return i;
+            acc += segLengths[i];
         }
-        return data.segLengths.length - 1;
+        return segLengths.length - 1;
     }
 
-    getLabelParameter() { return this._labelT; }
+    getLabelParameter(): number { return this._labelT; }
 
-    setLabelParameter(t) {
+    setLabelParameter(t: number): void {
         const iv = this.getVisibleInterval();
         if (iv) {
             this._labelT = Math.max(iv.min, Math.min(iv.max, t));
@@ -521,22 +642,21 @@ export class Polyline {
         }
     }
 
-    getPlacement() { return this._titlePlacement; }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleVerticalAlign() { return this._titleVerticalAlign || 'center'; }
-    getTitleOffset() { return this._titleOffset; }
+    getPlacement(): PolylineTitlePlacement { return this._titlePlacement; }
 
-    /* =================================================================
-     *  getBounds
-     * ================================================================= */
+    getTitleAlign(): PolylineTitleAlignH { return this._titleAlign; }
 
-    /**
-     * Bounding box по всем точкам полилинии (только x/y).
-     *
-     * @param {string|Object} [crs='EPSG:4326']
-     * @returns {Array<Array<number>>|null} [[minX, minY], [maxX, maxY]] или null.
-     */
-    getBounds(crs = 'EPSG:4326') {
+    getTitleVerticalAlign(): PolylineTitleAlignV {
+        return this._titleVerticalAlign || 'center';
+    }
+
+    getTitleOffset(): [number, number] { return this._titleOffset; }
+
+    // =================================================================
+    // KrbMap#fitTo / getBounds
+    // =================================================================
+
+    getBounds(crs: string | any = 'EPSG:4326'): [LonLat, LonLat] | null {
         if (!this._positions || !this._positions.length) return null;
 
         const src = this._crs
@@ -551,15 +671,15 @@ export class Polyline {
         for (let i = 0; i < this._positions.length; i++) {
             const pt = this._positions[i];
             if (!pt || pt.length < 2) continue;
-            let x, y;
+            let x: number, y: number;
             if (sameProjection) {
                 x = pt[0];
                 y = pt[1];
             } else {
                 const lonLat = src.toLonLat(pt);
-                const converted = dst.fromLonLat(lonLat);
-                x = converted[0];
-                y = converted[1];
+                const conv = dst.fromLonLat(lonLat);
+                x = conv[0];
+                y = conv[1];
             }
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;

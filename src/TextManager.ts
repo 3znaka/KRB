@@ -8,9 +8,9 @@ import { THREE } from './js_TP/tpb.js';
 
  export type LabelType = 'point' | 'line' | 'line-curved' | 'polygon';
 export type TitleAlignH = 'left' | 'center' | 'right';
-export type TitleAlignV = 'top' | 'center' | 'bottom';
+export type TitleAlignV = 'top' | 'middle' | 'center' | 'bottom';
 export type IconPosition = 'left' | 'right' | 'top' | 'bottom';
-export type LinePlacement = 'along' | 'horizontal';
+export type LinePlacement = 'along' | 'horizontal' | 'center';
 
 export interface LabelScreenPoint {
     x: number;

@@ -1,18 +1,16 @@
 /**
  * Marker — маркер на карте с поддержкой мутации после addTo().
  *
- * Изменения относительно предыдущей версии:
- *   - убрана @ts-nocheck, добавлены типы;
- *   - добавлены сеттеры: setLngLat, setIconUrl, setTooltip,
- *     setTitle, setVisible;
- *   - getLngLat() работает до addTo(), если известен CRS;
- *   - сеттеры возвращают `this` для чейнинга.
+ * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
+ * onHover, подпись и TextManager-контракт берутся из базового класса.
+ * Здесь остаётся только то, что специфично для DOM-маркера: CRS/позиция,
+ * иконка, altitudeMode, кластеризация, DOM-элемент и DOM-события.
  *
  * @module marker
  */
 import { Projections } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 // =====================================================================
 // Панели и дефолты
 // =====================================================================
@@ -48,13 +46,14 @@ export function _getPanes(map) {
 // =====================================================================
 /**
  * Маркер. После {@link Marker#addTo} объект мутабелен — можно менять
- * позицию, иконку, подпись, тултип и видимость без пересоздания.
+ * позицию, иконку, подпись, тултип, onClick/onHover, zoom bounds и
+ * видимость без пересоздания.
  *
  * @example
  * const m = new Marker({ position: [37.66, 55.76], title: 'Точка' }).addTo(map);
  * m.setLngLat([30.31, 59.93]).setTitle('Питер');
  */
-export class Marker {
+export class Marker extends SpatialObject {
     static _idCounter = 0;
     // ── Данные позиции ──
     _coord;
@@ -69,38 +68,17 @@ export class Marker {
     _anchor;
     _iconUrl;
     // ── Поведение ──
-    _minZoom;
-    _maxZoom;
     _altitudeMode;
     _altitude;
-    _tooltipText;
-    _onHover;
-    _onClick;
     _clusterable;
-    // ── Подпись ──
-    _title;
-    _titleAlign;
-    _titleStyle;
-    _titleMinZoom;
-    _titleMaxZoom;
-    _userTitleOffset;
-    _titleOffset = null;
-    _titleAllowOverflow;
-    _titlePriority;
-    // ── Состояние ──
-    _map = null;
-    _layer = null;
+    // ── Состояние DOM ──
     _element = null;
-    _textLabel = null;
     _isMobile = false;
     _lastHeightUpdateTime = 0;
     _cachedWorldY = 0;
-    /** Результат последнего _update; не путать с _userVisible. */
-    _isVisible = false;
-    _userVisible = true;
-    _lastScreenPos = null;
     _hideTimeout = null;
     constructor(options) {
+        super();
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker: options.position is required [x, y]');
         }
@@ -115,42 +93,28 @@ export class Marker {
         this._maxZoom = options.maxZoom ?? Infinity;
         this._altitudeMode = options.altitudeMode ?? 'ground';
         this._altitude = options.altitude ?? 0;
-        this._tooltipText = options.tooltip ?? '';
         this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : DEFAULT_ICON_URL;
         this._onHover = options.onHover ?? null;
         this._onClick = options.onClick ?? null;
         this._clusterable = options.clusterable !== undefined ? options.clusterable : true;
+        this._tooltipText = options.tooltip ?? '';
         this._title = options.title ?? '';
         this._titleAlign = options.titleAlign ?? 'center';
         this._titleStyle = options.titleStyle ?? {};
         this._titleMinZoom = options.titleMinZoom ?? -Infinity;
         this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        this._userTitleOffset = options.titleOffset ?? null;
+        this._userTitleOffset = options.titleOffset ? [...options.titleOffset] : null;
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
     }
     // =================================================================
-    // Присоединение / отсоединение
+    // Хуки SpatialObject
     // =================================================================
-    addTo(map) {
-        if (this._map)
-            this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        personalLayer.add(this);
-        return this;
-    }
-    _attach(map, layer) {
-        if (this._map === map && this._layer === layer)
-            return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
+    _onAttached(map) {
         const newCrs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-        // Если setLngLat() вызывался до attach без явного crs,
-        // _coord хранится в EPSG:4326. Пересчитываем, если inputCRS другой.
+        // setLngLat() до attach без явного crs: _coord хранится в WGS84.
         if (this._positionSetAsLonLat
             && this._lon !== null
             && this._lat !== null
@@ -161,15 +125,11 @@ export class Marker {
         }
         this._positionSetAsLonLat = false;
         this._crs = newCrs;
-        // Производные WGS84 — для обратной совместимости с ClusterLayer
-        // и внешним кодом, читающим marker._lon / marker._lat.
+        // Производные WGS84 — для обратной совместимости с ClusterLayer.
         const ll = this._crs.toLonLat(this._coord);
         this._lon = ll[0];
         this._lat = ll[1];
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
-        this._titleOffset = this._userTitleOffset
-            ? [...this._userTitleOffset]
-            : [0, this._iconSize[1] / 2 + 4];
         const { markerPane } = _getPanes(map);
         const markerId = `krb-marker-${++Marker._idCounter}`;
         const el = document.createElement('div');
@@ -200,53 +160,35 @@ export class Marker {
         }
         markerPane.appendChild(el);
         this._element = el;
-        if (this._title && this._map.textManager) {
-            this._textLabel = this._map.textManager.addLabel(this);
-        }
-        if (this._isMobile) {
-            el.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (this._onClick)
-                    this._onClick(e, this);
-                else
-                    this._defaultClickAction();
+        // Обработчики читают this._onClick/this._onHover/this._tooltipText
+        // динамически — сеттеры работают без перепривязки событий.
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (this._onClick)
+                this._onClick(e, this);
+            else
+                this._defaultClickAction();
+        });
+        if (!this._isMobile) {
+            el.addEventListener('pointerenter', () => {
+                if (this._onHover) {
+                    this._onHover(true);
+                }
+                else if (this._tooltipText && this._map?.popupManager) {
+                    this._map.popupManager.show(this, this._tooltipText);
+                }
             });
-        }
-        else {
-            if (this._onHover) {
-                el.addEventListener('pointerenter', () => this._onHover?.(true));
-                el.addEventListener('pointerleave', () => this._onHover?.(false));
-            }
-            else {
-                el.addEventListener('pointerenter', () => {
-                    if (this._tooltipText && this._map?.popupManager) {
-                        this._map.popupManager.show(this, this._tooltipText);
-                    }
-                });
-                el.addEventListener('pointerleave', () => {
-                    if (this._map?.popupManager)
-                        this._map.popupManager.hide();
-                });
-            }
-            el.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (this._onClick)
-                    this._onClick(e, this);
-                else
-                    this._defaultClickAction();
+            el.addEventListener('pointerleave', () => {
+                if (this._onHover) {
+                    this._onHover(false);
+                }
+                else if (this._map?.popupManager) {
+                    this._map.popupManager.hide();
+                }
             });
         }
     }
-    _defaultClickAction() {
-        if (this._map && this._crs) {
-            const [lon, lat] = this._crs.toLonLat(this._coord);
-            this._map.moveCameraToSlow(lon, lat, 0.3);
-        }
-        if (this._isMobile && this._tooltipText && this._map?.popupManager) {
-            this._map.popupManager.show(this, this._tooltipText);
-        }
-    }
-    remove() {
+    _teardown() {
         if (this._hideTimeout) {
             clearTimeout(this._hideTimeout);
             this._hideTimeout = null;
@@ -255,23 +197,16 @@ export class Marker {
             this._element.remove();
             this._element = null;
         }
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        if (this._layer) {
-            this._layer._removeRef(this);
-            this._layer = null;
-        }
-        this._map = null;
-        this._crs = null;
-        this._isVisible = false;
-        this._lastScreenPos = null;
-        // ВАЖНО: _lon/_lat НЕ обнуляем — при повторном attach
-        // их можно использовать для пересчёта _coord.
     }
+    _applyHidden() {
+        this._setVisible(false);
+    }
+    _defaultTitleOffset() {
+        return [0, this._iconSize[1] / 2 + 4];
+    }
+    getLabelType() { return 'point'; }
     // =================================================================
-    // Мутабельность
+    // Позиция / CRS
     // =================================================================
     /**
      * Устанавливает позицию в WGS84 [lon, lat].
@@ -294,8 +229,7 @@ export class Marker {
     }
     /**
      * Координаты в WGS84. Работает до addTo(), если у маркера есть
-     * явный `crs` или вызывался setLngLat(). В остальных случаях
-     * (до attach без crs) — `null`.
+     * явный `crs` или вызывался setLngLat().
      */
     getLngLat() {
         if (this._lon !== null && this._lat !== null) {
@@ -308,15 +242,27 @@ export class Marker {
         return [ll[0], ll[1]];
     }
     /**
- * Координаты в WGS84 [lon, lat] или `null`, если CRS неизвестна
- * (маркер не присоединён и нет явного crs, либо setLngLat не вызывался).
- *
- * Синоним {@link Marker#getLngLat}. Оставлен для обратной совместимости
- * со старой версией `Marker.getLonLat()`.
- */
+     * Координаты в WGS84 [lon, lat] или `null`. Синоним `getLngLat()`
+     * для обратной совместимости со старой версией `Marker.getLonLat()`.
+     */
     getLonLat() {
         return this.getLngLat();
     }
+    /** Возвращает исходные координаты в собственной СК маркера. */
+    getPosition() {
+        return [this._coord[0], this._coord[1]];
+    }
+    /** Возвращает код СК маркера или null. */
+    getCRS() {
+        return this._crsCode;
+    }
+    /** Участвует ли маркер в кластеризации. */
+    getClusterable() {
+        return this._clusterable;
+    }
+    // =================================================================
+    // Иконка
+    // =================================================================
     /** Меняет URL иконки (или убирает иконку при `null`). */
     setIconUrl(url) {
         this._iconUrl = url;
@@ -345,31 +291,8 @@ export class Marker {
         }
         return this;
     }
-    /** Меняет текст тултипа (HTML). Пустая строка — отключить тултип. */
-    setTooltip(html) {
-        this._tooltipText = html ?? '';
-        return this;
-    }
-    /** Меняет постоянную подпись. */
-    setTitle(text) {
-        const next = text ?? '';
-        if (this._title === next)
-            return this;
-        this._title = next;
-        this._refreshTextLabel();
-        return this;
-    }
-    /** Управляет видимостью маркера (независимо от зума и кластеризации). */
-    setVisible(visible) {
-        this._userVisible = !!visible;
-        if (!this._userVisible) {
-            this._setVisible(false);
-            this._isVisible = false;
-        }
-        return this;
-    }
     // =================================================================
-    // Внутренние хелперы мутабельности
+    // Внутренние хелперы
     // =================================================================
     /** Резолвит CRS маркера, если он известен без map. */
     _resolveCrs() {
@@ -381,28 +304,23 @@ export class Marker {
         }
         return null;
     }
-    /**
-     * Сбрасывает кэши позиции. Следующий _update() пересчитает
-     * экранную позицию и (если нужно) высоту рельефа.
-     */
+    /** Сбрасывает кэши позиции; следующий _update() всё пересчитает. */
     _afterPositionChange() {
         this._lastScreenPos = null;
         this._cachedWorldY = 0;
         this._lastHeightUpdateTime = 0;
     }
-    /** Пересоздаёт дескриптор подписи в TextManager. */
-    _refreshTextLabel() {
-        if (!this._map?.textManager)
-            return;
-        if (this._textLabel) {
-            this._map.textManager.updateLabel(this._textLabel);
+    _defaultClickAction() {
+        if (this._map && this._crs) {
+            const [lon, lat] = this._crs.toLonLat(this._coord);
+            this._map.moveCameraToSlow(lon, lat, 0.3);
         }
-        else if (this._title) {
-            this._textLabel = this._map.textManager.addLabel(this);
+        if (this._isMobile && this._tooltipText && this._map?.popupManager) {
+            this._map.popupManager.show(this, this._tooltipText);
         }
     }
     // =================================================================
-    // Видимость (внутренняя)
+    // Видимость (DOM-специфичная)
     // =================================================================
     _setVisible(visible) {
         const el = this._element;
@@ -438,33 +356,24 @@ export class Marker {
         }
     }
     // =================================================================
-    // Обновление позиции на экране
+    // Обновление на кадре
     // =================================================================
     _update(_map) {
         const map = this._map;
         if (!map || !this._element)
             return;
-        if (!this._userVisible) {
-            this._setVisible(false);
-            this._isVisible = false;
-            return;
-        }
-        const zoom = map.continuousZoom;
+        // Кластерная видимость — особенность Marker.
         if (this._layer && this._layer._clusterActive) {
             const vis = this._layer._clusterVisibleMarkers;
             if (!vis || !vis.has(this)) {
-                this._setVisible(false);
+                this._applyHidden();
                 this._isVisible = false;
                 return;
             }
         }
-        if (this._layer && !this._layer.visible) {
-            this._setVisible(false);
-            this._isVisible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._setVisible(false);
+        // Общий гейт: userVisible + layer + zoom bounds.
+        if (!this._isWithinView()) {
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -496,14 +405,14 @@ export class Marker {
         if (map.view.objectRenderDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
-                this._setVisible(false);
+                this._applyHidden();
                 this._isVisible = false;
                 return;
             }
         }
         const screenPos = worldPos.clone().project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
-            this._setVisible(false);
+            this._applyHidden();
             this._isVisible = false;
             return;
         }
@@ -517,43 +426,7 @@ export class Marker {
         this._isVisible = true;
     }
     // =================================================================
-    // TextManager contract
-    // =================================================================
-    getText() { return this._title; }
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign,
-        }, this._titleStyle);
-    }
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    getLabelType() { return 'point'; }
-    isVisible() { return this._isVisible; }
-    getScreenPosition() {
-        return this._isVisible ? this._lastScreenPos : null;
-    }
-    getTitleAlign() { return this._titleAlign; }
-    getTitleOffset() { return this._titleOffset; }
-    getTitleVerticalAlign() { return 'center'; }
-    getAllowOverflow() { return this._titleAllowOverflow; }
-    getPriority() { return this._titlePriority; }
-    // =================================================================
-    // Публичные геттеры
-    // =================================================================
-    /** Возвращает исходные координаты в собственной СК маркера. */
-    getPosition() {
-        return [this._coord[0], this._coord[1]];
-    }
-    /** Возвращает код СК маркера или null. */
-    getCRS() {
-        return this._crsCode;
-    }
-    // =================================================================
-    // Интерфейс для KrbMap#fitTo / getBounds
+    // KrbMap#fitTo / getBounds
     // =================================================================
     getBounds(crs = 'EPSG:4326') {
         const src = this._crs

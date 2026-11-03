@@ -6,7 +6,7 @@ import { THREE } from './js_TP/tpb.js';
 // Публичные типы
 // =====================================================================
 
-export type LabelType = 'point' | 'line' | 'line-curved';
+ export type LabelType = 'point' | 'line' | 'line-curved' | 'polygon';
 export type TitleAlignH = 'left' | 'center' | 'right';
 export type TitleAlignV = 'top' | 'center' | 'bottom';
 export type IconPosition = 'left' | 'right' | 'top' | 'bottom';

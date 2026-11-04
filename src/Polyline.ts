@@ -54,6 +54,8 @@ export interface PolylineOptions {
     tooltip?: string;
     onClick?: (event: MouseEvent, polyline: Polyline) => void;
     onHover?: (hovered: boolean) => void;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 function pointToSegmentDistance(point: any, a: any, b: any): number {
@@ -126,7 +128,8 @@ export class Polyline extends SpatialObject {
 
     constructor(options: PolylineOptions) {
         super();
-
+this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
         if (!options.positions?.length || options.positions.length < 2) {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }

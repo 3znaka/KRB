@@ -35,6 +35,12 @@ export abstract class SpatialObject {
      */
     protected _altitude: number = 0;
 
+     // ── Произвольные данные объекта ──
+    /** Бизнес-данные (id, type, studyId, …). Не участвуют в рендере. */
+    protected _properties: Record<string, any> = {};
+    /** Служебные данные (пользовательские/прикладные). Не участвуют в рендере. */
+    protected _userData: Record<string, any> = {};
+
     // ── Интерактив ──
     protected _tooltipText: string = '';
     protected _onClick: ((event: MouseEvent, obj: this) => void) | null = null;
@@ -234,6 +240,28 @@ export abstract class SpatialObject {
 
     getScreenPosition(): { x: number; y: number } | null {
         return this._isVisible ? this._lastScreenPos : null;
+    }
+
+    /** Устанавливает `properties` (заменяет целиком). */
+    setProperties(props: Record<string, any> | null | undefined): this {
+        this._properties = props ?? {};
+        return this;
+    }
+
+    /** Возвращает `properties` (живую ссылку). */
+    getProperties(): Record<string, any> {
+        return this._properties;
+    }
+
+    /** Устанавливает `userData` (заменяет целиком). */
+    setUserData(data: Record<string, any> | null | undefined): this {
+        this._userData = data ?? {};
+        return this;
+    }
+
+    /** Возвращает `userData` (живую ссылку). */
+    getUserData(): Record<string, any> {
+        return this._userData;
     }
 
     // =================================================================

@@ -27,6 +27,11 @@ export class SpatialObject {
      * Реализация интерпретации — в `_update` подкласса.
      */
     _altitude = 0;
+    // ── Произвольные данные объекта ──
+    /** Бизнес-данные (id, type, studyId, …). Не участвуют в рендере. */
+    _properties = {};
+    /** Служебные данные (пользовательские/прикладные). Не участвуют в рендере. */
+    _userData = {};
     // ── Интерактив ──
     _tooltipText = '';
     _onClick = null;
@@ -190,6 +195,24 @@ export class SpatialObject {
     getPriority() { return this._titlePriority; }
     getScreenPosition() {
         return this._isVisible ? this._lastScreenPos : null;
+    }
+    /** Устанавливает `properties` (заменяет целиком). */
+    setProperties(props) {
+        this._properties = props ?? {};
+        return this;
+    }
+    /** Возвращает `properties` (живую ссылку). */
+    getProperties() {
+        return this._properties;
+    }
+    /** Устанавливает `userData` (заменяет целиком). */
+    setUserData(data) {
+        this._userData = data ?? {};
+        return this;
+    }
+    /** Возвращает `userData` (живую ссылку). */
+    getUserData() {
+        return this._userData;
     }
     // =================================================================
     // Внутренние хелперы

@@ -92,6 +92,8 @@ export class Polygon extends SpatialObject {
     _sideIndicesArray = [];
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
             throw new Error('Polygon: options.rings required with at least one ring');
         }

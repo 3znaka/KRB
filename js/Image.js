@@ -60,6 +60,8 @@ export class Image extends SpatialObject {
     static _clickMoveThreshold = 5;
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.source) {
             throw new Error('Image: options.source is required');
         }

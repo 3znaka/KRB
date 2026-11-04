@@ -73,6 +73,8 @@ export class Area3D extends SpatialObject {
     _tempBox;
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');
         }

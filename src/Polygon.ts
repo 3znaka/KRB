@@ -60,6 +60,8 @@ export interface PolygonOptions {
     tooltip?: string;
     useSimpleStroke?: boolean;
     useWorkerForTriangulation?: boolean;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 export interface PolygonRenderOrder {
@@ -168,6 +170,9 @@ export class Polygon extends SpatialObject {
 
     constructor(options: PolygonOptions) {
         super();
+
+this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
 
         if (!options.rings || !options.rings.length || !options.rings[0].length) {
             throw new Error('Polygon: options.rings required with at least one ring');

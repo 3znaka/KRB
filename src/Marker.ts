@@ -52,6 +52,8 @@ export interface MarkerOptions {
     clusterable?: boolean;
     titleAllowOverflow?: boolean;
     titlePriority?: number;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 interface MapPanes {
@@ -122,6 +124,9 @@ export class Marker extends SpatialObject {
 
     constructor(options: MarkerOptions) {
         super();
+
+        this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
 
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker: options.position is required [x, y]');

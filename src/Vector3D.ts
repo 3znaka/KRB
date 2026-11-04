@@ -142,6 +142,8 @@ export interface Vector3DOptions {
     onHover?: (hovered: boolean) => void;
 
     animation?: AnimationSpec | string | Array<AnimationSpec | string> | null;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 interface ParsedAnimation {
@@ -300,7 +302,8 @@ export class Vector3D extends SpatialObject {
 
     constructor(options: Vector3DOptions) {
         super();
-
+this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
         if (!options.positions || options.positions.length < 2) {
             throw new Error('Vector3D: options.positions required, at least 2 points');
         }

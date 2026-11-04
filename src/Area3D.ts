@@ -57,6 +57,8 @@ export interface Area3DOptions {
     tooltip?: string;
     onClick?: (event: MouseEvent, area: Area3D) => void;
     onHover?: (hovered: boolean) => void;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 const AREA3D_RENDER_ORDER = 1000;
@@ -131,6 +133,9 @@ export class Area3D extends SpatialObject {
 
     constructor(options: Area3DOptions) {
         super();
+
+        this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
 
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
             throw new Error('Area3D: options.rings is required with at least one ring of 3+ points');

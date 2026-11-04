@@ -55,6 +55,8 @@ export interface Marker3DOptions {
     onHover?: (hovered: boolean) => void;
     clusterable?: boolean;
     playAnimation?: boolean;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 interface SizeAnimation {
@@ -133,6 +135,9 @@ export class Marker3D extends SpatialObject {
 
     constructor(options: Marker3DOptions) {
         super();
+
+        this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
 
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker3D: options.position is required [x, y]');

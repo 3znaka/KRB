@@ -65,6 +65,8 @@ export class Polyline extends SpatialObject {
     _unregisterInteraction = null;
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.positions?.length || options.positions.length < 2) {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }

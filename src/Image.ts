@@ -71,6 +71,8 @@ export interface ImageOptions {
     tooltip?: string;
     onClick?: (event: MouseEvent, image: Image) => void;
     onHover?: (hovered: boolean) => void;
+    properties?: Record<string, any>;
+userData?: Record<string, any>;
 }
 
 interface SizeAnchorRotationParams {
@@ -136,6 +138,9 @@ export class Image extends SpatialObject {
 
     constructor(options: ImageOptions) {
         super();
+
+this._properties = options.properties ?? {};
+this._userData = options.userData ?? {};
 
         if (!options.source) {
             throw new Error('Image: options.source is required');

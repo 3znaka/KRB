@@ -66,6 +66,8 @@ export class Marker extends SpatialObject {
     _hideTimeout = null;
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker: options.position is required [x, y]');
         }

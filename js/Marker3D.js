@@ -70,6 +70,8 @@ export class Marker3D extends SpatialObject {
     _tempProjScreenMatrix;
     constructor(options) {
         super();
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.position || options.position.length !== 2) {
             throw new Error('Marker3D: options.position is required [x, y]');
         }

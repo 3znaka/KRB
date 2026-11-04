@@ -83,7 +83,36 @@ export namespace THREE {
         invert(): this;
         identity(): this;
     }
+  export class Sphere {
+        constructor(center?: Vector3, radius?: number);
 
+        center: Vector3;
+        radius: number;
+
+        set(center: Vector3, radius: number): this;
+        setFromPoints(points: Vector3[], optionalCenter?: Vector3): this;
+
+        clone(): Sphere;
+        copy(sphere: Sphere): this;
+
+        isEmpty(): boolean;
+        makeEmpty(): this;
+
+        containsPoint(point: Vector3): boolean;
+        distanceToPoint(point: Vector3): number;
+
+        intersectsSphere(sphere: Sphere): boolean;
+        intersectsBox(box: any): boolean;
+        intersectsPlane(plane: any): boolean;
+
+        clampPoint(point: Vector3, target: Vector3): Vector3;
+        getBoundingBox(target: any): any;
+
+        applyMatrix4(matrix: any): this;
+        translate(offset: Vector3): this;
+
+        equals(sphere: Sphere): boolean;
+    }
     export class Euler {
         constructor(x?: number, y?: number, z?: number, order?: string);
         [key: string]: any;

@@ -631,6 +631,9 @@ private _tryApplyLayerBackground(layer: any): void {
 
     getVec3(): any { return this._tempPool.v3[this._tempPool.idx++ & 15]; }
     getVec2(): any { return this._tempPool.v2[this._tempPool.idx++ & 15]; }
+    queryRenderedFeatures(point: { x: number; y: number }) {
+    return this.interaction.queryRenderedFeatures(point);
+}
 }
 
 

@@ -242,6 +242,10 @@ export abstract class SpatialObject {
         return this._isVisible ? this._lastScreenPos : null;
     }
 
+    getLayer(): Layer | null {
+        return this._layer;
+    }
+
     /** Устанавливает `properties` (заменяет целиком). */
     setProperties(props: Record<string, any> | null | undefined): this {
         this._properties = props ?? {};

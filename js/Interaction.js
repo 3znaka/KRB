@@ -1,179 +1,108 @@
-// @ts-nocheck
 /**
  * Модуль единого менеджера взаимодействия для объектов на карте.
  *
+ * Отвечает за:
+ *   - регистрацию mesh-объектов (`Polygon`, `Area3D`, `Marker3D`,
+ *     `Polyline`, `Vector3D`, `Image`) для hover/click через raycast;
+ *   - определение DOM-маркеров (`Marker`) по `elementFromPoint`;
+ *   - публичный метод `queryRenderedFeatures({ x, y })` — «что под точкой».
+ *
+ * DOM-маркеры (`Marker`) в `register()` **не** попадают — у них свои
+ * DOM-события. Для `queryRenderedFeatures` они находятся отдельной веткой
+ * через `_getMarkerFromElement`.
+ *
+ * @module Interaction
+ */
+import { THREE } from './js_TP/tpb.js';
+import { _getMarkerFromElement } from './Marker.js';
+// =====================================================================
+// InteractionManager
+// =====================================================================
+/**
+ * Менеджер взаимодействия (один на карту). Создаётся автоматически
+ * в `KrbMap` как `map.interaction`.
  *
  * @example
  * // Регистрация полигона
  * const unregister = map.interaction.register(polygon, {
  *     getMeshes: () => [polygon._fillMesh, polygon._sideMesh, polygon._bottomMesh]
  *         .filter(Boolean),
- *     getBoundingSphere: () => polygon._boundingSphereRadius > 0
- *         ? {
- *             center: polygon._tempVec3
- *                 .copy(polygon._group.position)
- *                 .add(map.worldGroup.position)
- *                 .clone(),
- *             radius: polygon._boundingSphereRadius
- *         }
- *         : null,
  *     onHover: (isHovered) => polygon._applyHover(isHovered, map),
- *     onClick: (event) => polygon._onClick && polygon._onClick(event, polygon),
+ *     onClick: (event) => polygon._onClick?.(event, polygon),
  *     getTooltip: () => polygon._tooltipText || null,
- *     isVisible: () => polygon._group.visible
+ *     isVisible: () => polygon._group.visible,
  * });
  *
  * // Позже
  * unregister();
  */
-import { THREE } from './js_TP/tpb.js';
-/**
- * @typedef {Object} InteractionCallbacks
- * @property {() => (THREE.Object3D[]|null)} getMeshes - Возвращает список мешей
- *     для raycast. Может вернуть пустой массив или null — тогда объект
- *     пропускается.
- * @property {() => ({center: THREE.Vector3, radius: number}|null)} [getBoundingSphere] -
- *     Возвращает мировую bounding-сферу для broad-phase. `null` — без отсечения.
- * @property {(isHovered: boolean) => void} [onHover] - Колбэк изменения hover.
- *     Если задан — приоритетнее tooltip-логики.
- * @property {(event: PointerEvent|MouseEvent) => void} [onClick] - Колбэк клика.
- *     Вызывается только если клик не был драгом.
- * @property {() => (string|null)} [getTooltip] - Возвращает HTML-строку тултипа
- *     (или null). Показывается через `map.popupManager`, если не задан `onHover`.
- * @property {() => boolean} [isVisible] - Дополнительный фильтр видимости.
- *     Не вызывается, если объект уже отсечён по min/maxZoom у себя внутри.
- * @property {boolean} [isMobileOnly] - Если true, объект участвует только
- *     в мобильном тач-режиме (например, крупные hit-area).
- */
-/**
- * Менеджер взаимодействия (один на карту).
- *
- * Создаётся автоматически в `KrbMap` как `map.interaction`.
- */
 export class InteractionManager {
+    _map;
     /**
-     * @param {import('./KrbMap.js').KrbMap} map - Экземпляр карты.
+     * Зарегистрированные записи. `Set` — стабильный порядок обхода
+     * (порядок регистрации) + O(1) удаление.
      */
+    _entries = new Set();
+    /** Маппинг Object3D → entry. Строится на каждый raycast. */
+    _meshToEntry = new Map();
+    _raycaster = new THREE.Raycaster();
+    _mouseNDC = new THREE.Vector2();
+    _broadPhaseSphere = new THREE.Sphere();
+    _lastRaycastTime = 0;
+    /** Троттлинг hover-raycast: 33 мс ≈ 30 Гц. */
+    _raycastThrottleMs = 33;
+    _pointerDownX = 0;
+    _pointerDownY = 0;
+    _pointerDownActive = false;
+    /** Порог смещения (px) для «клик vs драг». */
+    _clickMoveThreshold = 5;
+    /** Запись, которая сейчас под курсором (desktop) или tap-active (mobile). */
+    _hoveredEntry = null;
+    /** Запись, по которой произошёл pointerdown (mobile). */
+    _pressedEntry = null;
+    _handlers = null;
+    _attached = false;
+    _isMobile = false;
+    _isMobileResolved = false;
     constructor(map) {
-        /** @private @type {import('./KrbMap.js').KrbMap} */
         this._map = map;
-        /**
-         * Зарегистрированные записи. `Set` — чтобы порядок обхода был
-         * стабильным (порядок регистрации), а удаление — O(1).
-         * @private
-         * @type {Set<Object>}
-         */
-        this._entries = new Set();
-        /**
-         * Маппинг Object3D → entry, строится на каждый raycast.
-         * Позволяет восстановить владельца по `intersection.object`.
-         * @private
-         * @type {Map<THREE.Object3D, Object>}
-         */
-        this._meshToEntry = new Map();
-        /** @private @type {THREE.Raycaster} */
-        this._raycaster = new THREE.Raycaster();
-        /** @private @type {THREE.Vector2} */
-        this._mouseNDC = new THREE.Vector2();
-        /** @private @type {THREE.Sphere} */
-        this._broadPhaseSphere = new THREE.Sphere();
-        /** @private @type {number} */
-        this._lastRaycastTime = 0;
-        /**
-         * Троттлинг hover-raycast в миллисекундах.
-         * 33 мс ≈ 30 Гц — выше смысла нет: мышь всё равно шлёт чаще,
-         * а между кадрами результат не меняется.
-         * @private
-         * @type {number}
-         */
-        this._raycastThrottleMs = 33;
-        /** @private @type {number} */
-        this._pointerDownX = 0;
-        /** @private @type {number} */
-        this._pointerDownY = 0;
-        /** @private @type {boolean} */
-        this._pointerDownActive = false;
-        /**
-         * Порог смещения указателя (в пикселях) между pointerdown и
-         * pointerup, выше которого событие считается драгом, а не кликом.
-         * @private
-         * @type {number}
-         */
-        this._clickMoveThreshold = 5;
-        /**
-         * Запись, которая сейчас находится под курсором (desktop) или
-         * последняя «включённая» тапом (mobile).
-         * @private
-         * @type {Object|null}
-         */
-        this._hoveredEntry = null;
-        /**
-         * Запись, по которой произошёл pointerdown (для mobile-сценария,
-         * когда мы не делаем raycast на move).
-         * @private
-         * @type {Object|null}
-         */
-        this._pressedEntry = null;
-        /** @private @type {?Object} */
-        this._handlers = null;
-        /** @private @type {boolean} */
-        this._attached = false;
-        /**
-         * Кэш «мобильности» устройства. Вычисляется один раз при первой
-         * регистрации (после того, как DOM готов).
-         * @private
-         * @type {boolean}
-         */
-        this._isMobile = false;
-        /** @private @type {boolean} */
-        this._isMobileResolved = false;
     }
-    /* ================================================================
-       Публичный API
-       ================================================================ */
+    // =================================================================
+    // Публичный API
+    // =================================================================
     /**
-     * Регистрирует объект для обработки событий указателя.
+     * Регистрирует mesh-объект для обработки указателя.
      *
-     * Если объект уже зарегистрирован — старая запись заменяется на новую
-     * (это позволяет «обновлять» колбэки без явного unregister).
+     * Если объект уже зарегистрирован — старая запись заменяется новой
+     * (позволяет «обновлять» колбэки без явного `unregister`).
      *
-     * @param {Object} obj - Произвольный объект-владелец (Polygon, Marker3D,
-     *     Area3D, …). Не обязан быть `THREE.Object3D`.
-     * @param {InteractionCallbacks} callbacks - Колбэки.
-     * @returns {() => void} Функция отмены регистрации (эквивалент
-     *     `this.unregister(obj)`). Удобно сохранить и вызвать в `remove()`.
+     * @returns функция отмены регистрации (эквивалент `unregister(obj)`).
      */
     register(obj, callbacks) {
         if (!obj || !callbacks || typeof callbacks.getMeshes !== 'function') {
             console.warn('InteractionManager.register: obj and callbacks.getMeshes are required');
             return () => { };
         }
-        // Если уже был — снимаем старую запись.
         this.unregister(obj);
         const entry = {
             obj,
             getMeshes: callbacks.getMeshes,
-            getBoundingSphere: callbacks.getBoundingSphere || null,
-            onHover: callbacks.onHover || null,
-            onClick: callbacks.onClick || null,
-            getTooltip: callbacks.getTooltip || null,
-            isVisible: callbacks.isVisible || null,
+            getBoundingSphere: callbacks.getBoundingSphere ?? null,
+            onHover: callbacks.onHover ?? null,
+            onClick: callbacks.onClick ?? null,
+            getTooltip: callbacks.getTooltip ?? null,
+            isVisible: callbacks.isVisible ?? null,
             isMobileOnly: callbacks.isMobileOnly === true,
-            wasHovered: false
+            wasHovered: false,
         };
         this._entries.add(entry);
         this._ensureListeners();
         return () => this.unregister(obj);
     }
     /**
-     * Снимает регистрацию объекта.
-     *
-     * Если объект был в состоянии hover — вызывается `onHover(false)`
-     * (или скрывается popup). После удаления последней записи слушатели
-     * снимаются с canvas.
-     *
-     * @param {Object} obj - Тот же объект, что передан в `register`.
-     * @returns {void}
+     * Снимает регистрацию объекта. Если объект был в hover — вызывает
+     * `onHover(false)` (или скрывает popup). После удаления последней
+     * записи слушатели снимаются с canvas.
      */
     unregister(obj) {
         for (const entry of this._entries) {
@@ -185,7 +114,7 @@ export class InteractionManager {
                     try {
                         entry.onHover(false);
                     }
-                    catch (e) { /* swallow */ }
+                    catch { /* swallow */ }
                 }
                 else if (entry.getTooltip && this._map.popupManager) {
                     this._map.popupManager.hide();
@@ -205,8 +134,6 @@ export class InteractionManager {
     /**
      * Полностью останавливает менеджер: снимает hover со всех записей,
      * очищает реестр и слушатели.
-     *
-     * @returns {void}
      */
     destroy() {
         for (const entry of this._entries) {
@@ -216,7 +143,7 @@ export class InteractionManager {
                     try {
                         entry.onHover(false);
                     }
-                    catch (e) { /* swallow */ }
+                    catch { /* swallow */ }
                 }
             }
         }
@@ -226,28 +153,90 @@ export class InteractionManager {
         this._pressedEntry = null;
         this._detachListeners();
     }
-    /* ================================================================
-       Внутренняя механика
-       ================================================================ */
     /**
-     * Ленивое определение «мобильности» устройства.
-     * @private
+     * Возвращает все видимые объекты под экранной точкой `(x, y)`.
+     *
+     * Работает для двух категорий объектов:
+     *   - mesh-объекты, зарегистрированные через `register()` — находятся
+     *     через raycast;
+     *   - DOM-маркеры (`Marker`) — через `elementFromPoint` +
+     *     `_getMarkerFromElement` (у них нет записи в `_entries`).
+     *
+     * Результат отсортирован от ближнего к дальнему (порядок raycast).
+     * Дубликаты (один `Polygon` = top + side + bottom в одной точке)
+     * схлопываются в один `QueryRenderedFeature`.
+     *
+     * Метод **не** меняет hover-состояние и **не** участвует в throttle
+     * hover-цикла — его можно безопасно вызывать из `click`-обработчиков.
+     *
+     * @example
+     * canvas.addEventListener('click', (e) => {
+     *     const rect = canvas.getBoundingClientRect();
+     *     const features = map.queryRenderedFeatures({
+     *         x: e.clientX - rect.left,
+     *         y: e.clientY - rect.top,
+     *     });
+     *     for (const f of features) console.log(f.object, f.properties, f.point);
+     * });
      */
+    queryRenderedFeatures(screen) {
+        const result = [];
+        const seen = new Set();
+        // ── 1. Mesh-объекты через raycast ─────────────────────────────
+        this._setNDCFromScreen(screen.x, screen.y);
+        this._raycaster.setFromCamera(this._mouseNDC, this._map.camera);
+        const meshes = this._collectMeshes(false);
+        if (meshes.length > 0) {
+            const hits = this._raycaster.intersectObjects(meshes, false);
+            for (const hit of hits) {
+                const entry = this._meshToEntry.get(hit.object);
+                if (!entry)
+                    continue;
+                const obj = entry.obj;
+                if (seen.has(obj))
+                    continue;
+                seen.add(obj);
+                result.push(this._buildFeatureFromHit(obj, hit));
+            }
+        }
+        // ── 2. DOM-маркеры через elementFromPoint ────────────────────
+        const canvas = this._map.renderer?.domElement;
+        if (canvas) {
+            const rect = canvas.getBoundingClientRect();
+            const el = document.elementFromPoint(rect.left + screen.x, rect.top + screen.y);
+            const markerEl = el instanceof HTMLElement
+                ? el.closest('.krb-marker')
+                : null;
+            const marker = markerEl instanceof HTMLElement
+                ? _getMarkerFromElement(markerEl)
+                : null;
+            if (marker && !seen.has(marker)) {
+                seen.add(marker);
+                const ll = marker.getLngLat() ?? marker.getCenter() ?? null;
+                result.push({
+                    object: marker,
+                    layer: marker.getLayer(),
+                    point: ll ? [ll[0], ll[1]] : [NaN, NaN],
+                    properties: marker.getProperties(),
+                });
+            }
+        }
+        return result;
+    }
+    // =================================================================
+    // Внутреннее: mobile, listeners
+    // =================================================================
     _resolveMobileFlag() {
         if (this._isMobileResolved)
             return;
         try {
             this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
         }
-        catch (e) {
+        catch {
             this._isMobile = false;
         }
         this._isMobileResolved = true;
     }
-    /**
-     * Устанавливает слушатели на canvas карты (идемпотентно).
-     * @private
-     */
     _ensureListeners() {
         if (this._attached)
             return;
@@ -260,7 +249,7 @@ export class InteractionManager {
             pointermove: (e) => this._onPointerMove(e),
             pointerup: (e) => this._onPointerUp(e),
             pointercancel: (e) => this._onPointerCancel(e),
-            pointerleave: (e) => this._onPointerLeave(e)
+            pointerleave: (e) => this._onPointerLeave(e),
         };
         canvas.addEventListener('pointerdown', this._handlers.pointerdown, true);
         canvas.addEventListener('pointermove', this._handlers.pointermove, true);
@@ -269,10 +258,6 @@ export class InteractionManager {
         canvas.addEventListener('pointerleave', this._handlers.pointerleave, true);
         this._attached = true;
     }
-    /**
-     * Снимает слушатели с canvas.
-     * @private
-     */
     _detachListeners() {
         if (!this._attached)
             return;
@@ -287,36 +272,25 @@ export class InteractionManager {
         this._handlers = null;
         this._attached = false;
     }
-    /**
-     * Переводит экранные координаты события в NDC.
-     * @private
-     * @param {PointerEvent|MouseEvent} event
-     */
+    // =================================================================
+    // Внутреннее: NDC, сбор мешей, raycast
+    // =================================================================
     _setNDCFromEvent(event) {
         const rect = this._map.renderer.domElement.getBoundingClientRect();
         this._mouseNDC.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
     }
-    /**
- * Сброс состояния при отмене pointer-сессии (жест системы, scroll
- * родителя и т.п.). Без него `_pointerDownActive` может «зависнуть»
- * в true, и следующий pointerup без pointerdown будет воспринят как
- * клик.
- *
- * @private
- * @param {PointerEvent} e
- */
-    _onPointerCancel(e) {
-        this._pointerDownActive = false;
-        this._pressedEntry = null;
+    _setNDCFromScreen(x, y) {
+        const rect = this._map.renderer.domElement.getBoundingClientRect();
+        this._mouseNDC.set((x / rect.width) * 2 - 1, -(y / rect.height) * 2 + 1);
     }
     /**
      * Собирает меши всех видимых записей, прошедших broad-phase.
-     * Параллельно строит `_meshToEntry` и сбрасывает hover у отсечённых.
+     * Заполняет `_meshToEntry`.
      *
-     * @private
-     * @returns {THREE.Object3D[]}
+     * @param clearHover — если `true`, сбрасывает hover у отсечённых записей
+     *     (для hover-цикла). `false` — без побочных эффектов (для query).
      */
-    _collectMeshes() {
+    _collectMeshes(clearHover = true) {
         this._meshToEntry.clear();
         const meshes = [];
         const ray = this._raycaster.ray;
@@ -327,17 +301,19 @@ export class InteractionManager {
                 try {
                     visible = entry.isVisible();
                 }
-                catch (e) {
+                catch {
                     visible = false;
                 }
                 if (!visible) {
-                    this._clearEntryHover(entry);
+                    if (clearHover)
+                        this._clearEntryHover(entry);
                     continue;
                 }
             }
             // 2) Мобильный фильтр.
             if (entry.isMobileOnly && !this._isMobile) {
-                this._clearEntryHover(entry);
+                if (clearHover)
+                    this._clearEntryHover(entry);
                 continue;
             }
             // 3) Broad-phase по bounding sphere.
@@ -346,13 +322,14 @@ export class InteractionManager {
                 try {
                     bs = entry.getBoundingSphere();
                 }
-                catch (e) {
+                catch {
                     bs = null;
                 }
                 if (bs && bs.center && typeof bs.radius === 'number') {
                     this._broadPhaseSphere.set(bs.center, bs.radius);
                     if (!ray.intersectsSphere(this._broadPhaseSphere)) {
-                        this._clearEntryHover(entry);
+                        if (clearHover)
+                            this._clearEntryHover(entry);
                         continue;
                     }
                 }
@@ -362,15 +339,15 @@ export class InteractionManager {
             try {
                 objMeshes = entry.getMeshes();
             }
-            catch (e) {
+            catch {
                 objMeshes = null;
             }
             if (!objMeshes || objMeshes.length === 0) {
-                this._clearEntryHover(entry);
+                if (clearHover)
+                    this._clearEntryHover(entry);
                 continue;
             }
-            for (let i = 0; i < objMeshes.length; i++) {
-                const m = objMeshes[i];
+            for (const m of objMeshes) {
                 if (!m)
                     continue;
                 meshes.push(m);
@@ -379,11 +356,6 @@ export class InteractionManager {
         }
         return meshes;
     }
-    /**
-     * Сбрасывает hover у записи, если он был активен.
-     * @private
-     * @param {Object} entry
-     */
     _clearEntryHover(entry) {
         if (!entry.wasHovered)
             return;
@@ -392,7 +364,7 @@ export class InteractionManager {
             try {
                 entry.onHover(false);
             }
-            catch (e) { /* swallow */ }
+            catch { /* swallow */ }
         }
         else if (entry.getTooltip && this._map.popupManager) {
             this._map.popupManager.hide();
@@ -401,36 +373,25 @@ export class InteractionManager {
             this._hoveredEntry = null;
     }
     /**
-     * Выполняет raycast из текущего NDC и возвращает верхнюю запись
-     * (или null, если попаданий нет).
-     *
-     * @private
-     * @returns {{entry: Object, hit: Object}|null}
+     * Raycast из текущего NDC, возвращает верхнюю запись (или `null`).
+     * Для hover-цикла; `queryRenderedFeatures` использует raycast напрямую.
      */
     _raycast() {
         this._raycaster.setFromCamera(this._mouseNDC, this._map.camera);
-        const meshes = this._collectMeshes();
+        const meshes = this._collectMeshes(true);
         if (meshes.length === 0)
             return null;
         const hits = this._raycaster.intersectObjects(meshes, false);
-        for (let i = 0; i < hits.length; i++) {
-            const entry = this._meshToEntry.get(hits[i].object);
+        for (const hit of hits) {
+            const entry = this._meshToEntry.get(hit.object);
             if (entry)
-                return { entry, hit: hits[i] };
+                return { entry, hit };
         }
         return null;
     }
-    /**
-     * Применяет новое состояние hover. Если запись не изменилась —
-     * ничего не делает.
-     *
-     * @private
-     * @param {Object|null} newEntry
-     */
     _applyHover(newEntry) {
         if (this._hoveredEntry === newEntry)
             return;
-        // Снимаем hover со старой.
         const old = this._hoveredEntry;
         if (old) {
             old.wasHovered = false;
@@ -438,13 +399,12 @@ export class InteractionManager {
                 try {
                     old.onHover(false);
                 }
-                catch (e) { /* swallow */ }
+                catch { /* swallow */ }
             }
             else if (old.getTooltip && this._map.popupManager) {
                 this._map.popupManager.hide();
             }
         }
-        // Ставим hover на новую.
         this._hoveredEntry = newEntry;
         if (newEntry) {
             newEntry.wasHovered = true;
@@ -452,14 +412,14 @@ export class InteractionManager {
                 try {
                     newEntry.onHover(true);
                 }
-                catch (e) { /* swallow */ }
+                catch { /* swallow */ }
             }
             else if (newEntry.getTooltip && this._map.popupManager) {
                 let text = null;
                 try {
                     text = newEntry.getTooltip();
                 }
-                catch (e) {
+                catch {
                     text = null;
                 }
                 if (text)
@@ -467,31 +427,45 @@ export class InteractionManager {
             }
         }
     }
-    /* ================================================================
-       Обработчики событий
-       ================================================================ */
-    /**
-     * @private
-     * @param {PointerEvent} e
-     */
+    // =================================================================
+    // Внутреннее: сборка QueryRenderedFeature
+    // =================================================================
+    _buildFeatureFromHit(obj, hit) {
+        let lon = NaN;
+        let lat = NaN;
+        try {
+            const wp = hit.point;
+            const ll = typeof this._map.unprojectToLonLat === 'function'
+                ? this._map.unprojectToLonLat(wp.x, wp.z)
+                : this._map.unproject([wp.x, wp.z], 'EPSG:4326');
+            lon = ll[0];
+            lat = ll[1];
+        }
+        catch {
+            // объект может быть вне домена проекции — оставляем NaN
+        }
+        const layer = obj.getLayer();
+        return {
+            object: obj,
+            layer,
+            point: [lon, lat],
+            properties: obj.getProperties(),
+        };
+    }
+    // =================================================================
+    // Обработчики указателя
+    // =================================================================
     _onPointerDown(e) {
         this._pointerDownX = e.clientX;
         this._pointerDownY = e.clientY;
         this._pointerDownActive = true;
-        // На мобильных сразу raycast’им, чтобы на pointerup знать,
-        // по кому именно тапнули (move там не помогает — hover не отслеживаем).
         if (this._isMobile) {
             this._setNDCFromEvent(e);
             const result = this._raycast();
             this._pressedEntry = result ? result.entry : null;
         }
     }
-    /**
-     * @private
-     * @param {PointerEvent} e
-     */
     _onPointerMove(e) {
-        // На мобильных hover не отслеживаем — только тап.
         if (this._isMobile)
             return;
         const now = performance.now();
@@ -502,10 +476,10 @@ export class InteractionManager {
         const result = this._raycast();
         this._applyHover(result ? result.entry : null);
     }
-    /**
-     * @private
-     * @param {PointerEvent} e
-     */
+    _onPointerCancel(_e) {
+        this._pointerDownActive = false;
+        this._pressedEntry = null;
+    }
     _onPointerUp(e) {
         const hadPointerDown = this._pointerDownActive;
         const pressedEntry = this._pressedEntry;
@@ -513,14 +487,11 @@ export class InteractionManager {
         this._pressedEntry = null;
         if (!hadPointerDown)
             return;
-        // Отсечение «клик после драга».
         const dx = e.clientX - this._pointerDownX;
         const dy = e.clientY - this._pointerDownY;
         const threshold = this._clickMoveThreshold;
-        if (dx * dx + dy * dy > threshold * threshold) {
+        if (dx * dx + dy * dy > threshold * threshold)
             return;
-        }
-        // Определяем, по кому клик.
         let entry = null;
         if (this._isMobile) {
             entry = pressedEntry;
@@ -531,15 +502,12 @@ export class InteractionManager {
             entry = result ? result.entry : null;
         }
         if (!entry) {
-            // Клик по пустому месту. На мобильном сбрасываем активный hover,
-            // чтобы «залипший» тултип/подсветка исчезли.
             if (this._isMobile && this._hoveredEntry) {
                 this._applyHover(null);
             }
             return;
         }
-        // 1) onClick имеет наивысший приоритет. Если он задан — никакой
-        //    hover-логики поверх, чтобы не было двойных вызовов.
+        // 1) onClick имеет приоритет.
         if (entry.onClick) {
             try {
                 entry.onClick(e, entry.obj);
@@ -549,13 +517,12 @@ export class InteractionManager {
             }
             return;
         }
-        // 2) Ни onHover, ни tooltip — объекту нечего делать в hover-режиме.
+        // 2) Ни hover, ни tooltip — объекту нечего делать.
         const hasHover = !!(entry.onHover || (entry.getTooltip && this._map.popupManager));
         if (!hasHover)
             return;
-        // 3) Мобильный: тап переключает hover (toggle).
-        //    Десктоп: hover обычно уже применён через pointermove, но
-        //    подстрахуемся на случай «щелчка без предварительного движения».
+        // 3) Mobile: toggle. Desktop: обычно hover уже применён на pointermove,
+        //    но подстрахуемся на случай «клика без движения».
         if (this._isMobile) {
             if (this._hoveredEntry === entry) {
                 this._applyHover(null);
@@ -564,17 +531,11 @@ export class InteractionManager {
                 this._applyHover(entry);
             }
         }
-        else {
-            if (this._hoveredEntry !== entry) {
-                this._applyHover(entry);
-            }
+        else if (this._hoveredEntry !== entry) {
+            this._applyHover(entry);
         }
     }
-    /**
-     * @private
-     * @param {PointerEvent} e
-     */
-    _onPointerLeave(e) {
+    _onPointerLeave(_e) {
         if (this._isMobile)
             return;
         this._applyHover(null);

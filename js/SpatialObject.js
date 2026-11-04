@@ -196,6 +196,9 @@ export class SpatialObject {
     getScreenPosition() {
         return this._isVisible ? this._lastScreenPos : null;
     }
+    getLayer() {
+        return this._layer;
+    }
     /** Устанавливает `properties` (заменяет целиком). */
     setProperties(props) {
         this._properties = props ?? {};

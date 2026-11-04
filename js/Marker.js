@@ -38,6 +38,13 @@ export function _getPanes(map) {
     }
     return panes;
 }
+const _elementToMarker = new WeakMap();
+/** Возвращает Marker по DOM-элементу иконки (или null). */
+export function _getMarkerFromElement(el) {
+    if (!el)
+        return null;
+    return _elementToMarker.get(el) ?? null;
+}
 // =====================================================================
 // Marker
 // =====================================================================
@@ -144,6 +151,7 @@ export class Marker extends SpatialObject {
         }
         markerPane.appendChild(el);
         this._element = el;
+        _elementToMarker.set(el, this);
         this._applyStyleTransforms();
         el.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -177,6 +185,8 @@ export class Marker extends SpatialObject {
             this._hideTimeout = null;
         }
         if (this._element) {
+            if (this._element)
+                _elementToMarker.delete(this._element);
             this._element.remove();
             this._element = null;
         }

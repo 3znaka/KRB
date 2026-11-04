@@ -491,6 +491,9 @@ export class KrbMap {
        ================================================================ */
     getVec3() { return this._tempPool.v3[this._tempPool.idx++ & 15]; }
     getVec2() { return this._tempPool.v2[this._tempPool.idx++ & 15]; }
+    queryRenderedFeatures(point) {
+        return this.interaction.queryRenderedFeatures(point);
+    }
 }
 function applyMixin(target, mixin) {
     const descriptors = Object.getOwnPropertyDescriptors(mixin);

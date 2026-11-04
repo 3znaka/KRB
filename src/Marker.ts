@@ -90,6 +90,14 @@ export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
     return panes;
 }
 
+const _elementToMarker = new WeakMap<HTMLElement, Marker>();
+
+/** Возвращает Marker по DOM-элементу иконки (или null). */
+export function _getMarkerFromElement(el: HTMLElement | null | undefined): Marker | null {
+    if (!el) return null;
+    return _elementToMarker.get(el) ?? null;
+}
+
 // =====================================================================
 // Marker
 // =====================================================================
@@ -213,6 +221,7 @@ this._userData = options.userData ?? {};
         }
         markerPane.appendChild(el);
         this._element = el;
+        _elementToMarker.set(el, this);
 
         this._applyStyleTransforms();
 
@@ -246,6 +255,7 @@ this._userData = options.userData ?? {};
             this._hideTimeout = null;
         }
         if (this._element) {
+            if (this._element) _elementToMarker.delete(this._element);
             this._element.remove();
             this._element = null;
         }

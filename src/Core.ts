@@ -634,6 +634,19 @@ private _tryApplyLayerBackground(layer: any): void {
     queryRenderedFeatures(point: { x: number; y: number }) {
     return this.interaction.queryRenderedFeatures(point);
 }
+loadImage(
+    url: string,
+    options?: { crossOrigin?: string | null },
+): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+        const img = document.createElement('img');
+        const co = options?.crossOrigin ?? 'anonymous';
+        if (co != null) img.crossOrigin = co;
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+        img.src = url;
+    });
+}
 }
 
 

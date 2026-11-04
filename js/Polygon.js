@@ -1,5 +1,5 @@
 /**
- * Polygon — полигон с заливкой, обводкой, экструзией и подписью.
+ * Polygon — полигон с заливкой, обводкой, экструзией, паттерном и подписью.
  * После `addTo()` мутабелен.
  *
  * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
@@ -18,6 +18,7 @@ export const POLYGON_RENDER_ORDER = {
     STROKE: 903,
 };
 const INVALID_EDGE_FRACTION = 8;
+const DEFAULT_FILL_PATTERN_SCALE = 64;
 function crossY(p0, p1, p2) {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
     const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
@@ -27,13 +28,16 @@ function crossY(p0, p1, p2) {
 // Polygon
 // =====================================================================
 export class Polygon extends SpatialObject {
-    // ── Данные колец ──
+    // ── Кольца / CRS ──
     _rings;
     _crsCode;
     _crs;
     // ── Оформление ──
     _fillColor;
     _fillOpacity;
+    _fillPatternSource;
+    _fillPatternScale;
+    _fillPatternTexture = null;
     _strokeColor;
     _strokeWidth;
     _strokeOpacity;
@@ -102,11 +106,12 @@ export class Polygon extends SpatialObject {
         this._crs = null;
         this._fillColor = options.fillColor ?? '#3388ff';
         this._fillOpacity = options.fillOpacity ?? 0.5;
+        this._fillPatternSource = options.fillPattern ?? null;
+        this._fillPatternScale = options.fillPatternScale ?? DEFAULT_FILL_PATTERN_SCALE;
         this._strokeColor = options.strokeColor ?? '#000000';
         this._strokeWidth = options.strokeWidth ?? 2;
         this._strokeOpacity = options.strokeOpacity ?? 1;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
-        // Единая высота: `altitude` приоритетнее `altitudeOffset`.
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
         this._extruded = options.extruded ?? false;
         this._height = options.height ?? 0;
@@ -150,6 +155,7 @@ export class Polygon extends SpatialObject {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
+        this._loadFillPattern();
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
@@ -169,6 +175,13 @@ export class Polygon extends SpatialObject {
         this._disposeMeshes();
         if (this._group.parent)
             this._group.parent.remove(this._group);
+        if (this._fillPatternTexture) {
+            try {
+                this._fillPatternTexture.dispose?.();
+            }
+            catch { /* swallow */ }
+            this._fillPatternTexture = null;
+        }
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
@@ -191,7 +204,6 @@ export class Polygon extends SpatialObject {
         if (this._map)
             this._registerInteraction(this._map);
     }
-    /** Смена высоты должна пересчитать кэш рельефа. */
     _onAltitudeChanged() {
         this._heightsDirty = true;
         this._heightsFinalized = false;
@@ -258,7 +270,7 @@ export class Polygon extends SpatialObject {
         return meshes;
     }
     // =================================================================
-    // Кольца (требует пересборки)
+    // Кольца
     // =================================================================
     setRings(rings) {
         if (!rings || !rings.length || rings[0].length < 3) {
@@ -323,10 +335,57 @@ export class Polygon extends SpatialObject {
         this._raycastMeshesCache = null;
     }
     // =================================================================
+    // Fill pattern
+    // =================================================================
+    _loadFillPattern() {
+        const src = this._fillPatternSource;
+        if (!src) {
+            this._fillPatternTexture = null;
+            return;
+        }
+        if (typeof src === 'string') {
+            const loader = new THREE.TextureLoader();
+            loader.setCrossOrigin('anonymous');
+            this._fillPatternTexture = loader.load(src, () => {
+                this._configureFillPatternTexture();
+                this._applyFillPatternToMaterials();
+            }, undefined, (err) => console.warn('Polygon: fillPattern load failed', err));
+            this._configureFillPatternTexture();
+        }
+        else if (typeof HTMLCanvasElement !== 'undefined' && src instanceof HTMLCanvasElement) {
+            this._fillPatternTexture = new THREE.CanvasTexture(src);
+            this._configureFillPatternTexture();
+        }
+        else {
+            this._fillPatternTexture = new THREE.Texture(src);
+            this._fillPatternTexture.needsUpdate = true;
+            this._configureFillPatternTexture();
+        }
+    }
+    _configureFillPatternTexture() {
+        const t = this._fillPatternTexture;
+        if (!t)
+            return;
+        t.wrapS = THREE.RepeatWrapping;
+        t.wrapT = THREE.RepeatWrapping;
+        t.needsUpdate = true;
+    }
+    _applyFillPatternToMaterials() {
+        const map = this._fillPatternTexture;
+        for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial]) {
+            if (!mat)
+                continue;
+            mat.map = map;
+            mat.needsUpdate = true;
+        }
+    }
+    // =================================================================
     // Построение геометрии
     // =================================================================
     _createSurfaceMaterial() {
         const isTransparent = this._fillOpacity < 1;
+        const map = this._fillPatternTexture;
+        const patternProps = map ? { map } : {};
         if (this._extruded) {
             return new THREE.MeshStandardMaterial({
                 color: this._fillColor,
@@ -340,6 +399,7 @@ export class Polygon extends SpatialObject {
                 polygonOffset: true,
                 polygonOffsetFactor: -1,
                 polygonOffsetUnits: -1,
+                ...patternProps,
             });
         }
         return new THREE.MeshBasicMaterial({
@@ -352,6 +412,7 @@ export class Polygon extends SpatialObject {
             polygonOffset: true,
             polygonOffsetFactor: -1,
             polygonOffsetUnits: -1,
+            ...patternProps,
         });
     }
     _applyShadowFlags(mesh) {
@@ -504,6 +565,17 @@ export class Polygon extends SpatialObject {
                 maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
+        // UV — из абсолютных world-координат, чтобы паттерн тайлился
+        // бесшовно между соседними полигонами.
+        const uvScale = this._fillPatternScale > 0
+            ? this._fillPatternScale
+            : DEFAULT_FILL_PATTERN_SCALE;
+        const topUVs = new Float32Array(points2D.length * 2);
+        for (let i = 0; i < points2D.length; i++) {
+            const wc = this._worldCoords[i];
+            topUVs[i * 2] = (wc ? wc[0] : 0) / uvScale;
+            topUVs[i * 2 + 1] = (wc ? wc[1] : 0) / uvScale;
+        }
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
@@ -513,6 +585,7 @@ export class Polygon extends SpatialObject {
             topPosArray[i * 3 + 2] = pt.y;
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
+        topGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs, 2));
         topGeometry.setIndex(topIndices);
         const topNormals = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++)
@@ -539,6 +612,8 @@ export class Polygon extends SpatialObject {
                 bottomPosArray[i * 3 + 2] = pt.y;
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
+            // DoubleSide — UV можно переиспользовать с top.
+            bottomGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs.slice(), 2));
             bottomGeometry.setIndex(bottomIndices);
             const bottomNormals = new Float32Array(points2D.length * 3);
             for (let i = 0; i < points2D.length; i++)
@@ -559,6 +634,8 @@ export class Polygon extends SpatialObject {
             const sideIndices = this._sideIndicesArray;
             sidePositions.length = 0;
             sideIndices.length = 0;
+            const sideUVs = [];
+            const sideUvScale = uvScale;
             const initialHeight = this._height;
             for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
                 if (ringStartIndices[ringIdx] === undefined)
@@ -570,6 +647,7 @@ export class Polygon extends SpatialObject {
                 const count = nextRingStart - start;
                 if (count < 2)
                     continue;
+                let cum = 0;
                 for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
                     const idxI = start + i;
@@ -581,12 +659,25 @@ export class Polygon extends SpatialObject {
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topJ.x, initialHeight, topJ.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
+                    // UV: U — длина вдоль ребра, V — высота стенки.
+                    const ddx = topJ.x - topI.x;
+                    const ddz = topJ.y - topI.y;
+                    const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
+                    const u0 = cum / sideUvScale;
+                    const u1 = (cum + edgeLen) / sideUvScale;
+                    const vH = initialHeight / sideUvScale;
+                    sideUVs.push(u0, vH); // top-I
+                    sideUVs.push(u0, 0); // bottom-I
+                    sideUVs.push(u1, vH); // top-J
+                    sideUVs.push(u1, 0); // bottom-J
+                    cum += edgeLen;
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
                     sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
                 }
             }
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
+            sideGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(sideUVs), 2));
             sideGeometry.setIndex(sideIndices);
             sideGeometry.computeVertexNormals();
             sideGeometry.computeBoundingSphere();
@@ -700,6 +791,41 @@ export class Polygon extends SpatialObject {
         return this;
     }
     getFillOpacity() { return this._fillOpacity; }
+    /**
+     * Меняет текстуру заливки. `null` — вернуть однотонную заливку.
+     * Работает после `addTo()` без пересоздания геометрии — UV уже
+     * посчитаны.
+     */
+    setFillPattern(source) {
+        if (this._fillPatternTexture) {
+            try {
+                this._fillPatternTexture.dispose?.();
+            }
+            catch { /* swallow */ }
+            this._fillPatternTexture = null;
+        }
+        this._fillPatternSource = source;
+        if (!this._map)
+            return this;
+        this._loadFillPattern();
+        this._applyFillPatternToMaterials();
+        return this;
+    }
+    getFillPattern() {
+        return this._fillPatternSource;
+    }
+    /** Масштаб паттерна: world-метры на одну плитку. Пересобирает UV. */
+    setFillPatternScale(scale) {
+        if (!(scale > 0))
+            return this;
+        this._fillPatternScale = scale;
+        if (this._map)
+            this._rebuildGeometry();
+        return this;
+    }
+    getFillPatternScale() {
+        return this._fillPatternScale;
+    }
     setStrokeColor(color) {
         this._strokeColor = color;
         if (this._strokeMaterial?.color)
@@ -734,7 +860,7 @@ export class Polygon extends SpatialObject {
     }
     getStrokeOpacity() { return this._strokeOpacity; }
     // =================================================================
-    // Высота: altitude — в базе; altitudeOffset — deprecated-алиас
+    // Высота
     // =================================================================
     /** @deprecated Используйте унаследованный `setAltitude`. */
     setAltitudeOffset(offset) {

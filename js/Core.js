@@ -494,6 +494,17 @@ export class KrbMap {
     queryRenderedFeatures(point) {
         return this.interaction.queryRenderedFeatures(point);
     }
+    loadImage(url, options) {
+        return new Promise((resolve, reject) => {
+            const img = document.createElement('img');
+            const co = options?.crossOrigin ?? 'anonymous';
+            if (co != null)
+                img.crossOrigin = co;
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+            img.src = url;
+        });
+    }
 }
 function applyMixin(target, mixin) {
     const descriptors = Object.getOwnPropertyDescriptors(mixin);

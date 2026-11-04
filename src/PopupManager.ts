@@ -63,7 +63,7 @@ export interface PopupMapHost {
     camera: any;
     renderer: { domElement: HTMLCanvasElement };
     /** Координаты в СК `crs` → world-метры карты, `[absX, absZ]`. */
-    project(pt: LonLat, crs: any): [number, number];
+    project(pt: LonLat, crs: any): number[];
 }
 
 // =====================================================================
@@ -372,10 +372,7 @@ export class PopupManager {
         if (!map) return null;
 
         const alt = lngLat.length >= 3 ? lngLat[2] : (altitude ?? 0);
-        const [absX, absZ] = map.project(
-            [lngLat[0], lngLat[1]],
-            crs ?? map.inputCRS,
-        );
+const [absX, absZ] = map.project([lngLat[0], lngLat[1]], crs ?? map.inputCRS);
         const wgPos = map.worldGroup.position;
 
         const vec = new THREE.Vector3(

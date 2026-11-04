@@ -186,7 +186,7 @@
                 zoom: 17.5,
                 pitch: 48,
                 bearing: 122,
-                maxZoom: 21
+                maxZoom: 22
             }),
             antialias: true
         });
@@ -207,11 +207,10 @@
             maxNativeZoom: 14,
             minZoom: 2,
             maxZoom: 22,
-            lineWidthMultiplier: 1.2,
-            fillOpacity: 0.85,
-            buildingEdges: false,
-            visibleLayers: ['water', 'landcover', 'landuse', 'park', 'transportation', 'building']
-        }).addTo(map);
+            invisibleLayers: ['poi']
+   
+        
+               }).addTo(map);
 
         fetch('exclude.geojson')
             .then(r => r.json())
@@ -250,7 +249,7 @@
         };
         function poiIconUrl(type) { return poiImageMap[type] || `img/${type}.png`; }
 
-        const ZOOM_THRESHOLD = 18.5;
+        const ZOOM_THRESHOLD = 18;
 
         // =============================================================
         // 4. Хелперы
@@ -377,7 +376,7 @@
                             depthTest: true,
                             depthWrite: true,
                             title: props.number || '',
-                            titleMinZoom: 18,
+                            titleMinZoom: 19,
                             titleStyle: { fontSize: '10px', color: '#333', fontWeight: 'bold' },
                             titlePriority: 5,
                             properties: props,
@@ -481,7 +480,7 @@ function buildBuildingLayer() {
                 fillOpacity: 0.9,                              // стартовое, до ZOOM_THRESHOLD
                 zoomInterpolate: {
                     // от 1 на 17.5 до 0 на 18.0 — как в оригинале
-                    fillOpacity: [[ZOOM_THRESHOLD, 1], [ZOOM_THRESHOLD + 0.5, 0]]
+                    fillOpacity: [[ZOOM_THRESHOLD, 1], [ZOOM_THRESHOLD + 1, 0]]
                 },
                 strokeColor: 'rgba(0,0,0,0)',
                 strokeWidth: 0,
@@ -490,7 +489,7 @@ function buildBuildingLayer() {
                 minHeight: minH,
                 altitude: 0,
                 altitudeMode: 'absolute',
-                maxZoom: ZOOM_THRESHOLD + 0.5,   // жёсткое отсечение после полного затухания
+                maxZoom: ZOOM_THRESHOLD + 1,   // жёсткое отсечение после полного затухания
                 depthTest: true,
                 depthWrite: true,
                 properties: props,
@@ -784,7 +783,7 @@ function buildBuildingLayer() {
                     iconUrl: 'img/Znachok1.png',
                     iconSize: [47, 76],
                     anchor: [0.5, 1.0],
-                    minZoom: 0,
+                    minZoom: 19,
                     clusterable: false
                 });
                 userMarker.addTo(map);
@@ -867,10 +866,10 @@ function buildBuildingLayer() {
                         iconUrl: poiIconUrl(props.type),
                         iconSize: [32, 32],
                         anchor: [0.5, 1.0],
-                        minZoom: 0,
+                        minZoom: 19,
                         clusterable: false,
                         title: onFloorLabel,
-                        titleMinZoom: 0,
+                        titleMinZoom: 19,
                         titleStyle: {
                             fontSize: '11px',
                             fontWeight: 'bold',

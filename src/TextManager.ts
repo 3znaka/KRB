@@ -30,6 +30,7 @@ export interface IconOptions {
     offset?: [number, number];
     cssStyle?: any;
     sprite?: any;
+     anchor?: [number, number];
 }
 
 export interface LabelBBox {
@@ -123,8 +124,8 @@ export interface Label {
     _display: string;
     _hasIcon: boolean;
     _icon: IconOptions | null;
-    _iconCenterX: number | null;
-    _iconCenterY: number | null;
+_iconAnchorX: number | null;
+_iconAnchorY: number | null;
     _vectorOwner: any;
     _hideTimeout: ReturnType<typeof setTimeout> | null;
     rect?: LabelScreenPoint[];
@@ -397,54 +398,60 @@ export class TextManager {
         return arr;
     }
 
-    _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
-        let iconEl = el.querySelector('.krb-icon') as HTMLSpanElement | null;
-        if (!iconEl) {
-            iconEl = document.createElement('span');
-            iconEl.className = 'krb-icon';
-            el.insertBefore(iconEl, el.firstChild);
-        }
-        const off = (icon && icon.offset) || [0, 0];
-
-        if (iconStyle._inner) {
-            Object.assign(iconEl.style, {
-                display: iconStyle.display,
-                alignItems: iconStyle.alignItems,
-                justifyContent: iconStyle.justifyContent,
-                width: iconStyle.width,
-                height: iconStyle.height,
-                borderRadius: iconStyle.borderRadius,
-                backgroundColor: iconStyle.backgroundColor,
-                boxShadow: iconStyle.boxShadow,
-                boxSizing: iconStyle.boxSizing,
-                flex: '0 0 auto',
-                transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
-            });
-
-            let innerEl = iconEl.querySelector('.krb-icon-inner') as HTMLSpanElement | null;
-            if (!innerEl) {
-                innerEl = document.createElement('span');
-                innerEl.className = 'krb-icon-inner';
-                iconEl.appendChild(innerEl);
-            }
-            Object.assign(innerEl.style, iconStyle._inner);
-        } else {
-            const innerEl = iconEl.querySelector('.krb-icon-inner');
-            if (innerEl) innerEl.remove();
-
-            Object.assign(iconEl.style, {
-                display: 'inline-block',
-                flex: '0 0 auto',
-                backgroundRepeat: 'no-repeat',
-                backgroundImage: iconStyle.backgroundImage || '',
-                backgroundPosition: iconStyle.backgroundPosition || '',
-                backgroundSize: iconStyle.backgroundSize || '',
-                width: iconStyle.width || '',
-                height: iconStyle.height || '',
-                transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
-            });
-        }
+_setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
+    let iconEl = el.querySelector('.krb-icon') as HTMLSpanElement | null;
+    if (!iconEl) {
+        iconEl = document.createElement('span');
+        iconEl.className = 'krb-icon';
+        el.insertBefore(iconEl, el.firstChild);
     }
+    const off = (icon && icon.offset) || [0, 0];
+
+    if (iconStyle._inner) {
+        // ── SPRITE-BASED ── (вернуть оригинал)
+        Object.assign(iconEl.style, {
+            display: iconStyle.display,
+            alignItems: iconStyle.alignItems,
+            justifyContent: iconStyle.justifyContent,
+            width: iconStyle.width,
+            height: iconStyle.height,
+            borderRadius: iconStyle.borderRadius,
+            backgroundColor: iconStyle.backgroundColor,
+            boxShadow: iconStyle.boxShadow,
+            boxSizing: iconStyle.boxSizing,
+            flex: '0 0 auto',
+            transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+            pointerEvents: iconStyle.pointerEvents || '',
+            cursor: iconStyle.cursor || '',
+        });
+
+        let innerEl = iconEl.querySelector('.krb-icon-inner') as HTMLSpanElement | null;
+        if (!innerEl) {
+            innerEl = document.createElement('span');
+            innerEl.className = 'krb-icon-inner';
+            iconEl.appendChild(innerEl);
+        }
+        Object.assign(innerEl.style, iconStyle._inner);
+    } else {
+        // ── CSS / BACKGROUND-IMAGE ──
+        const innerEl = iconEl.querySelector('.krb-icon-inner');
+        if (innerEl) innerEl.remove();
+
+        Object.assign(iconEl.style, {
+            display: 'inline-block',
+            flex: '0 0 auto',
+            backgroundRepeat: 'no-repeat',
+            backgroundImage: iconStyle.backgroundImage || '',
+            backgroundPosition: iconStyle.backgroundPosition || '',
+            backgroundSize: iconStyle.backgroundSize || '',
+            width: iconStyle.width || '',
+            height: iconStyle.height || '',
+            transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+            pointerEvents: iconStyle.pointerEvents || '',
+            cursor: iconStyle.cursor || '',
+        });
+    }
+}
 
     _removeIcon(el: HTMLDivElement): void {
         const iconEl = el.querySelector('.krb-icon');
@@ -559,8 +566,8 @@ export class TextManager {
             _display: hasIcon ? 'inline-flex' : 'block',
             _hasIcon: hasIcon,
             _icon: icon || null,
-            _iconCenterX: null,
-            _iconCenterY: null,
+            _iconAnchorX: null,
+            _iconAnchorY: null,
             _vectorOwner: owner,
             _hideTimeout: null,
             _cachedText: initialText,
@@ -577,89 +584,109 @@ export class TextManager {
         return label;
     }
 
-    updateLabel(label: Label): void {
-        if (!label) return;
-        this._updateLabelSource(label, label.source);
-        this._dirty = true;
+updateLabel(label: Label, refreshIcon = false): void {
+    if (!label) return;
+    this._updateLabelSource(label, label.source, refreshIcon);
+    this._dirty = true;
+}
+
+_updateLabelSource(label: Label, newSource: LabelSource, refreshIcon = false): void {
+    const prevSource = label.source;
+    const el = label.element;
+    const newType: LabelType = newSource.getLabelType ? newSource.getLabelType() : 'point';
+
+    const oldText = label._cachedText;
+    const newText = newSource.getText ? newSource.getText() : '';
+    const oldStyle = label._cachedStyle;
+    const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
+
+    label.source = newSource;
+    label._cachedText = newText;
+    label._cachedStyle = { ...newStyle };
+
+    if (prevSource !== newSource && newType !== 'line-curved') {
+        label._chosenT = null;
+        label._chosenIsFlipped = false;
     }
 
-    _updateLabelSource(label: Label, newSource: LabelSource): void {
-        const prevSource = label.source;
-        const el = label.element;
-        const newType: LabelType = newSource.getLabelType ? newSource.getLabelType() : 'point';
+    Object.assign(el.style, newStyle);
+    this._applyHalo(newStyle, el);
 
-        const oldText = label._cachedText;
-        const newText = newSource.getText ? newSource.getText() : '';
-        const oldStyle = label._cachedStyle;
-        const newStyle = newSource.getTextStyle ? newSource.getTextStyle() : {};
+    if (newType === 'line-curved') {
+        label._fontSize = parseFloat(newStyle.fontSize as string) || 12;
+        return;
+    }
 
-        label.source = newSource;
-        label._cachedText = newText;
-        label._cachedStyle = { ...newStyle };
+    // ═══ ICON REFRESH ══════════════════════════════════════════════
+    let iconChanged = false;
+    if (refreshIcon) {
+        const newIcon = newSource.getIcon ? newSource.getIcon() : null;
+        const iconStyle = newIcon ? this._resolveIconStyle(newIcon) : null;
 
-        if (prevSource !== newSource && newType !== 'line-curved') {
-            label._chosenT = null;
-            label._chosenIsFlipped = false;
-        }
-
-        Object.assign(el.style, newStyle);
-        this._applyHalo(newStyle, el);
-
-        if (newType === 'line-curved') {
-            label._fontSize = parseFloat(newStyle.fontSize as string) || 12;
-            return;
-        }
-
-        const textChanged = oldText !== newText;
-        const fontChanged = [
-            'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
-            'letterSpacing', 'lineHeight', 'textTransform',
-        ].some(key => oldStyle[key] !== newStyle[key]);
-
-        if (label._hasIcon) {
-            const pos: IconPosition = newSource.getLabelPosition ? newSource.getLabelPosition() : 'right';
-            const dir = pos === 'left'  ? 'row-reverse'
-                      : pos === 'top'   ? 'column-reverse'
-                      : pos === 'bottom' ? 'column'
-                      : 'row';
-            el.style.flexDirection = dir;
-            el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
-
-            if (textChanged || fontChanged) {
-                let textSpan = el.querySelector('.krb-text') as HTMLSpanElement | null;
-                if (newText) {
-                    if (!textSpan) {
-                        textSpan = document.createElement('span');
-                        textSpan.className = 'krb-text';
-                        textSpan.style.whiteSpace = newType === 'point' ? 'pre-line' : 'nowrap';
-                        el.appendChild(textSpan);
-                    }
-                    textSpan.textContent = newType === 'point'
-                        ? this._wrapPointText(newText, el.style.fontSize)
-                        : newText;
-                } else if (textSpan) {
-                    textSpan.remove();
-                }
-                label._needsMeasure = true;
-                this._scheduleMeasure(label);
-            }
-            return;
-        }
-
-        if (textChanged || (newType === 'point' && fontChanged)) {
-            if (newType === 'point') {
-                el.style.whiteSpace = 'pre-line';
-                el.textContent = this._wrapPointText(newText, el.style.fontSize);
+        if (iconStyle) {
+            if (!label._hasIcon) {
+                // Иконка появилась у label, созданного без неё — это
+                // перестройка DOM-структуры (flex + span), не поддержано.
+                console.warn(
+                    '[TextManager] updateLabel(refreshIcon) на label без иконки ' +
+                    'не поддерживается. Пересоздайте label (removeLabel+addLabel).'
+                );
             } else {
-                el.textContent = newText;
+                // Обновляем flexDirection — позиция иконки могла измениться
+                const pos: IconPosition = newSource.getLabelPosition
+                    ? newSource.getLabelPosition() : 'right';
+                el.style.flexDirection =
+                    pos === 'left'   ? 'row-reverse' :
+                    pos === 'top'    ? 'column-reverse' :
+                    pos === 'bottom' ? 'column' : 'row';
+                el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
+
+                this._setupIcon(el, iconStyle, newIcon);
+                label._icon = newIcon;   // anchor читается отсюда в _flushMeasurements
+                iconChanged = true;
             }
         }
+    }
+    // ═══════════════════════════════════════════════════════════════
 
+    const textChanged = oldText !== newText;
+    const fontChanged = [
+        'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
+        'letterSpacing', 'lineHeight', 'textTransform',
+    ].some(key => oldStyle[key] !== newStyle[key]);
+
+    if (label._hasIcon) {
+        // ТОЛЬКО текстовое содержимое; измерение — в _flushMeasurements.
         if (textChanged || fontChanged) {
-            label._needsMeasure = true;
-            this._scheduleMeasure(label);
+            let textSpan = el.querySelector('.krb-text') as HTMLSpanElement | null;
+            if (newText) {
+                if (!textSpan) {
+                    textSpan = document.createElement('span');
+                    textSpan.className = 'krb-text';
+                    textSpan.style.whiteSpace = newType === 'point' ? 'pre-line' : 'nowrap';
+                    el.appendChild(textSpan);
+                }
+                textSpan.textContent = newType === 'point'
+                    ? this._wrapPointText(newText, el.style.fontSize)
+                    : newText;
+            } else if (textSpan) {
+                textSpan.remove();
+            }
+        }
+    } else if (textChanged || (newType === 'point' && fontChanged)) {
+        if (newType === 'point') {
+            el.style.whiteSpace = 'pre-line';
+            el.textContent = this._wrapPointText(newText, el.style.fontSize);
+        } else {
+            el.textContent = newText;
         }
     }
+
+    if (textChanged || fontChanged || iconChanged) {
+        label._needsMeasure = true;
+        this._scheduleMeasure(label);
+    }
+}
 
     removeLabel(label: Label): void {
         if (!label) return;
@@ -793,21 +820,27 @@ export class TextManager {
                 label.height = el.offsetHeight;
                 label._fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 12;
 
-                if (label._hasIcon) {
-                    const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
-                    if (iconEl) {
-                        const savedTransform = el.style.transform;
-                        el.style.transform = 'none';
-                        try {
-                            const labelRect = el.getBoundingClientRect();
-                            const iconRect = iconEl.getBoundingClientRect();
-                            label._iconCenterX = (iconRect.left + iconRect.right) * 0.5 - labelRect.left;
-                            label._iconCenterY = (iconRect.top + iconRect.bottom) * 0.5 - labelRect.top;
-                        } finally {
-                            el.style.transform = savedTransform;
-                        }
-                    }
-                }
+               if (label._hasIcon) {
+    const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
+    if (iconEl) {
+        const savedLabelTx = el.style.transform;
+        const savedIconTx  = iconEl.style.transform;
+        el.style.transform = 'none';
+        iconEl.style.transform = 'none';   // снять rotate, чтобы anchor-фракция считалась от un-rotated bbox
+        try {
+            const labelRect = el.getBoundingClientRect();
+            const iconRect  = iconEl.getBoundingClientRect();
+            const iconLeft  = iconRect.left - labelRect.left;
+            const iconTop   = iconRect.top  - labelRect.top;
+            const [ax, ay]  = label._icon?.anchor ?? [0.5, 0.5];
+            label._iconAnchorX = iconLeft + ax * iconRect.width;
+            label._iconAnchorY = iconTop  + ay * iconRect.height;
+        } finally {
+            el.style.transform = savedLabelTx;
+            iconEl.style.transform = savedIconTx;
+        }
+    }
+}
 
                 label._needsMeasure = false;
             }
@@ -920,16 +953,16 @@ export class TextManager {
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
 
-        if (!anchorOverride
-            && label._hasIcon
-            && label._iconCenterX != null
-            && label._iconCenterY != null) {
-            const anchorX = label._iconCenterX;
-            const anchorY = label._iconCenterY;
-            const dx = -anchorX * cos + anchorY * sin;
-            const dy = -anchorX * sin - anchorY * cos;
-            return { dx, dy, offX, offY, w, h, cos, sin };
-        }
+if (!anchorOverride
+    && label._hasIcon
+    && label._iconAnchorX != null
+    && label._iconAnchorY != null) {
+    const anchorX = label._iconAnchorX;
+    const anchorY = label._iconAnchorY;
+    const dx = -anchorX * cos + anchorY * sin;
+    const dy = -anchorX * sin - anchorY * cos;
+    return { dx, dy, offX, offY, w, h, cos, sin };
+}
 
         let anchorX: number;
         if (align === 'left')       anchorX = 0;

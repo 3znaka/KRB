@@ -3,20 +3,25 @@
  *
  * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
  * onHover, подпись, altitude и TextManager-контракт берутся из базового
- * класса. Здесь остаётся только то, что специфично для DOM-маркера:
+ * класса. Здесь остаётся только то, что специфично для маркера:
  * CRS/позиция, иконка (размер / anchor / поворот), altitudeMode,
- * кластеризация, DOM-элемент и DOM-события.
+ * кластеризация.
+ *
+ * Иконка маркера рендерится через TextManager — тем же путём, что и
+ * иконки POI векторных тайлов. Это даёт единый collision-check и
+ * приоритезацию между маркерами и POI (см. getPriority()).
  *
  * @module marker
  */
 import { Projections } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
-// =====================================================================
-// Панели и дефолты
-// =====================================================================
 const _mapPanes = new WeakMap();
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
+/**
+ * @deprecated Панель маркеров больше не используется — иконки
+ * рендерятся через TextManager. Оставлено для совместимости.
+ */
 export function _getPanes(map) {
     let panes = _mapPanes.get(map);
     if (!panes) {
@@ -39,7 +44,7 @@ export function _getPanes(map) {
     return panes;
 }
 const _elementToMarker = new WeakMap();
-/** Возвращает Marker по DOM-элементу иконки (или null). */
+/** Возвращает Marker по DOM-элементу (label или .krb-icon) или null. */
 export function _getMarkerFromElement(el) {
     if (!el)
         return null;
@@ -49,6 +54,7 @@ export function _getMarkerFromElement(el) {
 // Marker
 // =====================================================================
 export class Marker extends SpatialObject {
+    /** Счётчик для внутренних нужд (оставлен для обратной совместимости). */
     static _idCounter = 0;
     // ── Данные позиции ──
     _coord;
@@ -62,15 +68,14 @@ export class Marker extends SpatialObject {
     _anchor;
     _rotation;
     _iconUrl;
+    _iconPriority = null;
     // ── Поведение ── (altitude — в базе)
     _altitudeMode;
     _clusterable;
-    // ── Состояние DOM ──
-    _element = null;
+    // ── Состояние ──
     _isMobile = false;
     _lastHeightUpdateTime = 0;
     _cachedWorldY = 0;
-    _hideTimeout = null;
     constructor(options) {
         super();
         if (options.zoomInterpolate)
@@ -86,6 +91,7 @@ export class Marker extends SpatialObject {
         this._iconSize = options.iconSize ?? [16, 16];
         this._anchor = options.anchor ?? [0.5, 1.0];
         this._rotation = options.rotation ?? 0;
+        this._iconPriority = options.iconPriority ?? null;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._altitudeMode = options.altitudeMode ?? 'ground';
@@ -104,6 +110,23 @@ export class Marker extends SpatialObject {
         this._titleAllowOverflow = options.titleAllowOverflow ?? false;
         this._titlePriority = options.titlePriority ?? 0;
         this._resolveTitleOffset();
+    }
+    // =================================================================
+    // Override _attach: label создаётся всегда, даже при пустом title
+    // (иконка маркера рендерится через TextManager).
+    // =================================================================
+    _attach(map, layer) {
+        if (this._map === map && this._layer === layer)
+            return;
+        this.remove();
+        this._map = map;
+        this._layer = layer;
+        this._resolveTitleOffset();
+        this._onAttached(map);
+        if (map.textManager) {
+            this._textLabel = map.textManager.addLabel(this);
+            this._bindLabelDomEvents();
+        }
     }
     // =================================================================
     // Хуки SpatialObject
@@ -126,78 +149,28 @@ export class Marker extends SpatialObject {
         this._lon = ll[0];
         this._lat = ll[1];
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
-        const { markerPane } = _getPanes(map);
-        const markerId = `krb-marker-${++Marker._idCounter}`;
-        const el = document.createElement('div');
-        el.id = markerId;
-        el.className = 'krb-marker';
-        Object.assign(el.style, {
-            position: 'absolute',
-            pointerEvents: 'auto',
-            cursor: 'pointer',
-            display: 'none',
-            transition: 'opacity 0.08s linear',
-            opacity: '0',
-        });
-        if (this._iconUrl) {
-            const img = document.createElement('img');
-            img.src = this._iconUrl;
-            Object.assign(img.style, {
-                width: '100%',
-                height: '100%',
-                display: 'block',
-                userSelect: 'none',
-            });
-            img.draggable = false;
-            el.appendChild(img);
-        }
-        markerPane.appendChild(el);
-        this._element = el;
-        _elementToMarker.set(el, this);
-        this._applyStyleTransforms();
-        el.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (this._onClick)
-                this._onClick(e, this);
-            else
-                this._defaultClickAction();
-        });
-        if (!this._isMobile) {
-            el.addEventListener('pointerenter', () => {
-                if (this._onHover) {
-                    this._onHover(true);
-                }
-                else if (this._tooltipText && this._map?.popupManager) {
-                    this._map.popupManager.show(this, this._tooltipText);
-                }
-            });
-            el.addEventListener('pointerleave', () => {
-                if (this._onHover) {
-                    this._onHover(false);
-                }
-                else if (this._map?.popupManager) {
-                    this._map.popupManager.hide();
-                }
-            });
-        }
     }
     _teardown() {
-        if (this._hideTimeout) {
-            clearTimeout(this._hideTimeout);
-            this._hideTimeout = null;
+        // Убираем записи _elementToMarker; сам DOM-элемент удалит
+        // SpatialObject.remove() через textManager.removeLabel().
+        const el = this._textLabel?.element;
+        if (el) {
+            _elementToMarker.delete(el);
+            const iconEl = el.querySelector('.krb-icon');
+            if (iconEl)
+                _elementToMarker.delete(iconEl);
         }
-        if (this._element) {
-            if (this._element)
-                _elementToMarker.delete(this._element);
-            this._element.remove();
-            this._element = null;
-        }
+        this._isVisible = false;
+        this._lastScreenPos = null;
     }
     _applyHidden() {
-        this._setVisible(false);
+        this._isVisible = false;
     }
     _defaultTitleOffset() {
-        return [0, this._iconSize[1] / 2 + 4];
+        // Позиционирование относительно иконки обеспечивает
+        // _computeAnchor через _iconAnchorX/Y. Дополнительный offset
+        // по умолчанию не нужен.
+        return [0, 0];
     }
     /** Смена высоты должна пересчитать кэши позиции. */
     _onAltitudeChanged() {
@@ -246,38 +219,22 @@ export class Marker extends SpatialObject {
     // Иконка: URL / размер / anchor / поворот
     // =================================================================
     setIconUrl(url) {
+        const wasNull = this._iconUrl === null;
+        const willBeNull = url === null;
         this._iconUrl = url;
-        if (!this._element)
-            return this;
-        const img = this._element.querySelector('img');
-        if (url) {
-            if (img) {
-                img.src = url;
-            }
-            else {
-                const newImg = document.createElement('img');
-                newImg.src = url;
-                Object.assign(newImg.style, {
-                    width: '100%',
-                    height: '100%',
-                    display: 'block',
-                    userSelect: 'none',
-                });
-                newImg.draggable = false;
-                this._element.appendChild(newImg);
-            }
-        }
-        else if (img) {
-            img.remove();
-        }
+        // Смена "иконка ↔ без иконки" меняет структуру DOM-узла внутри
+        // label, поэтому требует пересоздания label.
+        if (wasNull !== willBeNull)
+            this._rebuildLabel();
+        else
+            this._refreshLabel(true);
         return this;
     }
     setIconSize(size) {
         if (!size || size.length !== 2)
             return this;
         this._iconSize = [size[0], size[1]];
-        this._applyStyleTransforms();
-        this._resolveTitleOffset();
+        this._refreshLabel(true);
         return this;
     }
     getIconSize() {
@@ -287,7 +244,7 @@ export class Marker extends SpatialObject {
         if (!anchor || anchor.length !== 2)
             return this;
         this._anchor = [anchor[0], anchor[1]];
-        this._applyStyleTransforms();
+        this._refreshLabel(true);
         return this;
     }
     getAnchor() {
@@ -295,11 +252,19 @@ export class Marker extends SpatialObject {
     }
     setRotation(degrees) {
         this._rotation = Number.isFinite(degrees) ? degrees : 0;
-        this._applyStyleTransforms();
+        this._refreshLabel(true);
         return this;
     }
     getRotation() {
         return this._rotation;
+    }
+    /** Приоритет иконки для разрешения коллизий. */
+    getIconPriority() {
+        return this._iconPriority ?? this._titlePriority;
+    }
+    setIconPriority(priority) {
+        this._iconPriority = Number.isFinite(priority) ? priority : null;
+        return this;
     }
     // =================================================================
     // Altitude MODE (setAltitude/getAltitude — в базе)
@@ -319,6 +284,39 @@ export class Marker extends SpatialObject {
         return this._clusterable;
     }
     // =================================================================
+    // TextManager-контракт: иконка + позиция подписи + приоритет
+    // =================================================================
+    getIcon() {
+        if (!this._iconUrl)
+            return null;
+        const [w, h] = this._iconSize;
+        return {
+            name: 'marker',
+            anchor: [this._anchor[0], this._anchor[1]],
+            cssStyle: {
+                display: 'inline-block',
+                backgroundImage: `url("${this._iconUrl}")`,
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '100% 100%',
+                width: `${w}px`,
+                height: `${h}px`,
+                transform: this._rotation ? `rotate(${this._rotation}deg)` : '',
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+            },
+        };
+    }
+    getLabelPosition() {
+        // Текст — под иконкой (соответствует старому titleOffset
+        // [0, iconH/2 + 4] в горизонтальной компоновке).
+        return 'bottom';
+    }
+    getPriority() {
+        // Маркеры всегда выше POI: POI обычно имеют priority 0..20,
+        // а маркеры получают +1000.
+        return this.getIconPriority() + 1000;
+    }
+    // =================================================================
     // Внутренние хелперы
     // =================================================================
     _resolveCrs() {
@@ -334,6 +332,12 @@ export class Marker extends SpatialObject {
         this._lastScreenPos = null;
         this._cachedWorldY = 0;
         this._lastHeightUpdateTime = 0;
+        // Позиция изменилась — просим TextManager пересчитать визибилити
+        // (иначе при неподвижной камере коллизии останутся устаревшими).
+        const tm = this._map?.textManager;
+        if (tm && this._textLabel) {
+            tm.updateLabel(this._textLabel);
+        }
     }
     _defaultClickAction() {
         if (this._map && this._crs) {
@@ -344,75 +348,98 @@ export class Marker extends SpatialObject {
             this._map.popupManager.show(this, this._tooltipText);
         }
     }
-    _applyStyleTransforms() {
-        const el = this._element;
-        if (!el)
+    /**
+     * Обновляет содержимое label через TextManager, не пересоздавая
+     * DOM. `refreshIcon = true` нужен, когда поменялись `_iconUrl`,
+     * `_iconSize`, `_anchor` или `_rotation` — они упакованы в
+     * `getIcon().cssStyle`.
+     */
+    _refreshLabel(refreshIcon = false) {
+        const tm = this._map?.textManager;
+        if (!tm || !this._textLabel)
             return;
-        const [ax, ay] = this._anchor;
-        el.style.width = `${this._iconSize[0]}px`;
-        el.style.height = `${this._iconSize[1]}px`;
-        el.style.transformOrigin = `${ax * 100}% ${ay * 100}%`;
-        el.style.transform =
-            `translate(${-ax * 100}%, ${-ay * 100}%) rotate(${this._rotation}deg)`;
+        tm.updateLabel(this._textLabel, refreshIcon);
     }
-    // =================================================================
-    // Видимость (DOM-специфичная)
-    // =================================================================
-    _setVisible(visible) {
-        const el = this._element;
-        if (!el)
+    /**
+     * Пересоздаёт label с нуля. Нужно, только если меняется структура
+     * DOM внутри label (например, "появилась/исчезла иконка").
+     */
+    _rebuildLabel() {
+        const tm = this._map?.textManager;
+        if (!tm)
             return;
-        if (visible) {
-            if (this._hideTimeout) {
-                clearTimeout(this._hideTimeout);
-                this._hideTimeout = null;
-            }
-            if (el.style.display === 'none') {
-                el.style.display = 'block';
-                el.style.opacity = '0';
-                void el.offsetWidth;
-                el.style.opacity = '1';
-            }
-            else {
-                el.style.opacity = '1';
-            }
+        if (this._textLabel) {
+            tm.removeLabel(this._textLabel);
+            this._textLabel = null;
         }
-        else {
-            if (el.style.display === 'none')
-                return;
-            el.style.opacity = '0';
-            if (this._hideTimeout)
-                clearTimeout(this._hideTimeout);
-            this._hideTimeout = setTimeout(() => {
-                if (el.style.opacity === '0') {
-                    el.style.display = 'none';
+        this._textLabel = tm.addLabel(this);
+        this._bindLabelDomEvents();
+    }
+    /**
+     * Регистрирует DOM-элемент(ы) label в _elementToMarker и навешивает
+     * обработчики событий на иконку. Вызывается один раз после
+     * addLabel (и при _rebuildLabel).
+     */
+    _bindLabelDomEvents() {
+        if (!this._textLabel)
+            return;
+        const labelEl = this._textLabel.element;
+        if (!labelEl)
+            return;
+        _elementToMarker.set(labelEl, this);
+        const iconEl = labelEl.querySelector('.krb-icon');
+        if (iconEl) {
+            _elementToMarker.set(iconEl, this);
+            this._attachPointerHandlers(iconEl);
+        }
+    }
+    _attachPointerHandlers(target) {
+        target.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (this._onClick)
+                this._onClick(e, this);
+            else
+                this._defaultClickAction();
+        });
+        if (!this._isMobile) {
+            target.addEventListener('pointerenter', () => {
+                if (this._onHover) {
+                    this._onHover(true);
                 }
-                this._hideTimeout = null;
-            }, 80);
+                else if (this._tooltipText && this._map?.popupManager) {
+                    this._map.popupManager.show(this, this._tooltipText);
+                }
+            });
+            target.addEventListener('pointerleave', () => {
+                if (this._onHover) {
+                    this._onHover(false);
+                }
+                else if (this._map?.popupManager) {
+                    this._map.popupManager.hide();
+                }
+            });
         }
     }
     // =================================================================
-    // Обновление на кадре
+    // Обновление на кадре: только расчёт _lastScreenPos и _isVisible
     // =================================================================
     _update(_map) {
         const map = this._map;
         if (!map)
             return;
         this._applyZoomInterpolations(map.continuousZoom);
-        if (!this._element)
+        if (!this._textLabel)
             return;
         // Кластерная видимость — особенность Marker.
         if (this._layer && this._layer._clusterActive) {
             const vis = this._layer._clusterVisibleMarkers;
             if (!vis || !vis.has(this)) {
                 this._applyHidden();
-                this._isVisible = false;
                 return;
             }
         }
         if (!this._isWithinView()) {
             this._applyHidden();
-            this._isVisible = false;
             return;
         }
         const [absWorldX, absWorldZ] = map.project(this._coord, this._crs);
@@ -444,22 +471,17 @@ export class Marker extends SpatialObject {
             const dist = map.camera.position.distanceTo(worldPos);
             if (dist > map.maxObjectDistance) {
                 this._applyHidden();
-                this._isVisible = false;
                 return;
             }
         }
         const screenPos = worldPos.clone().project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._applyHidden();
-            this._isVisible = false;
             return;
         }
         const canvas = map.renderer.domElement;
         const x = (screenPos.x * 0.5 + 0.5) * canvas.clientWidth;
         const y = (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight;
-        this._element.style.left = `${x}px`;
-        this._element.style.top = `${y}px`;
-        this._setVisible(true);
         this._lastScreenPos = { x, y };
         this._isVisible = true;
     }

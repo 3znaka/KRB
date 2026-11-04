@@ -237,6 +237,7 @@ export class TextManager {
         }
         const off = (icon && icon.offset) || [0, 0];
         if (iconStyle._inner) {
+            // ── SPRITE-BASED ── (вернуть оригинал)
             Object.assign(iconEl.style, {
                 display: iconStyle.display,
                 alignItems: iconStyle.alignItems,
@@ -249,6 +250,8 @@ export class TextManager {
                 boxSizing: iconStyle.boxSizing,
                 flex: '0 0 auto',
                 transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+                pointerEvents: iconStyle.pointerEvents || '',
+                cursor: iconStyle.cursor || '',
             });
             let innerEl = iconEl.querySelector('.krb-icon-inner');
             if (!innerEl) {
@@ -259,6 +262,7 @@ export class TextManager {
             Object.assign(innerEl.style, iconStyle._inner);
         }
         else {
+            // ── CSS / BACKGROUND-IMAGE ──
             const innerEl = iconEl.querySelector('.krb-icon-inner');
             if (innerEl)
                 innerEl.remove();
@@ -272,6 +276,8 @@ export class TextManager {
                 width: iconStyle.width || '',
                 height: iconStyle.height || '',
                 transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+                pointerEvents: iconStyle.pointerEvents || '',
+                cursor: iconStyle.cursor || '',
             });
         }
     }
@@ -385,8 +391,8 @@ export class TextManager {
             _display: hasIcon ? 'inline-flex' : 'block',
             _hasIcon: hasIcon,
             _icon: icon || null,
-            _iconCenterX: null,
-            _iconCenterY: null,
+            _iconAnchorX: null,
+            _iconAnchorY: null,
             _vectorOwner: owner,
             _hideTimeout: null,
             _cachedText: initialText,
@@ -401,13 +407,13 @@ export class TextManager {
         this._dirty = true;
         return label;
     }
-    updateLabel(label) {
+    updateLabel(label, refreshIcon = false) {
         if (!label)
             return;
-        this._updateLabelSource(label, label.source);
+        this._updateLabelSource(label, label.source, refreshIcon);
         this._dirty = true;
     }
-    _updateLabelSource(label, newSource) {
+    _updateLabelSource(label, newSource, refreshIcon = false) {
         const prevSource = label.source;
         const el = label.element;
         const newType = newSource.getLabelType ? newSource.getLabelType() : 'point';
@@ -428,19 +434,41 @@ export class TextManager {
             label._fontSize = parseFloat(newStyle.fontSize) || 12;
             return;
         }
+        // ═══ ICON REFRESH ══════════════════════════════════════════════
+        let iconChanged = false;
+        if (refreshIcon) {
+            const newIcon = newSource.getIcon ? newSource.getIcon() : null;
+            const iconStyle = newIcon ? this._resolveIconStyle(newIcon) : null;
+            if (iconStyle) {
+                if (!label._hasIcon) {
+                    // Иконка появилась у label, созданного без неё — это
+                    // перестройка DOM-структуры (flex + span), не поддержано.
+                    console.warn('[TextManager] updateLabel(refreshIcon) на label без иконки ' +
+                        'не поддерживается. Пересоздайте label (removeLabel+addLabel).');
+                }
+                else {
+                    // Обновляем flexDirection — позиция иконки могла измениться
+                    const pos = newSource.getLabelPosition
+                        ? newSource.getLabelPosition() : 'right';
+                    el.style.flexDirection =
+                        pos === 'left' ? 'row-reverse' :
+                            pos === 'top' ? 'column-reverse' :
+                                pos === 'bottom' ? 'column' : 'row';
+                    el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
+                    this._setupIcon(el, iconStyle, newIcon);
+                    label._icon = newIcon; // anchor читается отсюда в _flushMeasurements
+                    iconChanged = true;
+                }
+            }
+        }
+        // ═══════════════════════════════════════════════════════════════
         const textChanged = oldText !== newText;
         const fontChanged = [
             'fontSize', 'fontFamily', 'fontWeight', 'fontStyle',
             'letterSpacing', 'lineHeight', 'textTransform',
         ].some(key => oldStyle[key] !== newStyle[key]);
         if (label._hasIcon) {
-            const pos = newSource.getLabelPosition ? newSource.getLabelPosition() : 'right';
-            const dir = pos === 'left' ? 'row-reverse'
-                : pos === 'top' ? 'column-reverse'
-                    : pos === 'bottom' ? 'column'
-                        : 'row';
-            el.style.flexDirection = dir;
-            el.style.textAlign = (pos === 'top' || pos === 'bottom') ? 'center' : '';
+            // ТОЛЬКО текстовое содержимое; измерение — в _flushMeasurements.
             if (textChanged || fontChanged) {
                 let textSpan = el.querySelector('.krb-text');
                 if (newText) {
@@ -457,12 +485,9 @@ export class TextManager {
                 else if (textSpan) {
                     textSpan.remove();
                 }
-                label._needsMeasure = true;
-                this._scheduleMeasure(label);
             }
-            return;
         }
-        if (textChanged || (newType === 'point' && fontChanged)) {
+        else if (textChanged || (newType === 'point' && fontChanged)) {
             if (newType === 'point') {
                 el.style.whiteSpace = 'pre-line';
                 el.textContent = this._wrapPointText(newText, el.style.fontSize);
@@ -471,7 +496,7 @@ export class TextManager {
                 el.textContent = newText;
             }
         }
-        if (textChanged || fontChanged) {
+        if (textChanged || fontChanged || iconChanged) {
             label._needsMeasure = true;
             this._scheduleMeasure(label);
         }
@@ -619,16 +644,22 @@ export class TextManager {
                 if (label._hasIcon) {
                     const iconEl = el.querySelector('.krb-icon');
                     if (iconEl) {
-                        const savedTransform = el.style.transform;
+                        const savedLabelTx = el.style.transform;
+                        const savedIconTx = iconEl.style.transform;
                         el.style.transform = 'none';
+                        iconEl.style.transform = 'none'; // снять rotate, чтобы anchor-фракция считалась от un-rotated bbox
                         try {
                             const labelRect = el.getBoundingClientRect();
                             const iconRect = iconEl.getBoundingClientRect();
-                            label._iconCenterX = (iconRect.left + iconRect.right) * 0.5 - labelRect.left;
-                            label._iconCenterY = (iconRect.top + iconRect.bottom) * 0.5 - labelRect.top;
+                            const iconLeft = iconRect.left - labelRect.left;
+                            const iconTop = iconRect.top - labelRect.top;
+                            const [ax, ay] = label._icon?.anchor ?? [0.5, 0.5];
+                            label._iconAnchorX = iconLeft + ax * iconRect.width;
+                            label._iconAnchorY = iconTop + ay * iconRect.height;
                         }
                         finally {
-                            el.style.transform = savedTransform;
+                            el.style.transform = savedLabelTx;
+                            iconEl.style.transform = savedIconTx;
                         }
                     }
                 }
@@ -790,10 +821,10 @@ export class TextManager {
         const sin = Math.sin(rad);
         if (!anchorOverride
             && label._hasIcon
-            && label._iconCenterX != null
-            && label._iconCenterY != null) {
-            const anchorX = label._iconCenterX;
-            const anchorY = label._iconCenterY;
+            && label._iconAnchorX != null
+            && label._iconAnchorY != null) {
+            const anchorX = label._iconAnchorX;
+            const anchorY = label._iconAnchorY;
             const dx = -anchorX * cos + anchorY * sin;
             const dy = -anchorX * sin - anchorY * cos;
             return { dx, dy, offX, offY, w, h, cos, sin };

@@ -122,6 +122,16 @@ export interface GeoJSONLayerOptions {
     url?: string;
     data?: GeoJSONInput;
     crs?: string;
+    /**
+     * Предикат на уровне GeoJSON-feature: `false` — feature не создаётся
+     * вообще (не попадает в `_objects`, не влияет на `getBounds`).
+     *
+     * НЕ путать с унаследованным `Layer.filter(predicate)` — тот работает
+     * по уже созданным объектам слоя (`SpatialObject`) и лишь скрывает их.
+     */
+    featureFilter?: (feature: GeoJSONFeature) => boolean;
+
+    /** @deprecated Используйте `featureFilter`. */
     filter?: (feature: GeoJSONFeature) => boolean;
     onEachFeature?: OnEachFeatureCallback;
 
@@ -215,7 +225,17 @@ export class GeoJSONLayer extends Layer {
     public url: string | null = null;
     public data: GeoJSONInput | null = null;
     public crs: string | null = null;
-    public filter: ((feature: GeoJSONFeature) => boolean) | null = null;
+    /**
+     * Предикат на уровне GeoJSON-feature. `false` — feature не создаётся.
+     *
+     * Это НЕ то же самое, что унаследованный {@link Layer#filter}:
+     *   - `featureFilter` — применяется при парсинге, feature вообще
+     *     не попадает в слой (влияет на `_objects.length` и `getBounds`);
+     *   - `filter()` — применяется к уже созданным объектам и лишь
+     *     скрывает их через `SpatialObject.setVisible()`, объекты
+     *     остаются в `_objects`.
+     */
+    public featureFilter: ((feature: GeoJSONFeature) => boolean) | null = null;
     public onEachFeature: OnEachFeatureCallback | null = null;
 
     // ── Коллбэки ──
@@ -285,7 +305,7 @@ export class GeoJSONLayer extends Layer {
         this.url = options.url ?? null;
         this.data = options.data ?? null;
         this.crs = options.crs ?? null;
-        this.filter = options.filter ?? null;
+this.featureFilter = options.featureFilter ?? options.filter ?? null;
         this.onEachFeature = options.onEachFeature ?? null;
 
         this.pointToOptions = options.pointToOptions ?? null;
@@ -366,6 +386,21 @@ export class GeoJSONLayer extends Layer {
         if (layer._map) this._load();
     }
 
+    /**
+ * Меняет feature-фильтр. При активной карте и загруженных данных
+ * автоматически вызывает `reload()`, чтобы применить фильтр к уже
+ * загруженным feature.
+ *
+ * @example
+ * layer.setFeatureFilter(f => f.properties?.type === 'city');
+ * layer.setFeatureFilter(null);   // снять фильтр
+ */
+setFeatureFilter(predicate: ((feature: GeoJSONFeature) => boolean) | null): this {
+    this.featureFilter = predicate;
+    if (this._map && this._loaded) this.reload();
+    return this;
+}
+
     private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
         try {
@@ -414,8 +449,8 @@ export class GeoJSONLayer extends Layer {
     }
 
     private _addFeature(feature: GeoJSONFeature): void {
-        const props = feature.properties ?? {};
-        if (this.filter && !this.filter(feature)) return;
+ const props = feature.properties ?? {};
+    if (this.featureFilter && !this.featureFilter(feature)) return;
 
         const geom = feature.geometry;
         if (!geom) return;

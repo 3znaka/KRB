@@ -45,7 +45,17 @@ export class GeoJSONLayer extends Layer {
     url = null;
     data = null;
     crs = null;
-    filter = null;
+    /**
+     * Предикат на уровне GeoJSON-feature. `false` — feature не создаётся.
+     *
+     * Это НЕ то же самое, что унаследованный {@link Layer#filter}:
+     *   - `featureFilter` — применяется при парсинге, feature вообще
+     *     не попадает в слой (влияет на `_objects.length` и `getBounds`);
+     *   - `filter()` — применяется к уже созданным объектам и лишь
+     *     скрывает их через `SpatialObject.setVisible()`, объекты
+     *     остаются в `_objects`.
+     */
+    featureFilter = null;
     onEachFeature = null;
     // ── Коллбэки ──
     pointToOptions = null;
@@ -106,7 +116,7 @@ export class GeoJSONLayer extends Layer {
         this.url = options.url ?? null;
         this.data = options.data ?? null;
         this.crs = options.crs ?? null;
-        this.filter = options.filter ?? null;
+        this.featureFilter = options.featureFilter ?? options.filter ?? null;
         this.onEachFeature = options.onEachFeature ?? null;
         this.pointToOptions = options.pointToOptions ?? null;
         this.point3DToOptions = options.point3DToOptions ?? null;
@@ -180,6 +190,21 @@ export class GeoJSONLayer extends Layer {
         if (layer._map)
             this._load();
     }
+    /**
+ * Меняет feature-фильтр. При активной карте и загруженных данных
+ * автоматически вызывает `reload()`, чтобы применить фильтр к уже
+ * загруженным feature.
+ *
+ * @example
+ * layer.setFeatureFilter(f => f.properties?.type === 'city');
+ * layer.setFeatureFilter(null);   // снять фильтр
+ */
+    setFeatureFilter(predicate) {
+        this.featureFilter = predicate;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
     async _load() {
         let geojson = null;
         try {
@@ -230,7 +255,7 @@ export class GeoJSONLayer extends Layer {
     }
     _addFeature(feature) {
         const props = feature.properties ?? {};
-        if (this.filter && !this.filter(feature))
+        if (this.featureFilter && !this.featureFilter(feature))
             return;
         const geom = feature.geometry;
         if (!geom)

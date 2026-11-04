@@ -24,6 +24,7 @@ export type PolylineTitleAlignH = 'left' | 'center' | 'right';
 export type PolylineTitleAlignV = 'top' | 'middle' | 'center' | 'bottom';
 export type PolylineTitlePlacement = 'center' | 'along';
 export type PolylineAltitudeMode = 'clampToGround' | 'absolute';
+export type LineDasharray = [number, number] | number;
 
 export interface PolylineOptions {
     positions: PolylinePosition[];
@@ -56,6 +57,10 @@ export interface PolylineOptions {
     onHover?: (hovered: boolean) => void;
     properties?: Record<string, any>;
 userData?: Record<string, any>;
+    /** `[dash, gap]` в world-метрах, либо число (`[n, n]`). */
+    lineDasharray?: LineDasharray;
+    /** Сдвиг паттерна вдоль линии, world-метры. Default: 0. */
+    lineDashOffset?: number;
 }
 
 function pointToSegmentDistance(point: any, a: any, b: any): number {
@@ -86,6 +91,8 @@ export class Polyline extends SpatialObject {
     private _altitudeMode: PolylineAltitudeMode;
     private _depthTest: boolean;
     private _depthWrite: boolean;
+        private _lineDasharray: LineDasharray | null = null;
+    private _lineDashOffset: number = 0;
 
     // ── Высоты ──
     private _heightUpdateInterval: number;
@@ -143,6 +150,8 @@ this._userData = options.userData ?? {};
         this._width = options.width || 2;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
+                this._lineDasharray = options.lineDasharray ?? null;
+        this._lineDashOffset = options.lineDashOffset ?? 0;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._depthTest = options.depthTest ?? false;
@@ -191,7 +200,7 @@ this._userData = options.userData ?? {};
 
         this._geometry = new LineGeometry();
         const canvas = map.renderer.domElement;
-        this._material = new LineMaterial({
+ this._material = new LineMaterial({
             color: this._color,
             linewidth: this._width,
             opacity: this._opacity,
@@ -199,6 +208,7 @@ this._userData = options.userData ?? {};
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
             resolution: new THREE.Vector2(canvas.width, canvas.height),
+            ...this._computeDashUniforms(),
         });
         this._line = new Line2(this._geometry, this._material);
         this._line.renderOrder = 999;
@@ -344,6 +354,48 @@ this._userData = options.userData ?? {};
     }
 
     getOpacity(): number { return this._opacity; }
+
+        // =================================================================
+    // Dash
+    // =================================================================
+
+    /**
+     * Устанавливает/убирает пунктир. `null` — сплошная линия.
+     * `[dash, gap]` в world-метрах (LineMaterial без `worldUnits: false`).
+     * Изменение дешёвое: не пересобирает геометрию, только uniforms.
+     */
+    setLineDasharray(dasharray: LineDasharray | null): this {
+        this._lineDasharray = dasharray;
+        if (!this._material) return this;
+
+        const u = this._computeDashUniforms();
+        this._material.dashed = u.dashed ?? false;
+        if (u.dashSize !== undefined)   this._material.dashSize = u.dashSize;
+        if (u.gapSize !== undefined)    this._material.gapSize = u.gapSize;
+        if (u.dashOffset !== undefined) this._material.dashOffset = u.dashOffset;
+        this._material.needsUpdate = true;
+        return this;
+    }
+
+    getLineDasharray(): LineDasharray | null {
+        if (this._lineDasharray == null) return null;
+        return Array.isArray(this._lineDasharray)
+            ? [this._lineDasharray[0], this._lineDasharray[1]]
+            : this._lineDasharray;
+    }
+
+    /** Сдвиг паттерна вдоль линии (world-метры). */
+    setLineDashOffset(offset: number): this {
+        if (!Number.isFinite(offset)) return this;
+        this._lineDashOffset = offset;
+        if (this._material) {
+            this._material.dashOffset = offset;
+            this._material.needsUpdate = true;
+        }
+        return this;
+    }
+
+    getLineDashOffset(): number { return this._lineDashOffset; }
 
     // =================================================================
     // Altitude MODE (setAltitude/getAltitude — в базе)
@@ -532,6 +584,25 @@ this._userData = options.userData ?? {};
         }
         this._geometry.setPositions(arr);
         this._line.computeLineDistances();
+    }
+
+        private _computeDashUniforms(): {
+        dashed?: boolean;
+        dashSize?: number;
+        gapSize?: number;
+        dashOffset?: number;
+    } {
+        const da = this._lineDasharray;
+        if (da == null) return {};
+        const [dashSize, gapSize] = typeof da === 'number'
+            ? [da, da]
+            : [da[0], da[1]];
+        return {
+            dashed: true,
+            dashSize,
+            gapSize,
+            dashOffset: this._lineDashOffset,
+        };
     }
 
     // =================================================================

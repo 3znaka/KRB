@@ -38,6 +38,8 @@ export class Polyline extends SpatialObject {
     _altitudeMode;
     _depthTest;
     _depthWrite;
+    _lineDasharray = null;
+    _lineDashOffset = 0;
     // ── Высоты ──
     _heightUpdateInterval;
     _lastHeightUpdateTime = 0;
@@ -78,6 +80,8 @@ export class Polyline extends SpatialObject {
         this._width = options.width || 2;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
+        this._lineDasharray = options.lineDasharray ?? null;
+        this._lineDashOffset = options.lineDashOffset ?? 0;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
         this._depthTest = options.depthTest ?? false;
@@ -127,6 +131,7 @@ export class Polyline extends SpatialObject {
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
             resolution: new THREE.Vector2(canvas.width, canvas.height),
+            ...this._computeDashUniforms(),
         });
         this._line = new Line2(this._geometry, this._material);
         this._line.renderOrder = 999;
@@ -262,6 +267,48 @@ export class Polyline extends SpatialObject {
         return this;
     }
     getOpacity() { return this._opacity; }
+    // =================================================================
+    // Dash
+    // =================================================================
+    /**
+     * Устанавливает/убирает пунктир. `null` — сплошная линия.
+     * `[dash, gap]` в world-метрах (LineMaterial без `worldUnits: false`).
+     * Изменение дешёвое: не пересобирает геометрию, только uniforms.
+     */
+    setLineDasharray(dasharray) {
+        this._lineDasharray = dasharray;
+        if (!this._material)
+            return this;
+        const u = this._computeDashUniforms();
+        this._material.dashed = u.dashed ?? false;
+        if (u.dashSize !== undefined)
+            this._material.dashSize = u.dashSize;
+        if (u.gapSize !== undefined)
+            this._material.gapSize = u.gapSize;
+        if (u.dashOffset !== undefined)
+            this._material.dashOffset = u.dashOffset;
+        this._material.needsUpdate = true;
+        return this;
+    }
+    getLineDasharray() {
+        if (this._lineDasharray == null)
+            return null;
+        return Array.isArray(this._lineDasharray)
+            ? [this._lineDasharray[0], this._lineDasharray[1]]
+            : this._lineDasharray;
+    }
+    /** Сдвиг паттерна вдоль линии (world-метры). */
+    setLineDashOffset(offset) {
+        if (!Number.isFinite(offset))
+            return this;
+        this._lineDashOffset = offset;
+        if (this._material) {
+            this._material.dashOffset = offset;
+            this._material.needsUpdate = true;
+        }
+        return this;
+    }
+    getLineDashOffset() { return this._lineDashOffset; }
     // =================================================================
     // Altitude MODE (setAltitude/getAltitude — в базе)
     // =================================================================
@@ -425,6 +472,20 @@ export class Polyline extends SpatialObject {
         }
         this._geometry.setPositions(arr);
         this._line.computeLineDistances();
+    }
+    _computeDashUniforms() {
+        const da = this._lineDasharray;
+        if (da == null)
+            return {};
+        const [dashSize, gapSize] = typeof da === 'number'
+            ? [da, da]
+            : [da[0], da[1]];
+        return {
+            dashed: true,
+            dashSize,
+            gapSize,
+            dashOffset: this._lineDashOffset,
+        };
     }
     // =================================================================
     // Экранные данные для подписи

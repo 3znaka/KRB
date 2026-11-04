@@ -9,6 +9,10 @@ import { THREE } from './js_TP/tpb.js';
 export type LabelType = 'point' | 'line' | 'line-curved' | 'polygon' | 'image' | 'area3d';
 export type TitleAlignH = 'left' | 'center' | 'right';
 export type TitleAlignV = 'top' | 'middle' | 'center' | 'bottom';
+export type VariableAnchor =
+    | 'center'
+    | 'top' | 'bottom' | 'left' | 'right'
+    | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 export type IconPosition = 'left' | 'right' | 'top' | 'bottom';
 export type LinePlacement = 'along' | 'horizontal' | 'center';
 
@@ -76,6 +80,7 @@ export interface LabelSource {
     getTitleOffset?(): [number, number] | null;
     getTitleAlign?(): TitleAlignH;
     getTitleVerticalAlign?(): TitleAlignV;
+    getTitleVariableAnchor?(): VariableAnchor[] | null;
     getLabelPosition?(): IconPosition;
     getIcon?(): IconOptions | null;
     getPlacement?(): LinePlacement;
@@ -123,10 +128,9 @@ export interface Label {
     _vectorOwner: any;
     _hideTimeout: ReturnType<typeof setTimeout> | null;
     rect?: LabelScreenPoint[];
-
-    // ── NEW: кэш для корректного updateLabel ──
     _cachedText: string;
     _cachedStyle: Record<string, string | number>;
+    _chosenAnchor: VariableAnchor | null;
 }
 
 export interface PruneStaleOptions {
@@ -330,6 +334,64 @@ export class TextManager {
         return null;
     }
 
+    /**
+ * Превращает `haloColor` / `haloWidth` / `haloBlur` из titleStyle в
+ * CSS `text-shadow`. Явный `textShadow` в стиле имеет приоритет.
+ */
+_applyHalo(style: Record<string, string | number>, el: HTMLElement): void {
+    if (style.textShadow !== undefined) return;
+
+    const color = style.haloColor ?? style.textHaloColor;
+    const widthRaw = style.haloWidth ?? style.textHaloWidth;
+
+    if (!color || widthRaw == null) {
+        // halo убрали — сбросить только то, что мы сами поставили
+        if ((el as any).__haloApplied) {
+            el.style.textShadow = '';
+            (el as any).__haloApplied = false;
+        }
+        return;
+    }
+
+    const w = Number(widthRaw);
+    if (!(w > 0)) return;
+    const blur = Number(style.haloBlur ?? style.textHaloBlur ?? 0);
+
+    // 4 направления + опциональный blur-слой для мягкости
+    const parts = [
+        `-${w}px -${w}px ${blur}px ${color}`,
+        ` ${w}px -${w}px ${blur}px ${color}`,
+        `-${w}px  ${w}px ${blur}px ${color}`,
+        ` ${w}px  ${w}px ${blur}px ${color}`,
+    ];
+    el.style.textShadow = parts.join(', ');
+    (el as any).__haloApplied = true;
+}
+
+_getVariableAnchors(label: Label): VariableAnchor[] | null {
+    // Приоритет: метод источника → ключ в titleStyle
+    let raw: any = null;
+    if (label.source.getTitleVariableAnchor) {
+        raw = label.source.getTitleVariableAnchor();
+    }
+    if (raw == null) raw = label._cachedStyle?.variableAnchor;
+    if (!raw) return null;
+
+    let arr: VariableAnchor[];
+    if (Array.isArray(raw)) arr = raw as VariableAnchor[];
+    else if (typeof raw === 'string') {
+        arr = raw.split(',').map(s => s.trim()) as VariableAnchor[];
+    } else return null;
+    if (!arr.length) return null;
+
+    // Sticky: текущий anchor — первым (чтобы не «прыгала»)
+    const cur = label._chosenAnchor;
+    if (cur && arr.includes(cur)) {
+        arr = [cur, ...arr.filter(a => a !== cur)];
+    }
+    return arr;
+}
+
     _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
         let iconEl = el.querySelector('.krb-icon') as HTMLSpanElement | null;
         if (!iconEl) {
@@ -462,6 +524,7 @@ export class TextManager {
         }
 
         Object.assign(el.style, initialStyle);
+        this._applyHalo(initialStyle, el); 
         el.style.transition = 'opacity 0.2s linear';
         el.style.opacity = '0';
 
@@ -482,6 +545,7 @@ export class TextManager {
             _needsMeasure: !isCurved,
             _queuedForMeasure: false,
             _chosenT: null,
+            _chosenAnchor: null,
             _chosenIsFlipped: false,
             _pendingChosenT: null,
             _pendingChosenIsFlipped: false,
@@ -542,6 +606,7 @@ export class TextManager {
         }
 
         Object.assign(el.style, newStyle);
+        this._applyHalo(newStyle, el);
 
         if (newType === 'line-curved') {
             label._fontSize = parseFloat(newStyle.fontSize as string) || 12;
@@ -801,47 +866,79 @@ export class TextManager {
         }
     }
 
-    _computeAnchor(label: Label, rotationDeg: number): {
-        dx: number; dy: number; offX: number; offY: number;
-        w: number; h: number; cos: number; sin: number;
-    } {
-        const src = label.source;
-        if (label._needsMeasure) this._flushMeasurements();
-        const w = label.width;
-        const h = label.height;
-        const offset = src.getTitleOffset ? src.getTitleOffset() : null;
-        const offX = offset ? offset[0] : 0;
-        const offY = offset ? offset[1] : 0;
+_computeAnchor(
+    label: Label,
+    rotationDeg: number,
+    anchorOverride?: VariableAnchor | null,
+): { dx: number; dy: number; offX: number; offY: number; w: number; h: number; cos: number; sin: number; } {
+    const src = label.source;
+    if (label._needsMeasure) this._flushMeasurements();
+    const w = label.width;
+    const h = label.height;
 
-        const rad = rotationDeg * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
+    // offset / align / vAlign
+    let offX = 0, offY = 0;
+    let align: TitleAlignH = 'center';
+    let vAlign: TitleAlignV = 'center';
 
-        if (label._hasIcon && label._iconCenterX != null && label._iconCenterY != null) {
-            const anchorX = label._iconCenterX;
-            const anchorY = label._iconCenterY;
-            const dx = -anchorX * cos + anchorY * sin;
-            const dy = -anchorX * sin - anchorY * cos;
-            return { dx, dy, offX, offY, w, h, cos, sin };
+    if (anchorOverride) {
+        // дефолтный gap — от размера шрифта
+        const gap = Math.max(4, label._fontSize * 0.3);
+        switch (anchorOverride) {
+            case 'center':        align = 'center'; vAlign = 'center'; break;
+            case 'top':           align = 'center'; vAlign = 'bottom'; offY = -gap; break;
+            case 'bottom':        align = 'center'; vAlign = 'top';    offY =  gap; break;
+            case 'left':          align = 'right';  vAlign = 'center'; offX = -gap; break;
+            case 'right':         align = 'left';   vAlign = 'center'; offX =  gap; break;
+            case 'top-left':      align = 'right';  vAlign = 'bottom'; offX = -gap; offY = -gap; break;
+            case 'top-right':     align = 'left';   vAlign = 'bottom'; offX =  gap; offY = -gap; break;
+            case 'bottom-left':   align = 'right';  vAlign = 'top';    offX = -gap; offY =  gap; break;
+            case 'bottom-right':  align = 'left';   vAlign = 'top';    offX =  gap; offY =  gap; break;
         }
+    } else {
+        const offset = src.getTitleOffset ? src.getTitleOffset() : null;
+        offX = offset ? offset[0] : 0;
+        offY = offset ? offset[1] : 0;
+        align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+        vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
+    }
 
-        const align: TitleAlignH = src.getTitleAlign ? src.getTitleAlign() : 'center';
-        const vAlign: TitleAlignV = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
-        let anchorX: number;
-        if (align === 'left')       anchorX = 0;
-        else if (align === 'right') anchorX = w;
-        else                        anchorX = w / 2;
-        let anchorY: number;
-        if (vAlign === 'top')         anchorY = 0;
-        else if (vAlign === 'bottom') anchorY = h;
-        else                          anchorY = h / 2;
+    const rad = rotationDeg * Math.PI / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
 
+    // иконка — только для static-режима (у variable-anchor иконки нет)
+    if (!anchorOverride
+        && label._hasIcon
+        && label._iconCenterX != null
+        && label._iconCenterY != null) {
+        const anchorX = label._iconCenterX;
+        const anchorY = label._iconCenterY;
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
         return { dx, dy, offX, offY, w, h, cos, sin };
     }
 
-    _getLabelCorners(label: Label, tOverride: number | null = null): LabelScreenPoint[] | null {
+    let anchorX: number;
+    if (align === 'left')       anchorX = 0;
+    else if (align === 'right') anchorX = w;
+    else                        anchorX = w / 2;
+
+    let anchorY: number;
+    if (vAlign === 'top')         anchorY = 0;
+    else if (vAlign === 'bottom') anchorY = h;
+    else                          anchorY = h / 2;
+
+    const dx = -anchorX * cos + anchorY * sin;
+    const dy = -anchorX * sin - anchorY * cos;
+    return { dx, dy, offX, offY, w, h, cos, sin };
+}
+
+_getLabelCorners(
+    label: Label,
+    tOverride: number | null = null,
+    anchorOverride?: VariableAnchor | null,
+): LabelScreenPoint[] | null {
         const src = label.source;
         const isLine = src.getLabelType() === 'line';
         let scrX: number, scrY: number, rotation = 0;
@@ -856,7 +953,7 @@ export class TextManager {
             if (!pos) return null;
             scrX = pos.x; scrY = pos.y;
         }
-        const a = this._computeAnchor(label, rotation);
+        const a = this._computeAnchor(label, rotation, anchorOverride);
         const { dx, dy, offX, offY, w, h, cos, sin } = a;
         const top = scrY + dy + offY;
         const left = scrX + dx + offX;
@@ -1164,26 +1261,42 @@ export class TextManager {
             return a.source.getText().localeCompare(b.source.getText());
         });
 
-        this._gridIndex.clear();
-        for (let i = 0; i < sorted.length; i++) {
-            const lbl = sorted[i];
-            const bbox = this._getBBox(lbl.rect!);
-            lbl._bbox = bbox;
+this._gridIndex.clear();
+for (let i = 0; i < sorted.length; i++) {
+    const lbl = sorted[i];
 
-            const others = this._gridIndex.query(bbox);
-            let overlaps = false;
-            for (let j = 0; j < others.length; j++) {
-                const other = others[j];
-                if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
-                if (this._rectsIntersect(lbl.rect!, other.rect!)) { overlaps = true; break; }
-            }
-            if (!overlaps) {
-                this._gridIndex.insert(bbox, lbl);
-                lbl.hiddenByPriority = false;
-            } else {
-                lbl.hiddenByPriority = true;
-            }
+    const anchors = this._getVariableAnchors(lbl);
+    const tryList: (VariableAnchor | null)[] = anchors ?? [null];
+
+    let placed = false;
+    for (const anchor of tryList) {
+        const corners = this._getLabelCorners(lbl, null, anchor);
+        if (!corners) continue;
+        const bbox = this._getBBox(corners);
+
+        let overlaps = false;
+        const others = this._gridIndex.query(bbox);
+        for (let j = 0; j < others.length; j++) {
+            const other = others[j];
+            if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
+            if (this._rectsIntersect(corners, other.rect!)) { overlaps = true; break; }
         }
+        if (overlaps) continue;
+
+        lbl.rect = corners;
+        lbl._bbox = bbox;
+        lbl._chosenAnchor = anchor;
+        this._gridIndex.insert(bbox, lbl);
+        lbl.hiddenByPriority = false;
+        placed = true;
+        break;
+    }
+
+    if (!placed) {
+        lbl.hiddenByPriority = true;
+        lbl._chosenAnchor = null;
+    }
+}
 
         if (placeLines) this._placeLineLabels(zoom);
 
@@ -1394,9 +1507,8 @@ export class TextManager {
                 this._setLabelVisible(label, false);
                 continue;
             }
-
-            const rotation = type === 'line' ? src.getScreenAngleAt!(label.t) : 0;
-            const a = this._computeAnchor(label, rotation);
+const rotation = type === 'line' ? src.getScreenAngleAt!(label.t) : 0;
+const a = this._computeAnchor(label, rotation, label._chosenAnchor);
             const { dx, dy, offX, offY } = a;
             const top = pos.y + dy + offY;
 

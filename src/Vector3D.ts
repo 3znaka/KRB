@@ -11,7 +11,7 @@
  */
 
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
 import {
     THREE,
     Line2,
@@ -144,6 +144,7 @@ export interface Vector3DOptions {
     animation?: AnimationSpec | string | Array<AnimationSpec | string> | null;
     properties?: Record<string, any>;
 userData?: Record<string, any>;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 interface ParsedAnimation {
@@ -302,6 +303,8 @@ export class Vector3D extends SpatialObject {
 
     constructor(options: Vector3DOptions) {
         super();
+
+        if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
 this._properties = options.properties ?? {};
 this._userData = options.userData ?? {};
         if (!options.positions || options.positions.length < 2) {
@@ -1351,6 +1354,7 @@ this._userData = options.userData ?? {};
 
     _update(map: any, deltaTime?: number): void {
         if (!this._map || !this._line) return;
+        this._applyZoomInterpolations(map.continuousZoom);
 
         if (!this._isWithinView()) {
             this._applyHidden();

@@ -17,7 +17,7 @@
 
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -73,6 +73,7 @@ export interface ImageOptions {
     onHover?: (hovered: boolean) => void;
     properties?: Record<string, any>;
 userData?: Record<string, any>;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 interface SizeAnchorRotationParams {
@@ -138,6 +139,8 @@ export class Image extends SpatialObject {
 
     constructor(options: ImageOptions) {
         super();
+
+        if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
 
 this._properties = options.properties ?? {};
 this._userData = options.userData ?? {};
@@ -757,6 +760,7 @@ this._userData = options.userData ?? {};
 
     _update(map: any): void {
         if (!this._map || !this._group) return;
+        this._applyZoomInterpolations(map.continuousZoom);
 
         if (!this._isWithinView()) {
             this._applyHidden();

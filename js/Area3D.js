@@ -73,6 +73,8 @@ export class Area3D extends SpatialObject {
     _tempBox;
     constructor(options) {
         super();
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (!options.rings || !options.rings.length || options.rings[0].length < 3) {
@@ -696,6 +698,7 @@ export class Area3D extends SpatialObject {
     _update(map) {
         if (!this._map || !this._group)
             return;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

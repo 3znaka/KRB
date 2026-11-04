@@ -12,7 +12,7 @@
 
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
-import { SpatialObject } from './SpatialObject.js';
+import { SpatialObject, ZoomInterpolation } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -61,6 +61,7 @@ userData?: Record<string, any>;
     lineDasharray?: LineDasharray;
     /** Сдвиг паттерна вдоль линии, world-метры. Default: 0. */
     lineDashOffset?: number;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 function pointToSegmentDistance(point: any, a: any, b: any): number {
@@ -135,6 +136,8 @@ export class Polyline extends SpatialObject {
 
     constructor(options: PolylineOptions) {
         super();
+
+        if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
 this._properties = options.properties ?? {};
 this._userData = options.userData ?? {};
         if (!options.positions?.length || options.positions.length < 2) {
@@ -497,6 +500,7 @@ this._userData = options.userData ?? {};
 
     _update(map: any): void {
         if (!this._map || !this._line) return;
+        this._applyZoomInterpolations(map.continuousZoom);
 
         if (!this._isWithinView()) {
             this._line.visible = false;

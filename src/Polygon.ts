@@ -10,7 +10,7 @@
 
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
-import { SpatialObject, TitleAlignH } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
 import earcut from './js_TP/earcut.js';
 
 // =====================================================================
@@ -70,6 +70,7 @@ export interface PolygonOptions {
     useWorkerForTriangulation?: boolean;
     properties?: Record<string, any>;
     userData?: Record<string, any>;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 export interface PolygonRenderOrder {
@@ -237,7 +238,7 @@ export class Polygon extends SpatialObject {
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
         this._tooltipText = options.tooltip ?? '';
-
+    if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
         this._group = new THREE.Group();
         this._centroidWorld = new THREE.Vector3();
         this._boundingSphereWorldCenter = new THREE.Vector3();
@@ -1132,8 +1133,10 @@ export class Polygon extends SpatialObject {
     // Обновление на кадре
     // =================================================================
 
-    _update(map: any): void {
+  _update(map: any): void {
         if (!this._map || !this._group) return;
+
+        this._applyZoomInterpolations(map.continuousZoom);   // ← NEW
 
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();

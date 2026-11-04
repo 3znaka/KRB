@@ -12,7 +12,7 @@
 
 import { Projections } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
-import { SpatialObject, TitleAlignH } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -54,6 +54,7 @@ export interface MarkerOptions {
     titlePriority?: number;
     properties?: Record<string, any>;
 userData?: Record<string, any>;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 interface MapPanes {
@@ -132,6 +133,8 @@ export class Marker extends SpatialObject {
 
     constructor(options: MarkerOptions) {
         super();
+
+        if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
 
         this._properties = options.properties ?? {};
 this._userData = options.userData ?? {};
@@ -484,6 +487,7 @@ this._userData = options.userData ?? {};
 
     _update(_map?: any): void {
         const map = this._map;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!map || !this._element) return;
 
         // Кластерная видимость — особенность Marker.

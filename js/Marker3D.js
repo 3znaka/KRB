@@ -70,6 +70,8 @@ export class Marker3D extends SpatialObject {
     _tempProjScreenMatrix;
     constructor(options) {
         super();
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (!options.position || options.position.length !== 2) {
@@ -691,6 +693,7 @@ export class Marker3D extends SpatialObject {
         if (!this._map || !this._object3D)
             return;
         const map = this._map;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

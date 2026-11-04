@@ -140,6 +140,8 @@ export class Polygon extends SpatialObject {
         this._onClick = options.onClick ?? null;
         this._onHover = options.onHover ?? null;
         this._tooltipText = options.tooltip ?? '';
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._group = new THREE.Group();
         this._centroidWorld = new THREE.Vector3();
         this._boundingSphereWorldCenter = new THREE.Vector3();
@@ -968,6 +970,7 @@ export class Polygon extends SpatialObject {
     _update(map) {
         if (!this._map || !this._group)
             return;
+        this._applyZoomInterpolations(map.continuousZoom); // ← NEW
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

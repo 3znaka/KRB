@@ -67,6 +67,8 @@ export class Polyline extends SpatialObject {
     _unregisterInteraction = null;
     constructor(options) {
         super();
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (!options.positions?.length || options.positions.length < 2) {
@@ -394,6 +396,7 @@ export class Polyline extends SpatialObject {
     _update(map) {
         if (!this._map || !this._line)
             return;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!this._isWithinView()) {
             this._line.visible = false;
             this._isVisible = false;

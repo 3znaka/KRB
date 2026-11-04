@@ -13,7 +13,7 @@
 
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
 
 // =====================================================================
 // Типы
@@ -57,6 +57,7 @@ export interface Marker3DOptions {
     playAnimation?: boolean;
     properties?: Record<string, any>;
 userData?: Record<string, any>;
+    zoomInterpolate?: ZoomInterpolation | null;
 }
 
 interface SizeAnimation {
@@ -135,6 +136,8 @@ export class Marker3D extends SpatialObject {
 
     constructor(options: Marker3DOptions) {
         super();
+
+        if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
 
         this._properties = options.properties ?? {};
 this._userData = options.userData ?? {};
@@ -784,6 +787,7 @@ this._userData = options.userData ?? {};
     _update(_map: any): void {
         if (!this._map || !this._object3D) return;
         const map = this._map;
+        this._applyZoomInterpolations(map.continuousZoom);
 
         if (!this._isWithinView()) {
             this._applyHidden();

@@ -60,6 +60,8 @@ export class Image extends SpatialObject {
     static _clickMoveThreshold = 5;
     constructor(options) {
         super();
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (!options.source) {
@@ -600,6 +602,7 @@ export class Image extends SpatialObject {
     _update(map) {
         if (!this._map || !this._group)
             return;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

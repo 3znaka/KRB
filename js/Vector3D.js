@@ -102,6 +102,8 @@ export class Vector3D extends SpatialObject {
     _Y_AXIS;
     constructor(options) {
         super();
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (!options.positions || options.positions.length < 2) {
@@ -1078,6 +1080,7 @@ export class Vector3D extends SpatialObject {
     _update(map, deltaTime) {
         if (!this._map || !this._line)
             return;
+        this._applyZoomInterpolations(map.continuousZoom);
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

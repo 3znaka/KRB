@@ -32,12 +32,19 @@ export class Polygon extends SpatialObject {
     _rings;
     _crsCode;
     _crs;
+    _ringStartIndices = [];
     // ── Оформление ──
     _fillColor;
     _fillOpacity;
     _fillPatternSource;
     _fillPatternScale;
+    _fillPatternFit;
     _fillPatternTexture = null;
+    /**
+     * Монотонный счётчик поколений загрузки текстуры. onLoad-callback,
+     * чьё поколение устарело, сам dispose'ит свою текстуру и выходит.
+     */
+    _fillPatternGeneration = 0;
     _strokeColor;
     _strokeWidth;
     _strokeOpacity;
@@ -70,8 +77,8 @@ export class Polygon extends SpatialObject {
     _strokeGeometry = null;
     _strokeMaterial = null;
     // ── Кэши ──
-    _cachedHeights;
-    _cachedStrokeHeights;
+    _cachedHeights = [];
+    _cachedStrokeHeights = [];
     _nodeHeights = [];
     _strokeNodeHeights = [];
     _lastHeightUpdateTime = 0;
@@ -82,8 +89,24 @@ export class Polygon extends SpatialObject {
     _centroidWorld;
     _cachedCentroidHeight = 0;
     _lastCentroidHeightUpdateTime = 0;
+    /** Среднее по `_nodeHeights`. Кэш; инвалидация — при rebuild. */
+    _avgNodeHeight = 0;
+    _avgNodeHeightValid = false;
     _worldCoords = [];
     _strokeWorldCoords = [];
+    _batch = null;
+    /**
+     * Layout боковых рёбер: `[idxI, idxJ]` для каждого ребра
+     * (индексы в `_cachedHeights` / `_vertices2D`). Нужен для
+     * корректного обновления высот стенок у полигонов с дырками.
+     */
+    _sideEdgeIJ = [];
+    /** Длины рёбер стенок — для пересчёта UV при `setFillPatternScale`. */
+    _sideEdgeLengths = [];
+    /** `_height`, при которой построены UV стенок. −1 = невалидно. */
+    _builtSideHeight = -1;
+    /** Кэш `getBounds` по коду CRS. */
+    _boundsCache = new Map();
     _boundingSphereRadius = 0;
     _boundingSphereWorldCenter;
     _raycastMeshesCache = null;
@@ -108,6 +131,7 @@ export class Polygon extends SpatialObject {
         this._fillOpacity = options.fillOpacity ?? 0.5;
         this._fillPatternSource = options.fillPattern ?? null;
         this._fillPatternScale = options.fillPatternScale ?? DEFAULT_FILL_PATTERN_SCALE;
+        this._fillPatternFit = options.fillPatternFit ?? 'tile';
         this._strokeColor = options.strokeColor ?? '#000000';
         this._strokeWidth = options.strokeWidth ?? 2;
         this._strokeOpacity = options.strokeOpacity ?? 1;
@@ -170,6 +194,13 @@ export class Polygon extends SpatialObject {
         this._lastCentroidHeightUpdateTime = 0;
     }
     _teardown() {
+        this._fillPatternGeneration++;
+        if (this._batch) {
+            const b = this._batch;
+            this._batch = null;
+            // Просим батчер пересобраться без этого полигона.
+            b.__batcher?.markDirty?.();
+        }
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
@@ -188,6 +219,10 @@ export class Polygon extends SpatialObject {
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
+        this._ringStartIndices.length = 0;
+        this._sideEdgeIJ.length = 0;
+        this._sideEdgeLengths.length = 0;
+        this._builtSideHeight = -1;
         this._vertices2D = [];
         this._boundingSphereRadius = 0;
         this._cachedHeights = [];
@@ -195,6 +230,8 @@ export class Polygon extends SpatialObject {
         this._raycastMeshesCache = null;
         this._invalidGeometry = false;
         this._centroidScreenPos = null;
+        this._avgNodeHeightValid = false;
+        this._boundsCache.clear();
         this._crs = null;
     }
     _applyHidden() {
@@ -218,6 +255,125 @@ export class Polygon extends SpatialObject {
     }
     isVisible() {
         return this._group?.visible ?? false;
+    }
+    /** @internal */
+    _getBatchStyleKey() {
+        if (this._invalidGeometry)
+            return null;
+        if (this._tooltipText)
+            return null;
+        if (this._onHover)
+            return null;
+        if (this._zoomInterpolations)
+            return null;
+        if (this._fillPatternSource != null
+            && typeof this._fillPatternSource !== 'string')
+            return null;
+        if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0)
+            return null;
+        return [
+            this._extruded ? 'E' : 'NE',
+            this._fillColor, this._fillOpacity,
+            // MeshStandardMaterial-специфичное — только для extruded
+            this._extruded ? this._roughness : '',
+            this._extruded ? this._metalness : '',
+            this._extruded ? (this._castShadow ? 1 : 0) : '',
+            this._extruded ? (this._receiveShadow ? 1 : 0) : '',
+            this._strokeColor, this._strokeWidth, this._strokeOpacity,
+            this._useSimpleStroke ? 1 : 0,
+            this._depthTest ? 1 : 0, this._depthWrite ? 1 : 0,
+            this._minZoom, this._maxZoom,
+            this._altitudeMode,
+            this._fillPatternSource ?? 'nop',
+            this._fillPatternScale, this._fillPatternFit,
+        ].join('|');
+    }
+    /** @internal */
+    _getBatchGeometryData() {
+        if (this._invalidGeometry || !this._fillGeometry)
+            return null;
+        const idxAttr = this._fillGeometry.index;
+        if (!idxAttr)
+            return null;
+        // heights — это Y TOP-вершин (для не-extruded это и есть плоскость).
+        // Для extruded bottom = heights[i] - height.
+        const extrude = this._extruded ? this._height : 0;
+        const base = this._altitude + this._minHeight + extrude;
+        const heights = new Array(this._worldCoords.length);
+        for (let i = 0; i < heights.length; i++) {
+            heights[i] = base + (this._nodeHeights[i] ?? 0);
+        }
+        return {
+            worldCoords: this._worldCoords,
+            heights,
+            indices: idxAttr.array,
+            ringStarts: this._ringStartIndices,
+            extruded: this._extruded,
+            height: this._extruded ? this._height : 0,
+            fillColor: this._fillColor,
+            fillOpacity: this._fillOpacity,
+            strokeColor: this._strokeColor,
+            strokeWidth: this._strokeWidth,
+            strokeOpacity: this._strokeOpacity,
+            useSimpleStroke: this._useSimpleStroke,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite,
+            castShadow: this._castShadow,
+            receiveShadow: this._receiveShadow,
+            roughness: this._roughness,
+            metalness: this._metalness,
+            fillPatternSource: typeof this._fillPatternSource === 'string'
+                ? this._fillPatternSource : null,
+            fillPatternScale: this._fillPatternScale,
+            fillPatternFit: this._fillPatternFit,
+            centroidX: this._centroidWorld.x,
+            centroidZ: this._centroidWorld.z,
+            minZoom: this._minZoom,
+            maxZoom: this._maxZoom,
+            altitudeMode: this._altitudeMode,
+        };
+    }
+    /** @internal */
+    _onBatchChange(batched, _batch) {
+        if (batched) {
+            // Свою сцену гасим, интерактив снимаем, текстуру паттерна
+            // освобождаем (батч держит свою).
+            if (this._unregisterInteraction) {
+                this._unregisterInteraction();
+                this._unregisterInteraction = null;
+            }
+            if (this._group)
+                this._group.visible = false;
+            if (this._fillPatternTexture) {
+                try {
+                    this._fillPatternTexture.dispose?.();
+                }
+                catch { /* swallow */ }
+                this._fillPatternTexture = null;
+            }
+        }
+        else {
+            if (this._group)
+                this._group.visible = true;
+            if (this._map) {
+                if (!this._fillPatternTexture && this._fillPatternSource) {
+                    this._loadFillPattern();
+                    this._applyFillPatternToMaterials();
+                }
+                this._registerInteraction(this._map);
+            }
+            this._heightsDirty = true;
+            this._heightsFinalized = false;
+        }
+    }
+    /** @internal — дергаем из каждого сеттера стиля. */
+    _invalidateBatch() {
+        if (!this._batch)
+            return;
+        const batcher = this._layer?._polygonBatcher;
+        if (batcher && typeof batcher.markDirty === 'function') {
+            batcher.markDirty();
+        }
     }
     // =================================================================
     // Интерактив
@@ -280,6 +436,7 @@ export class Polygon extends SpatialObject {
             return this;
         }
         this._rings = rings;
+        this._boundsCache.clear();
         if (!this._map)
             return this;
         this._rebuildGeometry();
@@ -296,8 +453,14 @@ export class Polygon extends SpatialObject {
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
+        this._ringStartIndices.length = 0;
+        this._sideEdgeIJ.length = 0;
+        this._sideEdgeLengths.length = 0;
+        this._builtSideHeight = -1;
         this._vertices2D = [];
         this._invalidGeometry = false;
+        this._avgNodeHeightValid = false;
+        this._boundsCache.clear();
         this._buildFillGeometry(this._map);
         this._buildStrokeGeometry(this._map);
         this._registerInteraction(this._map);
@@ -341,6 +504,7 @@ export class Polygon extends SpatialObject {
     // =================================================================
     _loadFillPattern() {
         const src = this._fillPatternSource;
+        const generation = ++this._fillPatternGeneration;
         if (!src) {
             this._fillPatternTexture = null;
             return;
@@ -348,10 +512,24 @@ export class Polygon extends SpatialObject {
         if (typeof src === 'string') {
             const loader = new THREE.TextureLoader();
             loader.setCrossOrigin('anonymous');
-            this._fillPatternTexture = loader.load(src, () => {
+            const tex = loader.load(src, (loaded) => {
+                // Защита от stale-callback: пока грузилась текстура,
+                // могли вызвать setFillPattern()/remove().
+                if (generation !== this._fillPatternGeneration) {
+                    try {
+                        loaded?.dispose?.();
+                    }
+                    catch { /* swallow */ }
+                    return;
+                }
                 this._configureFillPatternTexture();
                 this._applyFillPatternToMaterials();
-            }, undefined, (err) => console.warn('Polygon: fillPattern load failed', err));
+            }, undefined, (err) => {
+                if (generation !== this._fillPatternGeneration)
+                    return;
+                console.warn('Polygon: fillPattern load failed', err);
+            });
+            this._fillPatternTexture = tex;
             this._configureFillPatternTexture();
         }
         else if (typeof HTMLCanvasElement !== 'undefined' && src instanceof HTMLCanvasElement) {
@@ -370,6 +548,22 @@ export class Polygon extends SpatialObject {
             return;
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
+        // Mipmap при больших UV выбирает 1×1 level → сплошной блюр.
+        t.generateMipmaps = false;
+        t.minFilter = THREE.LinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        const renderer = this._map?.renderer;
+        const caps = renderer?.capabilities;
+        if (caps && typeof caps.getMaxAnisotropy === 'function') {
+            try {
+                t.anisotropy = Math.min(16, caps.getMaxAnisotropy());
+            }
+            catch { /* swallow */ }
+        }
+        const Ctor = THREE;
+        if (Ctor.SRGBColorSpace && !t.colorSpace) {
+            t.colorSpace = Ctor.SRGBColorSpace;
+        }
         t.needsUpdate = true;
     }
     _applyFillPatternToMaterials() {
@@ -379,6 +573,110 @@ export class Polygon extends SpatialObject {
                 continue;
             mat.map = map;
             mat.needsUpdate = true;
+        }
+    }
+    // =================================================================
+    // UV-логика (общая для build и update)
+    // =================================================================
+    _computeUVParams(patternScale) {
+        if (this._fillPatternFit === 'bounds') {
+            let minPX = Infinity, maxPX = -Infinity;
+            let minPZ = Infinity, maxPZ = -Infinity;
+            for (const wc of this._worldCoords) {
+                if (!wc)
+                    continue;
+                if (wc[0] < minPX)
+                    minPX = wc[0];
+                if (wc[0] > maxPX)
+                    maxPX = wc[0];
+                if (wc[1] < minPZ)
+                    minPZ = wc[1];
+                if (wc[1] > maxPZ)
+                    maxPZ = wc[1];
+            }
+            return {
+                originX: isFinite(minPX) ? minPX : 0,
+                originZ: isFinite(minPZ) ? minPZ : 0,
+                scaleX: (maxPX - minPX) > 1e-6 ? (maxPX - minPX) : 1,
+                scaleZ: (maxPZ - minPZ) > 1e-6 ? (maxPZ - minPZ) : 1,
+            };
+        }
+        // tile: anchor в ближайшем кратном patternScale от центроида.
+        // UV маленькие (точность float32 работает), тайлинг между
+        // соседями сохраняется (anchor отличается на N*patternScale
+        // → эквивалентно через RepeatWrapping).
+        return {
+            originX: Math.floor(this._centroidWorld.x / patternScale) * patternScale,
+            originZ: Math.floor(this._centroidWorld.z / patternScale) * patternScale,
+            scaleX: patternScale,
+            scaleZ: patternScale,
+        };
+    }
+    /**
+     * Пересчитывает UV-атрибуты существующих геометрий без dispose и
+     * повторного earcut. Дёшево (O(vertexCount)) — можно вызывать из
+     * `setFillPatternScale`/`setFillPatternFit` без риска для FPS.
+     */
+    _updateFillUVs() {
+        if (this._invalidGeometry)
+            return;
+        if (!this._fillGeometry)
+            return;
+        const patternScale = this._fillPatternScale > 0
+            ? this._fillPatternScale
+            : DEFAULT_FILL_PATTERN_SCALE;
+        const params = this._computeUVParams(patternScale);
+        const worldCoords = this._worldCoords;
+        const n = worldCoords.length;
+        // ── Top ──
+        const topAttr = this._fillGeometry.attributes.uv;
+        if (topAttr) {
+            const topUVs = topAttr.array;
+            for (let i = 0; i < n; i++) {
+                const wc = worldCoords[i];
+                if (!wc)
+                    continue;
+                topUVs[i * 2] = (wc[0] - params.originX) / params.scaleX;
+                topUVs[i * 2 + 1] = (wc[1] - params.originZ) / params.scaleZ;
+            }
+            topAttr.needsUpdate = true;
+        }
+        // ── Bottom (переиспользует top) ──
+        if (this._bottomGeometry) {
+            const botAttr = this._bottomGeometry.attributes.uv;
+            if (botAttr && topAttr) {
+                botAttr.array.set(topAttr.array);
+                botAttr.needsUpdate = true;
+            }
+        }
+        // ── Side: U вдоль ребра, V по высоте. Side всегда использует
+        //    patternScale (не bbox), поэтому смена fit на стороны не
+        //    влияет — но при смене scale U надо пересчитать. ──
+        if (this._sideGeometry && this._sideEdgeLengths.length > 0) {
+            const sideAttr = this._sideGeometry.attributes.uv;
+            if (sideAttr) {
+                const sideUVs = sideAttr.array;
+                const vH = this._height / patternScale;
+                let cum = 0;
+                const edgeCount = this._sideEdgeLengths.length;
+                for (let k = 0; k < edgeCount; k++) {
+                    const edgeLen = this._sideEdgeLengths[k];
+                    const base = k * 8;
+                    const u0 = cum / patternScale;
+                    const u1 = (cum + edgeLen) / patternScale;
+                    sideUVs[base + 0] = u0;
+                    sideUVs[base + 1] = vH;
+                    sideUVs[base + 2] = u0;
+                    sideUVs[base + 3] = 0;
+                    sideUVs[base + 4] = u1;
+                    sideUVs[base + 5] = vH;
+                    sideUVs[base + 6] = u1;
+                    sideUVs[base + 7] = 0;
+                    cum += edgeLen;
+                }
+                sideAttr.needsUpdate = true;
+            }
+            this._builtSideHeight = this._height;
         }
     }
     // =================================================================
@@ -495,6 +793,12 @@ export class Polygon extends SpatialObject {
         }
         this._worldCoords.length = 0;
         this._nodeHeights.length = 0;
+        this._ringStartIndices.length = 0;
+        this._sideEdgeIJ.length = 0;
+        this._sideEdgeLengths.length = 0;
+        this._builtSideHeight = -1;
+        this._avgNodeHeightValid = false;
+        this._boundsCache.clear();
         const coords = [];
         const points2D = [];
         const holeIndices = [];
@@ -506,6 +810,7 @@ export class Polygon extends SpatialObject {
                 continue;
             }
             ringStartIndices.push(points2D.length);
+            this._ringStartIndices.push(points2D.length);
             if (ringIdx > 0) {
                 holeIndices.push(coords.length / 2);
             }
@@ -567,16 +872,18 @@ export class Polygon extends SpatialObject {
                 maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-        // UV — из абсолютных world-координат, чтобы паттерн тайлился
-        // бесшовно между соседними полигонами.
-        const uvScale = this._fillPatternScale > 0
+        // ── UV top/bottom ──
+        const patternScale = this._fillPatternScale > 0
             ? this._fillPatternScale
             : DEFAULT_FILL_PATTERN_SCALE;
+        const uvParams = this._computeUVParams(patternScale);
         const topUVs = new Float32Array(points2D.length * 2);
         for (let i = 0; i < points2D.length; i++) {
             const wc = this._worldCoords[i];
-            topUVs[i * 2] = (wc ? wc[0] : 0) / uvScale;
-            topUVs[i * 2 + 1] = (wc ? wc[1] : 0) / uvScale;
+            const wx = wc ? wc[0] : 0;
+            const wz = wc ? wc[1] : 0;
+            topUVs[i * 2] = (wx - uvParams.originX) / uvParams.scaleX;
+            topUVs[i * 2 + 1] = (wz - uvParams.originZ) / uvParams.scaleZ;
         }
         const topGeometry = new THREE.BufferGeometry();
         const topPosArray = new Float32Array(points2D.length * 3);
@@ -614,7 +921,6 @@ export class Polygon extends SpatialObject {
                 bottomPosArray[i * 3 + 2] = pt.y;
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            // DoubleSide — UV можно переиспользовать с top.
             bottomGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs.slice(), 2));
             bottomGeometry.setIndex(bottomIndices);
             const bottomNormals = new Float32Array(points2D.length * 3);
@@ -637,7 +943,7 @@ export class Polygon extends SpatialObject {
             sidePositions.length = 0;
             sideIndices.length = 0;
             const sideUVs = [];
-            const sideUvScale = uvScale;
+            const sideUvScale = patternScale;
             const initialHeight = this._height;
             for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
                 if (ringStartIndices[ringIdx] === undefined)
@@ -661,20 +967,23 @@ export class Polygon extends SpatialObject {
                     sidePositions.push(topI.x, 0, topI.y);
                     sidePositions.push(topJ.x, initialHeight, topJ.y);
                     sidePositions.push(topJ.x, 0, topJ.y);
-                    // UV: U — длина вдоль ребра, V — высота стенки.
                     const ddx = topJ.x - topI.x;
                     const ddz = topJ.y - topI.y;
                     const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
                     const u0 = cum / sideUvScale;
                     const u1 = (cum + edgeLen) / sideUvScale;
                     const vH = initialHeight / sideUvScale;
-                    sideUVs.push(u0, vH); // top-I
-                    sideUVs.push(u0, 0); // bottom-I
-                    sideUVs.push(u1, vH); // top-J
-                    sideUVs.push(u1, 0); // bottom-J
-                    cum += edgeLen;
+                    sideUVs.push(u0, vH);
+                    sideUVs.push(u0, 0);
+                    sideUVs.push(u1, vH);
+                    sideUVs.push(u1, 0);
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
                     sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+                    // Запоминаем раскладку для корректного per-ring
+                    // обновления высот и пересчёта UV.
+                    this._sideEdgeIJ.push([idxI, idxJ]);
+                    this._sideEdgeLengths.push(edgeLen);
+                    cum += edgeLen;
                 }
             }
             const sideGeometry = new THREE.BufferGeometry();
@@ -693,6 +1002,7 @@ export class Polygon extends SpatialObject {
             this._sideGeometry = sideGeometry;
             this._sideMaterial = sideMaterial;
             this._group.add(sideMesh);
+            this._builtSideHeight = initialHeight;
         }
         this._raycastMeshesCache = null;
     }
@@ -775,9 +1085,12 @@ export class Polygon extends SpatialObject {
             this._bottomMaterial.color.set(color);
         if (this._sideMaterial?.color)
             this._sideMaterial.color.set(color);
+        this._invalidateBatch();
         return this;
     }
-    getFillColor() { return this._fillColor; }
+    getFillColor() {
+        return this._fillColor;
+    }
     setFillOpacity(opacity) {
         this._fillOpacity = Math.max(0, Math.min(1, opacity));
         const transparent = this._fillOpacity < 1;
@@ -790,6 +1103,7 @@ export class Polygon extends SpatialObject {
                 mat.needsUpdate = true;
             }
         }
+        this._invalidateBatch();
         return this;
     }
     getFillOpacity() { return this._fillOpacity; }
@@ -811,27 +1125,53 @@ export class Polygon extends SpatialObject {
             return this;
         this._loadFillPattern();
         this._applyFillPatternToMaterials();
+        this._invalidateBatch();
         return this;
     }
     getFillPattern() {
         return this._fillPatternSource;
     }
-    /** Масштаб паттерна: world-метры на одну плитку. Пересобирает UV. */
+    /**
+     * Масштаб паттерна: world-метры на одну плитку.
+     * Патч: обновляет только UV-атрибуты (`_updateFillUVs`), без dispose
+     * материалов и без повторного earcut. Раньше — полный rebuild.
+     */
     setFillPatternScale(scale) {
         if (!(scale > 0))
             return this;
+        if (this._fillPatternScale === scale)
+            return this;
         this._fillPatternScale = scale;
         if (this._map)
-            this._rebuildGeometry();
+            this._updateFillUVs();
+        this._invalidateBatch();
         return this;
     }
     getFillPatternScale() {
         return this._fillPatternScale;
     }
+    /**
+     * `'tile'` — мировой тайлинг (по умолчанию),
+     * `'bounds'` — растянуть текстуру на bbox полигона (0..1 UV).
+     * Патч: пересчитывает только UV (`_updateFillUVs`).
+     */
+    setFillPatternFit(fit) {
+        if (this._fillPatternFit === fit)
+            return this;
+        this._fillPatternFit = fit;
+        if (this._map)
+            this._updateFillUVs();
+        this._invalidateBatch();
+        return this;
+    }
+    getFillPatternFit() {
+        return this._fillPatternFit;
+    }
     setStrokeColor(color) {
         this._strokeColor = color;
         if (this._strokeMaterial?.color)
             this._strokeMaterial.color.set(color);
+        this._invalidateBatch();
         return this;
     }
     getStrokeColor() { return this._strokeColor; }
@@ -844,6 +1184,7 @@ export class Polygon extends SpatialObject {
             mat.linewidth = width;
             mat.needsUpdate = true;
         }
+        this._invalidateBatch();
         return this;
     }
     getStrokeWidth() { return this._strokeWidth; }
@@ -858,6 +1199,7 @@ export class Polygon extends SpatialObject {
                 mat.needsUpdate = true;
             }
         }
+        this._invalidateBatch();
         return this;
     }
     getStrokeOpacity() { return this._strokeOpacity; }
@@ -891,26 +1233,33 @@ export class Polygon extends SpatialObject {
         }
         if (this._map)
             this._rebuildGeometry();
+        this._invalidateBatch();
         return this;
     }
     getExtruded() { return this._extruded; }
     setHeight(height) {
         if (!(height >= 0))
             return this;
+        if (this._height === height)
+            return this;
         this._height = height;
         if (this._extruded) {
             this._heightsDirty = true;
             this._heightsFinalized = false;
         }
+        this._invalidateBatch();
         return this;
     }
     getHeight() { return this._height; }
     setMinHeight(height) {
         if (!(height >= 0))
             return this;
+        if (this._minHeight === height)
+            return this;
         this._minHeight = height;
         this._heightsDirty = true;
         this._heightsFinalized = false;
+        this._invalidateBatch();
         return this;
     }
     getMinHeight() { return this._minHeight; }
@@ -920,12 +1269,14 @@ export class Polygon extends SpatialObject {
     setDepthTest(depthTest) {
         this._depthTest = !!depthTest;
         this._applyDepthFlags();
+        this._invalidateBatch();
         return this;
     }
     getDepthTest() { return this._depthTest; }
     setDepthWrite(depthWrite) {
         this._depthWrite = !!depthWrite;
         this._applyDepthFlags();
+        this._invalidateBatch();
         return this;
     }
     getDepthWrite() { return this._depthWrite; }
@@ -971,12 +1322,22 @@ export class Polygon extends SpatialObject {
         const map = this._map;
         if (!map || !this._group)
             return;
-        this._applyZoomInterpolations(map.continuousZoom);
+        if (this._batch) {
+            if (this._invalidGeometry || !this._isWithinView()) {
+                this._isVisible = false;
+                this._centroidScreenPos = null;
+                return;
+            }
+            this._isVisible = true;
+            this._updateCentroidScreenPos();
+            return;
+        }
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;
             return;
         }
+        this._applyZoomInterpolations(map.continuousZoom);
         if (this._group.parent !== this._map.worldGroup) {
             this._group.parent?.remove(this._group);
             this._map.worldGroup.add(this._group);
@@ -1035,7 +1396,9 @@ export class Polygon extends SpatialObject {
             return false;
         const wgPos = map.worldGroup.position;
         const extrude = this._extruded ? this._height : 0;
-        for (let i = 0; i < this._vertices2D.length; i++) {
+        const n = this._vertices2D.length;
+        // Базовые высоты (рельеф + altitude + nodeH).
+        for (let i = 0; i < n; i++) {
             const worldCoord = this._worldCoords[i];
             if (!worldCoord)
                 continue;
@@ -1067,40 +1430,67 @@ export class Polygon extends SpatialObject {
             const nodeH = this._strokeNodeHeights[i] ?? 0;
             this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
         }
+        // ── Top ──
         const topPos = this._fillGeometry.attributes.position.array;
-        for (let i = 0; i < this._vertices2D.length; i++) {
+        for (let i = 0; i < n; i++) {
             topPos[i * 3 + 1] = this._cachedHeights[i];
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
+        // ── Bottom ──
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
-            for (let i = 0; i < this._vertices2D.length; i++) {
-                bottomPos[i * 3 + 1] = this._cachedHeights[i] - this._height;
+            const height = this._height;
+            for (let i = 0; i < n; i++) {
+                bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
             }
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
+        // ── Side (per-edge через _sideEdgeIJ — фикс для дырок) ──
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
-            let idx = 0;
-            for (let i = 0; i < this._vertices2D.length; i++) {
-                const j = (i + 1) % this._vertices2D.length;
-                const upperI = this._cachedHeights[i];
-                const upperJ = this._cachedHeights[j];
-                const lowerI = upperI - this._height;
-                const lowerJ = upperJ - this._height;
-                sidePos[idx * 3 + 1] = upperI;
-                idx++;
-                sidePos[idx * 3 + 1] = lowerI;
-                idx++;
-                sidePos[idx * 3 + 1] = upperJ;
-                idx++;
-                sidePos[idx * 3 + 1] = lowerJ;
-                idx++;
+            const height = this._height;
+            const edgeCount = this._sideEdgeIJ.length;
+            for (let k = 0; k < edgeCount; k++) {
+                const pair = this._sideEdgeIJ[k];
+                const idxI = pair[0];
+                const idxJ = pair[1];
+                const upperI = this._cachedHeights[idxI];
+                const upperJ = this._cachedHeights[idxJ];
+                const lowerI = upperI - height;
+                const lowerJ = upperJ - height;
+                const base = k * 4;
+                sidePos[base * 3 + 1] = upperI;
+                sidePos[(base + 1) * 3 + 1] = lowerI;
+                sidePos[(base + 2) * 3 + 1] = upperJ;
+                sidePos[(base + 3) * 3 + 1] = lowerJ;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
-            this._sideGeometry.computeVertexNormals();
+            // Патч: computeVertexNormals() удалён — нормали стенок
+            // инвариантны к изменению Y (направление рёбер не меняется,
+            // только их масштаб). Это самый дорогой вызов на кадр.
+            // UV боковых стенок: V зависит от _height, обновляем при
+            // изменении высоты. U не меняется — patternScale тот же.
+            if (this._builtSideHeight !== height) {
+                const uvAttr = this._sideGeometry.attributes.uv;
+                if (uvAttr) {
+                    const sideUVs = uvAttr.array;
+                    const patternScale = this._fillPatternScale > 0
+                        ? this._fillPatternScale
+                        : DEFAULT_FILL_PATTERN_SCALE;
+                    const vH = height / patternScale;
+                    for (let k = 0; k < edgeCount; k++) {
+                        const base = k * 8;
+                        sideUVs[base + 1] = vH;
+                        sideUVs[base + 5] = vH;
+                    }
+                    uvAttr.needsUpdate = true;
+                }
+                this._builtSideHeight = height;
+            }
+            // Bounding sphere пересчитываем: Y-диапазон меняется.
+            // (O(n), но вызывается раз в 500 мс для dynamic, не каждый кадр.)
             this._sideGeometry.computeBoundingSphere();
         }
         if (!isDynamic)
@@ -1169,14 +1559,16 @@ export class Polygon extends SpatialObject {
             }
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitude;
         }
-        let avgNodeH = 0;
-        if (this._nodeHeights.length > 0) {
+        // Патч: кэш среднего по _nodeHeights. Раньше — O(n) каждый кадр.
+        if (!this._avgNodeHeightValid) {
             let sum = 0;
-            for (let i = 0; i < this._nodeHeights.length; i++)
+            const n = this._nodeHeights.length;
+            for (let i = 0; i < n; i++)
                 sum += this._nodeHeights[i] ?? 0;
-            avgNodeH = sum / this._nodeHeights.length;
+            this._avgNodeHeight = n > 0 ? sum / n : 0;
+            this._avgNodeHeightValid = true;
         }
-        worldY += avgNodeH;
+        worldY += this._avgNodeHeight;
         worldY += this._minHeight + (this._extruded ? this._height : 0);
         const screenPos = map.getVec3().set(worldX, worldY + wgPos.y, worldZ);
         screenPos.project(map.camera);
@@ -1195,6 +1587,15 @@ export class Polygon extends SpatialObject {
     // KrbMap#fitTo / getBounds
     // =================================================================
     getBounds(crs = 'EPSG:4326') {
+        const key = typeof crs === 'string' ? crs : (crs?.code ?? 'custom');
+        if (this._boundsCache.has(key)) {
+            return this._boundsCache.get(key);
+        }
+        const result = this._computeBounds(crs);
+        this._boundsCache.set(key, result);
+        return result;
+    }
+    _computeBounds(crs) {
         if (!this._rings || !this._rings.length)
             return null;
         const src = this._crs

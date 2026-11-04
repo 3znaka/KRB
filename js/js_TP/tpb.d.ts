@@ -9,6 +9,8 @@ export namespace THREE {
     // Math
     // ----------------------------------------------------------------
 
+  export const MultiplyBlending: number;
+
     export class Vector2 {
         constructor(x?: number, y?: number);
         [key: string]: any;
@@ -81,13 +83,47 @@ export namespace THREE {
         invert(): this;
         identity(): this;
     }
+  export class Sphere {
+        constructor(center?: Vector3, radius?: number);
 
+        center: Vector3;
+        radius: number;
+
+        set(center: Vector3, radius: number): this;
+        setFromPoints(points: Vector3[], optionalCenter?: Vector3): this;
+
+        clone(): Sphere;
+        copy(sphere: Sphere): this;
+
+        isEmpty(): boolean;
+        makeEmpty(): this;
+
+        containsPoint(point: Vector3): boolean;
+        distanceToPoint(point: Vector3): number;
+
+        intersectsSphere(sphere: Sphere): boolean;
+        intersectsBox(box: any): boolean;
+        intersectsPlane(plane: any): boolean;
+
+        clampPoint(point: Vector3, target: Vector3): Vector3;
+        getBoundingBox(target: any): any;
+
+        applyMatrix4(matrix: any): this;
+        translate(offset: Vector3): this;
+
+        equals(sphere: Sphere): boolean;
+    }
     export class Euler {
-        constructor(x?: number, y?: number, z?: number);
+        constructor(x?: number, y?: number, z?: number, order?: string);
         [key: string]: any;
         x: number;
         y: number;
         z: number;
+        order: string;
+        set(x: number, y: number, z: number, order?: string): this;
+        setFromQuaternion(q: Quaternion, order?: string): this;
+        copy(e: Euler): this;
+        clone(): Euler;
     }
 
     export class Color {
@@ -242,6 +278,131 @@ export namespace THREE {
         constructor(radius?: number, widthSegments?: number, heightSegments?: number);
     }
 
+  export class CylinderGeometry extends BufferGeometry {
+        constructor(
+            radiusTop?: number,
+            radiusBottom?: number,
+            height?: number,
+            radialSegments?: number,
+            heightSegments?: number,
+            openEnded?: boolean,
+            thetaStart?: number,
+            thetaLength?: number
+        );
+    }
+
+    export class ConeGeometry extends CylinderGeometry {
+        constructor(
+            radius?: number,
+            height?: number,
+            radialSegments?: number,
+            heightSegments?: number,
+            openEnded?: boolean,
+            thetaStart?: number,
+            thetaLength?: number
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Bounds / culling (дополнения для Marker3D)
+    // ----------------------------------------------------------------
+
+    export class Box3 {
+        constructor(min?: Vector3, max?: Vector3);
+        [key: string]: any;
+        min: Vector3;
+        max: Vector3;
+        set(min: Vector3, max: Vector3): this;
+        setFromObject(object: Object3D, precise?: boolean): this;
+        setFromCenterAndSize(center: Vector3, size: Vector3): this;
+        getCenter(target: Vector3): Vector3;
+        getSize(target: Vector3): Vector3;
+        isEmpty(): boolean;
+        containsPoint(point: Vector3): boolean;
+        intersectsBox(box: Box3): boolean;
+        intersectsSphere(sphere: any): boolean;
+        applyMatrix4(matrix: Matrix4): this;
+        clone(): Box3;
+        copy(box: Box3): this;
+    }
+
+    export class Frustum {
+        constructor(
+            p0?: Plane, p1?: Plane, p2?: Plane,
+            p3?: Plane, p4?: Plane, p5?: Plane
+        );
+        [key: string]: any;
+        planes: Plane[];
+        setFromProjectionMatrix(m: Matrix4): this;
+        intersectsObject(object: Object3D): boolean;
+        intersectsSprite(sprite: any): boolean;
+        intersectsBox(box: Box3): boolean;
+        intersectsSphere(sphere: any): boolean;
+        containsPoint(point: Vector3): boolean;
+    }
+
+    // ----------------------------------------------------------------
+    // Animation (дополнения для Marker3D / GLB)
+    // ----------------------------------------------------------------
+
+    export class AnimationClip {
+        constructor(name?: string, duration?: number, tracks?: any[], blendMode?: number);
+        [key: string]: any;
+        name: string;
+        uuid: string;
+        duration: number;
+        tracks: any[];
+    }
+
+    export class AnimationAction {
+        [key: string]: any;
+        play(): this;
+        stop(): this;
+        reset(): this;
+        pause(): this;
+        setEffectiveWeight(weight: number): this;
+        setEffectiveTimeScale(timeScale: number): this;
+        setLoop(mode: number, repetitions: number): this;
+        fadeIn(duration: number): this;
+        fadeOut(duration: number): this;
+        isRunning(): boolean;
+    }
+
+    export class AnimationMixer {
+        constructor(root: Object3D);
+        [key: string]: any;
+        time: number;
+        timeScale: number;
+        clipAction(clip: AnimationClip, optionalRoot?: Object3D, blendMode?: number): AnimationAction;
+        existingAction(clip: AnimationClip, optionalRoot?: Object3D): AnimationAction | null;
+        stopAllAction(): this;
+        update(deltaTime: number): this;
+        setTime(timeInSeconds: number): this;
+        getRoot(): Object3D;
+        uncacheClip(clip: AnimationClip): void;
+        uncacheRoot(root: Object3D): void;
+    }
+
+    // ----------------------------------------------------------------
+    // Loaders — текстуры (используется в Tiles.ts)
+    // ----------------------------------------------------------------
+
+    export class TextureLoader {
+        constructor(manager?: any);
+        [key: string]: any;
+        load(
+            url: string,
+            onLoad?: (texture: Texture) => void,
+            onProgress?: (event: ProgressEvent) => void,
+            onError?: (event: ErrorEvent | Error) => void
+        ): Texture;
+        loadAsync(url: string, onProgress?: (event: ProgressEvent) => void): Promise<Texture>;
+        setPath(path: string): this;
+        setCrossOrigin(value: string): this;
+        setRequestHeader(header: Record<string, string>): this;
+        setWithCredentials(value: boolean): this;
+    }
+
     // ----------------------------------------------------------------
     // Materials & textures
     // ----------------------------------------------------------------
@@ -295,9 +456,31 @@ export namespace THREE {
     }
 
     export class Texture {
-        constructor();
+        constructor(
+            image?: any,
+            mapping?: number,
+            wrapS?: number,
+            wrapT?: number,
+            magFilter?: number,
+            minFilter?: number,
+            format?: number,
+            type?: number,
+            anisotropy?: number,
+            colorSpace?: string
+        );
         [key: string]: any;
+        image: any;
+        mapping: number;
+        wrapS: number;
+        wrapT: number;
+        magFilter: number;
+        minFilter: number;
+        format: number;
+        type: number;
+        anisotropy: number;
+        colorSpace: string;
         needsUpdate: boolean;
+        flipY: boolean;
         dispose(): void;
     }
     export class CanvasTexture extends Texture {
@@ -492,6 +675,80 @@ export namespace THREE {
 // ====================================================================
 // Fat lines (Line2 / LineMaterial и соответствующие geometry)
 // ====================================================================
+
+
+// ====================================================================
+// GLTF + Draco — используются Marker3D
+// ====================================================================
+
+export interface GLTF {
+    animations: THREE.AnimationClip[];
+    scene: THREE.Group;
+    scenes: THREE.Group[];
+    cameras: THREE.Camera[];
+    asset: { copyright?: string; generator?: string; version: string };
+    parser?: any;
+    userData?: any;
+}
+
+export class GLTFLoader {
+    constructor(manager?: any);
+    [key: string]: any;
+
+    load(
+        url: string,
+        onLoad: (gltf: GLTF) => void,
+        onProgress?: (event: ProgressEvent) => void,
+        onError?: (event: ErrorEvent | Error) => void
+    ): void;
+
+    loadAsync(
+        url: string,
+        onProgress?: (event: ProgressEvent) => void
+    ): Promise<GLTF>;
+
+    parse(
+        data: ArrayBuffer | string,
+        path: string,
+        onLoad: (gltf: GLTF) => void,
+        onError?: (event: ErrorEvent | Error) => void
+    ): void;
+
+    parseAsync(data: ArrayBuffer | string, path: string): Promise<GLTF>;
+
+    setPath(path: string): this;
+    setCrossOrigin(value: string): this;
+    setDRACOLoader(dracoLoader: DRACOLoader): this;
+    setKTX2Loader(ktx2Loader: any): this;
+    setMeshoptDecoder(meshoptDecoder: any): this;
+    register(callback: (parser: any) => any): this;
+    unregister(callback: (parser: any) => any): this;
+}
+
+export class DRACOLoader {
+    constructor(manager?: any);
+    [key: string]: any;
+
+    load(
+        url: string,
+        onLoad: (geometry: THREE.BufferGeometry) => void,
+        onProgress?: (event: ProgressEvent) => void,
+        onError?: (event: ErrorEvent | Error) => void
+    ): void;
+
+    loadAsync(
+        url: string,
+        onProgress?: (event: ProgressEvent) => void
+    ): Promise<THREE.BufferGeometry>;
+
+    setDecoderPath(path: string): this;
+    setDecoderConfig(config: { type?: 'js' | 'wasm' | string; [key: string]: any }): this;
+    setWorkerLimit(workerLimit: number): this;
+    preload(): this;
+    dispose(): void;
+    setPath(path: string): this;
+    setCrossOrigin(value: string): this;
+}
 
 export class LineSegmentsGeometry {
     constructor();

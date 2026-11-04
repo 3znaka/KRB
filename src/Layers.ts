@@ -70,34 +70,31 @@ interface ScreenPoint {
  * layer.removeFromMap();
  */
 export class Layer {
-    /** Объекты слоя. */
     protected _objects: SpatialObject[] = [];
-
-    /** Видимость слоя целиком. */
     public visible: boolean = true;
-
-    /** Карта, к которой привязан слой. */
     protected _map: any = null;
-
-    /** Текущий предикат фильтра (null — фильтра нет). */
     protected _filter: ((obj: SpatialObject) => boolean) | null = null;
-
-    /**
-     * Объекты, скрытые именно фильтром. Нужны для восстановления при
-     * `filter(null)` / `filter(newPredicate)`.
-     */
     protected _filterHidden = new Set<SpatialObject>();
+
+    // ── Batcher ──
+    _polygonBatcher: any = null;
+    private static _batcherFactory: ((layer: Layer) => any) | null = null;
+
+    static setBatcherFactory(fn: ((layer: Layer) => any) | null): void {
+        Layer._batcherFactory = fn;
+    }
+
+    private _ensureBatcher(): void {
+        if (this._polygonBatcher) return;
+        if (!Layer._batcherFactory) return;
+        this._polygonBatcher = Layer._batcherFactory(this);
+        if (this._map) this._polygonBatcher.addTo(this._map);
+    }
 
     constructor() {}
 
-    // =================================================================
-    // Присоединение / отсоединение
-    // =================================================================
+    // ── Lifecycle ──
 
-    /**
-     * Добавляет слой на карту. Если слой уже добавлен на другую карту,
-     * он будет сначала удалён оттуда.
-     */
     addTo(map: any): this {
         if (this._map === map) return this;
         this.removeFromMap();
@@ -105,20 +102,16 @@ export class Layer {
         if (map._dynamicLayers && !map._dynamicLayers.includes(this)) {
             map._dynamicLayers.push(this);
         }
+        if (this._polygonBatcher) this._polygonBatcher.addTo(map);
         return this;
     }
 
-    /**
-     * Удаляет слой с карты, уничтожая все связанные объекты.
-     */
     removeFromMap(): void {
         if (!this._map) return;
-        for (const obj of [...this._objects]) {
-            obj.remove();
-        }
+        if (this._polygonBatcher) this._polygonBatcher.removeFromMap();
+        for (const obj of [...this._objects]) obj.remove();
         this._objects = [];
         this._filterHidden.clear();
-
         if (this._map._dynamicLayers) {
             const idx = this._map._dynamicLayers.indexOf(this);
             if (idx > -1) this._map._dynamicLayers.splice(idx, 1);
@@ -126,91 +119,52 @@ export class Layer {
         this._map = null;
     }
 
-    // =================================================================
-    // Коллекция объектов
-    // =================================================================
+    // ── Коллекция ──
 
-    /**
-     * Добавляет один или несколько объектов на слой.
-     * Объекты будут автоматически прикреплены к карте.
-     *
-     * Если к слою уже применён фильтр через {@link Layer#filter} —
-     * он сразу будет применён и к новым объектам.
-     */
     add(...objects: SpatialObject[]): this {
         if (!this._map) {
             console.warn('Layer.add(): call layer.addTo(map) first');
             return this;
         }
+        this._ensureBatcher();
         for (const obj of objects) {
             if ((obj as any)._map) obj.remove();
             obj._attach(this._map, this);
             this._objects.push(obj);
-
             if (this._filter && !this._filter(obj)) {
                 obj.setVisible(false);
                 this._filterHidden.add(obj);
             }
         }
+        this._polygonBatcher?.markDirty?.();
         return this;
     }
 
-    /**
-     * Удаляет указанный объект со слоя.
-     */
     remove(object: SpatialObject): this {
         const idx = this._objects.indexOf(object);
         if (idx > -1) object.remove();
         this._filterHidden.delete(object);
+        this._polygonBatcher?.markDirty?.();
         return this;
     }
 
-    /**
-     * Удаляет ссылку на объект из внутреннего массива (вызывается при
-     * удалении объекта).
-     *
-     * @internal
-     */
+    /** @internal — вызывается из SpatialObject.remove(). */
     _removeRef(obj: SpatialObject): void {
         this._filterHidden.delete(obj);
         const idx = this._objects.indexOf(obj);
         if (idx > -1) this._objects.splice(idx, 1);
+        this._polygonBatcher?.markDirty?.();
     }
 
-    // =================================================================
-    // Видимость и фильтр
-    // =================================================================
+    // ── Видимость ──
 
-    /**
-     * Устанавливает видимость слоя целиком. Скрытые объекты не рендерятся
-     * и не реагируют на интерактив, независимо от их собственной видимости.
-     */
     setVisible(visible: boolean): this {
         this.visible = visible;
         return this;
     }
 
-    /**
-     * Фильтрует объекты слоя: скрывает те, для которых
-     * `predicate(obj) === false`. Передайте `null` (или ничего) —
-     * снять фильтр.
-     *
-     * Реализация использует `obj.setVisible()` из `SpatialObject`, поэтому:
-     *   - `filter(null)` восстанавливает только те объекты, которые
-     *     скрыл сам фильтр (хранятся в `_filterHidden`). Объекты, которые
-     *     пользователь скрыл вручную через `obj.setVisible(false)`
-     *     **до** вызова `filter()`, не будут затронуты.
-     *   - Если пользователь скрыл объект **после** того, как его скрыл
-     *     фильтр, вызов `filter(null)` восстановит видимость. Это
-     *     осознанный компромисс — не полагайтесь на такое сочетание.
-     *
-     * Фильтр ортогонален `layer.setVisible()`: тот скрывает весь слой,
-     * этот — только подмножество.
-     *
-     * @example
-     * layer.filter(m => m.getZoomBounds().max > 12);
-     * layer.filter(null);   // показать всё
-     */
+    // ── Фильтр ──
+
     filter(predicate?: ((obj: SpatialObject) => boolean) | null): this {
         // Восстановить всё, что было скрыто предыдущим фильтром.
         for (const obj of this._filterHidden) {
@@ -219,49 +173,32 @@ export class Layer {
         this._filterHidden.clear();
         this._filter = predicate ?? null;
 
-        if (!predicate) return this;
-
-        for (const obj of this._objects) {
-            if (!predicate(obj)) {
-                obj.setVisible(false);
-                this._filterHidden.add(obj);
+        if (predicate) {
+            for (const obj of this._objects) {
+                if (!predicate(obj)) {
+                    obj.setVisible(false);
+                    this._filterHidden.add(obj);
+                }
             }
         }
+        this._polygonBatcher?.markDirty?.();
         return this;
     }
 
-    // =================================================================
-    // Обновление на кадре
-    // =================================================================
+    // ── Per-frame ──
 
-    /**
-     * Вызывается картой на каждом кадре для обновления всех объектов слоя.
-     *
-     * @internal
-     */
     _postUpdate(map: any, deltaTime: number): void {
+        if (this._polygonBatcher) {
+            this._polygonBatcher.update(map, deltaTime);
+        }
         for (const obj of this._objects) {
             const o = obj as any;
             if (typeof o._update === 'function') o._update(map, deltaTime);
         }
     }
 
-    // =================================================================
-    // KrbMap#fitTo / getBounds
-    // =================================================================
+    // ── getBounds ──
 
-    /**
-     * Возвращает объединённый прямоугольник (bounding box), охватывающий
-     * все объекты слоя, у которых есть метод `getBounds(crs)`.
-     *
-     * Объекты без `getBounds` (или вернувшие null) молча пропускаются.
-     * Если ни один объект не дал валидного прямоугольника — возвращается
-     * `null`.
-     *
-     * @example
-     * const bounds = layer.getBounds();             // [[30.5, 50.4], [31.0, 50.7]]
-     * const bUtm = layer.getBounds('EPSG:32637');   // [[413500, 6178000], ...]
-     */
     getBounds(crs: string | any = 'EPSG:4326'): [[number, number], [number, number]] | null {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let count = 0;
@@ -629,4 +566,6 @@ export class ClusterLayer extends Layer {
 
         map.moveCameraToSlow(lon, lat, 0.6, targetZoom);
     }
+
+    
 }

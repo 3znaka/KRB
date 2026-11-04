@@ -396,8 +396,10 @@ export class Marker extends SpatialObject {
     // =================================================================
     _update(_map) {
         const map = this._map;
+        if (!map)
+            return;
         this._applyZoomInterpolations(map.continuousZoom);
-        if (!map || !this._element)
+        if (!this._element)
             return;
         // Кластерная видимость — особенность Marker.
         if (this._layer && this._layer._clusterActive) {

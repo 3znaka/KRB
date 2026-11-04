@@ -485,10 +485,11 @@ this._userData = options.userData ?? {};
     // Обновление на кадре
     // =================================================================
 
-    _update(_map?: any): void {
-        const map = this._map;
-        this._applyZoomInterpolations(map.continuousZoom);
-        if (!map || !this._element) return;
+_update(_map?: any): void {
+    const map = this._map;
+    if (!map) return;
+    this._applyZoomInterpolations(map.continuousZoom);
+    if (!this._element) return;
 
         // Кластерная видимость — особенность Marker.
         if (this._layer && (this._layer as any)._clusterActive) {

@@ -967,10 +967,11 @@ export class Polygon extends SpatialObject {
     // =================================================================
     // Обновление на кадре
     // =================================================================
-    _update(map) {
-        if (!this._map || !this._group)
+    _update(_mapArg) {
+        const map = this._map;
+        if (!map || !this._group)
             return;
-        this._applyZoomInterpolations(map.continuousZoom); // ← NEW
+        this._applyZoomInterpolations(map.continuousZoom);
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;

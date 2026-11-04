@@ -131,6 +131,13 @@ export interface Label {
     _cachedText: string;
     _cachedStyle: Record<string, string | number>;
     _chosenAnchor: VariableAnchor | null;
+    /**
+     * Кэш последней валидной экранной позиции. Заполняется в
+     * `_updateVisibility`; используется `_getLabelCorners`, чтобы не
+     * вызывать `getScreenPosition()` несколько раз для одного кадра
+     * (например, при переборе variableAnchor-ов).
+     */
+    screenPos?: LabelScreenPoint | null;
 }
 
 export interface PruneStaleOptions {
@@ -200,6 +207,8 @@ class _GridIndex<T> {
 }
 
 const STABLE_FRAMES = 5;
+const OPACITY_MS = 80;
+const OPACITY_CSS = `${OPACITY_MS}ms`;
 
 // =====================================================================
 // TextManager
@@ -335,62 +344,58 @@ export class TextManager {
     }
 
     /**
- * Превращает `haloColor` / `haloWidth` / `haloBlur` из titleStyle в
- * CSS `text-shadow`. Явный `textShadow` в стиле имеет приоритет.
- */
-_applyHalo(style: Record<string, string | number>, el: HTMLElement): void {
-    if (style.textShadow !== undefined) return;
+     * Превращает `haloColor` / `haloWidth` / `haloBlur` из titleStyle в
+     * CSS `text-shadow`. Явный `textShadow` в стиле имеет приоритет.
+     */
+    _applyHalo(style: Record<string, string | number>, el: HTMLElement): void {
+        if (style.textShadow !== undefined) return;
 
-    const color = style.haloColor ?? style.textHaloColor;
-    const widthRaw = style.haloWidth ?? style.textHaloWidth;
+        const color = style.haloColor ?? style.textHaloColor;
+        const widthRaw = style.haloWidth ?? style.textHaloWidth;
 
-    if (!color || widthRaw == null) {
-        // halo убрали — сбросить только то, что мы сами поставили
-        if ((el as any).__haloApplied) {
-            el.style.textShadow = '';
-            (el as any).__haloApplied = false;
+        if (!color || widthRaw == null) {
+            if ((el as any).__haloApplied) {
+                el.style.textShadow = '';
+                (el as any).__haloApplied = false;
+            }
+            return;
         }
-        return;
+
+        const w = Number(widthRaw);
+        if (!(w > 0)) return;
+        const blur = Number(style.haloBlur ?? style.textHaloBlur ?? 0);
+
+        const parts = [
+            `-${w}px -${w}px ${blur}px ${color}`,
+            ` ${w}px -${w}px ${blur}px ${color}`,
+            `-${w}px  ${w}px ${blur}px ${color}`,
+            ` ${w}px  ${w}px ${blur}px ${color}`,
+        ];
+        el.style.textShadow = parts.join(', ');
+        (el as any).__haloApplied = true;
     }
 
-    const w = Number(widthRaw);
-    if (!(w > 0)) return;
-    const blur = Number(style.haloBlur ?? style.textHaloBlur ?? 0);
+    _getVariableAnchors(label: Label): VariableAnchor[] | null {
+        let raw: any = null;
+        if (label.source.getTitleVariableAnchor) {
+            raw = label.source.getTitleVariableAnchor();
+        }
+        if (raw == null) raw = label._cachedStyle?.variableAnchor;
+        if (!raw) return null;
 
-    // 4 направления + опциональный blur-слой для мягкости
-    const parts = [
-        `-${w}px -${w}px ${blur}px ${color}`,
-        ` ${w}px -${w}px ${blur}px ${color}`,
-        `-${w}px  ${w}px ${blur}px ${color}`,
-        ` ${w}px  ${w}px ${blur}px ${color}`,
-    ];
-    el.style.textShadow = parts.join(', ');
-    (el as any).__haloApplied = true;
-}
+        let arr: VariableAnchor[];
+        if (Array.isArray(raw)) arr = raw as VariableAnchor[];
+        else if (typeof raw === 'string') {
+            arr = raw.split(',').map(s => s.trim()) as VariableAnchor[];
+        } else return null;
+        if (!arr.length) return null;
 
-_getVariableAnchors(label: Label): VariableAnchor[] | null {
-    // Приоритет: метод источника → ключ в titleStyle
-    let raw: any = null;
-    if (label.source.getTitleVariableAnchor) {
-        raw = label.source.getTitleVariableAnchor();
+        const cur = label._chosenAnchor;
+        if (cur && arr.includes(cur)) {
+            arr = [cur, ...arr.filter(a => a !== cur)];
+        }
+        return arr;
     }
-    if (raw == null) raw = label._cachedStyle?.variableAnchor;
-    if (!raw) return null;
-
-    let arr: VariableAnchor[];
-    if (Array.isArray(raw)) arr = raw as VariableAnchor[];
-    else if (typeof raw === 'string') {
-        arr = raw.split(',').map(s => s.trim()) as VariableAnchor[];
-    } else return null;
-    if (!arr.length) return null;
-
-    // Sticky: текущий anchor — первым (чтобы не «прыгала»)
-    const cur = label._chosenAnchor;
-    if (cur && arr.includes(cur)) {
-        arr = [cur, ...arr.filter(a => a !== cur)];
-    }
-    return arr;
-}
 
     _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
         let iconEl = el.querySelector('.krb-icon') as HTMLSpanElement | null;
@@ -484,7 +489,7 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
             transformOrigin: '0 0',
             left: '0',
             top: '0',
-            willChange: 'transform',
+            willChange: this._lastMoved === false ? 'auto' : 'transform',
         });
 
         if (hasIcon) {
@@ -524,8 +529,8 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
         }
 
         Object.assign(el.style, initialStyle);
-        this._applyHalo(initialStyle, el); 
-        el.style.transition = 'opacity 0.2s linear';
+        this._applyHalo(initialStyle, el);
+        el.style.transition = `opacity ${OPACITY_CSS} linear`;
         el.style.opacity = '0';
 
         this.pane!.appendChild(el);
@@ -560,6 +565,7 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
             _hideTimeout: null,
             _cachedText: initialText,
             _cachedStyle: { ...initialStyle },
+            screenPos: null,
         };
 
         this.labels.push(label);
@@ -571,13 +577,6 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
         return label;
     }
 
-    /**
-     * NEW: обновляет текст и/или стиль подписи без пересоздания DOM.
-     * Работает корректно и при `newSource === label.source` (случай
-     * `Marker.setTitle`), потому что старые значения берутся из кэша
-     * `label._cachedText/_cachedStyle`, а не запрашиваются повторно
-     * у source.
-     */
     updateLabel(label: Label): void {
         if (!label) return;
         this._updateLabelSource(label, label.source);
@@ -589,8 +588,6 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
         const el = label.element;
         const newType: LabelType = newSource.getLabelType ? newSource.getLabelType() : 'point';
 
-        // NEW: сравниваем с кэшем, а не с prevSource — иначе in-place
-        // мутация источника (Marker.setTitle) не видна.
         const oldText = label._cachedText;
         const newText = newSource.getText ? newSource.getText() : '';
         const oldStyle = label._cachedStyle;
@@ -685,7 +682,7 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
     pruneStaleLabels(activeIds: Set<any> | null, owner: any = null, opts: PruneStaleOptions = {}): void {
         if (!activeIds) return;
         const fade = opts.fade === true;
-        const graceMs = opts.graceMs ?? 10;
+        const graceMs = opts.graceMs ?? Math.max(OPACITY_MS + 10, 10);
         const now = performance.now();
         const toRemove: Label[] = [];
         let changed = false;
@@ -843,7 +840,25 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
             label._hideTimeout = setTimeout(() => {
                 if (parseFloat(el.style.opacity) === 0) el.style.display = 'none';
                 label._hideTimeout = null;
-            }, 80);
+            }, OPACITY_MS);
+        }
+    }
+
+    /**
+     * Мгновенно скрывает подпись без fade. Используется, когда позиция
+     * источника стала недоступна, а подпись уже была в fade-out —
+     * иначе она «залипает» на устаревшей экранной точке.
+     */
+    _forceHide(label: Label): void {
+        const el = label.element;
+        if (label._hideTimeout) { clearTimeout(label._hideTimeout); label._hideTimeout = null; }
+        el.style.opacity = '0';
+        el.style.display = 'none';
+        if (label.source.getLabelType() === 'line-curved') {
+            label._chosenT = null;
+            label._chosenIsFlipped = false;
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
         }
     }
 
@@ -857,7 +872,7 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
                 el.style.opacity = '0';
                 el.style.display = 'none';
                 void el.offsetWidth;
-                el.style.transition = 'opacity 0.2s linear';
+                el.style.transition = `opacity ${OPACITY_CSS} linear`;
             }
             label.hiddenByPriority = true;
             label._chosenT = null;
@@ -866,79 +881,76 @@ _getVariableAnchors(label: Label): VariableAnchor[] | null {
         }
     }
 
-_computeAnchor(
-    label: Label,
-    rotationDeg: number,
-    anchorOverride?: VariableAnchor | null,
-): { dx: number; dy: number; offX: number; offY: number; w: number; h: number; cos: number; sin: number; } {
-    const src = label.source;
-    if (label._needsMeasure) this._flushMeasurements();
-    const w = label.width;
-    const h = label.height;
+    _computeAnchor(
+        label: Label,
+        rotationDeg: number,
+        anchorOverride?: VariableAnchor | null,
+    ): { dx: number; dy: number; offX: number; offY: number; w: number; h: number; cos: number; sin: number; } {
+        const src = label.source;
+        if (label._needsMeasure) this._flushMeasurements();
+        const w = label.width;
+        const h = label.height;
 
-    // offset / align / vAlign
-    let offX = 0, offY = 0;
-    let align: TitleAlignH = 'center';
-    let vAlign: TitleAlignV = 'center';
+        let offX = 0, offY = 0;
+        let align: TitleAlignH = 'center';
+        let vAlign: TitleAlignV = 'center';
 
-    if (anchorOverride) {
-        // дефолтный gap — от размера шрифта
-        const gap = Math.max(4, label._fontSize * 0.3);
-        switch (anchorOverride) {
-            case 'center':        align = 'center'; vAlign = 'center'; break;
-            case 'top':           align = 'center'; vAlign = 'bottom'; offY = -gap; break;
-            case 'bottom':        align = 'center'; vAlign = 'top';    offY =  gap; break;
-            case 'left':          align = 'right';  vAlign = 'center'; offX = -gap; break;
-            case 'right':         align = 'left';   vAlign = 'center'; offX =  gap; break;
-            case 'top-left':      align = 'right';  vAlign = 'bottom'; offX = -gap; offY = -gap; break;
-            case 'top-right':     align = 'left';   vAlign = 'bottom'; offX =  gap; offY = -gap; break;
-            case 'bottom-left':   align = 'right';  vAlign = 'top';    offX = -gap; offY =  gap; break;
-            case 'bottom-right':  align = 'left';   vAlign = 'top';    offX =  gap; offY =  gap; break;
+        if (anchorOverride) {
+            const gap = Math.max(4, label._fontSize * 0.3);
+            switch (anchorOverride) {
+                case 'center':        align = 'center'; vAlign = 'center'; break;
+                case 'top':           align = 'center'; vAlign = 'bottom'; offY = -gap; break;
+                case 'bottom':        align = 'center'; vAlign = 'top';    offY =  gap; break;
+                case 'left':          align = 'right';  vAlign = 'center'; offX = -gap; break;
+                case 'right':         align = 'left';   vAlign = 'center'; offX =  gap; break;
+                case 'top-left':      align = 'right';  vAlign = 'bottom'; offX = -gap; offY = -gap; break;
+                case 'top-right':     align = 'left';   vAlign = 'bottom'; offX =  gap; offY = -gap; break;
+                case 'bottom-left':   align = 'right';  vAlign = 'top';    offX = -gap; offY =  gap; break;
+                case 'bottom-right':  align = 'left';   vAlign = 'top';    offX =  gap; offY =  gap; break;
+            }
+        } else {
+            const offset = src.getTitleOffset ? src.getTitleOffset() : null;
+            offX = offset ? offset[0] : 0;
+            offY = offset ? offset[1] : 0;
+            align = src.getTitleAlign ? src.getTitleAlign() : 'center';
+            vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
         }
-    } else {
-        const offset = src.getTitleOffset ? src.getTitleOffset() : null;
-        offX = offset ? offset[0] : 0;
-        offY = offset ? offset[1] : 0;
-        align = src.getTitleAlign ? src.getTitleAlign() : 'center';
-        vAlign = src.getTitleVerticalAlign ? src.getTitleVerticalAlign() : 'center';
-    }
 
-    const rad = rotationDeg * Math.PI / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
+        const rad = rotationDeg * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
 
-    // иконка — только для static-режима (у variable-anchor иконки нет)
-    if (!anchorOverride
-        && label._hasIcon
-        && label._iconCenterX != null
-        && label._iconCenterY != null) {
-        const anchorX = label._iconCenterX;
-        const anchorY = label._iconCenterY;
+        if (!anchorOverride
+            && label._hasIcon
+            && label._iconCenterX != null
+            && label._iconCenterY != null) {
+            const anchorX = label._iconCenterX;
+            const anchorY = label._iconCenterY;
+            const dx = -anchorX * cos + anchorY * sin;
+            const dy = -anchorX * sin - anchorY * cos;
+            return { dx, dy, offX, offY, w, h, cos, sin };
+        }
+
+        let anchorX: number;
+        if (align === 'left')       anchorX = 0;
+        else if (align === 'right') anchorX = w;
+        else                        anchorX = w / 2;
+
+        let anchorY: number;
+        if (vAlign === 'top')         anchorY = 0;
+        else if (vAlign === 'bottom') anchorY = h;
+        else                          anchorY = h / 2;
+
         const dx = -anchorX * cos + anchorY * sin;
         const dy = -anchorX * sin - anchorY * cos;
         return { dx, dy, offX, offY, w, h, cos, sin };
     }
 
-    let anchorX: number;
-    if (align === 'left')       anchorX = 0;
-    else if (align === 'right') anchorX = w;
-    else                        anchorX = w / 2;
-
-    let anchorY: number;
-    if (vAlign === 'top')         anchorY = 0;
-    else if (vAlign === 'bottom') anchorY = h;
-    else                          anchorY = h / 2;
-
-    const dx = -anchorX * cos + anchorY * sin;
-    const dy = -anchorX * sin - anchorY * cos;
-    return { dx, dy, offX, offY, w, h, cos, sin };
-}
-
-_getLabelCorners(
-    label: Label,
-    tOverride: number | null = null,
-    anchorOverride?: VariableAnchor | null,
-): LabelScreenPoint[] | null {
+    _getLabelCorners(
+        label: Label,
+        tOverride: number | null = null,
+        anchorOverride?: VariableAnchor | null,
+    ): LabelScreenPoint[] | null {
         const src = label.source;
         const isLine = src.getLabelType() === 'line';
         let scrX: number, scrY: number, rotation = 0;
@@ -949,7 +961,10 @@ _getLabelCorners(
             scrX = pos.x; scrY = pos.y;
             rotation = src.getScreenAngleAt!(t);
         } else {
-            const pos = src.getScreenPosition!();
+            // Используем кэш, заполненный в _updateVisibility. Это важно
+            // для variableAnchor: без кэша getScreenPosition() вызывался
+            // бы по разу на каждый anchor.
+            const pos = label.screenPos || src.getScreenPosition!();
             if (!pos) return null;
             scrX = pos.x; scrY = pos.y;
         }
@@ -1185,6 +1200,10 @@ _getLabelCorners(
             this._stableRefQ.copy(q);
             this._stableRefWp.copy(wp);
             this._stableRefZoom = zoom;
+            // КЛЮЧЕВОЙ ФИКС: пересчитывать коллизии каждый кадр движения.
+            // Без этого при панорамировании/наклоне подписи «кучкуются»,
+            // пока камера не остановится и не отсчитаются STABLE_FRAMES.
+            this._dirty = true;
         } else {
             this._stableFrameCount++;
         }
@@ -1244,8 +1263,15 @@ _getLabelCorners(
                 if (!rect) { label.hiddenByPriority = true; continue; }
                 label.rect = rect;
             } else {
+                // Кэшируем экранную позицию: _getLabelCorners для point
+                // будет использовать её при переборе variableAnchor-ов.
                 const pos = src.getScreenPosition!();
-                if (!pos) { label.hiddenByPriority = true; continue; }
+                if (!pos) {
+                    label.screenPos = null;
+                    label.hiddenByPriority = true;
+                    continue;
+                }
+                label.screenPos = pos;
                 const rect = this._getLabelCorners(label);
                 if (!rect) { label.hiddenByPriority = true; continue; }
                 label.rect = rect;
@@ -1261,42 +1287,42 @@ _getLabelCorners(
             return a.source.getText().localeCompare(b.source.getText());
         });
 
-this._gridIndex.clear();
-for (let i = 0; i < sorted.length; i++) {
-    const lbl = sorted[i];
+        this._gridIndex.clear();
+        for (let i = 0; i < sorted.length; i++) {
+            const lbl = sorted[i];
 
-    const anchors = this._getVariableAnchors(lbl);
-    const tryList: (VariableAnchor | null)[] = anchors ?? [null];
+            const anchors = this._getVariableAnchors(lbl);
+            const tryList: (VariableAnchor | null)[] = anchors ?? [null];
 
-    let placed = false;
-    for (const anchor of tryList) {
-        const corners = this._getLabelCorners(lbl, null, anchor);
-        if (!corners) continue;
-        const bbox = this._getBBox(corners);
+            let placed = false;
+            for (const anchor of tryList) {
+                const corners = this._getLabelCorners(lbl, null, anchor);
+                if (!corners) continue;
+                const bbox = this._getBBox(corners);
 
-        let overlaps = false;
-        const others = this._gridIndex.query(bbox);
-        for (let j = 0; j < others.length; j++) {
-            const other = others[j];
-            if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
-            if (this._rectsIntersect(corners, other.rect!)) { overlaps = true; break; }
+                let overlaps = false;
+                const others = this._gridIndex.query(bbox);
+                for (let j = 0; j < others.length; j++) {
+                    const other = others[j];
+                    if (!other._bbox || !this._bboxOverlap(bbox, other._bbox)) continue;
+                    if (this._rectsIntersect(corners, other.rect!)) { overlaps = true; break; }
+                }
+                if (overlaps) continue;
+
+                lbl.rect = corners;
+                lbl._bbox = bbox;
+                lbl._chosenAnchor = anchor;
+                this._gridIndex.insert(bbox, lbl);
+                lbl.hiddenByPriority = false;
+                placed = true;
+                break;
+            }
+
+            if (!placed) {
+                lbl.hiddenByPriority = true;
+                lbl._chosenAnchor = null;
+            }
         }
-        if (overlaps) continue;
-
-        lbl.rect = corners;
-        lbl._bbox = bbox;
-        lbl._chosenAnchor = anchor;
-        this._gridIndex.insert(bbox, lbl);
-        lbl.hiddenByPriority = false;
-        placed = true;
-        break;
-    }
-
-    if (!placed) {
-        lbl.hiddenByPriority = true;
-        lbl._chosenAnchor = null;
-    }
-}
 
         if (placeLines) this._placeLineLabels(zoom);
 
@@ -1416,6 +1442,11 @@ for (let i = 0; i < sorted.length; i++) {
             const sourceVisible = src.isVisible() && zoom >= zb.min && zoom <= zb.max;
             const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
 
+            // ── Фаза скрытия ───────────────────────────────────────────
+            // Если подпись должна быть невидимой — запускаем fade-out один
+            // раз, но НЕ пропускаем transform ниже: пока идёт fade-out,
+            // подпись должна продолжать следовать за якорем, иначе она
+            // «залипает» на краю экрана при панорамировании.
             if (!shouldBeVisible) {
                 const el = label.element;
                 const isFadingOut = label._hideTimeout != null;
@@ -1437,10 +1468,10 @@ for (let i = 0; i < sorted.length; i++) {
                         label._pendingChosenIsFlipped = false;
                     }
                     this._setLabelVisible(label, false);
-                    if (!isCurved) continue;
                 }
             }
 
+            // ── Кривые (line-curved) ───────────────────────────────────
             if (isCurved) {
                 let inTransition = false;
 
@@ -1498,17 +1529,25 @@ for (let i = 0; i < sorted.length; i++) {
                 continue;
             }
 
+            // ── Точечные и обычные линии ───────────────────────────────
             let pos: LabelScreenPoint | null | undefined;
             if (type === 'line') pos = src.getScreenPositionAt!(label.t);
             else                 pos = src.getScreenPosition!();
 
             if (!pos) {
-                if (!shouldBeVisible) continue;
+                if (!shouldBeVisible) {
+                    // Позиция недоступна, а подпись уже фейдится — гасим
+                    // мгновенно, чтобы она не «прилипла» к краю экрана
+                    // в устаревшей точке.
+                    this._forceHide(label);
+                    continue;
+                }
                 this._setLabelVisible(label, false);
                 continue;
             }
-const rotation = type === 'line' ? src.getScreenAngleAt!(label.t) : 0;
-const a = this._computeAnchor(label, rotation, label._chosenAnchor);
+
+            const rotation = type === 'line' ? src.getScreenAngleAt!(label.t) : 0;
+            const a = this._computeAnchor(label, rotation, label._chosenAnchor);
             const { dx, dy, offX, offY } = a;
             const top = pos.y + dy + offY;
 

@@ -60,6 +60,8 @@ class _GridIndex {
     }
 }
 const STABLE_FRAMES = 5;
+const OPACITY_MS = 80;
+const OPACITY_CSS = `${OPACITY_MS}ms`;
 // =====================================================================
 // TextManager
 // =====================================================================
@@ -173,16 +175,15 @@ export class TextManager {
         return null;
     }
     /**
- * Превращает `haloColor` / `haloWidth` / `haloBlur` из titleStyle в
- * CSS `text-shadow`. Явный `textShadow` в стиле имеет приоритет.
- */
+     * Превращает `haloColor` / `haloWidth` / `haloBlur` из titleStyle в
+     * CSS `text-shadow`. Явный `textShadow` в стиле имеет приоритет.
+     */
     _applyHalo(style, el) {
         if (style.textShadow !== undefined)
             return;
         const color = style.haloColor ?? style.textHaloColor;
         const widthRaw = style.haloWidth ?? style.textHaloWidth;
         if (!color || widthRaw == null) {
-            // halo убрали — сбросить только то, что мы сами поставили
             if (el.__haloApplied) {
                 el.style.textShadow = '';
                 el.__haloApplied = false;
@@ -193,7 +194,6 @@ export class TextManager {
         if (!(w > 0))
             return;
         const blur = Number(style.haloBlur ?? style.textHaloBlur ?? 0);
-        // 4 направления + опциональный blur-слой для мягкости
         const parts = [
             `-${w}px -${w}px ${blur}px ${color}`,
             ` ${w}px -${w}px ${blur}px ${color}`,
@@ -204,7 +204,6 @@ export class TextManager {
         el.__haloApplied = true;
     }
     _getVariableAnchors(label) {
-        // Приоритет: метод источника → ключ в titleStyle
         let raw = null;
         if (label.source.getTitleVariableAnchor) {
             raw = label.source.getTitleVariableAnchor();
@@ -223,7 +222,6 @@ export class TextManager {
             return null;
         if (!arr.length)
             return null;
-        // Sticky: текущий anchor — первым (чтобы не «прыгала»)
         const cur = label._chosenAnchor;
         if (cur && arr.includes(cur)) {
             arr = [cur, ...arr.filter(a => a !== cur)];
@@ -317,7 +315,7 @@ export class TextManager {
             transformOrigin: '0 0',
             left: '0',
             top: '0',
-            willChange: 'transform',
+            willChange: this._lastMoved === false ? 'auto' : 'transform',
         });
         if (hasIcon) {
             const pos = source.getLabelPosition ? source.getLabelPosition() : 'right';
@@ -360,7 +358,7 @@ export class TextManager {
         }
         Object.assign(el.style, initialStyle);
         this._applyHalo(initialStyle, el);
-        el.style.transition = 'opacity 0.2s linear';
+        el.style.transition = `opacity ${OPACITY_CSS} linear`;
         el.style.opacity = '0';
         this.pane.appendChild(el);
         const label = {
@@ -393,6 +391,7 @@ export class TextManager {
             _hideTimeout: null,
             _cachedText: initialText,
             _cachedStyle: { ...initialStyle },
+            screenPos: null,
         };
         this.labels.push(label);
         if (stableId != null)
@@ -402,13 +401,6 @@ export class TextManager {
         this._dirty = true;
         return label;
     }
-    /**
-     * NEW: обновляет текст и/или стиль подписи без пересоздания DOM.
-     * Работает корректно и при `newSource === label.source` (случай
-     * `Marker.setTitle`), потому что старые значения берутся из кэша
-     * `label._cachedText/_cachedStyle`, а не запрашиваются повторно
-     * у source.
-     */
     updateLabel(label) {
         if (!label)
             return;
@@ -419,8 +411,6 @@ export class TextManager {
         const prevSource = label.source;
         const el = label.element;
         const newType = newSource.getLabelType ? newSource.getLabelType() : 'point';
-        // NEW: сравниваем с кэшем, а не с prevSource — иначе in-place
-        // мутация источника (Marker.setTitle) не видна.
         const oldText = label._cachedText;
         const newText = newSource.getText ? newSource.getText() : '';
         const oldStyle = label._cachedStyle;
@@ -511,7 +501,7 @@ export class TextManager {
         if (!activeIds)
             return;
         const fade = opts.fade === true;
-        const graceMs = opts.graceMs ?? 10;
+        const graceMs = opts.graceMs ?? Math.max(OPACITY_MS + 10, 10);
         const now = performance.now();
         const toRemove = [];
         let changed = false;
@@ -681,7 +671,27 @@ export class TextManager {
                 if (parseFloat(el.style.opacity) === 0)
                     el.style.display = 'none';
                 label._hideTimeout = null;
-            }, 80);
+            }, OPACITY_MS);
+        }
+    }
+    /**
+     * Мгновенно скрывает подпись без fade. Используется, когда позиция
+     * источника стала недоступна, а подпись уже была в fade-out —
+     * иначе она «залипает» на устаревшей экранной точке.
+     */
+    _forceHide(label) {
+        const el = label.element;
+        if (label._hideTimeout) {
+            clearTimeout(label._hideTimeout);
+            label._hideTimeout = null;
+        }
+        el.style.opacity = '0';
+        el.style.display = 'none';
+        if (label.source.getLabelType() === 'line-curved') {
+            label._chosenT = null;
+            label._chosenIsFlipped = false;
+            label._pendingChosenT = null;
+            label._pendingChosenIsFlipped = false;
         }
     }
     _hideAllLineLabels() {
@@ -698,7 +708,7 @@ export class TextManager {
                 el.style.opacity = '0';
                 el.style.display = 'none';
                 void el.offsetWidth;
-                el.style.transition = 'opacity 0.2s linear';
+                el.style.transition = `opacity ${OPACITY_CSS} linear`;
             }
             label.hiddenByPriority = true;
             label._chosenT = null;
@@ -712,12 +722,10 @@ export class TextManager {
             this._flushMeasurements();
         const w = label.width;
         const h = label.height;
-        // offset / align / vAlign
         let offX = 0, offY = 0;
         let align = 'center';
         let vAlign = 'center';
         if (anchorOverride) {
-            // дефолтный gap — от размера шрифта
             const gap = Math.max(4, label._fontSize * 0.3);
             switch (anchorOverride) {
                 case 'center':
@@ -780,7 +788,6 @@ export class TextManager {
         const rad = rotationDeg * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
-        // иконка — только для static-режима (у variable-anchor иконки нет)
         if (!anchorOverride
             && label._hasIcon
             && label._iconCenterX != null
@@ -823,7 +830,10 @@ export class TextManager {
             rotation = src.getScreenAngleAt(t);
         }
         else {
-            const pos = src.getScreenPosition();
+            // Используем кэш, заполненный в _updateVisibility. Это важно
+            // для variableAnchor: без кэша getScreenPosition() вызывался
+            // бы по разу на каждый anchor.
+            const pos = label.screenPos || src.getScreenPosition();
             if (!pos)
                 return null;
             scrX = pos.x;
@@ -1058,6 +1068,10 @@ export class TextManager {
             this._stableRefQ.copy(q);
             this._stableRefWp.copy(wp);
             this._stableRefZoom = zoom;
+            // КЛЮЧЕВОЙ ФИКС: пересчитывать коллизии каждый кадр движения.
+            // Без этого при панорамировании/наклоне подписи «кучкуются»,
+            // пока камера не остановится и не отсчитаются STABLE_FRAMES.
+            this._dirty = true;
         }
         else {
             this._stableFrameCount++;
@@ -1124,11 +1138,15 @@ export class TextManager {
                 label.rect = rect;
             }
             else {
+                // Кэшируем экранную позицию: _getLabelCorners для point
+                // будет использовать её при переборе variableAnchor-ов.
                 const pos = src.getScreenPosition();
                 if (!pos) {
+                    label.screenPos = null;
                     label.hiddenByPriority = true;
                     continue;
                 }
+                label.screenPos = pos;
                 const rect = this._getLabelCorners(label);
                 if (!rect) {
                     label.hiddenByPriority = true;
@@ -1305,6 +1323,11 @@ export class TextManager {
             const zb = src.getTextZoomBounds();
             const sourceVisible = src.isVisible() && zoom >= zb.min && zoom <= zb.max;
             const shouldBeVisible = sourceVisible && !label.hiddenByPriority;
+            // ── Фаза скрытия ───────────────────────────────────────────
+            // Если подпись должна быть невидимой — запускаем fade-out один
+            // раз, но НЕ пропускаем transform ниже: пока идёт fade-out,
+            // подпись должна продолжать следовать за якорем, иначе она
+            // «залипает» на краю экрана при панорамировании.
             if (!shouldBeVisible) {
                 const el = label.element;
                 const isFadingOut = label._hideTimeout != null;
@@ -1324,10 +1347,9 @@ export class TextManager {
                         label._pendingChosenIsFlipped = false;
                     }
                     this._setLabelVisible(label, false);
-                    if (!isCurved)
-                        continue;
                 }
             }
+            // ── Кривые (line-curved) ───────────────────────────────────
             if (isCurved) {
                 let inTransition = false;
                 if (shouldBeVisible && label._pendingChosenT != null) {
@@ -1382,14 +1404,20 @@ export class TextManager {
                 }
                 continue;
             }
+            // ── Точечные и обычные линии ───────────────────────────────
             let pos;
             if (type === 'line')
                 pos = src.getScreenPositionAt(label.t);
             else
                 pos = src.getScreenPosition();
             if (!pos) {
-                if (!shouldBeVisible)
+                if (!shouldBeVisible) {
+                    // Позиция недоступна, а подпись уже фейдится — гасим
+                    // мгновенно, чтобы она не «прилипла» к краю экрана
+                    // в устаревшей точке.
+                    this._forceHide(label);
                     continue;
+                }
                 this._setLabelVisible(label, false);
                 continue;
             }

@@ -527,32 +527,36 @@ onTouchMove(e: TouchEvent) {
         // ─────────────────────────────────────────────────────────────
         // 1. КЛАССИФИКАЦИЯ ЖЕСТА (один раз на касание)
         // ─────────────────────────────────────────────────────────────
-  if (ts.activeGesture === null) {
+if (ts.activeGesture === null) {
     let aDiff = curAngle - ts.startAngle;
     while (aDiff >  Math.PI) aDiff -= 2 * Math.PI;
     while (aDiff < -Math.PI) aDiff += 2 * Math.PI;
 
     const zoomSignal   = Math.abs(curDist - ts.startDist);
     const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5;
-    const tiltSignal   = Math.abs(midY - ts.startMidY);
 
     // ─── тюнинг ───
-    const GESTURE_TRIGGER_PX = 10;   // было 14
-    const TILT_TRIGGER_PX    = 7;    // tilt-порог — ниже общего
-    const TILT_DOMINANCE     = 1.2;  // было 1.5
+    const GESTURE_TRIGGER_PX = 9;    // общая деад-зона
+    const TILT_TRIGGER_PX    = 4;    // tilt-порог — сильно ниже общего
+    const TILT_DOMINANCE     = 0.7;  // < 1 — tilt побеждает даже слабее конкурентов
+    const TILT_BIAS          = 2.0;  // ×2 к сигналу tilt при сравнении
 
-    // Деад-зона: ниже минимального из двух порогов — вообще ничего не делаем
-    if (Math.max(zoomSignal, rotateSignal, tiltSignal) <
-        Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX)) {
+    const tiltSignalRaw = Math.abs(midY - ts.startMidY);
+    const tiltSignal    = tiltSignalRaw * TILT_BIAS;
+
+    const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
+
+    // Деад-зона: пока ни один сигнал не дотянул до своего порога
+    if (maxSignal < Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX * TILT_BIAS)) {
         ts.prevDist = curDist; ts.prevAngle = curAngle;
         ts.prevMidX = midX;    ts.prevMidY = midY;
         return;
     }
 
     const tiltWins =
-        tiltSignal >= TILT_TRIGGER_PX &&
-        tiltSignal >  TILT_DOMINANCE * zoomSignal &&
-        tiltSignal >  TILT_DOMINANCE * rotateSignal;
+        tiltSignalRaw >= TILT_TRIGGER_PX &&            // порог по «сырому» px
+        tiltSignal    > TILT_DOMINANCE * zoomSignal &&
+        tiltSignal    > TILT_DOMINANCE * rotateSignal;
 
     if (tiltWins) {
         ts.activeGesture = 'tilt';
@@ -561,22 +565,19 @@ onTouchMove(e: TouchEvent) {
         ts.startMidX  = midX;
         ts.startDist  = curDist;
         ts.startAngle = curAngle;
-    } else if (Math.max(zoomSignal, rotateSignal, tiltSignal) >= GESTURE_TRIGGER_PX) {
+    } else if (maxSignal >= GESTURE_TRIGGER_PX) {
         ts.activeGesture = 'zoomRotate';
     } else {
-        // Сигнала хватает только на tilt-порог, но tilt не доминирует —
-        // ещё ждём, не фиксируем жест.
+        // сигнала хватает только на tilt-порог, но tilt не доминирует — ждём
         ts.prevDist = curDist; ts.prevAngle = curAngle;
         ts.prevMidX = midX;    ts.prevMidY = midY;
         return;
     }
 
-    // «мёртвая зона» — накопленное до классификации не применяем
     ts.prevDist = curDist; ts.prevAngle = curAngle;
     ts.prevMidX = midX;    ts.prevMidY = midY;
     return;
 }
-
         // ─────────────────────────────────────────────────────────────
         // 2. TILT — только pitch, зум и rotate отключены
         // ─────────────────────────────────────────────────────────────

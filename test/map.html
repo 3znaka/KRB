@@ -186,7 +186,12 @@
                 zoom: 17.5,
                 pitch: 48,
                 bearing: 122,
-                maxZoom: 22
+                maxZoom: 22,
+                minZoom: 15,
+                maxBounds: [
+            [37.644358, 55.753074],   // [minLon, minLat]
+            [37.684699, 55.774887],   // [maxLon, maxLat]
+        ],
             }),
             antialias: true
         });

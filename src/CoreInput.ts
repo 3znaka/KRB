@@ -534,29 +534,26 @@ if (ts.activeGesture === null) {
 
     const zoomSignal   = Math.abs(curDist - ts.startDist);
     const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5;
+    const tiltSignal   = Math.abs(midY - ts.startMidY);
 
-    // ─── тюнинг ───
-    const GESTURE_TRIGGER_PX = 9;    // общая деад-зона
-    const TILT_TRIGGER_PX    = 4;    // tilt-порог — сильно ниже общего
-    const TILT_DOMINANCE     = 0.7;  // < 1 — tilt побеждает даже слабее конкурентов
-    const TILT_BIAS          = 2.0;  // ×2 к сигналу tilt при сравнении
-
-    const tiltSignalRaw = Math.abs(midY - ts.startMidY);
-    const tiltSignal    = tiltSignalRaw * TILT_BIAS;
+    // ─── тюнинг: середина между v1 и v2 ───
+    const GESTURE_TRIGGER_PX = 10;   // было 14 (v1) / 9 (v2)
+    const TILT_TRIGGER_PX    = 6;    // было 7  (v1) / 4 (v2)
+    const TILT_DOMINANCE     = 0.8;  // было 1.2 (v1) / 0.35 эффективно (v2)
 
     const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
 
-    // Деад-зона: пока ни один сигнал не дотянул до своего порога
-    if (maxSignal < Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX * TILT_BIAS)) {
+    // Деад-зона: сигнала не хватает даже на минимум обоих порогов
+    if (maxSignal < Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX)) {
         ts.prevDist = curDist; ts.prevAngle = curAngle;
         ts.prevMidX = midX;    ts.prevMidY = midY;
         return;
     }
 
     const tiltWins =
-        tiltSignalRaw >= TILT_TRIGGER_PX &&            // порог по «сырому» px
-        tiltSignal    > TILT_DOMINANCE * zoomSignal &&
-        tiltSignal    > TILT_DOMINANCE * rotateSignal;
+        tiltSignal >= TILT_TRIGGER_PX &&
+        tiltSignal >  TILT_DOMINANCE * zoomSignal &&
+        tiltSignal >  TILT_DOMINANCE * rotateSignal;
 
     if (tiltWins) {
         ts.activeGesture = 'tilt';
@@ -568,7 +565,7 @@ if (ts.activeGesture === null) {
     } else if (maxSignal >= GESTURE_TRIGGER_PX) {
         ts.activeGesture = 'zoomRotate';
     } else {
-        // сигнала хватает только на tilt-порог, но tilt не доминирует — ждём
+        // хватает только tilt-порога, но tilt не выиграл — ждём
         ts.prevDist = curDist; ts.prevAngle = curAngle;
         ts.prevMidX = midX;    ts.prevMidY = midY;
         return;

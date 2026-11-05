@@ -151,10 +151,9 @@ export class Marker extends SpatialObject {
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
     }
     _teardown() {
-        // Убираем записи _elementToMarker; сам DOM-элемент удалит
-        // SpatialObject.remove() через textManager.removeLabel().
         const el = this._textLabel?.element;
         if (el) {
+            el.removeEventListener('wheel', this._onLabelWheel);
             _elementToMarker.delete(el);
             const iconEl = el.querySelector('.krb-icon');
             if (iconEl)
@@ -372,11 +371,30 @@ export class Marker extends SpatialObject {
         this._textLabel = tm.addLabel(this);
         this._bindLabelDomEvents();
     }
-    /**
-     * Регистрирует DOM-элемент(ы) label в _elementToMarker и навешивает
-     * обработчики событий на иконку. Вызывается один раз после
-     * addLabel (и при _rebuildLabel).
-     */
+    // Marker.ts
+    _onLabelWheel = (e) => {
+        const canvas = this._map?.renderer?.domElement;
+        if (!canvas)
+            return;
+        e.preventDefault();
+        e.stopPropagation();
+        canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaX: e.deltaX,
+            deltaY: e.deltaY,
+            deltaZ: e.deltaZ,
+            deltaMode: e.deltaMode,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            screenX: e.screenX,
+            screenY: e.screenY,
+            ctrlKey: e.ctrlKey,
+            shiftKey: e.shiftKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+            bubbles: true,
+            cancelable: true,
+        }));
+    };
     _bindLabelDomEvents() {
         if (!this._textLabel)
             return;
@@ -384,6 +402,7 @@ export class Marker extends SpatialObject {
         if (!labelEl)
             return;
         _elementToMarker.set(labelEl, this);
+        labelEl.addEventListener('wheel', this._onLabelWheel, { passive: false });
         const iconEl = labelEl.querySelector('.krb-icon');
         if (iconEl) {
             _elementToMarker.set(iconEl, this);

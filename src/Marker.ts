@@ -235,18 +235,17 @@ export class Marker extends SpatialObject {
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
     }
 
-    protected _teardown(): void {
-        // Убираем записи _elementToMarker; сам DOM-элемент удалит
-        // SpatialObject.remove() через textManager.removeLabel().
-        const el = this._textLabel?.element as HTMLElement | undefined;
-        if (el) {
-            _elementToMarker.delete(el);
-            const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
-            if (iconEl) _elementToMarker.delete(iconEl);
-        }
-        this._isVisible = false;
-        this._lastScreenPos = null;
+protected _teardown(): void {
+    const el = this._textLabel?.element as HTMLElement | undefined;
+    if (el) {
+        el.removeEventListener('wheel', this._onLabelWheel);
+        _elementToMarker.delete(el);
+        const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
+        if (iconEl) _elementToMarker.delete(iconEl);
     }
+    this._isVisible = false;
+    this._lastScreenPos = null;
+}
 
     protected _applyHidden(): void {
         this._isVisible = false;
@@ -488,24 +487,45 @@ export class Marker extends SpatialObject {
         this._bindLabelDomEvents();
     }
 
-    /**
-     * Регистрирует DOM-элемент(ы) label в _elementToMarker и навешивает
-     * обработчики событий на иконку. Вызывается один раз после
-     * addLabel (и при _rebuildLabel).
-     */
-    private _bindLabelDomEvents(): void {
-        if (!this._textLabel) return;
-        const labelEl = this._textLabel.element as HTMLElement | null;
-        if (!labelEl) return;
+// Marker.ts
 
-        _elementToMarker.set(labelEl, this);
+private _onLabelWheel = (e: WheelEvent): void => {
+    const canvas = this._map?.renderer?.domElement as HTMLElement | null;
+    if (!canvas) return;
+    e.preventDefault();
+    e.stopPropagation();
+    canvas.dispatchEvent(new WheelEvent('wheel', {
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+        deltaZ: e.deltaZ,
+        deltaMode: e.deltaMode,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        screenX: e.screenX,
+        screenY: e.screenY,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+        bubbles: true,
+        cancelable: true,
+    }));
+};
 
-        const iconEl = labelEl.querySelector('.krb-icon') as HTMLElement | null;
-        if (iconEl) {
-            _elementToMarker.set(iconEl, this);
-            this._attachPointerHandlers(iconEl);
-        }
+private _bindLabelDomEvents(): void {
+    if (!this._textLabel) return;
+    const labelEl = this._textLabel.element as HTMLElement | null;
+    if (!labelEl) return;
+
+    _elementToMarker.set(labelEl, this);
+    labelEl.addEventListener('wheel', this._onLabelWheel, { passive: false });
+
+    const iconEl = labelEl.querySelector('.krb-icon') as HTMLElement | null;
+    if (iconEl) {
+        _elementToMarker.set(iconEl, this);
+        this._attachPointerHandlers(iconEl);
     }
+}
 
     private _attachPointerHandlers(target: HTMLElement): void {
         target.addEventListener('click', (e) => {

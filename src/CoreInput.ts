@@ -527,51 +527,55 @@ onTouchMove(e: TouchEvent) {
         // ─────────────────────────────────────────────────────────────
         // 1. КЛАССИФИКАЦИЯ ЖЕСТА (один раз на касание)
         // ─────────────────────────────────────────────────────────────
-        if (ts.activeGesture === null) {
-            let aDiff = curAngle - ts.startAngle;
-            while (aDiff >  Math.PI) aDiff -= 2 * Math.PI;
-            while (aDiff < -Math.PI) aDiff += 2 * Math.PI;
+  if (ts.activeGesture === null) {
+    let aDiff = curAngle - ts.startAngle;
+    while (aDiff >  Math.PI) aDiff -= 2 * Math.PI;
+    while (aDiff < -Math.PI) aDiff += 2 * Math.PI;
 
-            const zoomSignal   = Math.abs(curDist - ts.startDist);
-            const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5; // «пиксели» эквивалент
-            const tiltSignal   = Math.abs(midY - ts.startMidY);
+    const zoomSignal   = Math.abs(curDist - ts.startDist);
+    const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5;
+    const tiltSignal   = Math.abs(midY - ts.startMidY);
 
-            const GESTURE_TRIGGER_PX = 14;   // ниже — «мёртвая зона»
-            const TILT_DOMINANCE     = 1.5;  // tilt должен явно доминировать
+    // ─── тюнинг ───
+    const GESTURE_TRIGGER_PX = 10;   // было 14
+    const TILT_TRIGGER_PX    = 7;    // tilt-порог — ниже общего
+    const TILT_DOMINANCE     = 1.2;  // было 1.5
 
-            const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
-            if (maxSignal < GESTURE_TRIGGER_PX) {
-                // ещё не набрали сигнала — просто запоминаем prev
-                ts.prevDist = curDist;
-                ts.prevAngle = curAngle;
-                ts.prevMidX = midX;
-                ts.prevMidY = midY;
-                return;
-            }
+    // Деад-зона: ниже минимального из двух порогов — вообще ничего не делаем
+    if (Math.max(zoomSignal, rotateSignal, tiltSignal) <
+        Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX)) {
+        ts.prevDist = curDist; ts.prevAngle = curAngle;
+        ts.prevMidX = midX;    ts.prevMidY = midY;
+        return;
+    }
 
-            if (tiltSignal >= GESTURE_TRIGGER_PX &&
-                tiltSignal >  TILT_DOMINANCE * zoomSignal &&
-                tiltSignal >  TILT_DOMINANCE * rotateSignal) {
-                // TILT — эксклюзивный режим
-                ts.activeGesture = 'tilt';
-                ts.startPitch = ts.prevPitch;
-                ts.startMidY  = midY;               // база отсчёта — от текущего момента
-                ts.startMidX  = midX;
-                // для симметрии сохраним дистанцию/угол — вдруг пригодится
-                ts.startDist  = curDist;
-                ts.startAngle = curAngle;
-            } else {
-                ts.activeGesture = 'zoomRotate';
-            }
+    const tiltWins =
+        tiltSignal >= TILT_TRIGGER_PX &&
+        tiltSignal >  TILT_DOMINANCE * zoomSignal &&
+        tiltSignal >  TILT_DOMINANCE * rotateSignal;
 
-            // «мёртвая зона» — накопленное до классификации не применяем
-            ts.prevDist = curDist;
-            ts.prevAngle = curAngle;
-            ts.prevMidX = midX;
-            ts.prevMidY = midY;
+    if (tiltWins) {
+        ts.activeGesture = 'tilt';
+        ts.startPitch = ts.prevPitch;
+        ts.startMidY  = midY;
+        ts.startMidX  = midX;
+        ts.startDist  = curDist;
+        ts.startAngle = curAngle;
+    } else if (Math.max(zoomSignal, rotateSignal, tiltSignal) >= GESTURE_TRIGGER_PX) {
+        ts.activeGesture = 'zoomRotate';
+    } else {
+        // Сигнала хватает только на tilt-порог, но tilt не доминирует —
+        // ещё ждём, не фиксируем жест.
+        ts.prevDist = curDist; ts.prevAngle = curAngle;
+        ts.prevMidX = midX;    ts.prevMidY = midY;
+        return;
+    }
 
-            return;
-        }
+    // «мёртвая зона» — накопленное до классификации не применяем
+    ts.prevDist = curDist; ts.prevAngle = curAngle;
+    ts.prevMidX = midX;    ts.prevMidY = midY;
+    return;
+}
 
         // ─────────────────────────────────────────────────────────────
         // 2. TILT — только pitch, зум и rotate отключены

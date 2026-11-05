@@ -468,33 +468,43 @@ export const CoreInputMixin = {
                 while (aDiff < -Math.PI)
                     aDiff += 2 * Math.PI;
                 const zoomSignal = Math.abs(curDist - ts.startDist);
-                const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5; // «пиксели» эквивалент
+                const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5;
                 const tiltSignal = Math.abs(midY - ts.startMidY);
-                const GESTURE_TRIGGER_PX = 14; // ниже — «мёртвая зона»
-                const TILT_DOMINANCE = 1.5; // tilt должен явно доминировать
-                const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
-                if (maxSignal < GESTURE_TRIGGER_PX) {
-                    // ещё не набрали сигнала — просто запоминаем prev
+                // ─── тюнинг ───
+                const GESTURE_TRIGGER_PX = 10; // было 14
+                const TILT_TRIGGER_PX = 7; // tilt-порог — ниже общего
+                const TILT_DOMINANCE = 1.2; // было 1.5
+                // Деад-зона: ниже минимального из двух порогов — вообще ничего не делаем
+                if (Math.max(zoomSignal, rotateSignal, tiltSignal) <
+                    Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX)) {
                     ts.prevDist = curDist;
                     ts.prevAngle = curAngle;
                     ts.prevMidX = midX;
                     ts.prevMidY = midY;
                     return;
                 }
-                if (tiltSignal >= GESTURE_TRIGGER_PX &&
+                const tiltWins = tiltSignal >= TILT_TRIGGER_PX &&
                     tiltSignal > TILT_DOMINANCE * zoomSignal &&
-                    tiltSignal > TILT_DOMINANCE * rotateSignal) {
-                    // TILT — эксклюзивный режим
+                    tiltSignal > TILT_DOMINANCE * rotateSignal;
+                if (tiltWins) {
                     ts.activeGesture = 'tilt';
                     ts.startPitch = ts.prevPitch;
-                    ts.startMidY = midY; // база отсчёта — от текущего момента
+                    ts.startMidY = midY;
                     ts.startMidX = midX;
-                    // для симметрии сохраним дистанцию/угол — вдруг пригодится
                     ts.startDist = curDist;
                     ts.startAngle = curAngle;
                 }
-                else {
+                else if (Math.max(zoomSignal, rotateSignal, tiltSignal) >= GESTURE_TRIGGER_PX) {
                     ts.activeGesture = 'zoomRotate';
+                }
+                else {
+                    // Сигнала хватает только на tilt-порог, но tilt не доминирует —
+                    // ещё ждём, не фиксируем жест.
+                    ts.prevDist = curDist;
+                    ts.prevAngle = curAngle;
+                    ts.prevMidX = midX;
+                    ts.prevMidY = midY;
+                    return;
                 }
                 // «мёртвая зона» — накопленное до классификации не применяем
                 ts.prevDist = curDist;

@@ -153,14 +153,14 @@ export const CoreEventsMixin = {
         const payloadFor = (e) => {
             const rect = el.getBoundingClientRect();
             const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-            let lngLat = null;
+            let lonLat = null;
             if (this.worldGroup && this.camera) {
                 const world = this._raycastToGround(e.clientX, e.clientY, new THREE.Vector3());
                 if (world) {
-                    lngLat = this.unprojectToLonLat(world.x - this.worldGroup.position.x, world.z - this.worldGroup.position.z);
+                    lonLat = this.unprojectToLonLat(world.x - this.worldGroup.position.x, world.z - this.worldGroup.position.z);
                 }
             }
-            return { lngLat, point, originalEvent: e };
+            return { lonLat, point, originalEvent: e };
         };
         const dispatch = (name) => (e) => {
             const set = this._eventHandlers.get(name);

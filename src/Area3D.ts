@@ -649,7 +649,7 @@ this._userData = options.userData ?? {};
     }
 
     /** WGS84-центр bbox — алиас `getCenter()`. */
-    getLngLat(): LonLat | null {
+    getLonLat(): LonLat | null {
         return this.getCenter();
     }
 

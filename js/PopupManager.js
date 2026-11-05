@@ -44,7 +44,7 @@ export class PopupManager {
      *
      * // С полными опциями точки:
      * map.popupManager.showAtPoint(
-     *     { lngLat: [37.62, 55.75], altitude: 200 },
+     *     { lonLat: [37.62, 55.75], altitude: 200 },
      *     '<b>Высота 200 м</b>'
      * );
      *
@@ -95,7 +95,7 @@ export class PopupManager {
     /**
      * Показывает тултип в произвольной точке.
      *
-     * `lngLat` — `[lon, lat]` или `[lon, lat, alt]` в WGS84 (или в СК,
+     * `lonLat` — `[lon, lat]` или `[lon, lat, alt]` в WGS84 (или в СК,
      * указанной в {@link PopupPoint#crs} через {@link showAtPoint}).
      * На каждом кадре экранная позиция пересчитывается через `map.project`
      * — при движении камеры попап «висит» в точке.
@@ -104,8 +104,8 @@ export class PopupManager {
      * map.popupManager.showAt([37.62, 55.75], '<b>Москва</b>');
      * map.popupManager.showAt([37.62, 55.75, 200], '<b>На высоте 200 м</b>');
      */
-    showAt(lngLat, html) {
-        this.showAtPoint({ lngLat }, html);
+    showAt(lonLat, html) {
+        this.showAtPoint({ lonLat }, html);
     }
     /**
      * Показывает тултип в произвольной точке с полными опциями
@@ -113,11 +113,11 @@ export class PopupManager {
      *
      * @example
      * map.popupManager.showAtPoint(
-     *     { lngLat: [7425000, 6200000], crs: 'EPSG:3857' },
+     *     { lonLat: [7425000, 6200000], crs: 'EPSG:3857' },
      *     '<b>Точка в Меркаторе</b>'
      * );
      * map.popupManager.showAtPoint(
-     *     { lngLat: [37.62, 55.75], altitude: 500 },
+     *     { lonLat: [37.62, 55.75], altitude: 500 },
      *     '<b>+500 м</b>'
      * );
      */
@@ -268,7 +268,7 @@ export class PopupManager {
     // =================================================================
     _makeVirtualAnchor(point) {
         return {
-            getScreenPosition: () => this._projectLngLatToScreen(point.lngLat, point.crs, point.altitude),
+            getScreenPosition: () => this._projectLonLatToScreen(point.lonLat, point.crs, point.altitude),
         };
     }
     /**
@@ -276,12 +276,12 @@ export class PopupManager {
      * Возвращает `null`, если точки нет в видимой области frustum'а
      * или карта уничтожена.
      */
-    _projectLngLatToScreen(lngLat, crs, altitude) {
+    _projectLonLatToScreen(lonLat, crs, altitude) {
         const map = this._map;
         if (!map)
             return null;
-        const alt = lngLat.length >= 3 ? lngLat[2] : (altitude ?? 0);
-        const [absX, absZ] = map.project([lngLat[0], lngLat[1]], crs ?? map.inputCRS);
+        const alt = lonLat.length >= 3 ? lonLat[2] : (altitude ?? 0);
+        const [absX, absZ] = map.project([lonLat[0], lonLat[1]], crs ?? map.inputCRS);
         const wgPos = map.worldGroup.position;
         const vec = new THREE.Vector3(absX + wgPos.x, alt + wgPos.y, absZ + wgPos.z);
         vec.project(map.camera);

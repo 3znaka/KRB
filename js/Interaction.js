@@ -212,7 +212,7 @@ export class InteractionManager {
                 : null;
             if (marker && !seen.has(marker)) {
                 seen.add(marker);
-                const ll = marker.getLngLat() ?? marker.getCenter() ?? null;
+                const ll = marker.getLonLat() ?? marker.getCenter() ?? null;
                 result.push({
                     object: marker,
                     layer: marker.getLayer(),

@@ -453,7 +453,7 @@ export class Marker3D extends SpatialObject {
     // =================================================================
     // Позиция / CRS
     // =================================================================
-    setLngLat(lonLat) {
+    setLonLat(lonLat) {
         if (!lonLat || lonLat.length !== 2)
             return this;
         this._lon = lonLat[0];
@@ -479,7 +479,7 @@ export class Marker3D extends SpatialObject {
         this._lastHeightUpdateTime = 0;
         return this;
     }
-    getLngLat() {
+    getLonLat() {
         if (this._lon !== null && this._lat !== null)
             return [this._lon, this._lat];
         if (this._crs) {
@@ -493,14 +493,13 @@ export class Marker3D extends SpatialObject {
         }
         return null;
     }
-    getLonLat() { return this.getLngLat(); }
     /** Возвращает исходные координаты в собственной СК маркера. */
     getPosition() { return [this._coord[0], this._coord[1]]; }
     /** Возвращает код СК маркера или null. */
     getCRS() { return this._crsCode; }
     /** Центр (по факту — позиция) в WGS84: `[lon, lat]`, либо `null`. */
     getCenter() {
-        const ll = this.getLngLat();
+        const ll = this.getLonLat();
         return ll ? [ll[0], ll[1]] : null;
     }
     // =================================================================

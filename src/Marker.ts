@@ -270,7 +270,7 @@ export class Marker extends SpatialObject {
     // Позиция / CRS / bounds
     // =================================================================
 
-    setLngLat(lonLat: LonLat): this {
+    setLonLat(lonLat: LonLat): this {
         if (!lonLat || lonLat.length !== 2) return this;
         const crs = this._resolveCrs() ?? Projections.get('EPSG:4326');
         const conv = crs.fromLonLat(lonLat);
@@ -283,7 +283,7 @@ export class Marker extends SpatialObject {
         return this;
     }
 
-    getLngLat(): LonLat | null {
+    getLonLat(): LonLat | null {
         if (this._lon !== null && this._lat !== null) {
             return [this._lon, this._lat];
         }
@@ -291,10 +291,6 @@ export class Marker extends SpatialObject {
         if (!crs) return null;
         const ll = crs.toLonLat(this._coord);
         return [ll[0], ll[1]];
-    }
-
-    getLonLat(): LonLat | null {
-        return this.getLngLat();
     }
 
     getPosition(): CoordXY {
@@ -306,7 +302,7 @@ export class Marker extends SpatialObject {
     }
 
     getCenter(): LonLat | null {
-        return this.getLngLat();
+        return this.getLonLat();
     }
 
     // =================================================================

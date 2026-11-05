@@ -13,7 +13,7 @@ export type KrbMapEventName =
     | 'resize';
 
 export interface PointerEventPayload {
-    lngLat: [number, number] | null;
+    lonLat: [number, number] | null;
     point: { x: number; y: number };
     originalEvent: PointerEvent | MouseEvent;
 }
@@ -164,17 +164,17 @@ export const CoreEventsMixin: CoreEventsMethods & ThisType<KrbMap> = {
         const payloadFor = (e: PointerEvent | MouseEvent): PointerEventPayload => {
             const rect  = el.getBoundingClientRect();
             const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-            let lngLat: [number, number] | null = null;
+            let lonLat: [number, number] | null = null;
             if (this.worldGroup && this.camera) {
                 const world = this._raycastToGround(e.clientX, e.clientY, new THREE.Vector3());
                 if (world) {
-                    lngLat = this.unprojectToLonLat(
+                    lonLat = this.unprojectToLonLat(
                         world.x - this.worldGroup.position.x,
                         world.z - this.worldGroup.position.z
                     );
                 }
             }
-            return { lngLat, point, originalEvent: e };
+            return { lonLat, point, originalEvent: e };
         };
 
         const dispatch = (name: KrbMapEventName) => (e: PointerEvent | MouseEvent) => {

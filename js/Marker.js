@@ -180,7 +180,7 @@ export class Marker extends SpatialObject {
     // =================================================================
     // Позиция / CRS / bounds
     // =================================================================
-    setLngLat(lonLat) {
+    setLonLat(lonLat) {
         if (!lonLat || lonLat.length !== 2)
             return this;
         const crs = this._resolveCrs() ?? Projections.get('EPSG:4326');
@@ -193,7 +193,7 @@ export class Marker extends SpatialObject {
         this._afterPositionChange();
         return this;
     }
-    getLngLat() {
+    getLonLat() {
         if (this._lon !== null && this._lat !== null) {
             return [this._lon, this._lat];
         }
@@ -203,9 +203,6 @@ export class Marker extends SpatialObject {
         const ll = crs.toLonLat(this._coord);
         return [ll[0], ll[1]];
     }
-    getLonLat() {
-        return this.getLngLat();
-    }
     getPosition() {
         return [this._coord[0], this._coord[1]];
     }
@@ -213,7 +210,7 @@ export class Marker extends SpatialObject {
         return this._crsCode;
     }
     getCenter() {
-        return this.getLngLat();
+        return this.getLonLat();
     }
     // =================================================================
     // Иконка: URL / размер / anchor / поворот

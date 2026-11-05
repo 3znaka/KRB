@@ -543,7 +543,7 @@ this._userData = options.userData ?? {};
     // Позиция / CRS
     // =================================================================
 
-    setLngLat(lonLat: LonLat): this {
+    setLonLat(lonLat: LonLat): this {
         if (!lonLat || lonLat.length !== 2) return this;
 
         this._lon = lonLat[0];
@@ -570,7 +570,7 @@ this._userData = options.userData ?? {};
         return this;
     }
 
-    getLngLat(): LonLat | null {
+    getLonLat(): LonLat | null {
         if (this._lon !== null && this._lat !== null) return [this._lon, this._lat];
         if (this._crs) {
             const ll = this._crs.toLonLat(this._coord);
@@ -584,7 +584,6 @@ this._userData = options.userData ?? {};
         return null;
     }
 
-    getLonLat(): LonLat | null { return this.getLngLat(); }
 
     /** Возвращает исходные координаты в собственной СК маркера. */
     getPosition(): CoordXY { return [this._coord[0], this._coord[1]]; }
@@ -594,7 +593,7 @@ this._userData = options.userData ?? {};
 
     /** Центр (по факту — позиция) в WGS84: `[lon, lat]`, либо `null`. */
     getCenter(): LonLat | null {
-        const ll = this.getLngLat();
+        const ll = this.getLonLat();
         return ll ? [ll[0], ll[1]] : null;
     }
 

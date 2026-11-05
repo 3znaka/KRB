@@ -557,7 +557,7 @@ export class Area3D extends SpatialObject {
         return [sx / outer.length, sy / outer.length];
     }
     /** WGS84-центр bbox — алиас `getCenter()`. */
-    getLngLat() {
+    getLonLat() {
         return this.getCenter();
     }
     getCRS() { return this._crsCode; }

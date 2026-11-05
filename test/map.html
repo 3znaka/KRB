@@ -784,7 +784,7 @@ function selectSearchResult(item) {
             if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
 
             if (userMarker) {
-                userMarker.setLngLat([lon, lat]);
+                userMarker.setLonLat([lon, lat]);
             } else {
                 userMarker = new KRB.Marker({
                     position: [lon, lat],

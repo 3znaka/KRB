@@ -95,6 +95,7 @@ export class KrbMap {
     _firstRenderDone;
     _padding = null;
     _maxBounds = null;
+    _lastBoundsCheck = null;
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene;
     camera;

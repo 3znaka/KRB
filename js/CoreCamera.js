@@ -168,7 +168,12 @@ export const CoreCameraMixin = {
         if (!canvas)
             return null;
         this.camera.updateMatrixWorld(true);
-        const rect = canvas.getBoundingClientRect();
+        // Reuse cached rect (see CoreInput._getCanvasRect) — matches the
+        // rect used inside _raycastToGround, so raycasts hit exactly the
+        // pixels we advertise as corners.
+        const rect = typeof this._getCanvasRect === 'function'
+            ? this._getCanvasRect()
+            : canvas.getBoundingClientRect();
         const W = rect.width, H = rect.height;
         const off = this.worldGroup.position;
         const corners = [
@@ -179,7 +184,8 @@ export const CoreCameraMixin = {
         ];
         const lons = [];
         const lats = [];
-        const tmp = new THREE.Vector3();
+        // Reuse a single temp vector instead of allocating a new one.
+        const tmp = this._tempVec3a;
         for (const [px, py] of corners) {
             const world = this._raycastToGround(px, py, tmp);
             if (!world)
@@ -201,6 +207,8 @@ export const CoreCameraMixin = {
         this.easeTo({ ...options, duration: 0 });
     },
     setMaxBounds(bounds) {
+        // Invalidate cached bounds check — bounds changed.
+        this._lastBoundsCheck = null;
         if (!bounds) {
             this._maxBounds = null;
             return;
@@ -218,17 +226,34 @@ export const CoreCameraMixin = {
     /**
      * Clamp эффективного центра в maxBounds через сдвиг worldGroup.
      * Вызывается: из pan-путей (CoreInput), из animate() каждый кадр (catch-all),
-     * из easeTo (см. патч ниже).
+     * из easeTo.
+     *
+     * Кэширует последнее состояние (target + worldGroup.position). Если
+     * за кадр ничего не изменилось — повторная проекция не выполняется.
+     * В типичной сцене (пользователь не двигает камеру) это устраняет
+     * 1 unprojectToLonLat + 1 projectLonLat на каждый кадр.
      */
     _enforceMaxBounds() {
         if (!this._maxBounds)
             return;
         if (!this.controls || !this.worldGroup)
             return;
-        const off = this.worldGroup.position;
-        let [lon, lat] = this.unprojectToLonLat(this.controls.target.x - off.x, this.controls.target.z - off.z);
-        if (!Number.isFinite(lon) || !Number.isFinite(lat))
+        const tx = this.controls.target.x;
+        const tz = this.controls.target.z;
+        const wx = this.worldGroup.position.x;
+        const wz = this.worldGroup.position.z;
+        // Early-out: same state as last check and nothing was clamped.
+        const last = this._lastBoundsCheck;
+        if (last &&
+            last.tx === tx && last.tz === tz &&
+            last.wx === wx && last.wz === wz) {
             return;
+        }
+        let [lon, lat] = this.unprojectToLonLat(tx - wx, tz - wz);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+            this._lastBoundsCheck = { tx, tz, wx, wz };
+            return;
+        }
         // Нормализуем lon — вдруг worldGroup был на «обёрнутой» позиции
         while (lon < -180)
             lon += 360;
@@ -237,13 +262,24 @@ export const CoreCameraMixin = {
         const b = this._maxBounds;
         const newLon = Math.max(b.minLon, Math.min(b.maxLon, lon));
         const newLat = Math.max(b.minLat, Math.min(b.maxLat, lat));
-        if (newLon === lon && newLat === lat)
+        if (newLon === lon && newLat === lat) {
+            // Ничего не меняем — кэшируем текущее состояние.
+            this._lastBoundsCheck = { tx, tz, wx, wz };
             return;
+        }
         // Сдвигаем worldGroup так, чтобы controls.target эффективно указывал
-        // в (newLon, newLat). Это то же самое, что «pan с упором в границу».
-        const [wx, wz] = this.projectLonLat(newLon, newLat);
-        this.worldGroup.position.x = this.controls.target.x - wx;
-        this.worldGroup.position.z = this.controls.target.z - wz;
+        // в (newLon, newLat).
+        const [wxNew, wzNew] = this.projectLonLat(newLon, newLat);
+        this.worldGroup.position.x = this.controls.target.x - wxNew;
+        this.worldGroup.position.z = this.controls.target.z - wzNew;
+        // Кэшируем новое (уже clamped) состояние — следующий кадр без
+        // изменений пропустит работу.
+        this._lastBoundsCheck = {
+            tx: this.controls.target.x,
+            tz: this.controls.target.z,
+            wx: this.worldGroup.position.x,
+            wz: this.worldGroup.position.z,
+        };
     },
     setPadding(padding) { this._applyPadding(padding); },
     _applyPadding(padding) {
@@ -293,22 +329,36 @@ export const CoreCameraMixin = {
         const K = H / (2 * this.TILE_PIXELS * tanHalfFov);
         return Math.log2((this.WORLD_SIZE * K) / d);
     },
+    // ───────────────────────────────────────────────────────────────────────
+    // Optimized _resolveCameraPlacement:
+    //
+    // 1. cos(azimuth) / sin(azimuth) hoisted OUT of the `hasElevation`
+    //    branch, so the output-path trig call uses the same precomputed
+    //    values (previously cos/sin(azimuth) were computed 2x when
+    //    hasElevation was true).
+    // 2. sin(pitch) / cos(pitch) are computed once and reused for output
+    //    when the loop exits without modifying `pitch` (the common case:
+    //    camera is above terrain on the first iteration).
+    //    Only recomputed when `pitch` actually changes inside the loop.
+    // 3. Elevation sampling is untouched — its iterative refinement is
+    //    required for correctness.
+    // ───────────────────────────────────────────────────────────────────────
     _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
         let dist = desiredDist;
         const minP = this.controls?.minPolarAngle ?? 0.001;
         const maxP = this.controls?.maxPolarAngle ?? (Math.PI - 0.001);
-        let pitch = Math.max(minP, Math.min(maxP, desiredPitch)); // ← было Math.PI - 0.001
+        let pitch = Math.max(minP, Math.min(maxP, desiredPitch));
+        const cosAz = Math.cos(azimuth);
+        const sinAz = Math.sin(azimuth);
+        let sinP = Math.sin(pitch);
+        let cosP = Math.cos(pitch);
         if (this.hasElevation) {
             const clearance = this.CAMERA_TERRAIN_CLEARANCE;
             const targetTerrain = this.getSurfaceHeightAt(target.x, target.z);
             const minDistForTarget = targetTerrain + clearance;
             if (dist < minDistForTarget)
                 dist = minDistForTarget;
-            const cosAz = Math.cos(azimuth);
-            const sinAz = Math.sin(azimuth);
             for (let iter = 0; iter < 6; iter++) {
-                const sinP = Math.sin(pitch);
-                const cosP = Math.cos(pitch);
                 const camX = target.x + dist * sinP * cosAz;
                 const camZ = target.z + dist * sinP * sinAz;
                 const camY = target.y + dist * cosP;
@@ -319,15 +369,17 @@ export const CoreCameraMixin = {
                 const requiredCosP = Math.min(1, requiredY / dist);
                 pitch = Math.acos(requiredCosP);
                 pitch = Math.max(minP, Math.min(maxP, pitch));
+                // pitch changed — refresh trig for the next iteration /
+                // for the final output below.
+                sinP = Math.sin(pitch);
+                cosP = Math.cos(pitch);
                 if (pitch <= minP) {
                     pitch = minP;
                     break;
                 }
             }
         }
-        const sinP = Math.sin(pitch);
-        const cosP = Math.cos(pitch);
-        outPos.set(target.x + dist * sinP * Math.cos(azimuth), target.y + dist * cosP, target.z + dist * sinP * Math.sin(azimuth));
+        outPos.set(target.x + dist * sinP * cosAz, target.y + dist * cosP, target.z + dist * sinP * sinAz);
         return { pitch, dist };
     },
     setPitch(pitchDeg, duration = 0.3) {
@@ -456,6 +508,8 @@ export const CoreCameraMixin = {
         const [newCenterX, newCenterZ] = this.projectLonLat(newLon, lat);
         this.worldGroup.position.x = this.controls.target.x - newCenterX;
         this.worldGroup.position.z = this.controls.target.z - newCenterZ;
+        // worldGroup changed — invalidate cached bounds check
+        this._lastBoundsCheck = null;
         this.maybeUpdateVisibleTiles(true);
     },
     moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
@@ -655,6 +709,16 @@ export const CoreCameraMixin = {
             return this.BASE_DISTANCE;
         return dRequired;
     },
+    // ───────────────────────────────────────────────────────────────────────
+    // Optimized applyZoomDistance:
+    //
+    // 1. Uses _tempVec3a/_tempVec3b for the two pivot raycasts instead of
+    //    allocating a fresh THREE.Vector3 each call. Applied each zoom frame,
+    //    this saves ~2 vector allocations/frame.
+    // 2. Fixed a latent null-deref in the debug log: `P_after.x` was accessed
+    //    even when P_after was null. Now the shift is captured in locals and
+    //    only the debug path reads them.
+    // ───────────────────────────────────────────────────────────────────────
     applyZoomDistance() {
         if (this._cameraAnimation) {
             this._zoomPivotActive = false;
@@ -669,7 +733,9 @@ export const CoreCameraMixin = {
         if (pivotActive) {
             pivotSx = this._zoomPivotX;
             pivotSy = this._zoomPivotY;
-            P_before = this._raycastToGround(pivotSx, pivotSy, new THREE.Vector3());
+            // Reuse _tempVec3a. Safe: _resolveCameraPlacement below does not
+            // touch it, and elevation providers must not either.
+            P_before = this._raycastToGround(pivotSx, pivotSy, this._tempVec3a);
         }
         // --- существующее перемещение камеры ---
         const target = this._tempTarget.copy(this.controls.target);
@@ -685,18 +751,20 @@ export const CoreCameraMixin = {
         this.camera.position.copy(this._tempPlacementOut);
         this.camera.lookAt(target);
         // КРИТИЧНО: matrixWorld после lookAt хранит СТАРЫЙ кватернион.
-        // Для чистого зума это почти безвредно, но при малейшем изменении
-        // ориентации (например, если zoomToCursor идёт во время анимации
-        // или terrain-кламп чуть изменил pitch) raycast ошибается.
         this.camera.updateMatrixWorld(true);
         if (pivotActive && P_before) {
-            const P_after = this._raycastToGround(pivotSx, pivotSy, new THREE.Vector3());
+            const P_after = this._raycastToGround(pivotSx, pivotSy, this._tempVec3b);
+            let shiftX = 0, shiftZ = 0;
             if (P_after) {
-                this.worldGroup.position.x += P_after.x - P_before.x;
-                this.worldGroup.position.z += P_after.z - P_before.z;
+                shiftX = P_after.x - P_before.x;
+                shiftZ = P_after.z - P_before.z;
+                this.worldGroup.position.x += shiftX;
+                this.worldGroup.position.z += shiftZ;
+                // worldGroup changed — invalidate cached bounds check
+                this._lastBoundsCheck = null;
             }
             if (window.__krbDebugZoom) {
-                console.log('[zoom] z=%s dist=%s shift=(%s,%s) frameDt=%s', this.continuousZoom.toFixed(3), this.camera.position.distanceTo(this.controls.target).toFixed(1), (P_after.x - P_before.x).toFixed(3), (P_after.z - P_before.z).toFixed(3), (this._currentDeltaTime * 1000).toFixed(1));
+                console.log('[zoom] z=%s dist=%s shift=(%s,%s) frameDt=%s', this.continuousZoom.toFixed(3), this.camera.position.distanceTo(this.controls.target).toFixed(1), shiftX.toFixed(3), shiftZ.toFixed(3), (this._currentDeltaTime * 1000).toFixed(1));
             }
             if (zoomDiff < 0.001)
                 this._zoomPivotActive = false;

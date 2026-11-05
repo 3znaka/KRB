@@ -1,5 +1,28 @@
 // CoreInput.ts
 import { THREE } from './js_TP/tpb.js';
+// ───────────────────────────────────────────────────────────────────────
+// Module-level temporaries for hot paths.
+// These are reused across calls to avoid GC pressure at 60+ fps.
+// Safe because JS is single-threaded and each is used only inside one
+// method at a time (no interleaving within a single call stack).
+// ───────────────────────────────────────────────────────────────────────
+const _upAxis = new THREE.Vector3(0, 1, 0);
+// For _applyRotationDelta
+const _qY = new THREE.Quaternion();
+const _qH = new THREE.Quaternion();
+const _qR = new THREE.Quaternion();
+const _hAxis = new THREE.Vector3();
+const _camRel = new THREE.Vector3();
+const _tgtRel = new THREE.Vector3();
+const _testVec = new THREE.Vector3();
+const _ndVec = new THREE.Vector3();
+const _nhAxis = new THREE.Vector3();
+const _crtVec = new THREE.Vector3();
+const _qhInner = new THREE.Quaternion();
+// For _raycastToGround — separate plane from this.groundPlane,
+// because the latter is used for drag with y=0 fixed and must not be
+// mutated by the terrain iteration.
+const _rayPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 export const CoreInputMixin = {
     initDragTools() {
         this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -17,6 +40,8 @@ export const CoreInputMixin = {
         this._rotatePivotY = 0;
         this._rotateLastX = 0;
         this._rotateLastY = 0;
+        // Canvas rect cache — see _getCanvasRect()
+        this._cachedCanvasRect = null;
     },
     initTouchState() {
         this.touchState = {
@@ -31,10 +56,29 @@ export const CoreInputMixin = {
             activeGesture: null,
         };
     },
+    // ───────────────────────────────────────────────────────────────────────
+    // Cached canvas rect. getBoundingClientRect() triggers a layout reflow,
+    // which is why calling it on every pointermove is expensive. Cache it
+    // and invalidate only when the layout can actually change.
+    // ───────────────────────────────────────────────────────────────────────
+    _getCanvasRect() {
+        let r = this._cachedCanvasRect;
+        if (!r) {
+            r = this.renderer.domElement.getBoundingClientRect();
+            this._cachedCanvasRect = r;
+        }
+        return r;
+    },
+    _invalidateCanvasRect() {
+        this._cachedCanvasRect = null;
+    },
     onMouseDown(e) {
         if (this._cameraAnimation)
             return;
         this._zoomPivotActive = false;
+        // Invalidate rect on the start of a new gesture, in case the page
+        // scrolled without a resize event.
+        this._invalidateCanvasRect();
         // ── останавливаем pan-инерцию ──
         this._panVelX = 0;
         this._panVelZ = 0;
@@ -45,10 +89,15 @@ export const CoreInputMixin = {
             this._rotatePivotY = e.clientY;
             this._rotateLastX = e.clientX;
             this._rotateLastY = e.clientY;
-            this._rotatePivot = this._raycastToGround(e.clientX, e.clientY, new THREE.Vector3());
-            if (!this._rotatePivot) {
+            // Reuse a persistent Vector3 for the pivot — avoids allocation
+            // on every right-click. It's fine to leave stale data after
+            // mouseup, since _rotatePivotActive gates all readers.
+            if (!this._rotatePivot)
+                this._rotatePivot = new THREE.Vector3();
+            const hit = this._raycastToGround(e.clientX, e.clientY, this._rotatePivot);
+            if (!hit) {
                 // горизонт/небо — фолбэк на классическое вращение вокруг target
-                this._rotatePivot = this.controls.target.clone();
+                this._rotatePivot.copy(this.controls.target);
             }
             return;
         }
@@ -57,7 +106,7 @@ export const CoreInputMixin = {
         this._mouseDownX = e.clientX;
         this._mouseDownY = e.clientY;
         this._mouseMoved = false;
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this._getCanvasRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycasterDragger.setFromCamera(this.mouse, this.camera);
@@ -92,7 +141,7 @@ export const CoreInputMixin = {
         }
         if (!this.isDragging)
             return;
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this._getCanvasRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycasterDragger.setFromCamera(this.mouse, this.camera);
@@ -116,7 +165,7 @@ export const CoreInputMixin = {
         // завершение rotate-to-cursor
         if (this._rotatePivotActive) {
             this._rotatePivotActive = false;
-            this._rotatePivot = null;
+            // _rotatePivot НЕ обнуляем — переиспользуется на следующем mousedown.
             return;
         }
         if (!this.isDragging)
@@ -142,6 +191,8 @@ export const CoreInputMixin = {
         this._zoomPivotActive = true;
         this._zoomPivotX = e.clientX;
         this._zoomPivotY = e.clientY;
+        // Позиция мыши изменится после зума, но rect останется прежним,
+        // так что не инвалидируем — просто используем накопленное.
         this.applyZoomDelta(delta);
     },
     getTouchDistance(touches) {
@@ -149,15 +200,20 @@ export const CoreInputMixin = {
         const dy = touches[0].clientY - touches[1].clientY;
         return Math.sqrt(dx * dx + dy * dy);
     },
+    // ───────────────────────────────────────────────────────────────────────
+    // Raycast against the terrain (or y=0 ground plane when no elevation).
+    // Uses a module-scoped Plane — safe because the function is synchronous
+    // and getSurfaceHeightAt does not re-enter raycasting.
+    // ───────────────────────────────────────────────────────────────────────
     _raycastToGround(screenX, screenY, out) {
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this._getCanvasRect();
         const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
         const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
         this._tempMouse.set(ndcX, ndcY);
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
-        // начальное приближение — плоскость y = 0
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        if (!this._tempRaycaster.ray.intersectPlane(plane, out))
+        // Начальное приближение — плоскость y = 0.
+        _rayPlane.constant = 0;
+        if (!this._tempRaycaster.ray.intersectPlane(_rayPlane, out))
             return null;
         if (!this.hasElevation)
             return out;
@@ -166,8 +222,8 @@ export const CoreInputMixin = {
             const h = this.getSurfaceHeightAt(out.x, out.z);
             if (Math.abs(h) < 0.05)
                 break;
-            plane.constant = -h; // плоскость y = h
-            if (!this._tempRaycaster.ray.intersectPlane(plane, out))
+            _rayPlane.constant = -h; // плоскость y = h
+            if (!this._tempRaycaster.ray.intersectPlane(_rayPlane, out))
                 return null;
         }
         return out;
@@ -183,7 +239,7 @@ export const CoreInputMixin = {
         this._applyRotationDelta(dTheta, dPhi, pivot);
         if (window.__krbDebugRotate) {
             // sanity-check: пивот должен проецироваться туда же, куда в начале драга
-            const rect = this.renderer.domElement.getBoundingClientRect();
+            const rect = this._getCanvasRect();
             const p = pivot.clone().project(this.camera);
             const sx = (p.x * 0.5 + 0.5) * rect.width + rect.left;
             const sy = (-p.y * 0.5 + 0.5) * rect.height + rect.top;
@@ -191,6 +247,9 @@ export const CoreInputMixin = {
         }
     },
     // Применяет уже вычисленные dTheta/dPhi — переиспользуется и при drag, и при инерции.
+    //
+    // В отличие от исходной версии не создаёт ни одного нового THREE-объекта —
+    // все промежуточные величины живут в модульных temp-константах.
     _applyRotationDelta(dTheta, dPhi, pivot) {
         const cam = this.camera.position;
         const target = this.controls.target;
@@ -206,22 +265,19 @@ export const CoreInputMixin = {
         const dPhiRequested = dPhi; // сколько хотели наклонить
         const theta0 = Math.atan2(dir.x, dir.z);
         const thetaAfter = theta0 + dTheta;
-        const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dTheta);
-        const h = new THREE.Vector3(Math.cos(thetaAfter), 0, -Math.sin(thetaAfter));
-        const qH = new THREE.Quaternion();
-        const R = new THREE.Quaternion();
-        const camRel = cam.clone().sub(pivot);
-        const tgtRel = target.clone().sub(pivot);
-        const test = new THREE.Vector3();
+        _qY.setFromAxisAngle(_upAxis, dTheta);
+        _hAxis.set(Math.cos(thetaAfter), 0, -Math.sin(thetaAfter));
+        _camRel.subVectors(cam, pivot);
+        _tgtRel.subVectors(target, pivot);
         const buildR = (a) => {
-            qH.setFromAxisAngle(h, a);
-            R.multiplyQuaternions(qH, qY);
+            _qH.setFromAxisAngle(_hAxis, a);
+            _qR.multiplyQuaternions(_qH, _qY);
         };
         const clearanceAt = (a) => {
             buildR(a);
-            test.copy(camRel).applyQuaternion(R).add(pivot);
-            const ground = this.hasElevation ? this.getSurfaceHeightAt(test.x, test.z) : 0;
-            return test.y - (ground + this.CAMERA_TERRAIN_CLEARANCE);
+            _testVec.copy(_camRel).applyQuaternion(_qR).add(pivot);
+            const ground = this.hasElevation ? this.getSurfaceHeightAt(_testVec.x, _testVec.z) : 0;
+            return _testVec.y - (ground + this.CAMERA_TERRAIN_CLEARANCE);
         };
         // 2. Ограничиваем dPhi так, чтобы камера не ушла под землю при вращении вокруг пивота
         if (dPhi !== 0) {
@@ -246,26 +302,25 @@ export const CoreInputMixin = {
         }
         // 3. Применяем вращение вокруг пивота
         buildR(dPhi);
-        cam.copy(camRel).applyQuaternion(R).add(pivot);
-        target.copy(tgtRel).applyQuaternion(R).add(pivot);
+        cam.copy(_camRel).applyQuaternion(_qR).add(pivot);
+        target.copy(_tgtRel).applyQuaternion(_qR).add(pivot);
         // 4. Возвращаем target на землю, чтобы дальше вращаться вокруг нормального пивота
         this._retargetToGround();
         // 5. Докручиваем остаток dPhi вокруг controls.target
         let dPhiResidual = dPhiRequested - dPhi;
         if (Math.abs(dPhiResidual) > 1e-6) {
-            const nd = new THREE.Vector3().subVectors(cam, target);
-            const nth = Math.atan2(nd.x, nd.z);
-            const nh = new THREE.Vector3(Math.cos(nth), 0, -Math.sin(nth));
-            const posAt = (a) => {
-                const crt = new THREE.Vector3().subVectors(cam, target);
-                const qh = new THREE.Quaternion().setFromAxisAngle(nh, a);
-                crt.applyQuaternion(qh);
-                return target.clone().add(crt);
-            };
+            _ndVec.subVectors(cam, target);
+            const nth = Math.atan2(_ndVec.x, _ndVec.z);
+            _nhAxis.set(Math.cos(nth), 0, -Math.sin(nth));
             const clearAt = (a) => {
-                const p = posAt(a);
-                const ground = this.hasElevation ? this.getSurfaceHeightAt(p.x, p.z) : 0;
-                return p.y - (ground + this.CAMERA_TERRAIN_CLEARANCE);
+                _crtVec.subVectors(cam, target);
+                _qhInner.setFromAxisAngle(_nhAxis, a);
+                _crtVec.applyQuaternion(_qhInner);
+                const px = target.x + _crtVec.x;
+                const py = target.y + _crtVec.y;
+                const pz = target.z + _crtVec.z;
+                const ground = this.hasElevation ? this.getSurfaceHeightAt(px, pz) : 0;
+                return py - (ground + this.CAMERA_TERRAIN_CLEARANCE);
             };
             if (dPhiResidual > 0 && clearAt(dPhiResidual) < 0) {
                 if (clearAt(0) >= 0) {
@@ -284,7 +339,10 @@ export const CoreInputMixin = {
                 }
             }
             if (Math.abs(dPhiResidual) > 1e-6) {
-                cam.copy(posAt(dPhiResidual));
+                _crtVec.subVectors(cam, target);
+                _qhInner.setFromAxisAngle(_nhAxis, dPhiResidual);
+                _crtVec.applyQuaternion(_qhInner);
+                cam.copy(target).add(_crtVec);
             }
         }
         this.camera.lookAt(target);
@@ -296,11 +354,12 @@ export const CoreInputMixin = {
         if (this._cameraAnimation)
             return;
         this._zoomPivotActive = false;
+        this._invalidateCanvasRect();
         if (e.touches.length === 1) {
             // ── сброс pan-скорости ──
             this._panVelX = 0;
             this._panVelZ = 0;
-            const rect = this.renderer.domElement.getBoundingClientRect();
+            const rect = this._getCanvasRect();
             const touch = e.touches[0];
             this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
             this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
@@ -331,7 +390,7 @@ export const CoreInputMixin = {
             ts.id1 = t1.identifier;
             const dx = t1.clientX - t0.clientX;
             const dy = t1.clientY - t0.clientY;
-            const dist = Math.hypot(dx, dy);
+            const dist = Math.sqrt(dx * dx + dy * dy);
             const angle = Math.atan2(dy, dx);
             const midX = (t0.clientX + t1.clientX) * 0.5;
             const midY = (t0.clientY + t1.clientY) * 0.5;
@@ -343,7 +402,7 @@ export const CoreInputMixin = {
             ts.accumulatedLineAngle = 0;
             ts.activeGesture = null;
             const target = this.controls.target;
-            const dir = this.camera.position.clone().sub(target);
+            const dir = this._tempVec3a.subVectors(this.camera.position, target);
             const d = dir.length();
             ts.prevAzimuth = Math.atan2(dir.z, dir.x);
             ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
@@ -362,7 +421,7 @@ export const CoreInputMixin = {
             return;
         if (this.touchDragActive && e.touches.length === 1) {
             e.preventDefault();
-            const rect = this.renderer.domElement.getBoundingClientRect();
+            const rect = this._getCanvasRect();
             const touch = e.touches[0];
             this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
             this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
@@ -393,7 +452,7 @@ export const CoreInputMixin = {
                 return;
             const dx = t1.clientX - t0.clientX;
             const dy = t1.clientY - t0.clientY;
-            const curDist = Math.hypot(dx, dy);
+            const curDist = Math.sqrt(dx * dx + dy * dy);
             const curAngle = Math.atan2(dy, dx);
             const midX = (t0.clientX + t1.clientX) * 0.5;
             const midY = (t0.clientY + t1.clientY) * 0.5;
@@ -451,7 +510,6 @@ export const CoreInputMixin = {
                 const H = this.renderer.domElement.clientHeight || 1;
                 const tiltRange = this.controls.maxPolarAngle - this.controls.minPolarAngle;
                 // Полный диапазон pitch (0…85°) за ~35% высоты экрана.
-                // Было: maxPolarAngle / H  (полный диапазон за весь экран).
                 const TILT_FULL_RANGE_PX = H * 0.35;
                 const tiltDeltaPx = ts.startMidY - midY; // >0, пальцы ушли вверх
                 const newPitch = ts.startPitch +
@@ -539,6 +597,8 @@ export const CoreInputMixin = {
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
+        // Layout changed — canvas rect cache must be refreshed.
+        this._invalidateCanvasRect();
         this.maybeUpdateVisibleTiles();
         this._emitResize(w, h);
         if (this._padding)
@@ -549,7 +609,7 @@ export const CoreInputMixin = {
             return;
         if (this._mouseMoved)
             return;
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this._getCanvasRect();
         this._tempMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
@@ -637,6 +697,9 @@ export const CoreInputMixin = {
         window.addEventListener('mouseup', () => this.onMouseUp(), { signal });
         el.addEventListener('wheel', (e) => this.onWheel(e), { passive: false, signal });
         window.addEventListener('resize', () => this.onResize(), { signal });
+        // Canvas rect may shift when the page scrolls (without a resize).
+        // Invalidate the cache so the next gesture reads fresh values.
+        window.addEventListener('scroll', () => this._invalidateCanvasRect(), { passive: true, signal });
         el.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false, signal });
         el.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false, signal });
         el.addEventListener('touchend', (e) => this.onTouchEnd(e), { signal });

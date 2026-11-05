@@ -297,6 +297,13 @@ export class TextManager {
                 width: '100%', height: '100%',
                 pointerEvents: 'none',
                 zIndex: '625',
+
+                userSelect: 'none',
+            webkitUserSelect: 'none',
+            mozUserSelect: 'none',
+            msUserSelect: 'none',
+            webkitTouchCallout: 'none',
+            webkitUserDrag: 'none',
             });
             target.appendChild(pane);
         }
@@ -497,6 +504,12 @@ _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
             left: '0',
             top: '0',
             willChange: this._lastMoved === false ? 'auto' : 'transform',
+                userSelect: 'none',
+    webkitUserSelect: 'none',
+    mozUserSelect: 'none',
+    msUserSelect: 'none',
+    webkitTouchCallout: 'none',
+    webkitUserDrag: 'none',
         });
 
         if (hasIcon) {
@@ -1103,9 +1116,11 @@ if (!anchorOverride
         while (el.children.length < need) {
             const span = document.createElement('span');
             span.style.cssText =
-                'position:absolute;left:0;top:0;' +
-                'transform-origin:50% 50%;white-space:nowrap;' +
-                'line-height:1;';
+    'position:absolute;left:0;top:0;' +
+    'transform-origin:50% 50%;white-space:nowrap;' +
+    'line-height:1;' +
+    '-webkit-user-select:none;-moz-user-select:none;' +
+    '-ms-user-select:none;user-select:none;';
             el.appendChild(span);
         }
         while (el.children.length > need) {

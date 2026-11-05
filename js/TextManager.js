@@ -131,6 +131,12 @@ export class TextManager {
                 width: '100%', height: '100%',
                 pointerEvents: 'none',
                 zIndex: '625',
+                userSelect: 'none',
+                webkitUserSelect: 'none',
+                mozUserSelect: 'none',
+                msUserSelect: 'none',
+                webkitTouchCallout: 'none',
+                webkitUserDrag: 'none',
             });
             target.appendChild(pane);
         }
@@ -322,6 +328,12 @@ export class TextManager {
             left: '0',
             top: '0',
             willChange: this._lastMoved === false ? 'auto' : 'transform',
+            userSelect: 'none',
+            webkitUserSelect: 'none',
+            mozUserSelect: 'none',
+            msUserSelect: 'none',
+            webkitTouchCallout: 'none',
+            webkitUserDrag: 'none',
         });
         if (hasIcon) {
             const pos = source.getLabelPosition ? source.getLabelPosition() : 'right';
@@ -980,7 +992,9 @@ export class TextManager {
             span.style.cssText =
                 'position:absolute;left:0;top:0;' +
                     'transform-origin:50% 50%;white-space:nowrap;' +
-                    'line-height:1;';
+                    'line-height:1;' +
+                    '-webkit-user-select:none;-moz-user-select:none;' +
+                    '-ms-user-select:none;user-select:none;';
             el.appendChild(span);
         }
         while (el.children.length > need) {

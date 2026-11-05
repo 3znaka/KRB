@@ -38355,6 +38355,8 @@ export {
   Line2,
   LineGeometry,
   LineMaterial,
+  LineSegments2,
+  LineSegmentsGeometry,
   OrbitControls,
   export_Protobuf as Protobuf,
   three_module_exports as THREE,

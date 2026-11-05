@@ -59,6 +59,7 @@ export interface KrbMapOptions {
 
     panFriction?: number;
     backgroundColor?: string | number;
+    debug?: boolean;
 
 }
 
@@ -104,6 +105,7 @@ interface TouchState {
  * освещение, пул временных векторов).
  */
 export class KrbMap {
+    debug: boolean;
     // --- Публичные свойства ---
     targetElement: HTMLElement;
     sprite: any;
@@ -280,7 +282,7 @@ get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
         if (!el) throw new Error('Target element not found');
         this.targetElement = el;
 
-
+this.debug = options.debug ?? false;
         this.sprite = options.sprite ?? null; 
         this.layers = options.layers || [];
         if (!options.view) throw new Error('View required');

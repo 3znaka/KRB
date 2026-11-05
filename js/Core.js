@@ -35,6 +35,7 @@ import { CoreEventsMixin } from './CoreEvents.js';
  * освещение, пул временных векторов).
  */
 export class KrbMap {
+    debug;
     // --- Публичные свойства ---
     targetElement;
     sprite;
@@ -188,6 +189,7 @@ export class KrbMap {
         if (!el)
             throw new Error('Target element not found');
         this.targetElement = el;
+        this.debug = options.debug ?? false;
         this.sprite = options.sprite ?? null;
         this.layers = options.layers || [];
         if (!options.view)

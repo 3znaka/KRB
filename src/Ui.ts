@@ -23,6 +23,7 @@ export interface UIMap {
     groundPlane?: any; // THREE.Plane
     layers?: any[];
     _dynamicLayers?: any[];
+    debug?: boolean;
 }
 
 export interface Attribution {
@@ -98,23 +99,29 @@ export function initUI(map: UIMap): { destroy: () => void } {
     const scaleLabel = document.createElement('div');
     scaleLabel.className = 'krb-scale-label';
 
+let coordLabel: HTMLSpanElement | null = null;
+let fpsLabel: HTMLSpanElement | null = null;
+let zoomValueLabel: HTMLSpanElement | null = null;
+
+if (map.debug) {
     const zoomLabel = document.createElement('div');
     zoomLabel.className = 'krb-zoom-label';
 
-    const coordLabel = document.createElement('span');
+    coordLabel = document.createElement('span');
     coordLabel.className = 'krb-coord-label';
     zoomLabel.appendChild(coordLabel);
 
-    const fpsLabel = document.createElement('span');
+    fpsLabel = document.createElement('span');
     fpsLabel.className = 'krb-fps-label';
     fpsLabel.textContent = 'FPS: --';
     zoomLabel.appendChild(fpsLabel);
 
-    const zoomValueLabel = document.createElement('span');
+    zoomValueLabel = document.createElement('span');
     zoomValueLabel.className = 'krb-zoom-value';
     zoomLabel.appendChild(zoomValueLabel);
 
     pane.appendChild(zoomLabel);
+}
 
     scaleContainer.appendChild(scaleBar);
     scaleBar.appendChild(scaleLabel);
@@ -283,28 +290,29 @@ export function initUI(map: UIMap): { destroy: () => void } {
     /**
      * Обновляет масштабную линейку, координаты и подпись зума.
      */
-    function updateScaleBar(): void {
-        const worldPos = map.worldGroup.position;
-        const target = map.controls.target;
+function updateScaleBar(): void {
+    const worldPos = map.worldGroup.position;
+    const target = map.controls.target;
 
-        const centerX = target.x - worldPos.x;
-        const centerZ = target.z - worldPos.z;
+    const centerX = target.x - worldPos.x;
+    const centerZ = target.z - worldPos.z;
 
-        const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
+    const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
 
-        if (!Number.isFinite(lon) || !Number.isFinite(lat) ||
-            Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
-            return;
-        }
+    if (!Number.isFinite(lon) || !Number.isFinite(lat) ||
+        Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
+        return;
+    }
 
+    if (map.debug && coordLabel) {
         _dirVec.subVectors(map.camera.position, target);
         const dist = _dirVec.length();
         const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
         const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-
         const bearingDeg = computeBearingDeg().toFixed(1);
-
-        coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        coordLabel.textContent =
+            `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+    }
 
         const barLengthPx = 100;
         const rect = map.renderer.domElement.getBoundingClientRect();
@@ -346,21 +354,21 @@ export function initUI(map: UIMap): { destroy: () => void } {
             scaleLabel.textContent = formatDistance(nice);
         }
 
+  if (map.debug && zoomValueLabel) {
         zoomValueLabel.textContent =
             ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
     }
+}
 
     let lastFpsUpdate = performance.now();
     let frames = 0;
     let rafId: number | null = null;
     let destroyed = false;
 
-    /**
-     * Цикл анимации: обновляет UI и поворачивает значок компаса.
-     */
-    function animateUI(): void {
-        if (destroyed) return;
+function animateUI(): void {
+    if (destroyed) return;
 
+    if (map.debug && fpsLabel) {
         const now = performance.now();
         frames++;
         if (now - lastFpsUpdate >= 500) {
@@ -369,16 +377,17 @@ export function initUI(map: UIMap): { destroy: () => void } {
             frames = 0;
             lastFpsUpdate = now;
         }
-
-        updateScaleBar();
-
-        const bearingDeg = computeBearingDeg();
-        if (compassSvg) {
-            compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
-        }
-
-        rafId = requestAnimationFrame(animateUI);
     }
+
+    updateScaleBar();
+
+    const bearingDeg = computeBearingDeg();
+    if (compassSvg) {
+        compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
+    }
+
+    rafId = requestAnimationFrame(animateUI);
+}
 
     animateUI();
 

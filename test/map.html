@@ -331,7 +331,7 @@
                     layer.add(new KRB.Polygon({
                         rings,
                         fillColor: '#e8e8e8',
-                        fillOpacity: 0.9,
+                        fillOpacity: 1,
                         strokeColor: 'rgba(0,0,0,0)',
                         strokeWidth: 0,
                         extruded: true,
@@ -365,7 +365,7 @@
                         layer.add(new KRB.Polygon({
                             rings,
                             fillColor,
-                            fillOpacity: 0.85,
+                            fillOpacity: 1,
                             fillPattern: usePattern ? 'img/diag-red-104.png' : undefined,
                             fillPatternScale: 10,
                             strokeColor: 'rgba(0,0,0,0)',
@@ -400,7 +400,7 @@
                         layer.add(new KRB.Polygon({
                             rings,
                             fillColor: props.status == 1 ? '#cf554b' : '#e8e8e8',
-                            fillOpacity: 0.75,
+                            fillOpacity: 1,
                             strokeColor: 'rgba(0,0,0,0)',
                             strokeWidth: 0,
                             extruded: true,
@@ -634,20 +634,23 @@ function buildBuildingLayer() {
         const searchResults = document.getElementById('search-results');
         const closeBtn = document.getElementById('closebtn');
 
-        function selectSearchResult(item) {
-            closeBtn.style.display = 'block';
-            setFloor(item.floor);
-            searchInput.value = item.label || '';
-            setRoomHash(item.label);
+function selectSearchResult(item) {
+    closeBtn.style.display = 'block';
+    setFloor(item.floor);
+    searchInput.value = item.label || '';
+    setRoomHash(item.label);
 
-            if (item.id_room === 0) {
-                highlightBuilding(item.id);
-                map.easeTo({ center: [item.x, item.y], zoom: ZOOM_THRESHOLD, duration: 0.8 });
-            } else {
-                highlightRoomById(item.id);
-                map.easeTo({ center: [item.x, item.y], zoom: 20, duration: 0.8 });
-            }
-        }
+    const isRoom = window.room_layer &&
+        room_layer.features.some(x => x.properties.id === item.id);
+
+    if (!isRoom) {
+        highlightBuilding(item.id);
+        map.easeTo({ center: [item.x, item.y], zoom: ZOOM_THRESHOLD, duration: 0.8 });
+    } else {
+        highlightRoomById(item.id);
+        map.easeTo({ center: [item.x, item.y], zoom: 21, duration: 0.8 });
+    }
+}
 
         function findRoom(label) {
             if (!window.search_data) return;

@@ -401,7 +401,6 @@ _getBatchStyleKey(): string | null {
     return [
         this._extruded ? 'E' : 'NE',
         this._fillColor, this._fillOpacity,
-        // MeshStandardMaterial-специфичное — только для extruded
         this._extruded ? this._roughness : '',
         this._extruded ? this._metalness : '',
         this._extruded ? (this._castShadow ? 1 : 0) : '',

@@ -68,19 +68,24 @@ export function initUI(map) {
     scaleBar.className = 'krb-scale-bar';
     const scaleLabel = document.createElement('div');
     scaleLabel.className = 'krb-scale-label';
-    const zoomLabel = document.createElement('div');
-    zoomLabel.className = 'krb-zoom-label';
-    const coordLabel = document.createElement('span');
-    coordLabel.className = 'krb-coord-label';
-    zoomLabel.appendChild(coordLabel);
-    const fpsLabel = document.createElement('span');
-    fpsLabel.className = 'krb-fps-label';
-    fpsLabel.textContent = 'FPS: --';
-    zoomLabel.appendChild(fpsLabel);
-    const zoomValueLabel = document.createElement('span');
-    zoomValueLabel.className = 'krb-zoom-value';
-    zoomLabel.appendChild(zoomValueLabel);
-    pane.appendChild(zoomLabel);
+    let coordLabel = null;
+    let fpsLabel = null;
+    let zoomValueLabel = null;
+    if (map.debug) {
+        const zoomLabel = document.createElement('div');
+        zoomLabel.className = 'krb-zoom-label';
+        coordLabel = document.createElement('span');
+        coordLabel.className = 'krb-coord-label';
+        zoomLabel.appendChild(coordLabel);
+        fpsLabel = document.createElement('span');
+        fpsLabel.className = 'krb-fps-label';
+        fpsLabel.textContent = 'FPS: --';
+        zoomLabel.appendChild(fpsLabel);
+        zoomValueLabel = document.createElement('span');
+        zoomValueLabel.className = 'krb-zoom-value';
+        zoomLabel.appendChild(zoomValueLabel);
+        pane.appendChild(zoomLabel);
+    }
     scaleContainer.appendChild(scaleBar);
     scaleBar.appendChild(scaleLabel);
     leftBottom.appendChild(scaleContainer);
@@ -236,12 +241,15 @@ export function initUI(map) {
             Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
             return;
         }
-        _dirVec.subVectors(map.camera.position, target);
-        const dist = _dirVec.length();
-        const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
-        const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-        const bearingDeg = computeBearingDeg().toFixed(1);
-        coordLabel.textContent = `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        if (map.debug && coordLabel) {
+            _dirVec.subVectors(map.camera.position, target);
+            const dist = _dirVec.length();
+            const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
+            const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
+            const bearingDeg = computeBearingDeg().toFixed(1);
+            coordLabel.textContent =
+                `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        }
         const barLengthPx = 100;
         const rect = map.renderer.domElement.getBoundingClientRect();
         if (!rect.width || !rect.height)
@@ -275,26 +283,27 @@ export function initUI(map) {
             scaleBar.style.width = (barLengthPx * ratio) + 'px';
             scaleLabel.textContent = formatDistance(nice);
         }
-        zoomValueLabel.textContent =
-            ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
+        if (map.debug && zoomValueLabel) {
+            zoomValueLabel.textContent =
+                ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
+        }
     }
     let lastFpsUpdate = performance.now();
     let frames = 0;
     let rafId = null;
     let destroyed = false;
-    /**
-     * Цикл анимации: обновляет UI и поворачивает значок компаса.
-     */
     function animateUI() {
         if (destroyed)
             return;
-        const now = performance.now();
-        frames++;
-        if (now - lastFpsUpdate >= 500) {
-            const fps = Math.round((frames * 1000) / (now - lastFpsUpdate));
-            fpsLabel.textContent = `FPS: ${fps}`;
-            frames = 0;
-            lastFpsUpdate = now;
+        if (map.debug && fpsLabel) {
+            const now = performance.now();
+            frames++;
+            if (now - lastFpsUpdate >= 500) {
+                const fps = Math.round((frames * 1000) / (now - lastFpsUpdate));
+                fpsLabel.textContent = `FPS: ${fps}`;
+                frames = 0;
+                lastFpsUpdate = now;
+            }
         }
         updateScaleBar();
         const bearingDeg = computeBearingDeg();

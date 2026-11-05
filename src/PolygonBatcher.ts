@@ -4,6 +4,11 @@ import { THREE } from './js_TP/tpb.js';
 const RENDER_ORDER = { BOTTOM: 900, SIDE: 901, TOP: 902, STROKE: 903 };
 const DEFAULT_PATTERN_SCALE = 64;
 
+/** Совместимо с ZoomInterpolation из SpatialObject / Polygon. */
+export interface ZoomInterpolationLike {
+    fillOpacity?: Array<[number, number]>;
+}
+
 interface Batchable {
     _getBatchStyleKey(): string | null;
     _getBatchGeometryData(): BatchGeometryData | null;
@@ -40,6 +45,12 @@ export interface BatchGeometryData {
     minZoom: number;
     maxZoom: number;
     altitudeMode: string;
+    /**
+     * Опционально: per-batch анимация прозрачности по зуму.
+     * Заполняется Polygon._getBatchGeometryData() когда в Polygon снят
+     * блокер `if (this._zoomInterpolations) return null;`.
+     */
+    zoomInterpolations?: ZoomInterpolationLike | null;
 }
 
 function isBatchable(obj: any): obj is Batchable {
@@ -64,24 +75,33 @@ class BatchedGroup {
     private _map: any = null;
     private _anchorX = 0;
     private _anchorZ = 0;
+    /** Центр сферы в local worldGroup координатах (anchor уже учтён). */
     private _boundingSphere: { center: any; radius: number } | null = null;
+    /** Переиспользуемый вектор для getBoundingSphere (мир. координаты). */
+    private _boundingSphereWorldCenter: any = null;
     private _minZoom = -Infinity;
     private _maxZoom = Infinity;
+    /** Разделяемая текстура паттерна — владелец PolygonBatcher. */
     private _patternTexture: any = null;
+    /** Интерполяция прозрачности по зуму (если была в данных). */
+    private _zoomFillOpacity: Array<[number, number]> | null = null;
+    private _baseFillOpacity = 1;
+    private _baseStrokeOpacity = 1;
     private _disposed = false;
 
     constructor(polygons: Batchable[]) {
         this.polygons = polygons;
         this.polygonSet = new Set(polygons);
+        this._boundingSphereWorldCenter = new THREE.Vector3();
     }
 
-    build(map: any): void {
+    build(map: any, getPatternTexture: (url: string) => any): void {
         this._map = map;
 
         const datas: Array<{ poly: Batchable; data: BatchGeometryData }> = [];
         for (const p of this.polygons) {
             const d = p._getBatchGeometryData();
-            if (d) datas.push({ poly: p, data: d });
+            if (d && d.indices && d.indices.length >= 3) datas.push({ poly: p, data: d });
         }
         if (datas.length === 0) return;
 
@@ -93,9 +113,17 @@ class BatchedGroup {
         const d0 = datas[0].data;
         this._minZoom = d0.minZoom;
         this._maxZoom = d0.maxZoom;
+        this._baseFillOpacity = d0.fillOpacity;
+        this._baseStrokeOpacity = d0.strokeOpacity;
 
         if (d0.fillPatternSource) {
-            this._patternTexture = this._loadPatternSync(d0.fillPatternSource);
+            this._patternTexture = getPatternTexture(d0.fillPatternSource);
+        }
+
+        // Zoom-интерполяция прозрачности (готово к шагу B).
+        const zi = d0.zoomInterpolations?.fillOpacity;
+        if (zi && zi.length >= 2) {
+            this._zoomFillOpacity = zi as Array<[number, number]>;
         }
 
         const patternScale = d0.fillPatternScale > 0 ? d0.fillPatternScale : DEFAULT_PATTERN_SCALE;
@@ -153,7 +181,7 @@ class BatchedGroup {
 
             if (!isExtruded) continue;
 
-            // ── BOTTOM (те же XZ, Y - height, обмотка перевёрнута) ──
+            // ── BOTTOM ──
             const bottomBase = positions.length / 3;
             for (let i = 0; i < n; i++) {
                 const [wx, wz] = wc[i];
@@ -204,8 +232,7 @@ class BatchedGroup {
 
                     indices.push(quadBase, quadBase + 1, quadBase + 2);
                     indices.push(quadBase + 1, quadBase + 3, quadBase + 2);
-                    triPoly.push(poly);
-                    triPoly.push(poly);
+                    triPoly.push(poly, poly);
                 }
             }
         }
@@ -216,12 +243,17 @@ class BatchedGroup {
         geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
         geom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
         geom.setIndex(indices);
-        // Нормали нужны MeshStandardMaterial (extruded). Для MeshBasic не мешают.
-        geom.computeVertexNormals();
+        // Нормали нужны MeshStandardMaterial (extruded). Для MeshBasic
+        // они не используются — пропускаем, экономим цикл на rebuild.
+        if (d0.extruded) geom.computeVertexNormals();
         geom.computeBoundingBox();
         geom.computeBoundingSphere();
 
-        const isTransparent = d0.fillOpacity < 1;
+        // Если будет zoom-анимация прозрачности — материал должен быть
+        // transparent с самого начала, иначе анимация к 0 работать не будет.
+        const animatedOpacity = !!this._zoomFillOpacity;
+        const isTransparent = animatedOpacity || d0.fillOpacity < 1;
+
         let mat: any;
         if (d0.extruded) {
             mat = new THREE.MeshStandardMaterial({
@@ -261,7 +293,8 @@ class BatchedGroup {
             mesh.castShadow = d0.castShadow;
             mesh.receiveShadow = d0.receiveShadow;
         }
-        mesh.position.set(this._anchorX, 0, this._anchorZ); 
+        mesh.position.set(this._anchorX, 0, this._anchorZ);
+        mesh.userData.batchedGroup = this;
         this.mesh = mesh;
 
         // ── Штрих: LineSegments по рёбрам top ──
@@ -293,7 +326,7 @@ class BatchedGroup {
             const sMat = new THREE.LineBasicMaterial({
                 color: d0.strokeColor as any,
                 opacity: d0.strokeOpacity,
-                transparent: d0.strokeOpacity < 1,
+                transparent: animatedOpacity || d0.strokeOpacity < 1,
                 depthTest: d0.depthTest,
                 depthWrite: d0.depthWrite,
             });
@@ -319,28 +352,28 @@ class BatchedGroup {
         this._registerInteraction(map);
     }
 
-    private _loadPatternSync(url: string): any {
-        const loader = new THREE.TextureLoader();
-        loader.setCrossOrigin('anonymous');
-        const tex = loader.load(url, undefined, undefined, (err: any) => {
-            console.warn('PolygonBatcher: pattern load failed', err);
-        });
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.generateMipmaps = false;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        const Ctor = THREE as any;
-        if (Ctor.SRGBColorSpace && !tex.colorSpace) tex.colorSpace = Ctor.SRGBColorSpace;
-        tex.needsUpdate = true;
-        return tex;
-    }
-
     private _registerInteraction(map: any): void {
         if (!map.interaction || !this.mesh) return;
         if (this._unregister) { this._unregister(); this._unregister = null; }
         this._unregister = map.interaction.register(this, {
             getMeshes: () => this.mesh ? [this.mesh] : [],
-            getBoundingSphere: () => this._boundingSphere,
+            // Возвращаем центр в МИРОВЫХ координатах — в отличие от
+            // прежней версии, которая отдавала локальные (без
+            // worldGroup.position). Из-за этого каллинг ломался
+            // при панорамировании (worldGroup сдвигается).
+            getBoundingSphere: () => {
+                if (!this._boundingSphere) return null;
+                const wgPos = map.worldGroup.position;
+                this._boundingSphereWorldCenter.set(
+                    this._boundingSphere.center.x + wgPos.x,
+                    this._boundingSphere.center.y + wgPos.y,
+                    this._boundingSphere.center.z + wgPos.z,
+                );
+                return {
+                    center: this._boundingSphereWorldCenter,
+                    radius: this._boundingSphere.radius,
+                };
+            },
             isVisible: () => this.mesh?.visible ?? false,
             onClick: (event: MouseEvent) => {
                 const poly = this._pickPolygon(event, map);
@@ -371,6 +404,24 @@ class BatchedGroup {
         const visible = layerVisible && z >= this._minZoom && z <= this._maxZoom;
         this.mesh.visible = visible;
         if (this.strokeLine) this.strokeLine.visible = visible;
+        if (!visible) return;
+
+        // Zoom-анимация прозрачности. Работает только если
+        // BatchGeometryData.zoomInterpolations был передан Polygon'ом.
+        if (this._zoomFillOpacity) {
+            const [z0, o0] = this._zoomFillOpacity[0];
+            const [z1, o1] = this._zoomFillOpacity[1];
+            const t = (z <= z0) ? 0 : (z >= z1) ? 1 : (z - z0) / (z1 - z0 || 1);
+            const opMul = o0 + (o1 - o0) * t;
+            const fillOp = this._baseFillOpacity * opMul;
+            const strokeOp = this._baseStrokeOpacity * opMul;
+            if (this.fillMaterial && this.fillMaterial.opacity !== fillOp) {
+                this.fillMaterial.opacity = fillOp;
+            }
+            if (this.strokeMaterial && this.strokeMaterial.opacity !== strokeOp) {
+                this.strokeMaterial.opacity = strokeOp;
+            }
+        }
     }
 
     dispose(): void {
@@ -387,14 +438,15 @@ class BatchedGroup {
             this.strokeLine.material?.dispose();
             if (this.strokeLine.parent) this.strokeLine.parent.remove(this.strokeLine);
         }
-        if (this._patternTexture) {
-            try { this._patternTexture.dispose?.(); } catch { /* swallow */ }
-            this._patternTexture = null;
-        }
+        // Паттерн НЕ наш — им владеет PolygonBatcher (кэш по URL).
+        this._patternTexture = null;
         this.mesh = null;
         this.strokeLine = null;
         this.fillMaterial = null;
         this.strokeMaterial = null;
+        this._trianglesToPolygon = [];
+        this._boundingSphere = null;
+        this._boundingSphereWorldCenter = null;
     }
 }
 
@@ -408,6 +460,7 @@ export class PolygonBatcher {
     private _group: any;
     private _batches = new Map<string, BatchedGroup>();
     private _polygonToBatch = new Map<Batchable, BatchedGroup>();
+    private _patternTextures = new Map<string, any>();
     private _pendingRebuild = false;
     private _dirtyTime = 0;
     private _lastCheckTime = 0;
@@ -446,6 +499,33 @@ export class PolygonBatcher {
     markDirty(): void {
         this._pendingRebuild = true;
         this._dirtyTime = performance.now();
+    }
+
+    /** Общая текстура паттерна по URL (для всех батчей слоя). */
+    private _getPatternTexture(url: string): any {
+        let tex = this._patternTextures.get(url);
+        if (tex) return tex;
+
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
+        tex = loader.load(url, undefined, undefined, (err: any) => {
+            console.warn('PolygonBatcher: pattern load failed', err);
+        });
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+
+        const caps = this._map?.renderer?.capabilities;
+        if (caps && typeof caps.getMaxAnisotropy === 'function') {
+            try { tex.anisotropy = Math.min(16, caps.getMaxAnisotropy()); } catch { /* swallow */ }
+        }
+        const Ctor = THREE as any;
+        if (Ctor.SRGBColorSpace && !tex.colorSpace) tex.colorSpace = Ctor.SRGBColorSpace;
+        tex.needsUpdate = true;
+
+        this._patternTextures.set(url, tex);
+        return tex;
     }
 
     update(map: any, _deltaTime?: number): void {
@@ -508,7 +588,7 @@ export class PolygonBatcher {
                 if (anyDynamic) continue;
             }
             const batch = new BatchedGroup(polys);
-            batch.build(this._map);
+            batch.build(this._map, (url) => this._getPatternTexture(url));
             if (!batch.mesh) continue;
             this._group.add(batch.mesh);
             if (batch.strokeLine) this._group.add(batch.strokeLine);
@@ -520,6 +600,8 @@ export class PolygonBatcher {
             }
         }
 
+        // Полигоны, которые больше не входят ни в один батч,
+        // разбатчиваем — у них пересоберётся своя геометрия.
         for (const p of oldPolygons) {
             if (!this._polygonToBatch.has(p)) {
                 p._onBatchChange?.(false, null);
@@ -530,6 +612,10 @@ export class PolygonBatcher {
     dispose(): void {
         this._disposed = true;
         this.removeFromMap();
+        for (const tex of this._patternTextures.values()) {
+            try { tex.dispose?.(); } catch { /* swallow */ }
+        }
+        this._patternTextures.clear();
     }
 }
 

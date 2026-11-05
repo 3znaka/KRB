@@ -22,21 +22,30 @@ class BatchedGroup {
     _map = null;
     _anchorX = 0;
     _anchorZ = 0;
+    /** Центр сферы в local worldGroup координатах (anchor уже учтён). */
     _boundingSphere = null;
+    /** Переиспользуемый вектор для getBoundingSphere (мир. координаты). */
+    _boundingSphereWorldCenter = null;
     _minZoom = -Infinity;
     _maxZoom = Infinity;
+    /** Разделяемая текстура паттерна — владелец PolygonBatcher. */
     _patternTexture = null;
+    /** Интерполяция прозрачности по зуму (если была в данных). */
+    _zoomFillOpacity = null;
+    _baseFillOpacity = 1;
+    _baseStrokeOpacity = 1;
     _disposed = false;
     constructor(polygons) {
         this.polygons = polygons;
         this.polygonSet = new Set(polygons);
+        this._boundingSphereWorldCenter = new THREE.Vector3();
     }
-    build(map) {
+    build(map, getPatternTexture) {
         this._map = map;
         const datas = [];
         for (const p of this.polygons) {
             const d = p._getBatchGeometryData();
-            if (d)
+            if (d && d.indices && d.indices.length >= 3)
                 datas.push({ poly: p, data: d });
         }
         if (datas.length === 0)
@@ -51,8 +60,15 @@ class BatchedGroup {
         const d0 = datas[0].data;
         this._minZoom = d0.minZoom;
         this._maxZoom = d0.maxZoom;
+        this._baseFillOpacity = d0.fillOpacity;
+        this._baseStrokeOpacity = d0.strokeOpacity;
         if (d0.fillPatternSource) {
-            this._patternTexture = this._loadPatternSync(d0.fillPatternSource);
+            this._patternTexture = getPatternTexture(d0.fillPatternSource);
+        }
+        // Zoom-интерполяция прозрачности (готово к шагу B).
+        const zi = d0.zoomInterpolations?.fillOpacity;
+        if (zi && zi.length >= 2) {
+            this._zoomFillOpacity = zi;
         }
         const patternScale = d0.fillPatternScale > 0 ? d0.fillPatternScale : DEFAULT_PATTERN_SCALE;
         const patternFit = d0.fillPatternFit;
@@ -109,7 +125,7 @@ class BatchedGroup {
             }
             if (!isExtruded)
                 continue;
-            // ── BOTTOM (те же XZ, Y - height, обмотка перевёрнута) ──
+            // ── BOTTOM ──
             const bottomBase = positions.length / 3;
             for (let i = 0; i < n; i++) {
                 const [wx, wz] = wc[i];
@@ -152,8 +168,7 @@ class BatchedGroup {
                     cum += edgeLen;
                     indices.push(quadBase, quadBase + 1, quadBase + 2);
                     indices.push(quadBase + 1, quadBase + 3, quadBase + 2);
-                    triPoly.push(poly);
-                    triPoly.push(poly);
+                    triPoly.push(poly, poly);
                 }
             }
         }
@@ -162,11 +177,16 @@ class BatchedGroup {
         geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
         geom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
         geom.setIndex(indices);
-        // Нормали нужны MeshStandardMaterial (extruded). Для MeshBasic не мешают.
-        geom.computeVertexNormals();
+        // Нормали нужны MeshStandardMaterial (extruded). Для MeshBasic
+        // они не используются — пропускаем, экономим цикл на rebuild.
+        if (d0.extruded)
+            geom.computeVertexNormals();
         geom.computeBoundingBox();
         geom.computeBoundingSphere();
-        const isTransparent = d0.fillOpacity < 1;
+        // Если будет zoom-анимация прозрачности — материал должен быть
+        // transparent с самого начала, иначе анимация к 0 работать не будет.
+        const animatedOpacity = !!this._zoomFillOpacity;
+        const isTransparent = animatedOpacity || d0.fillOpacity < 1;
         let mat;
         if (d0.extruded) {
             mat = new THREE.MeshStandardMaterial({
@@ -207,6 +227,7 @@ class BatchedGroup {
             mesh.receiveShadow = d0.receiveShadow;
         }
         mesh.position.set(this._anchorX, 0, this._anchorZ);
+        mesh.userData.batchedGroup = this;
         this.mesh = mesh;
         // ── Штрих: LineSegments по рёбрам top ──
         if (d0.strokeWidth > 0 && d0.strokeOpacity > 0 && d0.strokeColor != null) {
@@ -235,7 +256,7 @@ class BatchedGroup {
             const sMat = new THREE.LineBasicMaterial({
                 color: d0.strokeColor,
                 opacity: d0.strokeOpacity,
-                transparent: d0.strokeOpacity < 1,
+                transparent: animatedOpacity || d0.strokeOpacity < 1,
                 depthTest: d0.depthTest,
                 depthWrite: d0.depthWrite,
             });
@@ -254,22 +275,6 @@ class BatchedGroup {
         }
         this._registerInteraction(map);
     }
-    _loadPatternSync(url) {
-        const loader = new THREE.TextureLoader();
-        loader.setCrossOrigin('anonymous');
-        const tex = loader.load(url, undefined, undefined, (err) => {
-            console.warn('PolygonBatcher: pattern load failed', err);
-        });
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.generateMipmaps = false;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        const Ctor = THREE;
-        if (Ctor.SRGBColorSpace && !tex.colorSpace)
-            tex.colorSpace = Ctor.SRGBColorSpace;
-        tex.needsUpdate = true;
-        return tex;
-    }
     _registerInteraction(map) {
         if (!map.interaction || !this.mesh)
             return;
@@ -279,7 +284,20 @@ class BatchedGroup {
         }
         this._unregister = map.interaction.register(this, {
             getMeshes: () => this.mesh ? [this.mesh] : [],
-            getBoundingSphere: () => this._boundingSphere,
+            // Возвращаем центр в МИРОВЫХ координатах — в отличие от
+            // прежней версии, которая отдавала локальные (без
+            // worldGroup.position). Из-за этого каллинг ломался
+            // при панорамировании (worldGroup сдвигается).
+            getBoundingSphere: () => {
+                if (!this._boundingSphere)
+                    return null;
+                const wgPos = map.worldGroup.position;
+                this._boundingSphereWorldCenter.set(this._boundingSphere.center.x + wgPos.x, this._boundingSphere.center.y + wgPos.y, this._boundingSphere.center.z + wgPos.z);
+                return {
+                    center: this._boundingSphereWorldCenter,
+                    radius: this._boundingSphere.radius,
+                };
+            },
             isVisible: () => this.mesh?.visible ?? false,
             onClick: (event) => {
                 const poly = this._pickPolygon(event, map);
@@ -314,6 +332,24 @@ class BatchedGroup {
         this.mesh.visible = visible;
         if (this.strokeLine)
             this.strokeLine.visible = visible;
+        if (!visible)
+            return;
+        // Zoom-анимация прозрачности. Работает только если
+        // BatchGeometryData.zoomInterpolations был передан Polygon'ом.
+        if (this._zoomFillOpacity) {
+            const [z0, o0] = this._zoomFillOpacity[0];
+            const [z1, o1] = this._zoomFillOpacity[1];
+            const t = (z <= z0) ? 0 : (z >= z1) ? 1 : (z - z0) / (z1 - z0 || 1);
+            const opMul = o0 + (o1 - o0) * t;
+            const fillOp = this._baseFillOpacity * opMul;
+            const strokeOp = this._baseStrokeOpacity * opMul;
+            if (this.fillMaterial && this.fillMaterial.opacity !== fillOp) {
+                this.fillMaterial.opacity = fillOp;
+            }
+            if (this.strokeMaterial && this.strokeMaterial.opacity !== strokeOp) {
+                this.strokeMaterial.opacity = strokeOp;
+            }
+        }
     }
     dispose() {
         if (this._disposed)
@@ -338,17 +374,15 @@ class BatchedGroup {
             if (this.strokeLine.parent)
                 this.strokeLine.parent.remove(this.strokeLine);
         }
-        if (this._patternTexture) {
-            try {
-                this._patternTexture.dispose?.();
-            }
-            catch { /* swallow */ }
-            this._patternTexture = null;
-        }
+        // Паттерн НЕ наш — им владеет PolygonBatcher (кэш по URL).
+        this._patternTexture = null;
         this.mesh = null;
         this.strokeLine = null;
         this.fillMaterial = null;
         this.strokeMaterial = null;
+        this._trianglesToPolygon = [];
+        this._boundingSphere = null;
+        this._boundingSphereWorldCenter = null;
     }
 }
 // =====================================================================
@@ -360,6 +394,7 @@ export class PolygonBatcher {
     _group;
     _batches = new Map();
     _polygonToBatch = new Map();
+    _patternTextures = new Map();
     _pendingRebuild = false;
     _dirtyTime = 0;
     _lastCheckTime = 0;
@@ -395,6 +430,34 @@ export class PolygonBatcher {
     markDirty() {
         this._pendingRebuild = true;
         this._dirtyTime = performance.now();
+    }
+    /** Общая текстура паттерна по URL (для всех батчей слоя). */
+    _getPatternTexture(url) {
+        let tex = this._patternTextures.get(url);
+        if (tex)
+            return tex;
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
+        tex = loader.load(url, undefined, undefined, (err) => {
+            console.warn('PolygonBatcher: pattern load failed', err);
+        });
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        const caps = this._map?.renderer?.capabilities;
+        if (caps && typeof caps.getMaxAnisotropy === 'function') {
+            try {
+                tex.anisotropy = Math.min(16, caps.getMaxAnisotropy());
+            }
+            catch { /* swallow */ }
+        }
+        const Ctor = THREE;
+        if (Ctor.SRGBColorSpace && !tex.colorSpace)
+            tex.colorSpace = Ctor.SRGBColorSpace;
+        tex.needsUpdate = true;
+        this._patternTextures.set(url, tex);
+        return tex;
     }
     update(map, _deltaTime) {
         if (this._disposed || !this._map)
@@ -464,7 +527,7 @@ export class PolygonBatcher {
                     continue;
             }
             const batch = new BatchedGroup(polys);
-            batch.build(this._map);
+            batch.build(this._map, (url) => this._getPatternTexture(url));
             if (!batch.mesh)
                 continue;
             this._group.add(batch.mesh);
@@ -477,6 +540,8 @@ export class PolygonBatcher {
                 this._polygonToBatch.set(p, batch);
             }
         }
+        // Полигоны, которые больше не входят ни в один батч,
+        // разбатчиваем — у них пересоберётся своя геометрия.
         for (const p of oldPolygons) {
             if (!this._polygonToBatch.has(p)) {
                 p._onBatchChange?.(false, null);
@@ -486,6 +551,13 @@ export class PolygonBatcher {
     dispose() {
         this._disposed = true;
         this.removeFromMap();
+        for (const tex of this._patternTextures.values()) {
+            try {
+                tex.dispose?.();
+            }
+            catch { /* swallow */ }
+        }
+        this._patternTextures.clear();
     }
 }
 import { Layer } from './Layers.js';

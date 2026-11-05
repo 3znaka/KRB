@@ -35,25 +35,14 @@ export interface PolygonOptions {
     crs?: string;
     fillColor?: string | number;
     fillOpacity?: number;
-
-    /** Текстура заливки: URL, Image или Canvas. */
     fillPattern?: FillPatternSource;
-    /** World-метры на одну плитку в режиме `'tile'`. Default: 64. */
     fillPatternScale?: number;
-    /**
-     * `'tile'` (по умолчанию) — мировой тайлинг: соседние полигоны
-     * бесшовны, размер плитки задаётся `fillPatternScale`.
-     * `'bounds'` — текстура растягивается на bbox полигона (UV 0..1).
-     * Для маленьких полигонов (комнаты, здания) обычно нужен `'bounds'`.
-     */
     fillPatternFit?: FillPatternFit;
-
     strokeColor?: string | number;
     strokeWidth?: number;
     strokeOpacity?: number;
     altitudeMode?: AltitudeMode;
     altitude?: number;
-    /** @deprecated Используйте `altitude`. */
     altitudeOffset?: number;
     extruded?: boolean;
     height?: number;
@@ -132,10 +121,6 @@ export class Polygon extends SpatialObject {
     private _fillPatternScale: number;
     private _fillPatternFit: FillPatternFit;
     private _fillPatternTexture: any = null;
-    /**
-     * Монотонный счётчик поколений загрузки текстуры. onLoad-callback,
-     * чьё поколение устарело, сам dispose'ит свою текстуру и выходит.
-     */
     private _fillPatternGeneration = 0;
     private _strokeColor: string | number;
     private _strokeWidth: number;
@@ -177,6 +162,13 @@ export class Polygon extends SpatialObject {
     // ── Кэши ──
     private _cachedHeights: number[] = [];
     private _cachedStrokeHeights: number[] = [];
+    /**
+     * Кэш индексов триангуляции top-грани. Заполняется в `_buildFillGeometry`
+     * (и при необходимости пересчитывается в `_getBatchGeometryData`).
+     * Переживает `_disposeMeshes()`, чтобы батчер мог пересобраться
+     * после `markDirty()` (например, `setFillColor`) без GPU-геометрии.
+     */
+    private _cachedTopIndices: number[] | null = null;
     private _nodeHeights: number[] = [];
     private _strokeNodeHeights: number[] = [];
     private _lastHeightUpdateTime = 0;
@@ -189,7 +181,6 @@ export class Polygon extends SpatialObject {
     private _cachedCentroidHeight = 0;
     private _lastCentroidHeightUpdateTime = 0;
 
-    /** Среднее по `_nodeHeights`. Кэш; инвалидация — при rebuild. */
     private _avgNodeHeight = 0;
     private _avgNodeHeightValid = false;
 
@@ -198,18 +189,10 @@ export class Polygon extends SpatialObject {
 
     _batch: any = null;
 
-    /**
-     * Layout боковых рёбер: `[idxI, idxJ]` для каждого ребра
-     * (индексы в `_cachedHeights` / `_vertices2D`). Нужен для
-     * корректного обновления высот стенок у полигонов с дырками.
-     */
     private _sideEdgeIJ: Array<[number, number]> = [];
-    /** Длины рёбер стенок — для пересчёта UV при `setFillPatternScale`. */
     private _sideEdgeLengths: number[] = [];
-    /** `_height`, при которой построены UV стенок. −1 = невалидно. */
     private _builtSideHeight = -1;
 
-    /** Кэш `getBounds` по коду CRS. */
     private _boundsCache = new Map<string, [LonLat, LonLat] | null>();
 
     private _boundingSphereRadius = 0;
@@ -321,14 +304,13 @@ export class Polygon extends SpatialObject {
         this._lastCentroidHeightUpdateTime = 0;
     }
 
-protected _teardown(): void {
-    this._fillPatternGeneration++;
-    if (this._batch) {
-        const b: any = this._batch;
-        this._batch = null;
-        // Просим батчер пересобраться без этого полигона.
-        b.__batcher?.markDirty?.();
-    }
+    protected _teardown(): void {
+        this._fillPatternGeneration++;
+        if (this._batch) {
+            const b: any = this._batch;
+            this._batch = null;
+            b.__batcher?.markDirty?.();
+        }
 
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
@@ -346,7 +328,8 @@ protected _teardown(): void {
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
-        this._ringStartIndices.length = 0; 
+        this._ringStartIndices.length = 0;
+        this._cachedTopIndices = null;
         this._sideEdgeIJ.length = 0;
         this._sideEdgeLengths.length = 0;
         this._builtSideHeight = -1;
@@ -388,115 +371,156 @@ protected _teardown(): void {
         return this._group?.visible ?? false;
     }
 
-/** @internal */
-_getBatchStyleKey(): string | null {
-    if (this._invalidGeometry) return null;
-    if (this._tooltipText) return null;
-    if (this._onHover) return null;
-    if (this._zoomInterpolations) return null;
-    if (this._fillPatternSource != null
-        && typeof this._fillPatternSource !== 'string') return null;
-    if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0) return null;
+    /** @internal */
+    _getBatchStyleKey(): string | null {
+        if (this._invalidGeometry) return null;
+        if (this._tooltipText) return null;
+        if (this._onHover) return null;
+        // TODO: убрать, когда PolygonBatcher научится применять zoomInterpolate.
 
-    return [
-        this._extruded ? 'E' : 'NE',
-        this._fillColor, this._fillOpacity,
-        this._extruded ? this._roughness : '',
-        this._extruded ? this._metalness : '',
-        this._extruded ? (this._castShadow ? 1 : 0) : '',
-        this._extruded ? (this._receiveShadow ? 1 : 0) : '',
-        this._strokeColor, this._strokeWidth, this._strokeOpacity,
-        this._useSimpleStroke ? 1 : 0,
-        this._depthTest ? 1 : 0, this._depthWrite ? 1 : 0,
-        this._minZoom, this._maxZoom,
-        this._altitudeMode,
-        this._fillPatternSource ?? 'nop',
-        this._fillPatternScale, this._fillPatternFit,
-    ].join('|');
-}
+        if (this._fillPatternSource != null
+            && typeof this._fillPatternSource !== 'string') return null;
+        if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0) return null;
 
-/** @internal */
-_getBatchGeometryData(): any | null {
-    if (this._invalidGeometry || !this._fillGeometry) return null;
-    const idxAttr = this._fillGeometry.index;
-    if (!idxAttr) return null;
-
-    // heights — это Y TOP-вершин (для не-extruded это и есть плоскость).
-    // Для extruded bottom = heights[i] - height.
-    const extrude = this._extruded ? this._height : 0;
-    const base = this._altitude + this._minHeight + extrude;
-    const heights = new Array(this._worldCoords.length);
-    for (let i = 0; i < heights.length; i++) {
-        heights[i] = base + (this._nodeHeights[i] ?? 0);
+        return [
+            this._extruded ? 'E' : 'NE',
+            this._fillColor, this._fillOpacity,
+            this._extruded ? this._roughness : '',
+            this._extruded ? this._metalness : '',
+            this._extruded ? (this._castShadow ? 1 : 0) : '',
+            this._extruded ? (this._receiveShadow ? 1 : 0) : '',
+            this._strokeColor, this._strokeWidth, this._strokeOpacity,
+            this._useSimpleStroke ? 1 : 0,
+            this._depthTest ? 1 : 0, this._depthWrite ? 1 : 0,
+            this._minZoom, this._maxZoom,
+            this._altitudeMode,
+            this._fillPatternSource ?? 'nop',
+            this._fillPatternScale, this._fillPatternFit,
+        ].join('|');
     }
 
-    return {
-        worldCoords: this._worldCoords,
-        heights,
-        indices: idxAttr.array,
-        ringStarts: this._ringStartIndices,
-        extruded: this._extruded,
-        height: this._extruded ? this._height : 0,
-        fillColor: this._fillColor,
-        fillOpacity: this._fillOpacity,
-        strokeColor: this._strokeColor,
-        strokeWidth: this._strokeWidth,
-        strokeOpacity: this._strokeOpacity,
-        useSimpleStroke: this._useSimpleStroke,
-        depthTest: this._depthTest,
-        depthWrite: this._depthWrite,
-        castShadow: this._castShadow,
-        receiveShadow: this._receiveShadow,
-        roughness: this._roughness,
-        metalness: this._metalness,
-        fillPatternSource: typeof this._fillPatternSource === 'string'
-            ? this._fillPatternSource : null,
-        fillPatternScale: this._fillPatternScale,
-        fillPatternFit: this._fillPatternFit,
-        centroidX: this._centroidWorld.x,
-        centroidZ: this._centroidWorld.z,
-        minZoom: this._minZoom,
-        maxZoom: this._maxZoom,
-        altitudeMode: this._altitudeMode,
-    };
-}
+    /** @internal */
+    _getBatchGeometryData(): any | null {
+        if (this._invalidGeometry) return null;
+        if (!this._worldCoords.length) return null;
 
-/** @internal */
-_onBatchChange(batched: boolean, _batch: any): void {
-    if (batched) {
-        // Свою сцену гасим, интерактив снимаем, текстуру паттерна
-        // освобождаем (батч держит свою).
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
+        // Индексы триангуляции. Живут дольше, чем _fillGeometry:
+        // _buildFillGeometry кладёт их в _cachedTopIndices, _disposeMeshes
+        // их не трогает. Благодаря этому _getBatchGeometryData работает
+        // и после _onBatchChange(true), и после смены стиля (markDirty).
+        let indices: ArrayLike<number>;
+        if (this._cachedTopIndices) {
+            indices = this._cachedTopIndices;
+        } else if (this._fillGeometry?.index) {
+            const arr = this._fillGeometry.index.array as ArrayLike<number>;
+            this._cachedTopIndices = Array.from(arr as any);
+            indices = this._cachedTopIndices;
+        } else {
+            const computed = this._triangulateFromRings();
+            if (!computed.length) return null;
+            this._cachedTopIndices = computed;
+            indices = computed;
         }
-        if (this._group) this._group.visible = false;
-        if (this._fillPatternTexture) {
-            try { this._fillPatternTexture.dispose?.(); } catch { /* swallow */ }
-            this._fillPatternTexture = null;
+
+        const extrude = this._extruded ? this._height : 0;
+        const base = this._altitude + this._minHeight + extrude;
+        const heights = new Array(this._worldCoords.length);
+        for (let i = 0; i < heights.length; i++) {
+            heights[i] = base + (this._nodeHeights[i] ?? 0);
         }
-    } else {
-        if (this._group) this._group.visible = true;
-        if (this._map) {
+
+        return {
+            worldCoords: this._worldCoords,
+            heights,
+            indices,
+            zoomInterpolations: this._zoomInterpolations ?? null,
+            ringStarts: this._ringStartIndices,
+            extruded: this._extruded,
+            height: this._extruded ? this._height : 0,
+            fillColor: this._fillColor,
+            fillOpacity: this._fillOpacity,
+            strokeColor: this._strokeColor,
+            strokeWidth: this._strokeWidth,
+            strokeOpacity: this._strokeOpacity,
+            useSimpleStroke: this._useSimpleStroke,
+            depthTest: this._depthTest,
+            depthWrite: this._depthWrite,
+            castShadow: this._castShadow,
+            receiveShadow: this._receiveShadow,
+            roughness: this._roughness,
+            metalness: this._metalness,
+            fillPatternSource: typeof this._fillPatternSource === 'string'
+                ? this._fillPatternSource : null,
+            fillPatternScale: this._fillPatternScale,
+            fillPatternFit: this._fillPatternFit,
+            centroidX: this._centroidWorld.x,
+            centroidZ: this._centroidWorld.z,
+            minZoom: this._minZoom,
+            maxZoom: this._maxZoom,
+            altitudeMode: this._altitudeMode,
+        };
+    }
+
+    /**
+     * @internal
+     *
+     * При попадании в батч освобождаем только GPU-ресурсы
+     * (BufferGeometry / Mesh / материалы). Сырые массивы
+     * (`_worldCoords`, `_nodeHeights`, `_ringStartIndices`,
+     * `_strokeWorldCoords`, `_strokeNodeHeights`, `_cachedTopIndices`)
+     * ОСТАВЛЯЕМ: они нужны
+     *   – `_getBatchGeometryData()` для повторного batch-rebuild
+     *     после `markDirty()` (setFillColor и т.п.);
+     *   – `_updateCentroidScreenPos()` (текст батченного полигона);
+     *   – `_updateHeights()` в случае разбатчивания.
+     */
+    _onBatchChange(batched: boolean, _batch: any): void {
+        if (batched) {
+            if (this._unregisterInteraction) {
+                this._unregisterInteraction();
+                this._unregisterInteraction = null;
+            }
+            if (this._group) this._group.visible = false;
+
+            if (this._fillPatternTexture) {
+                try { this._fillPatternTexture.dispose?.(); } catch { /* swallow */ }
+                this._fillPatternTexture = null;
+            }
+
+            this._disposeMeshes();
+            // _vertices2D / _cachedHeights зависят от _fillGeometry и
+            // пересчитываются в _buildFillGeometry / _updateHeights,
+            // поэтому их можно освободить.
+            this._vertices2D = [];
+            this._cachedHeights = [];
+            this._cachedStrokeHeights = [];
+            this._sideEdgeIJ.length = 0;
+            this._sideEdgeLengths.length = 0;
+            this._builtSideHeight = -1;
+            this._heightsFinalized = false;
+            this._avgNodeHeightValid = false;
+        } else {
+            // Паттерн нужно восстановить ДО rebuild — иначе _createSurfaceMaterial
+            // создаст материалы без текстуры.
             if (!this._fillPatternTexture && this._fillPatternSource) {
                 this._loadFillPattern();
-                this._applyFillPatternToMaterials();
             }
-            this._registerInteraction(this._map);
+            if (this._map) this._rebuildGeometry();
+            if (this._group) this._group.visible = true;
+            if (this._map) this._registerInteraction(this._map);
+            this._heightsDirty = true;
+            this._heightsFinalized = false;
         }
-        this._heightsDirty = true;
-        this._heightsFinalized = false;
     }
-}
 
-/** @internal — дергаем из каждого сеттера стиля. */
-private _invalidateBatch(): void {
-    if (!this._batch) return;
-    const batcher = (this._layer as any)?._polygonBatcher;
-    if (batcher && typeof batcher.markDirty === 'function') {
-        batcher.markDirty();
+    /** @internal — дергаем из каждого сеттера стиля. */
+    private _invalidateBatch(): void {
+        if (!this._batch) return;
+        const batcher = (this._layer as any)?._polygonBatcher;
+        if (batcher && typeof batcher.markDirty === 'function') {
+            batcher.markDirty();
+        }
     }
-}
 
     // =================================================================
     // Интерактив
@@ -565,6 +589,7 @@ private _invalidateBatch(): void {
         this._boundsCache.clear();
         if (!this._map) return this;
         this._rebuildGeometry();
+        this._invalidateBatch();
         return this;
     }
 
@@ -580,7 +605,8 @@ private _invalidateBatch(): void {
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
-        this._ringStartIndices.length = 0; 
+        this._ringStartIndices.length = 0;
+        this._cachedTopIndices = null;
         this._sideEdgeIJ.length = 0;
         this._sideEdgeLengths.length = 0;
         this._builtSideHeight = -1;
@@ -629,6 +655,7 @@ private _invalidateBatch(): void {
         this._strokeGeometry = null;
         this._strokeMaterial = null;
         this._raycastMeshesCache = null;
+        // _cachedTopIndices НЕ трогаем — по нему батчер сможет пересобраться.
     }
 
     // =================================================================
@@ -650,8 +677,6 @@ private _invalidateBatch(): void {
             const tex = loader.load(
                 src,
                 (loaded: any) => {
-                    // Защита от stale-callback: пока грузилась текстура,
-                    // могли вызвать setFillPattern()/remove().
                     if (generation !== this._fillPatternGeneration) {
                         try { loaded?.dispose?.(); } catch { /* swallow */ }
                         return;
@@ -683,8 +708,6 @@ private _invalidateBatch(): void {
 
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
-
-        // Mipmap при больших UV выбирает 1×1 level → сплошной блюр.
         t.generateMipmaps = false;
         t.minFilter = THREE.LinearFilter;
         t.magFilter = THREE.LinearFilter;
@@ -713,7 +736,7 @@ private _invalidateBatch(): void {
     }
 
     // =================================================================
-    // UV-логика (общая для build и update)
+    // UV-логика
     // =================================================================
 
     private _computeUVParams(patternScale: number): UVParams {
@@ -734,10 +757,6 @@ private _invalidateBatch(): void {
                 scaleZ: (maxPZ - minPZ) > 1e-6 ? (maxPZ - minPZ) : 1,
             };
         }
-        // tile: anchor в ближайшем кратном patternScale от центроида.
-        // UV маленькие (точность float32 работает), тайлинг между
-        // соседями сохраняется (anchor отличается на N*patternScale
-        // → эквивалентно через RepeatWrapping).
         return {
             originX: Math.floor(this._centroidWorld.x / patternScale) * patternScale,
             originZ: Math.floor(this._centroidWorld.z / patternScale) * patternScale,
@@ -746,11 +765,6 @@ private _invalidateBatch(): void {
         };
     }
 
-    /**
-     * Пересчитывает UV-атрибуты существующих геометрий без dispose и
-     * повторного earcut. Дёшево (O(vertexCount)) — можно вызывать из
-     * `setFillPatternScale`/`setFillPatternFit` без риска для FPS.
-     */
     private _updateFillUVs(): void {
         if (this._invalidGeometry) return;
         if (!this._fillGeometry) return;
@@ -762,7 +776,6 @@ private _invalidateBatch(): void {
         const worldCoords = this._worldCoords;
         const n = worldCoords.length;
 
-        // ── Top ──
         const topAttr = this._fillGeometry.attributes.uv;
         if (topAttr) {
             const topUVs = topAttr.array as Float32Array;
@@ -775,7 +788,6 @@ private _invalidateBatch(): void {
             topAttr.needsUpdate = true;
         }
 
-        // ── Bottom (переиспользует top) ──
         if (this._bottomGeometry) {
             const botAttr = this._bottomGeometry.attributes.uv;
             if (botAttr && topAttr) {
@@ -784,9 +796,6 @@ private _invalidateBatch(): void {
             }
         }
 
-        // ── Side: U вдоль ребра, V по высоте. Side всегда использует
-        //    patternScale (не bbox), поэтому смена fit на стороны не
-        //    влияет — но при смене scale U надо пересчитать. ──
         if (this._sideGeometry && this._sideEdgeLengths.length > 0) {
             const sideAttr = this._sideGeometry.attributes.uv;
             if (sideAttr) {
@@ -915,7 +924,44 @@ private _invalidateBatch(): void {
         return false;
     }
 
+    /**
+     * Триангулирует top-грань по `_worldCoords` + `_ringStartIndices`.
+     * Нужен, когда GPU-геометрия выгружена (`_fillGeometry = null`), а
+     * батчеру после `markDirty()` индексы снова нужны. По стоимости —
+     * десятки вершин на комнату, вызывается редко (только при rebuild батча).
+     */
+    private _triangulateFromRings(): number[] {
+        const wc = this._worldCoords;
+        const rs = this._ringStartIndices;
+        if (!wc.length || !rs.length) return [];
+
+        const coords: number[] = [];
+        const holeIndices: number[] = [];
+        for (let r = 0; r < rs.length; r++) {
+            const start = rs[r];
+            const end = (r + 1 < rs.length) ? rs[r + 1] : wc.length;
+            if (r > 0) holeIndices.push(coords.length / 2);
+            for (let i = start; i < end; i++) {
+                coords.push(wc[i][0], wc[i][1]);
+            }
+        }
+        if (coords.length < 6) return [];
+
+        const indices = earcut(coords, holeIndices, 2);
+        if (!indices.length) return [];
+
+        // Ориентация: crossY в плоскости XZ, точки в абсолютных worldCoords.
+        const p2d: Array<{ x: number; y: number }> = new Array(coords.length / 2);
+        for (let i = 0, j = 0; i < coords.length; i += 2, j++) {
+            p2d[j] = { x: coords[i], y: coords[i + 1] };
+        }
+        const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
+        return firstCrossY >= 0 ? indices : this._flipIndices(indices);
+    }
+
     private _buildFillGeometry(map: any): void {
+        this._cachedTopIndices = null;
+
         const rings = this._rings;
         if (!rings || !rings.length || rings[0].length < 3) {
             console.warn('Polygon: rings[0] must have at least 3 points');
@@ -993,6 +1039,9 @@ private _invalidateBatch(): void {
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
 
+        // Кэш для батчера — переживёт _disposeMeshes().
+        this._cachedTopIndices = topIndices;
+
         let cx = 0, cy = 0;
         for (const pt of points2D) {
             cx += pt.x;
@@ -1016,7 +1065,6 @@ private _invalidateBatch(): void {
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
-        // ── UV top/bottom ──
         const patternScale = this._fillPatternScale > 0
             ? this._fillPatternScale
             : DEFAULT_FILL_PATTERN_SCALE;
@@ -1134,8 +1182,6 @@ private _invalidateBatch(): void {
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
                     sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
 
-                    // Запоминаем раскладку для корректного per-ring
-                    // обновления высот и пересчёта UV.
                     this._sideEdgeIJ.push([idxI, idxJ]);
                     this._sideEdgeLengths.push(edgeLen);
 
@@ -1251,12 +1297,13 @@ private _invalidateBatch(): void {
         if (this._fillMaterial?.color) this._fillMaterial.color.set(color as any);
         if (this._bottomMaterial?.color) this._bottomMaterial.color.set(color as any);
         if (this._sideMaterial?.color) this._sideMaterial.color.set(color as any);
-       this._invalidateBatch();
+        this._invalidateBatch();
         return this;
     }
 
-    getFillColor(): string | number { 
-        return this._fillColor; }
+    getFillColor(): string | number {
+        return this._fillColor;
+    }
 
     setFillOpacity(opacity: number): this {
         this._fillOpacity = Math.max(0, Math.min(1, opacity));
@@ -1275,11 +1322,6 @@ private _invalidateBatch(): void {
 
     getFillOpacity(): number { return this._fillOpacity; }
 
-    /**
-     * Меняет текстуру заливки. `null` — вернуть однотонную заливку.
-     * Работает после `addTo()` без пересоздания геометрии — UV уже
-     * посчитаны.
-     */
     setFillPattern(source: FillPatternSource): this {
         if (this._fillPatternTexture) {
             try { this._fillPatternTexture.dispose?.(); } catch { /* swallow */ }
@@ -1298,11 +1340,6 @@ private _invalidateBatch(): void {
         return this._fillPatternSource;
     }
 
-    /**
-     * Масштаб паттерна: world-метры на одну плитку.
-     * Патч: обновляет только UV-атрибуты (`_updateFillUVs`), без dispose
-     * материалов и без повторного earcut. Раньше — полный rebuild.
-     */
     setFillPatternScale(scale: number): this {
         if (!(scale > 0)) return this;
         if (this._fillPatternScale === scale) return this;
@@ -1316,11 +1353,6 @@ private _invalidateBatch(): void {
         return this._fillPatternScale;
     }
 
-    /**
-     * `'tile'` — мировой тайлинг (по умолчанию),
-     * `'bounds'` — растянуть текстуру на bbox полигона (0..1 UV).
-     * Патч: пересчитывает только UV (`_updateFillUVs`).
-     */
     setFillPatternFit(fit: FillPatternFit): this {
         if (this._fillPatternFit === fit) return this;
         this._fillPatternFit = fit;
@@ -1336,7 +1368,7 @@ private _invalidateBatch(): void {
     setStrokeColor(color: string | number): this {
         this._strokeColor = color;
         if (this._strokeMaterial?.color) this._strokeMaterial.color.set(color as any);
-       this._invalidateBatch();
+        this._invalidateBatch();
         return this;
     }
 
@@ -1377,12 +1409,10 @@ private _invalidateBatch(): void {
     // Высота
     // =================================================================
 
-    /** @deprecated Используйте унаследованный `setAltitude`. */
     setAltitudeOffset(offset: number): this {
         return this.setAltitude(offset);
     }
 
-    /** @deprecated Используйте унаследованный `getAltitude`. */
     getAltitudeOffset(): number {
         return this.getAltitude();
     }
@@ -1494,22 +1524,20 @@ private _invalidateBatch(): void {
     // Обновление на кадре
     // =================================================================
 
-_update(_mapArg?: any): void {
-    const map = this._map;
-    if (!map || !this._group) return;
+    _update(_mapArg?: any): void {
+        const map = this._map;
+        if (!map || !this._group) return;
 
-
-    if (this._batch) {
-        if (this._invalidGeometry || !this._isWithinView()) {
-            this._isVisible = false;
-            this._centroidScreenPos = null;
+        if (this._batch) {
+            if (this._invalidGeometry || !this._isWithinView()) {
+                this._isVisible = false;
+                this._centroidScreenPos = null;
+                return;
+            }
+            this._isVisible = true;
+            this._updateCentroidScreenPos();
             return;
         }
-        this._isVisible = true;
-        this._updateCentroidScreenPos();
-        return;
-    }
-
 
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
@@ -1586,7 +1614,6 @@ _update(_mapArg?: any): void {
         const extrude = this._extruded ? this._height : 0;
         const n = this._vertices2D.length;
 
-        // Базовые высоты (рельеф + altitude + nodeH).
         for (let i = 0; i < n; i++) {
             const worldCoord = this._worldCoords[i];
             if (!worldCoord) continue;
@@ -1619,7 +1646,6 @@ _update(_mapArg?: any): void {
             this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
         }
 
-        // ── Top ──
         const topPos = this._fillGeometry.attributes.position.array as Float32Array;
         for (let i = 0; i < n; i++) {
             topPos[i * 3 + 1] = this._cachedHeights[i];
@@ -1627,7 +1653,6 @@ _update(_mapArg?: any): void {
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
 
-        // ── Bottom ──
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array as Float32Array;
             const height = this._height;
@@ -1638,7 +1663,6 @@ _update(_mapArg?: any): void {
             this._bottomGeometry.computeBoundingSphere();
         }
 
-        // ── Side (per-edge через _sideEdgeIJ — фикс для дырок) ──
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array as Float32Array;
             const height = this._height;
@@ -1659,12 +1683,6 @@ _update(_mapArg?: any): void {
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
 
-            // Патч: computeVertexNormals() удалён — нормали стенок
-            // инвариантны к изменению Y (направление рёбер не меняется,
-            // только их масштаб). Это самый дорогой вызов на кадр.
-
-            // UV боковых стенок: V зависит от _height, обновляем при
-            // изменении высоты. U не меняется — patternScale тот же.
             if (this._builtSideHeight !== height) {
                 const uvAttr = this._sideGeometry.attributes.uv;
                 if (uvAttr) {
@@ -1683,8 +1701,6 @@ _update(_mapArg?: any): void {
                 this._builtSideHeight = height;
             }
 
-            // Bounding sphere пересчитываем: Y-диапазон меняется.
-            // (O(n), но вызывается раз в 500 мс для dynamic, не каждый кадр.)
             this._sideGeometry.computeBoundingSphere();
         }
 
@@ -1758,7 +1774,6 @@ _update(_mapArg?: any): void {
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitude;
         }
 
-        // Патч: кэш среднего по _nodeHeights. Раньше — O(n) каждый кадр.
         if (!this._avgNodeHeightValid) {
             let sum = 0;
             const n = this._nodeHeights.length;

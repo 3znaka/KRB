@@ -40,10 +40,6 @@ export class Polygon extends SpatialObject {
     _fillPatternScale;
     _fillPatternFit;
     _fillPatternTexture = null;
-    /**
-     * Монотонный счётчик поколений загрузки текстуры. onLoad-callback,
-     * чьё поколение устарело, сам dispose'ит свою текстуру и выходит.
-     */
     _fillPatternGeneration = 0;
     _strokeColor;
     _strokeWidth;
@@ -79,6 +75,13 @@ export class Polygon extends SpatialObject {
     // ── Кэши ──
     _cachedHeights = [];
     _cachedStrokeHeights = [];
+    /**
+     * Кэш индексов триангуляции top-грани. Заполняется в `_buildFillGeometry`
+     * (и при необходимости пересчитывается в `_getBatchGeometryData`).
+     * Переживает `_disposeMeshes()`, чтобы батчер мог пересобраться
+     * после `markDirty()` (например, `setFillColor`) без GPU-геометрии.
+     */
+    _cachedTopIndices = null;
     _nodeHeights = [];
     _strokeNodeHeights = [];
     _lastHeightUpdateTime = 0;
@@ -89,23 +92,14 @@ export class Polygon extends SpatialObject {
     _centroidWorld;
     _cachedCentroidHeight = 0;
     _lastCentroidHeightUpdateTime = 0;
-    /** Среднее по `_nodeHeights`. Кэш; инвалидация — при rebuild. */
     _avgNodeHeight = 0;
     _avgNodeHeightValid = false;
     _worldCoords = [];
     _strokeWorldCoords = [];
     _batch = null;
-    /**
-     * Layout боковых рёбер: `[idxI, idxJ]` для каждого ребра
-     * (индексы в `_cachedHeights` / `_vertices2D`). Нужен для
-     * корректного обновления высот стенок у полигонов с дырками.
-     */
     _sideEdgeIJ = [];
-    /** Длины рёбер стенок — для пересчёта UV при `setFillPatternScale`. */
     _sideEdgeLengths = [];
-    /** `_height`, при которой построены UV стенок. −1 = невалидно. */
     _builtSideHeight = -1;
-    /** Кэш `getBounds` по коду CRS. */
     _boundsCache = new Map();
     _boundingSphereRadius = 0;
     _boundingSphereWorldCenter;
@@ -198,7 +192,6 @@ export class Polygon extends SpatialObject {
         if (this._batch) {
             const b = this._batch;
             this._batch = null;
-            // Просим батчер пересобраться без этого полигона.
             b.__batcher?.markDirty?.();
         }
         if (this._unregisterInteraction) {
@@ -220,6 +213,7 @@ export class Polygon extends SpatialObject {
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
         this._ringStartIndices.length = 0;
+        this._cachedTopIndices = null;
         this._sideEdgeIJ.length = 0;
         this._sideEdgeLengths.length = 0;
         this._builtSideHeight = -1;
@@ -264,8 +258,7 @@ export class Polygon extends SpatialObject {
             return null;
         if (this._onHover)
             return null;
-        if (this._zoomInterpolations)
-            return null;
+        // TODO: убрать, когда PolygonBatcher научится применять zoomInterpolate.
         if (this._fillPatternSource != null
             && typeof this._fillPatternSource !== 'string')
             return null;
@@ -289,13 +282,30 @@ export class Polygon extends SpatialObject {
     }
     /** @internal */
     _getBatchGeometryData() {
-        if (this._invalidGeometry || !this._fillGeometry)
+        if (this._invalidGeometry)
             return null;
-        const idxAttr = this._fillGeometry.index;
-        if (!idxAttr)
+        if (!this._worldCoords.length)
             return null;
-        // heights — это Y TOP-вершин (для не-extruded это и есть плоскость).
-        // Для extruded bottom = heights[i] - height.
+        // Индексы триангуляции. Живут дольше, чем _fillGeometry:
+        // _buildFillGeometry кладёт их в _cachedTopIndices, _disposeMeshes
+        // их не трогает. Благодаря этому _getBatchGeometryData работает
+        // и после _onBatchChange(true), и после смены стиля (markDirty).
+        let indices;
+        if (this._cachedTopIndices) {
+            indices = this._cachedTopIndices;
+        }
+        else if (this._fillGeometry?.index) {
+            const arr = this._fillGeometry.index.array;
+            this._cachedTopIndices = Array.from(arr);
+            indices = this._cachedTopIndices;
+        }
+        else {
+            const computed = this._triangulateFromRings();
+            if (!computed.length)
+                return null;
+            this._cachedTopIndices = computed;
+            indices = computed;
+        }
         const extrude = this._extruded ? this._height : 0;
         const base = this._altitude + this._minHeight + extrude;
         const heights = new Array(this._worldCoords.length);
@@ -305,7 +315,8 @@ export class Polygon extends SpatialObject {
         return {
             worldCoords: this._worldCoords,
             heights,
-            indices: idxAttr.array,
+            indices,
+            zoomInterpolations: this._zoomInterpolations ?? null,
             ringStarts: this._ringStartIndices,
             extruded: this._extruded,
             height: this._extruded ? this._height : 0,
@@ -332,11 +343,21 @@ export class Polygon extends SpatialObject {
             altitudeMode: this._altitudeMode,
         };
     }
-    /** @internal */
+    /**
+     * @internal
+     *
+     * При попадании в батч освобождаем только GPU-ресурсы
+     * (BufferGeometry / Mesh / материалы). Сырые массивы
+     * (`_worldCoords`, `_nodeHeights`, `_ringStartIndices`,
+     * `_strokeWorldCoords`, `_strokeNodeHeights`, `_cachedTopIndices`)
+     * ОСТАВЛЯЕМ: они нужны
+     *   – `_getBatchGeometryData()` для повторного batch-rebuild
+     *     после `markDirty()` (setFillColor и т.п.);
+     *   – `_updateCentroidScreenPos()` (текст батченного полигона);
+     *   – `_updateHeights()` в случае разбатчивания.
+     */
     _onBatchChange(batched, _batch) {
         if (batched) {
-            // Свою сцену гасим, интерактив снимаем, текстуру паттерна
-            // освобождаем (батч держит свою).
             if (this._unregisterInteraction) {
                 this._unregisterInteraction();
                 this._unregisterInteraction = null;
@@ -350,17 +371,31 @@ export class Polygon extends SpatialObject {
                 catch { /* swallow */ }
                 this._fillPatternTexture = null;
             }
+            this._disposeMeshes();
+            // _vertices2D / _cachedHeights зависят от _fillGeometry и
+            // пересчитываются в _buildFillGeometry / _updateHeights,
+            // поэтому их можно освободить.
+            this._vertices2D = [];
+            this._cachedHeights = [];
+            this._cachedStrokeHeights = [];
+            this._sideEdgeIJ.length = 0;
+            this._sideEdgeLengths.length = 0;
+            this._builtSideHeight = -1;
+            this._heightsFinalized = false;
+            this._avgNodeHeightValid = false;
         }
         else {
+            // Паттерн нужно восстановить ДО rebuild — иначе _createSurfaceMaterial
+            // создаст материалы без текстуры.
+            if (!this._fillPatternTexture && this._fillPatternSource) {
+                this._loadFillPattern();
+            }
+            if (this._map)
+                this._rebuildGeometry();
             if (this._group)
                 this._group.visible = true;
-            if (this._map) {
-                if (!this._fillPatternTexture && this._fillPatternSource) {
-                    this._loadFillPattern();
-                    this._applyFillPatternToMaterials();
-                }
+            if (this._map)
                 this._registerInteraction(this._map);
-            }
             this._heightsDirty = true;
             this._heightsFinalized = false;
         }
@@ -439,6 +474,7 @@ export class Polygon extends SpatialObject {
         if (!this._map)
             return this;
         this._rebuildGeometry();
+        this._invalidateBatch();
         return this;
     }
     getRings() {
@@ -453,6 +489,7 @@ export class Polygon extends SpatialObject {
         this._nodeHeights.length = 0;
         this._strokeNodeHeights.length = 0;
         this._ringStartIndices.length = 0;
+        this._cachedTopIndices = null;
         this._sideEdgeIJ.length = 0;
         this._sideEdgeLengths.length = 0;
         this._builtSideHeight = -1;
@@ -497,6 +534,7 @@ export class Polygon extends SpatialObject {
         this._strokeGeometry = null;
         this._strokeMaterial = null;
         this._raycastMeshesCache = null;
+        // _cachedTopIndices НЕ трогаем — по нему батчер сможет пересобраться.
     }
     // =================================================================
     // Fill pattern
@@ -512,8 +550,6 @@ export class Polygon extends SpatialObject {
             const loader = new THREE.TextureLoader();
             loader.setCrossOrigin('anonymous');
             const tex = loader.load(src, (loaded) => {
-                // Защита от stale-callback: пока грузилась текстура,
-                // могли вызвать setFillPattern()/remove().
                 if (generation !== this._fillPatternGeneration) {
                     try {
                         loaded?.dispose?.();
@@ -547,7 +583,6 @@ export class Polygon extends SpatialObject {
             return;
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
-        // Mipmap при больших UV выбирает 1×1 level → сплошной блюр.
         t.generateMipmaps = false;
         t.minFilter = THREE.LinearFilter;
         t.magFilter = THREE.LinearFilter;
@@ -575,7 +610,7 @@ export class Polygon extends SpatialObject {
         }
     }
     // =================================================================
-    // UV-логика (общая для build и update)
+    // UV-логика
     // =================================================================
     _computeUVParams(patternScale) {
         if (this._fillPatternFit === 'bounds') {
@@ -600,10 +635,6 @@ export class Polygon extends SpatialObject {
                 scaleZ: (maxPZ - minPZ) > 1e-6 ? (maxPZ - minPZ) : 1,
             };
         }
-        // tile: anchor в ближайшем кратном patternScale от центроида.
-        // UV маленькие (точность float32 работает), тайлинг между
-        // соседями сохраняется (anchor отличается на N*patternScale
-        // → эквивалентно через RepeatWrapping).
         return {
             originX: Math.floor(this._centroidWorld.x / patternScale) * patternScale,
             originZ: Math.floor(this._centroidWorld.z / patternScale) * patternScale,
@@ -611,11 +642,6 @@ export class Polygon extends SpatialObject {
             scaleZ: patternScale,
         };
     }
-    /**
-     * Пересчитывает UV-атрибуты существующих геометрий без dispose и
-     * повторного earcut. Дёшево (O(vertexCount)) — можно вызывать из
-     * `setFillPatternScale`/`setFillPatternFit` без риска для FPS.
-     */
     _updateFillUVs() {
         if (this._invalidGeometry)
             return;
@@ -627,7 +653,6 @@ export class Polygon extends SpatialObject {
         const params = this._computeUVParams(patternScale);
         const worldCoords = this._worldCoords;
         const n = worldCoords.length;
-        // ── Top ──
         const topAttr = this._fillGeometry.attributes.uv;
         if (topAttr) {
             const topUVs = topAttr.array;
@@ -640,7 +665,6 @@ export class Polygon extends SpatialObject {
             }
             topAttr.needsUpdate = true;
         }
-        // ── Bottom (переиспользует top) ──
         if (this._bottomGeometry) {
             const botAttr = this._bottomGeometry.attributes.uv;
             if (botAttr && topAttr) {
@@ -648,9 +672,6 @@ export class Polygon extends SpatialObject {
                 botAttr.needsUpdate = true;
             }
         }
-        // ── Side: U вдоль ребра, V по высоте. Side всегда использует
-        //    patternScale (не bbox), поэтому смена fit на стороны не
-        //    влияет — но при смене scale U надо пересчитать. ──
         if (this._sideGeometry && this._sideEdgeLengths.length > 0) {
             const sideAttr = this._sideGeometry.attributes.uv;
             if (sideAttr) {
@@ -784,7 +805,43 @@ export class Polygon extends SpatialObject {
         }
         return false;
     }
+    /**
+     * Триангулирует top-грань по `_worldCoords` + `_ringStartIndices`.
+     * Нужен, когда GPU-геометрия выгружена (`_fillGeometry = null`), а
+     * батчеру после `markDirty()` индексы снова нужны. По стоимости —
+     * десятки вершин на комнату, вызывается редко (только при rebuild батча).
+     */
+    _triangulateFromRings() {
+        const wc = this._worldCoords;
+        const rs = this._ringStartIndices;
+        if (!wc.length || !rs.length)
+            return [];
+        const coords = [];
+        const holeIndices = [];
+        for (let r = 0; r < rs.length; r++) {
+            const start = rs[r];
+            const end = (r + 1 < rs.length) ? rs[r + 1] : wc.length;
+            if (r > 0)
+                holeIndices.push(coords.length / 2);
+            for (let i = start; i < end; i++) {
+                coords.push(wc[i][0], wc[i][1]);
+            }
+        }
+        if (coords.length < 6)
+            return [];
+        const indices = earcut(coords, holeIndices, 2);
+        if (!indices.length)
+            return [];
+        // Ориентация: crossY в плоскости XZ, точки в абсолютных worldCoords.
+        const p2d = new Array(coords.length / 2);
+        for (let i = 0, j = 0; i < coords.length; i += 2, j++) {
+            p2d[j] = { x: coords[i], y: coords[i + 1] };
+        }
+        const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
+        return firstCrossY >= 0 ? indices : this._flipIndices(indices);
+    }
     _buildFillGeometry(map) {
+        this._cachedTopIndices = null;
         const rings = this._rings;
         if (!rings || !rings.length || rings[0].length < 3) {
             console.warn('Polygon: rings[0] must have at least 3 points');
@@ -851,6 +908,8 @@ export class Polygon extends SpatialObject {
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
+        // Кэш для батчера — переживёт _disposeMeshes().
+        this._cachedTopIndices = topIndices;
         let cx = 0, cy = 0;
         for (const pt of points2D) {
             cx += pt.x;
@@ -871,7 +930,6 @@ export class Polygon extends SpatialObject {
                 maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-        // ── UV top/bottom ──
         const patternScale = this._fillPatternScale > 0
             ? this._fillPatternScale
             : DEFAULT_FILL_PATTERN_SCALE;
@@ -978,8 +1036,6 @@ export class Polygon extends SpatialObject {
                     sideUVs.push(u1, 0);
                     sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
                     sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
-                    // Запоминаем раскладку для корректного per-ring
-                    // обновления высот и пересчёта UV.
                     this._sideEdgeIJ.push([idxI, idxJ]);
                     this._sideEdgeLengths.push(edgeLen);
                     cum += edgeLen;
@@ -1106,11 +1162,6 @@ export class Polygon extends SpatialObject {
         return this;
     }
     getFillOpacity() { return this._fillOpacity; }
-    /**
-     * Меняет текстуру заливки. `null` — вернуть однотонную заливку.
-     * Работает после `addTo()` без пересоздания геометрии — UV уже
-     * посчитаны.
-     */
     setFillPattern(source) {
         if (this._fillPatternTexture) {
             try {
@@ -1130,11 +1181,6 @@ export class Polygon extends SpatialObject {
     getFillPattern() {
         return this._fillPatternSource;
     }
-    /**
-     * Масштаб паттерна: world-метры на одну плитку.
-     * Патч: обновляет только UV-атрибуты (`_updateFillUVs`), без dispose
-     * материалов и без повторного earcut. Раньше — полный rebuild.
-     */
     setFillPatternScale(scale) {
         if (!(scale > 0))
             return this;
@@ -1149,11 +1195,6 @@ export class Polygon extends SpatialObject {
     getFillPatternScale() {
         return this._fillPatternScale;
     }
-    /**
-     * `'tile'` — мировой тайлинг (по умолчанию),
-     * `'bounds'` — растянуть текстуру на bbox полигона (0..1 UV).
-     * Патч: пересчитывает только UV (`_updateFillUVs`).
-     */
     setFillPatternFit(fit) {
         if (this._fillPatternFit === fit)
             return this;
@@ -1205,11 +1246,9 @@ export class Polygon extends SpatialObject {
     // =================================================================
     // Высота
     // =================================================================
-    /** @deprecated Используйте унаследованный `setAltitude`. */
     setAltitudeOffset(offset) {
         return this.setAltitude(offset);
     }
-    /** @deprecated Используйте унаследованный `getAltitude`. */
     getAltitudeOffset() {
         return this.getAltitude();
     }
@@ -1396,7 +1435,6 @@ export class Polygon extends SpatialObject {
         const wgPos = map.worldGroup.position;
         const extrude = this._extruded ? this._height : 0;
         const n = this._vertices2D.length;
-        // Базовые высоты (рельеф + altitude + nodeH).
         for (let i = 0; i < n; i++) {
             const worldCoord = this._worldCoords[i];
             if (!worldCoord)
@@ -1429,14 +1467,12 @@ export class Polygon extends SpatialObject {
             const nodeH = this._strokeNodeHeights[i] ?? 0;
             this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
         }
-        // ── Top ──
         const topPos = this._fillGeometry.attributes.position.array;
         for (let i = 0; i < n; i++) {
             topPos[i * 3 + 1] = this._cachedHeights[i];
         }
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
-        // ── Bottom ──
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
             const height = this._height;
@@ -1446,7 +1482,6 @@ export class Polygon extends SpatialObject {
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
-        // ── Side (per-edge через _sideEdgeIJ — фикс для дырок) ──
         if (this._sideGeometry) {
             const sidePos = this._sideGeometry.attributes.position.array;
             const height = this._height;
@@ -1466,11 +1501,6 @@ export class Polygon extends SpatialObject {
                 sidePos[(base + 3) * 3 + 1] = lowerJ;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
-            // Патч: computeVertexNormals() удалён — нормали стенок
-            // инвариантны к изменению Y (направление рёбер не меняется,
-            // только их масштаб). Это самый дорогой вызов на кадр.
-            // UV боковых стенок: V зависит от _height, обновляем при
-            // изменении высоты. U не меняется — patternScale тот же.
             if (this._builtSideHeight !== height) {
                 const uvAttr = this._sideGeometry.attributes.uv;
                 if (uvAttr) {
@@ -1488,8 +1518,6 @@ export class Polygon extends SpatialObject {
                 }
                 this._builtSideHeight = height;
             }
-            // Bounding sphere пересчитываем: Y-диапазон меняется.
-            // (O(n), но вызывается раз в 500 мс для dynamic, не каждый кадр.)
             this._sideGeometry.computeBoundingSphere();
         }
         if (!isDynamic)
@@ -1558,7 +1586,6 @@ export class Polygon extends SpatialObject {
             }
             worldY = (this._cachedCentroidHeight ?? 0) + this._altitude;
         }
-        // Патч: кэш среднего по _nodeHeights. Раньше — O(n) каждый кадр.
         if (!this._avgNodeHeightValid) {
             let sum = 0;
             const n = this._nodeHeights.length;

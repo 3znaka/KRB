@@ -54,6 +54,13 @@ export const CoreInputMixin = {
             startMidY: 0,
             startPitch: 0,
             activeGesture: null,
+            // ── Dynamic reclassification state ──
+            smoothZoom: 0,
+            smoothRotate: 0,
+            smoothTilt: 0,
+            candidateGesture: null,
+            candidateFrames: 0,
+            lastSwitchTime: 0,
         };
     },
     // ───────────────────────────────────────────────────────────────────────
@@ -401,6 +408,13 @@ export const CoreInputMixin = {
             ts.startZoom = this.continuousZoom;
             ts.accumulatedLineAngle = 0;
             ts.activeGesture = null;
+            // ── reset dynamic-classification state ──
+            ts.smoothZoom = 0;
+            ts.smoothRotate = 0;
+            ts.smoothTilt = 0;
+            ts.candidateGesture = null;
+            ts.candidateFrames = 0;
+            ts.lastSwitchTime = 0;
             const target = this.controls.target;
             const dir = this._tempVec3a.subVectors(this.camera.position, target);
             const d = dir.length();
@@ -459,52 +473,102 @@ export const CoreInputMixin = {
             if (curDist < 1e-3)
                 return;
             // ─────────────────────────────────────────────────────────────
-            // 1. КЛАССИФИКАЦИЯ ЖЕСТА (один раз на касание)
+            // Мгновенные дельты текущего кадра (для классификации).
             // ─────────────────────────────────────────────────────────────
-            if (ts.activeGesture === null) {
-                let aDiff = curAngle - ts.startAngle;
-                while (aDiff > Math.PI)
-                    aDiff -= 2 * Math.PI;
-                while (aDiff < -Math.PI)
-                    aDiff += 2 * Math.PI;
-                const zoomSignal = Math.abs(curDist - ts.startDist);
-                const rotateSignal = Math.abs(aDiff) * ts.startDist * 0.5;
-                const tiltSignal = Math.abs(midY - ts.startMidY);
-                // ─── тюнинг: середина между v1 и v2 ───
-                const GESTURE_TRIGGER_PX = 10; // было 14 (v1) / 9 (v2)
-                const TILT_TRIGGER_PX = 6; // было 7  (v1) / 4 (v2)
-                const TILT_DOMINANCE = 0.8; // было 1.2 (v1) / 0.35 эффективно (v2)
-                const maxSignal = Math.max(zoomSignal, rotateSignal, tiltSignal);
-                // Деад-зона: сигнала не хватает даже на минимум обоих порогов
-                if (maxSignal < Math.min(GESTURE_TRIGGER_PX, TILT_TRIGGER_PX)) {
-                    ts.prevDist = curDist;
-                    ts.prevAngle = curAngle;
-                    ts.prevMidX = midX;
-                    ts.prevMidY = midY;
-                    return;
-                }
-                const tiltWins = tiltSignal >= TILT_TRIGGER_PX &&
-                    tiltSignal > TILT_DOMINANCE * zoomSignal &&
-                    tiltSignal > TILT_DOMINANCE * rotateSignal;
-                if (tiltWins) {
-                    ts.activeGesture = 'tilt';
-                    ts.startPitch = ts.prevPitch;
-                    ts.startMidY = midY;
-                    ts.startMidX = midX;
-                    ts.startDist = curDist;
-                    ts.startAngle = curAngle;
-                }
-                else if (maxSignal >= GESTURE_TRIGGER_PX) {
-                    ts.activeGesture = 'zoomRotate';
+            let angleDelta = curAngle - ts.prevAngle;
+            while (angleDelta > Math.PI)
+                angleDelta -= 2 * Math.PI;
+            while (angleDelta < -Math.PI)
+                angleDelta += 2 * Math.PI;
+            const dDist = Math.abs(curDist - ts.prevDist);
+            const dRotate = Math.abs(angleDelta) * curDist * 0.5;
+            const dMidY = Math.abs(midY - ts.prevMidY);
+            // ─────────────────────────────────────────────────────────────
+            // EMA-сглаживание (α = 0.3)
+            // ─────────────────────────────────────────────────────────────
+            const EMA = 0.3;
+            ts.smoothZoom = (1 - EMA) * ts.smoothZoom + EMA * dDist;
+            ts.smoothRotate = (1 - EMA) * ts.smoothRotate + EMA * dRotate;
+            ts.smoothTilt = (1 - EMA) * ts.smoothTilt + EMA * dMidY;
+            // ─────────────────────────────────────────────────────────────
+            // ДИНАМИЧЕСКАЯ КЛАССИФИКАЦИЯ / РЕКЛАССИФИКАЦИЯ
+            //
+            // Каждый кадр определяем «победителя». Если он отличается от
+            // текущего активного жеста SWITCH_FRAMES кадров подряд — плавно
+            // переключаемся с перебазированием (без визуального прыжка).
+            //
+            // Благодаря этому стартовая классификация может быть мягкой
+            // (TILT_BIAS ≈ 0.9 — почти нейтральная): ошибочные решения
+            // самокорректируются за 2–3 кадра после начала движения.
+            // ─────────────────────────────────────────────────────────────
+            const TILT_BIAS = 0.9; // <1 = tilt легче; >1 = tilt строже
+            const MOTION_FLOOR = 0.5; // порог покоя EMA
+            const SWITCH_FRAMES = 3; // стабильных кадров для переключения
+            const SWITCH_COOLDOWN_MS = 120; // анти-дребезг
+            const smoothTotal = ts.smoothZoom + ts.smoothRotate + ts.smoothTilt;
+            if (smoothTotal < MOTION_FLOOR) {
+                // пользователь стоит — кандидат сбрасываем, prev обновляем
+                ts.candidateGesture = null;
+                ts.candidateFrames = 0;
+                ts.prevDist = curDist;
+                ts.prevAngle = curAngle;
+                ts.prevMidX = midX;
+                ts.prevMidY = midY;
+                return;
+            }
+            const tiltWeighted = ts.smoothTilt / TILT_BIAS;
+            const otherMax = Math.max(ts.smoothZoom, ts.smoothRotate);
+            const winner = (tiltWeighted > otherMax) ? 'tilt' : 'zoomRotate';
+            if (winner !== ts.activeGesture) {
+                if (winner === ts.candidateGesture) {
+                    ts.candidateFrames++;
                 }
                 else {
-                    // хватает только tilt-порога, но tilt не выиграл — ждём
-                    ts.prevDist = curDist;
-                    ts.prevAngle = curAngle;
-                    ts.prevMidX = midX;
-                    ts.prevMidY = midY;
-                    return;
+                    ts.candidateGesture = winner;
+                    ts.candidateFrames = 1;
                 }
+                const now = performance.now();
+                const canSwitch = ts.activeGesture === null ||
+                    now - ts.lastSwitchTime > SWITCH_COOLDOWN_MS;
+                if (ts.candidateFrames >= SWITCH_FRAMES && canSwitch) {
+                    ts.activeGesture = winner;
+                    ts.lastSwitchTime = now;
+                    ts.candidateGesture = null;
+                    ts.candidateFrames = 0;
+                    // ── перебазирование входящего жеста ──
+                    // Ставим «нулевую» точку в текущее положение пальцев и
+                    // текущую ориентацию камеры. На этом кадре новый жест
+                    // даст дельту 0 → визуального прыжка нет.
+                    if (winner === 'tilt') {
+                        ts.startMidX = midX;
+                        ts.startMidY = midY;
+                        const _d = this._tempVec3a.subVectors(this.camera.position, this.controls.target);
+                        const _l = _d.length() || 1;
+                        ts.startPitch = Math.acos(Math.max(-1, Math.min(1, _d.y / _l)));
+                        ts.prevPitch = ts.startPitch;
+                    }
+                    else {
+                        ts.prevDist = curDist;
+                        ts.prevAngle = curAngle;
+                        ts.prevMidX = midX;
+                        ts.prevMidY = midY;
+                        const _d = this._tempVec3a.subVectors(this.camera.position, this.controls.target);
+                        const _l = _d.length() || 1;
+                        ts.prevAzimuth = Math.atan2(_d.z, _d.x);
+                        ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, _d.y / _l)));
+                    }
+                    if (window.__krbDebugGesture) {
+                        console.log('[gesture] switch → %s (zoom=%s rot=%s tilt=%s)', winner, ts.smoothZoom.toFixed(2), ts.smoothRotate.toFixed(2), ts.smoothTilt.toFixed(2));
+                    }
+                }
+            }
+            else {
+                // жест стабилен — сбрасываем кандидата
+                ts.candidateGesture = null;
+                ts.candidateFrames = 0;
+            }
+            // ── ещё не классифицировано — ждём ──
+            if (ts.activeGesture === null) {
                 ts.prevDist = curDist;
                 ts.prevAngle = curAngle;
                 ts.prevMidX = midX;
@@ -512,13 +576,13 @@ export const CoreInputMixin = {
                 return;
             }
             // ─────────────────────────────────────────────────────────────
-            // 2. TILT — только pitch, зум и rotate отключены
+            // TILT — только pitch, зум и rotate отключены
             // ─────────────────────────────────────────────────────────────
             if (ts.activeGesture === 'tilt') {
                 const H = this.renderer.domElement.clientHeight || 1;
                 const tiltRange = this.controls.maxPolarAngle - this.controls.minPolarAngle;
-                // Полный диапазон pitch (0…85°) за ~35% высоты экрана.
-                const TILT_FULL_RANGE_PX = H * 0.35;
+                // Полный диапазон pitch (0…85°) за ~30% высоты экрана.
+                const TILT_FULL_RANGE_PX = H * 0.30;
                 const tiltDeltaPx = ts.startMidY - midY; // >0, пальцы ушли вверх
                 const newPitch = ts.startPitch +
                     tiltDeltaPx * (tiltRange / TILT_FULL_RANGE_PX);
@@ -540,20 +604,20 @@ export const CoreInputMixin = {
                 return;
             }
             // ─────────────────────────────────────────────────────────────
-            // 3. ZOOM + ROTATE — оригинальное поведение, но БЕЗ tilt
+            // ZOOM + ROTATE — оригинальное поведение, без tilt
             // ─────────────────────────────────────────────────────────────
             const P_before = this._raycastToGround(ts.prevMidX, ts.prevMidY, this._tempVec3a);
-            let angleDelta = curAngle - ts.prevAngle;
-            while (angleDelta > Math.PI)
-                angleDelta -= 2 * Math.PI;
-            while (angleDelta < -Math.PI)
-                angleDelta += 2 * Math.PI;
+            let angleDelta2 = curAngle - ts.prevAngle;
+            while (angleDelta2 > Math.PI)
+                angleDelta2 -= 2 * Math.PI;
+            while (angleDelta2 < -Math.PI)
+                angleDelta2 += 2 * Math.PI;
             const zoomDelta = Math.log2(curDist / ts.prevDist);
             const target = this.controls.target;
             const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
             const newCameraDist = prevCameraDist * Math.pow(0.5, zoomDelta);
-            const newAzimuth = ts.prevAzimuth - angleDelta;
-            const newPitch = ts.prevPitch; // ← pitch больше не меняем
+            const newAzimuth = ts.prevAzimuth - angleDelta2;
+            const newPitch = ts.prevPitch; // pitch не меняем
             const placement = this._resolveCameraPlacement(target, newCameraDist, newPitch, newAzimuth, this._tempPlacementOut);
             this.camera.position.copy(this._tempPlacementOut);
             this.camera.lookAt(target);
@@ -578,6 +642,8 @@ export const CoreInputMixin = {
         if (e.touches.length < 2 && this.touchState.isPinching) {
             this.touchState.isPinching = false;
             this.touchState.activeGesture = null;
+            this.touchState.candidateGesture = null;
+            this.touchState.candidateFrames = 0;
             if (!this._cameraAnimation)
                 this.syncControlsTarget();
         }

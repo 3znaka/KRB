@@ -394,6 +394,10 @@ export class KrbMap {
         this.bindEvents();
         this.maybeUpdateVisibleTiles(true);
         this._setupAutoPause();
+        const maxBounds = options.maxBounds ?? this.view.maxBounds;
+        if (maxBounds) {
+            this.setMaxBounds(maxBounds);
+        }
         this.animate();
         requestAnimationFrame(() => initUI(this));
     }

@@ -60,7 +60,7 @@ export interface KrbMapOptions {
     panFriction?: number;
     backgroundColor?: string | number;
     debug?: boolean;
-
+maxBounds?: [[number, number], [number, number]];
 }
 
 interface TouchState {
@@ -526,6 +526,12 @@ for (const layer of this.layers) {
         this.maybeUpdateVisibleTiles(true);
 
         this._setupAutoPause();
+
+        const maxBounds = options.maxBounds ?? this.view.maxBounds;
+if (maxBounds) {
+    this.setMaxBounds(maxBounds);  
+}
+
 
         this.animate();
         requestAnimationFrame(() => initUI(this));

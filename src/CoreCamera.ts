@@ -25,6 +25,7 @@ export interface CoreCameraMethods {
     syncControlsTarget(): void;
     readonly targetZoom: number;
     _retargetToGround(): boolean;
+    getMaxBounds(): [[number, number], [number, number]] | null;
 
     easeTo(options: {
         center?: [number, number];
@@ -814,6 +815,12 @@ syncControlsTarget() {
     get targetZoom() {
         return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;
     },
+
+    getMaxBounds(): [[number, number], [number, number]] | null {
+    if (!this._maxBounds) return null;
+    const b = this._maxBounds;
+    return [[b.minLon, b.minLat], [b.maxLon, b.maxLat]];
+},
 };
 
 declare module './Core.js' {

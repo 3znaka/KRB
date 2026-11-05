@@ -11,6 +11,7 @@ export interface ViewOptions {
     zoomSensitivity?: number;
     pitch?: number;
     bearing?: number;
+    maxBounds?: [[number, number], [number, number]];  
 }
 
 export class View {
@@ -23,6 +24,7 @@ export class View {
     zoomSensitivity: number;
     pitch: number;
     bearing: number;
+     maxBounds: [[number, number], [number, number]] | null;
 
     constructor(options: ViewOptions) {
         if (!options) throw new Error('View: options object is required');
@@ -49,5 +51,14 @@ export class View {
         this.zoomSensitivity = options.zoomSensitivity ?? DEFAULTS.ZOOM_SENSITIVITY;
         this.pitch = options.pitch ?? 0;
         this.bearing = options.bearing ?? 0;
+
+        this.maxBounds = options.maxBounds
+            ? [
+                [Math.min(options.maxBounds[0][0], options.maxBounds[1][0]),
+                 Math.min(options.maxBounds[0][1], options.maxBounds[1][1])],
+                [Math.max(options.maxBounds[0][0], options.maxBounds[1][0]),
+                 Math.max(options.maxBounds[0][1], options.maxBounds[1][1])],
+              ]
+            : null;
     }
 }

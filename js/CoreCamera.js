@@ -754,4 +754,10 @@ export const CoreCameraMixin = {
     get targetZoom() {
         return this._cameraAnimation?.endZoom ?? this.targetContinuousZoom;
     },
+    getMaxBounds() {
+        if (!this._maxBounds)
+            return null;
+        const b = this._maxBounds;
+        return [[b.minLon, b.minLat], [b.maxLon, b.maxLat]];
+    },
 };

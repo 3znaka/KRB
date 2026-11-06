@@ -1,6 +1,7 @@
 // CoreElevation.ts
 import { THREE } from './js_TP/tpb.js';
-import { DEFAULTS, getVirtKey } from './Utils.js';
+import { DEFAULTS } from './Defaults.js';
+import { getVirtKey } from './TileKey.js';
 import type { KrbMap } from './Core.js';
 
 export interface CoreElevationMethods {
@@ -106,11 +107,6 @@ _calibrateBaseDistance() {
 
     const factor = m.size / this.TILE_PIXELS;
     if (!Number.isFinite(factor) || factor <= 0) return;
-
-    console.info(
-        `KrbMap: калибровка камеры для ${this.projection.code}: tile screen size = ` +
-        `${m.size.toFixed(1)}px vs TILE_PIXELS = ${this.TILE_PIXELS} (factor=${factor.toFixed(3)}).`
-    );
 },
 
     _setSurfaceMaxHeight(key, value) {

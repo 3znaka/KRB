@@ -1,6 +1,6 @@
 // Core.ts
 import { THREE } from './js_TP/tpb.js';
-import { DEFAULTS } from './Utils.js';
+import { DEFAULTS } from './Defaults.js';
 import { Projections } from './Projections.js';
 import { TileManager } from './Tiles.js';
 import { TextManager } from './TextManager.js';
@@ -182,6 +182,9 @@ export class KrbMap {
     /* Extent MAP-проекции (мир, в котором живут worldGroup-меши) */
     get mapHalfExtentX() { return this.projection.halfExtentX; }
     get mapHalfExtentY() { return this.projection.halfExtentY; }
+    get ellipsoid() { return this.projection.ellipsoid; }
+    get meanRadius() { return this.projection.meanRadius; }
+    get authalicRadius() { return this.projection.authalicRadius; }
     /* Extent TILE-CRS (домен сетки z/x/y, определяется layer.crs) */
     get tileHalfExtentX() { return this.tileCRS.halfExtentX; }
     get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
@@ -246,12 +249,12 @@ export class KrbMap {
         this.deformedTiles = this._rasterLayers.length > 0
             ? this._rasterLayers.some((l) => !this._isLayerLinear(l))
             : !(this.tileCRS === this.projection && this.projection.isMercator);
-        this.R = options.R ?? this.projection.semiMajor;
-        if (options.R !== undefined && Math.abs(options.R - this.projection.semiMajor) > 1) {
-            console.warn(`KrbMap: options.R=${options.R} не совпадает с semi-major проекции ` +
-                `${this.projection.code} (${this.projection.semiMajor}). ` +
-                `Extent тайлов берётся из проекции; options.R влияет только на ` +
-                `калибровку камеры. Уберите options.R и задайте нужный CRS.`);
+        this.R = options.R ?? this.projection.meanRadius;
+        if (options.R !== undefined && Math.abs(options.R - this.projection.meanRadius) > 1) {
+            console.warn(`KrbMap: options.R=${options.R} не совпадает со средним радиусом ` +
+                `${this.projection.code} в world-единицах ` +
+                `(${this.projection.meanRadius.toFixed(1)}). ` +
+                `R влияет только на калибровку камеры; extent тайлов берётся из проекции.`);
         }
         this._refreshExtents();
         this.TILE_PIXELS = 256;

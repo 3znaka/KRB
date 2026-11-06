@@ -205,19 +205,24 @@ const _F  = 1 / 298.257222101;
 const _B  = _A * (1 - _F);
 const _E2 = 1 - (_B * _B) / (_A * _A);
 
-export function ecefToGeodetic(X: number, Y: number, Z: number): [number, number, number] {
-    const p = Math.sqrt(X * X + Y * Y);
+export function ecefToGeodetic(
+    X: number, Y: number, Z: number,
+    ell: { a: number; f: number } = { a: _A, f: _F },
+): [number, number, number] {
+    const { a, f } = ell;
+    const e2 = f * (2 - f);
+    const b  = a * (1 - f);
+    const p  = Math.sqrt(X * X + Y * Y);
     const lon = Math.atan2(Y, X);
-    let lat = Math.atan2(Z, p * (1 - _E2));
+    let lat = Math.atan2(Z, p * (1 - e2));
     for (let i = 0; i < 10; i++) {
         const s = Math.sin(lat);
-        const N = _A / Math.sqrt(1 - _E2 * s * s);
-        lat = Math.atan2(Z + _E2 * N * s, p);
+        const N = a / Math.sqrt(1 - e2 * s * s);
+        lat = Math.atan2(Z + e2 * N * s, p);
     }
-    const sL = Math.sin(lat);
-    const cL = Math.cos(lat);
-    const N = _A / Math.sqrt(1 - _E2 * sL * sL);
-    const h = cL > 1e-10 ? p / cL - N : Math.abs(Z) - _B;
+    const sL = Math.sin(lat), cL = Math.cos(lat);
+    const N = a / Math.sqrt(1 - e2 * sL * sL);
+    const h = cL > 1e-10 ? p / cL - N : Math.abs(Z) - b;
     return [lon * 180 / Math.PI, lat * 180 / Math.PI, h];
 }
 

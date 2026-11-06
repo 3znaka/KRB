@@ -1,7 +1,7 @@
 // CoreLayers.ts
 import { Projections } from './Projections.js';
-import { getOriginZ } from './Utils.js';
 import type { KrbMap } from './Core.js';
+import { getVirtKey, getOriginZ } from './TileKey.js';
 
 export interface CoreLayersMethods {
     _isLayerLinear(layer: any): boolean;

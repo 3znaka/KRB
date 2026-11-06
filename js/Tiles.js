@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { THREE } from './js_TP/tpb.js';
-import { getOriginZ, getVirtKey, DEFAULTS } from './Utils.js';
+import { DEFAULTS } from './Defaults.js';
+import { getVirtKey, getOriginZ } from './TileKey.js';
 import { Projections } from './Projections.js';
 /** Максимальное количество кэшируемых тайлов на один слой. @private */
 const MAX_CACHED_TILES = 350;
@@ -136,6 +137,13 @@ export class Tile {
  *
  * Выше `maxElevationNativeZoom` — overzoom: `getFallbackElevation`
  * растягивает DEM предка на сетку текущего тайла.
+ *
+ * ## Сетка тайлов и эллипсоид
+ *
+ * Для эллипсоидального Mercator (например, EPSG:3395) `halfExtentX ≠
+ * halfExtentY`. Поэтому тайлы прямоугольные: `tileSizeX` берётся из
+ * `_mapHalfX`, `tileSizeY` — из `_mapHalfY`. Единой `tileSize` больше
+ * нет — использовать `tileSizeX` для X и `tileSizeY` для Z.
  */
 export class TileManager {
     /**
@@ -388,18 +396,21 @@ export class TileManager {
             : this.engine.tileZoom;
         const layerCrs = this.layer?.crs;
         const isDeformed = this._isDeformed;
-        // В обеих ветках камера и `worldGroupPos` живут в map-координатах,
-        // поэтому cullUnit — это ширина MAP-мира. Для Mercator-семейства
-        // `_mapHalfX === _mapHalfY`, и квадратной сетки достаточно.
-        const cullUnit = 2 * this._mapHalfX;
+        // Камера и `worldGroupPos` живут в map-координатах. Для Mercator-
+        // семейства до фикса эллипсоида `_mapHalfX === _mapHalfY`; теперь
+        // для 3395 они различаются, поэтому tileSizeX / tileSizeY
+        // вычисляем отдельно и используем по осям.
+        const halfX = this._mapHalfX;
+        const halfY = this._mapHalfY;
+        const tileSizeX = (2 * halfX) / Math.pow(2, idealZ);
+        const tileSizeY = (2 * halfY) / Math.pow(2, idealZ);
+        const maxTile = (1 << idealZ) - 1;
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
-        const tileSize = cullUnit / Math.pow(2, idealZ);
-        const maxTile = (1 << idealZ) - 1;
         const vFov = (camera.fov * Math.PI) / 180;
         const aspect = camera.aspect;
-        const hh = dist * Math.tan(vFov / 2) * aspect + margin * tileSize;
-        const hv = dist * Math.tan(vFov / 2) + margin * tileSize;
+        const hh = dist * Math.tan(vFov / 2) * aspect + margin * tileSizeX;
+        const hv = dist * Math.tan(vFov / 2) + margin * tileSizeY;
         const minX = controlsTarget.x - hh, maxX = controlsTarget.x + hh;
         const minZ = controlsTarget.z - hv, maxZ = controlsTarget.z + hv;
         let xMin, xMax, yMin, yMax;
@@ -484,8 +495,6 @@ export class TileManager {
             else {
                 // Ни одна сэмплированная точка не дала валидный tile-index.
                 // Если фрустум вообще пересекает мир — отрисовываем весь зум-уровень.
-                const halfX = this._mapHalfX;
-                const halfY = this._mapHalfY;
                 if (maxX > -halfX && minX < halfX &&
                     maxZ > -halfY && minZ < halfY) {
                     xMin = 0;
@@ -503,14 +512,13 @@ export class TileManager {
         }
         else {
             // Линейный режим (map-CRS === tile-CRS, обе Mercator).
-            // Камера/controlsTarget — в map-world, tileSize — в тех же единицах.
+            // X-ось — по tileSizeX, Z-ось — по tileSizeY (для эллипсоидального
+            // Mercator они различаются ~1%).
             const off = worldGroupPos;
-            const halfX = this._mapHalfX;
-            const halfY = this._mapHalfY;
-            xMin = Math.floor((minX - off.x + halfX) / tileSize);
-            xMax = Math.floor((maxX - off.x + halfX) / tileSize);
-            yMin = Math.max(0, Math.floor((minZ - off.z + halfY) / tileSize));
-            yMax = Math.min(maxTile, Math.floor((maxZ - off.z + halfY) / tileSize));
+            xMin = Math.floor((minX - off.x + halfX) / tileSizeX);
+            xMax = Math.floor((maxX - off.x + halfX) / tileSizeX);
+            yMin = Math.max(0, Math.floor((minZ - off.z + halfY) / tileSizeY));
+            yMax = Math.min(maxTile, Math.floor((maxZ - off.z + halfY) / tileSizeY));
         }
         const visibleKeys = new Set();
         for (let y = yMin; y <= yMax; y++) {
@@ -619,7 +627,7 @@ export class TileManager {
         try {
             const srcX = ((inst.virtX % (1 << inst.z)) + (1 << inst.z)) % (1 << inst.z);
             const srcKey = getVirtKey(inst.z, srcX, inst.y);
-            const texUrl = this.engine.getTextureUrl(this.layer, inst.z, srcX, inst.y);
+            texUrl = this.engine.getTextureUrl(this.layer, inst.z, srcX, inst.y);
             if (this.hasElevation &&
                 inst.z >= this._minElevationNativeZoom &&
                 inst.z <= this._maxElevationNativeZoom) {
@@ -652,13 +660,6 @@ export class TileManager {
             }
             else {
                 inst.ready = true;
-                this.engine.emit?.('error', {
-                    source: 'tile',
-                    layer: this.layer,
-                    z: inst.z, x: inst.virtX, y: inst.y,
-                    url: texUrl,
-                    error: err,
-                });
             }
         }
         catch (err) {
@@ -668,6 +669,13 @@ export class TileManager {
             inst.loading = false;
             inst.failed = true;
             inst.ready = true;
+            this.engine.emit?.('error', {
+                source: 'tile',
+                layer: this.layer,
+                z: inst.z, x: inst.virtX, y: inst.y,
+                url: texUrl,
+                error: err,
+            });
         }
     }
     /**
@@ -685,22 +693,28 @@ export class TileManager {
             return this._createDeformedTileMesh(inst, texture);
         }
         const { z, virtX, y } = inst;
-        const tileSize = (2 * this._mapHalfX) / Math.pow(2, z);
+        const tileSizeX = (2 * this._mapHalfX) / Math.pow(2, z);
+        const tileSizeY = (2 * this._mapHalfY) / Math.pow(2, z);
         const seg = this.hasElevation ? this.engine.SEGMENTS : 1;
-        const originX = virtX * tileSize - this._mapHalfX;
-        const originZ = getOriginZ(y, tileSize, this._mapHalfY);
+        const originX = virtX * tileSizeX - this._mapHalfX;
+        const originZ = getOriginZ(y, tileSizeY, this._mapHalfY);
+        // Кэш flatTileGeometry — квадратный, его нельзя переиспользовать,
+        // если мир не квадратный (эллипсоидальный Mercator, 4326 и т.п.).
+        const canReuseFlat = !this.hasElevation
+            && this.flatTileGeometry
+            && this._mapHalfX === this._mapHalfY;
         let geometry;
-        if (!this.hasElevation && this.flatTileGeometry) {
+        if (canReuseFlat) {
             geometry = this.flatTileGeometry.clone();
             geometry.rotateX(-Math.PI / 2);
         }
         else {
-            geometry = new THREE.PlaneGeometry(tileSize, tileSize, seg, seg);
+            geometry = new THREE.PlaneGeometry(tileSizeX, tileSizeY, seg, seg);
             geometry.rotateX(-Math.PI / 2);
         }
         const mat = this._createTileMaterial(texture);
         const mesh = new THREE.Mesh(geometry, mat);
-        mesh.position.set(originX + tileSize / 2, 0, originZ + tileSize / 2);
+        mesh.position.set(originX + tileSizeX / 2, 0, originZ + tileSizeY / 2);
         mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
         return mesh;
@@ -880,10 +894,11 @@ export class TileManager {
                 if (!heights) {
                     const elevUrl = this.srcKeyToElevUrl.get(srcKey);
                     if (elevUrl) {
-                        const tileSize = (2 * this._mapHalfX) / Math.pow(2, inst.z);
-                        const originX = inst.virtX * tileSize - this._mapHalfX;
-                        const originZ = getOriginZ(inst.y, tileSize, this._mapHalfY);
-                        heights = await this.getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ);
+                        const tileSizeX = (2 * this._mapHalfX) / Math.pow(2, inst.z);
+                        const tileSizeY = (2 * this._mapHalfY) / Math.pow(2, inst.z);
+                        const originX = inst.virtX * tileSizeX - this._mapHalfX;
+                        const originZ = getOriginZ(inst.y, tileSizeY, this._mapHalfY);
+                        heights = await this.getDirectElevData(srcKey, elevUrl, tileSizeX, originX, originZ);
                     }
                 }
             }
@@ -971,14 +986,15 @@ export class TileManager {
         const parentData = await this.getParentElevData(fz, pSrcX, pY);
         if (!parentData)
             throw new Error('No parent data');
-        const tileSize = (2 * this._mapHalfX) / Math.pow(2, inst.z);
-        const originX = inst.virtX * tileSize - this._mapHalfX;
-        const originZ = getOriginZ(inst.y, tileSize, this._mapHalfY);
+        const tileSizeX = (2 * this._mapHalfX) / Math.pow(2, inst.z);
+        const tileSizeY = (2 * this._mapHalfY) / Math.pow(2, inst.z);
+        const originX = inst.virtX * tileSizeX - this._mapHalfX;
+        const originZ = getOriginZ(inst.y, tileSizeY, this._mapHalfY);
         const dx = srcX % scale, dy = inst.y % scale;
         const imageDataCopy = new ImageData(new Uint8ClampedArray(parentData.data), parentData.width, parentData.height);
         const result = await this.scheduleWorkerJob('computeFromParent', {
             imageData: imageDataCopy,
-            tileSize, originX, originZ,
+            tileSize: tileSizeX, originX, originZ,
             segments: this.engine.SEGMENTS,
             scale, dx, dy,
             heightScale: this.getElevationHeightScale()
@@ -1083,7 +1099,21 @@ export class TileManager {
         instA.geometry.computeVertexNormals();
         instB.geometry.computeVertexNormals();
     }
-    /** @private */
+    /**
+     * Коэффициент перевода DEM-высот в метры (обычно 1 — DEM уже в метрах).
+     *
+     * ⚠️ Результат кладётся в `geometry.position[i+1]` как world-Y.
+     * Инвариант: `ProjectionRegistry._wrapWorld` нормирует `halfExtentX`
+     * любой проекции к `WORLD_HALF_X ≈ π·a_WGS84`, поэтому **1 world-unit
+     * ≈ 1 метр** для всех Earth-scale CRS (3857, 4326, 3395, UTM, GK).
+     * Не меняйте эту связку без пересчёта масштаба высот.
+     *
+     * Для локальных проекций с малым extent (город в метрах) инвариант
+     * сломается — в этом случае нужен явный пересчёт
+     * `height_m / worldScale · (π·a / WORLD_HALF_X)`.
+     *
+     * @private
+     */
     getElevationHeightScale() {
         return this.layer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
     }
@@ -1097,11 +1127,14 @@ export class TileManager {
             return;
         const isDeformed = this._isDeformed;
         const layerCrs = this.layer?.crs;
-        // В обеих ветках работаем в map-координатах, поэтому cullUnit — map-world.
-        const cullUnit = 2 * this._mapHalfX;
-        const tileSize = cullUnit / Math.pow(2, z);
+        const halfX = this._mapHalfX;
+        const halfY = this._mapHalfY;
+        const tileSizeX = (2 * halfX) / Math.pow(2, z);
+        const tileSizeY = (2 * halfY) / Math.pow(2, z);
         const margin = 2;
-        const radius = tileSize * margin;
+        const radiusX = tileSizeX * margin;
+        const radiusY = tileSizeY * margin;
+        const radius = Math.max(radiusX, radiusY); // для deformed-ветки
         const maxTile = (1 << z) - 1;
         let xMin, xMax, yMin, yMax;
         if (isDeformed) {
@@ -1134,9 +1167,8 @@ export class TileManager {
             yMax = Math.min(maxTile, Math.ceil(maxTy));
         }
         else {
-            const halfX = this._mapHalfX;
-            xMin = Math.floor((center.x - radius - worldGroupPos.x + halfX) / tileSize);
-            xMax = Math.floor((center.x + radius - worldGroupPos.x + halfX) / tileSize);
+            xMin = Math.floor((center.x - radiusX - worldGroupPos.x + halfX) / tileSizeX);
+            xMax = Math.floor((center.x + radiusX - worldGroupPos.x + halfX) / tileSizeX);
             xMin = Math.max(0, xMin);
             xMax = Math.min(maxTile, xMax);
             yMin = 0;
@@ -1146,9 +1178,8 @@ export class TileManager {
             return;
         for (let y = yMin; y <= yMax; y++) {
             if (!isDeformed) {
-                // FIX: было MAX_MERCATOR → теперь _mapHalfY.
-                const oz = getOriginZ(y, tileSize, this._mapHalfY) + worldGroupPos.z;
-                if (oz + tileSize < center.z - radius || oz > center.z + radius)
+                const oz = getOriginZ(y, tileSizeY, halfY) + worldGroupPos.z;
+                if (oz + tileSizeY < center.z - radiusY || oz > center.z + radiusY)
                     continue;
             }
             for (let x = xMin; x <= xMax; x++) {

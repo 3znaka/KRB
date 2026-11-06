@@ -1,6 +1,6 @@
 // Core.ts
 import { THREE } from './js_TP/tpb.js';
-import { DEFAULTS } from './Utils.js';
+import { DEFAULTS } from './Defaults.js';
 import { Projections } from './Projections.js';
 import { TileManager } from './Tiles.js';
 import { TextManager } from './TextManager.js';
@@ -36,7 +36,13 @@ export interface KrbMapOptions {
     zoomOffset?: number;
     minReliefZ?: number;
     maxReliefZ?: number;
-    R?: number;
+    /**
+ * Радиус Земли в world-единицах (используется только для калибровки
+ * камеры и дистанций). По умолчанию — средний радиус эллипсоида
+ * проекции, приведённый к world-масштабу. Extent тайлов задаётся
+ * проекцией и не зависит от этого параметра.
+ */
+R?: number;
     segments?: number;
     animDuration?: number;
     tileMargin?: number;
@@ -290,6 +296,10 @@ private _refreshExtents(): void {
 get mapHalfExtentX() { return this.projection.halfExtentX; }
 get mapHalfExtentY() { return this.projection.halfExtentY; }
 
+get ellipsoid()      { return this.projection.ellipsoid; }
+get meanRadius()     { return this.projection.meanRadius; }
+get authalicRadius() { return this.projection.authalicRadius; }
+
 /* Extent TILE-CRS (домен сетки z/x/y, определяется layer.crs) */
 get tileHalfExtentX() { return this.tileCRS.halfExtentX; }
 get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
@@ -369,13 +379,13 @@ this.debug = options.debug ?? false;
             : !(this.tileCRS === this.projection && this.projection.isMercator);
 
 
-this.R = options.R ?? this.projection.semiMajor;
-if (options.R !== undefined && Math.abs(options.R - this.projection.semiMajor) > 1) {
+this.R = options.R ?? this.projection.meanRadius;
+if (options.R !== undefined && Math.abs(options.R - this.projection.meanRadius) > 1) {
     console.warn(
-        `KrbMap: options.R=${options.R} не совпадает с semi-major проекции ` +
-        `${this.projection.code} (${this.projection.semiMajor}). ` +
-        `Extent тайлов берётся из проекции; options.R влияет только на ` +
-        `калибровку камеры. Уберите options.R и задайте нужный CRS.`
+        `KrbMap: options.R=${options.R} не совпадает со средним радиусом ` +
+        `${this.projection.code} в world-единицах ` +
+        `(${this.projection.meanRadius.toFixed(1)}). ` +
+        `R влияет только на калибровку камеры; extent тайлов берётся из проекции.`
     );
 }
 

@@ -1,6 +1,6 @@
 // CoreLayers.ts
 import { Projections } from './Projections.js';
-import { getOriginZ } from './Utils.js';
+import { getOriginZ } from './TileKey.js';
 export const CoreLayersMixin = {
     _isLayerLinear(layer) {
         if (!layer)

@@ -1,4 +1,4 @@
-import { DEFAULTS } from './Utils.js';
+import { DEFAULTS } from './Defaults.js';
 export class View {
     centerLonLat;
     center;

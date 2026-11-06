@@ -211,7 +211,7 @@ export default {
         (x, y)     => inverse(x, y)[1],
     ],
     options: {
-        semiMajor:      6_371_000,
+        semiMajor:      6_378_245,
         halfExtentX:    HALF_X,
         halfExtentY:    HALF_Y,
         maxAbsCoord:    Math.max(HALF_X, HALF_Y) * 1.5,

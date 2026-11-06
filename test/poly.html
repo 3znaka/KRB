@@ -42,12 +42,12 @@ await KRB.addCrs('ADPKP:0057');
     });
 
 
-    new KRB.GeoJSONLayer({
+  const world = new KRB.GeoJSONLayer({
         url: 'world.geojson',
-        defaultFillColor:   '#3b82f6',
-        defaultFillOpacity: 0.28,
-        defaultStrokeColor: '#1e3a8a',
-        defaultStrokeWidth: 0.7,
+        defaultFillColor:   '#aa0101',
+      
+        defaultStrokeColor: '#000000',
+        defaultStrokeWidth: 0.3,
     }).addTo(map);
 
 </script>

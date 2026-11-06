@@ -11,7 +11,7 @@ import {
   THREE,
 } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { getOriginZ, getVirtKey } from './Utils.js';
+import { getVirtKey } from './TileKey.js';
 import { Layer } from './Layers.js';
 
 export class SurfacePolygon {

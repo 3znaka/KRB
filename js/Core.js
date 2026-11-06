@@ -199,7 +199,8 @@ export class KrbMap {
             throw new Error('View required');
         this.globalElevCache = new Map();
         this.view = options.view;
-        this.hasTileLayers = this.layers.some((layer) => !!(layer.texture || layer.elevation));
+        this.hasTileLayers = this.layers.some((layer) => !!(layer.texture || layer.elevation) ||
+            (typeof layer?.addTo === 'function' && (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile'))));
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(`KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`);
         }
@@ -354,38 +355,29 @@ export class KrbMap {
                     this._surfaceMaxHeightCache.clear();
             });
         }
-        // ── Инициализация объектных слоёв ──
-        // 1) явные objectLayers[]
-        // 2) graticule из options (instance или config)
-        // 3) предупреждение, если пользователь по ошибке положил объект в layers[]
+        const objectsToAdd = new Set();
+        const isTileConfig = (l) => !!l && (!!l.texture || !!l.elevation);
+        const isObjectLayer = (l) => !!l && !isTileConfig(l) && typeof l.addTo === 'function';
+        // 1) из layers[]
         for (const layer of this.layers) {
-            if (!layer)
-                continue;
-            if (layer.texture || layer.elevation)
-                continue;
-            if (typeof layer.addTo === 'function') {
-                console.warn('KrbMap: объектный слой найден в `layers[]` — перенесите его ' +
-                    'в `objectLayers[]` (или используйте опцию `graticule`).');
-            }
+            if (isObjectLayer(layer))
+                objectsToAdd.add(layer);
         }
-        const initialObjects = [];
+        // 2) из objectLayers[]
         if (options.objectLayers) {
             for (const l of options.objectLayers) {
-                if (!l)
-                    continue;
-                if (initialObjects.includes(l))
-                    continue;
-                initialObjects.push(l);
+                if (isObjectLayer(l))
+                    objectsToAdd.add(l);
             }
         }
-        if (options.graticule !== undefined && options.graticule !== false) {
+        // 3) из options.graticule
+        if (options.graticule) {
             const g = (options.graticule instanceof Graticule)
                 ? options.graticule
                 : new Graticule(options.graticule);
-            if (!initialObjects.includes(g))
-                initialObjects.push(g);
+            objectsToAdd.add(g);
         }
-        for (const layer of initialObjects) {
+        for (const layer of objectsToAdd) {
             if (layer._map === this)
                 continue;
             try {

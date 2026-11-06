@@ -15,8 +15,15 @@ KRB is a high-performance, feature-rich cartographic library designed for render
 
 ## Integration
 
-To include KRB in your project, use the provided CDN mirror. This ensures reliable access even if primary repository hosting is temporarily unavailable.
+To include KRB in your project, use CDN:
+```html
+<link href="'https://cdn.jsdelivr.net/gh/3znaka/KRB/KRB.css" rel="stylesheet">
+<script type="module">
+  import * as KRB from 'https://cdn.jsdelivr.net/gh/3znaka/KRB/js/KRB.min.js';
+</script>
+```
 
+Or use the provided CDN mirror. This ensures reliable access even if primary repository hosting is temporarily unavailable:
 ```html
 <link href="https://cdn.mapengine.ru/min/KRB.css" rel="stylesheet">
 <script type="module">

@@ -19,10 +19,12 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
+
 await KRB.addCrs('ADPKP:0057');
 
  const map = new KRB.Map({
         target: 'map',
+
         crs: 'ADPKP:0057',
         layers: [],
         graticule: {

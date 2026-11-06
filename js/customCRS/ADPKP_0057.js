@@ -202,6 +202,8 @@ for (let lat = -90; lat <= 90; lat += 5) {
 const HALF_X = (maxX || 2e7) * 1.15;
 const HALF_Y = (maxY || 2e7) * 1.15;
 
+import { Ellipsoid } from '../Ellipsoid.js';
+
 export default {
     code: 'ADPKP:0057',
     formula: [
@@ -211,7 +213,7 @@ export default {
         (x, y)     => inverse(x, y)[1],
     ],
     options: {
-        semiMajor:      6_378_245,
+        ellipsoid: new Ellipsoid({ a: 6_378_245, rf: 298.3, name: 'Krassovsky 1940' }),
         halfExtentX:    HALF_X,
         halfExtentY:    HALF_Y,
         maxAbsCoord:    Math.max(HALF_X, HALF_Y) * 1.5,

@@ -88,7 +88,11 @@ class GridLabelSource {
         return this._anchor?.visibleOnScreen ?? false;
     }
     getLabelType() { return 'point'; }
-    getPriority() { return this._graticule._labelPriority; }
+    getPriority() {
+        if (!this._anchor)
+            return this._graticule._labelPriority;
+        return this._graticule._labelPriority + this._anchor.roundness;
+    }
     getScreenPosition() { return this._anchor?.screenPos ?? null; }
     getTitleVariableAnchor() {
         if (!this._anchor)
@@ -159,7 +163,7 @@ export class Graticule {
             fontSize: '10px',
             fontFamily: 'sans-serif',
             color: '#797979',
-            padding: '1px 1px',
+            padding: '5px 5px',
         };
         this._labelMinZoom = options.labelMinZoom ?? -Infinity;
         this._labelMaxZoom = options.labelMaxZoom ?? Infinity;
@@ -598,7 +602,7 @@ export class Graticule {
                 stableId: id, kind: 'meridian', value, text,
                 line2: this._buildLine2(points),
                 points3D: points,
-                labels: this._buildLabelAnchors(id, text),
+                labels: this._buildLabelAnchors(id, text, value, step, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
@@ -622,7 +626,7 @@ export class Graticule {
                 stableId: id, kind: 'parallel', value, text,
                 line2: this._buildLine2(points),
                 points3D: points,
-                labels: this._buildLabelAnchors(id, text),
+                labels: this._buildLabelAnchors(id, text, value, step, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
@@ -646,7 +650,8 @@ export class Graticule {
      * пересекает. Естественные стороны (для «привязки к концам», когда
      * линия целиком в кадре) определяются уже в `_findEdgeAnchor`.
      */
-    _buildLabelAnchors(lineId, text) {
+    _buildLabelAnchors(lineId, text, value, step, isGeo) {
+        const roundness = computeRoundness(value, step, isGeo);
         const result = [];
         for (const side of this._labelSides) {
             const stableId = `${lineId}:${side}`;
@@ -657,6 +662,7 @@ export class Graticule {
                 source,
                 screenPos: null,
                 visibleOnScreen: false,
+                roundness,
             };
             source._anchor = anchor;
             result.push(anchor);
@@ -776,71 +782,25 @@ export class Graticule {
         catch { }
         info.line2 = null;
     }
-    // ─────────────────────────────────────────────────────────────────
-    // Подписи
-    // ─────────────────────────────────────────────────────────────────
-    _updateLabelPositions(_viewport) {
-        const map = this._map;
-        const camera = map.camera;
-        const canvas = map.renderer.domElement;
-        const W = canvas.clientWidth;
-        const H = canvas.clientHeight;
-        const wgPos = map.worldGroup.position;
-        const tmp = this._tmpVec;
-        const sx = this._scratchSx;
-        const sy = this._scratchSy;
-        const vis = this._scratchVis;
-        for (const info of this._lineInfos) {
-            const pts = info.points3D;
-            if (pts.length < 2) {
-                for (const lbl of info.labels) {
-                    lbl.visibleOnScreen = false;
-                    lbl.screenPos = null;
-                }
-                continue;
-            }
-            const n = pts.length;
-            let allInside = true;
-            for (let i = 0; i < n; i++) {
-                const [px, py, pz] = pts[i];
-                tmp.set(px + wgPos.x, py + wgPos.y, pz + wgPos.z);
-                tmp.project(camera);
-                vis[i] = (tmp.z > -1 && tmp.z < 1) ? 1 : 0;
-                sx[i] = (tmp.x * 0.5 + 0.5) * W;
-                sy[i] = (-tmp.y * 0.5 + 0.5) * H;
-                if (!vis[i] || sx[i] < 0 || sx[i] > W || sy[i] < 0 || sy[i] > H) {
-                    allInside = false;
-                }
-            }
-            for (const lbl of info.labels) {
-                const anchor = this._findEdgeAnchor(lbl.side, info.kind, sx, sy, vis, n, W, H, allInside);
-                if (anchor) {
-                    lbl.screenPos = anchor;
-                    lbl.visibleOnScreen = true;
-                }
-                else {
-                    lbl.screenPos = null;
-                    lbl.visibleOnScreen = false;
-                }
-            }
-        }
-    }
     /**
      * Ищет точку подписи для конкретной стороны экрана.
      *   1) Пересечение полилинии с этим краем.
-     *   2) Fallback: линия целиком внутри экрана — берём ближайшую
-     *      к этому краю вершину, НО только для «естественной» стороны
-     *      (для меридианов — top/bottom, для параллелей — left/right).
-     *      Это гарантирует, что подпись привязывается к концам линий
-     *      (полюсам / антимеридиану), а не к произвольной точке кривой.
-     *   3) Если линия частично за экраном, но не пересекает заданный
-     *      край — подпись скрывается (не «перескакивает» в середину).
+     *   2) Fallback: линия видна, но не пересекает этот край.
+     *      Для меридианов: самая удалённая от центра линии видимая
+     *      точка в северной (top) или южной (bottom) половине.
+     *      Для параллелей: то же самое, но в западной (left) или
+     *      восточной (right) половине.
+     *      Раньше брался экстремум по оси (top = min Y, left = min X) —
+     *      на выпуклых проекциях (Equal Earth, Polynomial) это bulge
+     *      линии, который на повёрнутой карте проецируется в центр
+     *      экрана, и подпись «уезжает» туда.
+     *   3) Если линия вообще не видна — null.
      */
-    _findEdgeAnchor(side, kind, sx, sy, vis, n, W, H, allInside) {
+    _findEdgeAnchor(side, kind, sx, sy, vis, n, W, H) {
         const M = LABEL_MARGIN;
         const clampX = (x) => Math.max(M, Math.min(W - M, x));
         const clampY = (y) => Math.max(M, Math.min(H - M, y));
-        // 1) Пересечение с краем.
+        // 1) Пересечение с краем. (без изменений)
         for (let i = 0; i < n - 1; i++) {
             if (!vis[i] || !vis[i + 1])
                 continue;
@@ -871,48 +831,83 @@ export class Graticule {
                 return { x: side === 'left' ? M : W - M, y: clampY(y) };
             }
         }
-        // 2) Fallback — только если линия целиком внутри экрана.
-        if (!allInside)
-            return null;
-        // Определяем, является ли эта сторона естественной для данного типа линии.
+        // 2) Fallback — «самая дальняя от центра видимая точка в своей половине».
         const isNaturalSide = kind === 'meridian'
             ? (side === 'top' || side === 'bottom')
             : (side === 'left' || side === 'right');
         if (!isNaturalSide)
             return null;
-        let best = Infinity;
-        let bestX = null;
-        let bestY = null;
-        for (let i = 0; i < n; i++) {
-            if (!vis[i])
-                continue;
-            const x = sx[i], y = sy[i];
-            if (x < 0 || x > W || y < 0 || y > H)
-                continue;
-            let d;
-            switch (side) {
-                case 'top':
-                    d = y;
-                    break;
-                case 'bottom':
-                    d = H - y;
-                    break;
-                case 'left':
-                    d = x;
-                    break;
-                case 'right':
-                    d = W - x;
-                    break;
-            }
-            if (d < best) {
-                best = d;
-                bestX = x;
-                bestY = y;
+        if (n < 2)
+            return null;
+        const lastI = n - 1;
+        const isPositiveSide = kind === 'meridian'
+            ? (side === 'top')
+            : (side === 'right');
+        if (isPositiveSide) {
+            const endI = Math.ceil(lastI * 0.51);
+            for (let i = lastI; i >= endI; i--) {
+                if (!vis[i])
+                    continue;
+                const x = sx[i], y = sy[i];
+                if (x < 0 || x > W || y < 0 || y > H)
+                    continue;
+                return { x: clampX(x), y: clampY(y) };
             }
         }
-        if (bestX === null || bestY === null)
-            return null;
-        return { x: clampX(bestX), y: clampY(bestY) };
+        else {
+            const endI = Math.floor(lastI * 0.49);
+            for (let i = 0; i <= endI; i++) {
+                if (!vis[i])
+                    continue;
+                const x = sx[i], y = sy[i];
+                if (x < 0 || x > W || y < 0 || y > H)
+                    continue;
+                return { x: clampX(x), y: clampY(y) };
+            }
+        }
+        return null;
+    }
+    _updateLabelPositions(_viewport) {
+        const map = this._map;
+        const camera = map.camera;
+        const canvas = map.renderer.domElement;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        const wgPos = map.worldGroup.position;
+        const tmp = this._tmpVec;
+        const sx = this._scratchSx;
+        const sy = this._scratchSy;
+        const vis = this._scratchVis;
+        for (const info of this._lineInfos) {
+            const pts = info.points3D;
+            if (pts.length < 2) {
+                for (const lbl of info.labels) {
+                    lbl.visibleOnScreen = false;
+                    lbl.screenPos = null;
+                }
+                continue;
+            }
+            const n = pts.length;
+            for (let i = 0; i < n; i++) {
+                const [px, py, pz] = pts[i];
+                tmp.set(px + wgPos.x, py + wgPos.y, pz + wgPos.z);
+                tmp.project(camera);
+                vis[i] = (tmp.z > -1 && tmp.z < 1) ? 1 : 0;
+                sx[i] = (tmp.x * 0.5 + 0.5) * W;
+                sy[i] = (-tmp.y * 0.5 + 0.5) * H;
+            }
+            for (const lbl of info.labels) {
+                const anchor = this._findEdgeAnchor(lbl.side, info.kind, sx, sy, vis, n, W, H);
+                if (anchor) {
+                    lbl.screenPos = anchor;
+                    lbl.visibleOnScreen = true;
+                }
+                else {
+                    lbl.screenPos = null;
+                    lbl.visibleOnScreen = false;
+                }
+            }
+        }
     }
     _updateLabelsInTextManager() {
         const tm = this._map?.textManager;
@@ -1021,4 +1016,38 @@ export class Graticule {
 }
 function round6(v) {
     return Math.round(v * 1e6) / 1e6;
+}
+function computeRoundness(value, step, isGeo) {
+    const absV = Math.abs(value);
+    const eps = Math.max(step * 1e-6, 1e-9);
+    if (absV < eps)
+        return 1000; // 0°
+    if (isGeo && absV >= 179.999)
+        return 999; // ±180°
+    if (isGeo) {
+        const nice = [90, 60, 45, 30, 20, 15, 10, 5, 2, 1];
+        for (let i = 0; i < nice.length; i++) {
+            const d = nice[i];
+            if (d < step * 0.999)
+                continue; // делитель меньше шага — не наш
+            const rem = absV % d;
+            if (rem < eps || d - rem < eps) {
+                return 900 - i * 50;
+            }
+        }
+        return 100;
+    }
+    // Linear: кратность «круглым» линейным шагам (10·base, 5·base, 2·base, base).
+    const mag = Math.pow(10, Math.floor(Math.log10(Math.max(absV, step))));
+    const niceLinear = [mag * 10, mag * 5, mag * 2, mag];
+    for (let i = 0; i < niceLinear.length; i++) {
+        const d = niceLinear[i];
+        if (d < step * 0.999)
+            continue;
+        const rem = absV % d;
+        if (rem < eps || d - rem < eps) {
+            return 900 - i * 100;
+        }
+    }
+    return 100;
 }

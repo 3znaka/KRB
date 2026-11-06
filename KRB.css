@@ -116,6 +116,7 @@
 /* Атрибуция */
 .krb-attribution {
     font-size: 12px;
+        max-width: 70%;
     pointer-events: auto;
     padding: 4px;
     background: rgba(255, 255, 255, 0.7);

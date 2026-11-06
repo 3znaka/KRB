@@ -91,6 +91,15 @@ export const CoreLifecycleMixin = {
             return;
         this._disposed = true;
         this._disposeEvents();
+        if (this._uiHandle && typeof this._uiHandle.destroy === 'function') {
+            try {
+                this._uiHandle.destroy();
+            }
+            catch (e) {
+                console.warn(e);
+            }
+        }
+        this._uiHandle = null;
         if (this._onVisChange) {
             try {
                 document.removeEventListener('visibilitychange', this._onVisChange);

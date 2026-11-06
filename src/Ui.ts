@@ -18,6 +18,7 @@ export interface UIMap {
     applyZoomDelta(delta: number): void;
     resetBearing(): void;
     unprojectToLonLat(x: number, z: number): [number, number];
+    unprojectToLonLatSafe?(x: number, z: number): [number, number] | null;
     camera: any; // THREE.Camera
     renderer: { domElement: HTMLCanvasElement };
     groundPlane?: any; // THREE.Plane
@@ -76,13 +77,10 @@ export function initUI(map: UIMap): { destroy: () => void } {
 
     const getImgUrl = (filename: string): string => new URL(`./img/${filename}`, import.meta.url).href;
 
-    // ---- Защита от повторной инициализации ----
-    let pane = container.querySelector<HTMLDivElement>('#krb-ui-pane');
-    if (pane) {
-        return { destroy: () => {} };
-    }
+const existing = container.querySelector<HTMLDivElement>('#krb-ui-pane');
+if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
 
-    pane = document.createElement('div');
+const pane = document.createElement('div'); 
     pane.id = 'krb-ui-pane';
     pane.className = 'krb-ui-pane';
     container.appendChild(pane);
@@ -291,18 +289,24 @@ if (map.debug) {
      * Обновляет масштабную линейку, координаты и подпись зума.
      */
 function updateScaleBar(): void {
+    if (!map.worldGroup || !map.controls || !map.renderer) return;
     const worldPos = map.worldGroup.position;
-    const target = map.controls.target;
+    const target   = map.controls.target;
 
     const centerX = target.x - worldPos.x;
     const centerZ = target.z - worldPos.z;
 
-    const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
-
-    if (!Number.isFinite(lon) || !Number.isFinite(lat) ||
-        Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
-        return;
-    }
+    // ── центр: используем safe, если есть ────────────────────────
+   const centerLL = map.unprojectToLonLatSafe
+    ? map.unprojectToLonLatSafe(centerX, centerZ) 
+        : (() => {
+            const v = map.unprojectToLonLat(centerX, centerZ);
+            if (!v || !Number.isFinite(v[0]) || !Number.isFinite(v[1])) return null;
+            if (Math.abs(v[0]) > 180.0001 || Math.abs(v[1]) > 90.0001) return null;
+            return v;
+        })();
+    if (!centerLL) return;
+    const [lon, lat] = centerLL;
 
     if (map.debug && coordLabel) {
         _dirVec.subVectors(map.camera.position, target);
@@ -314,47 +318,52 @@ function updateScaleBar(): void {
             `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
     }
 
-        const barLengthPx = 100;
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        if (!rect.width || !rect.height) return;
+       const barLengthPx = 100;
+    const rect = map.renderer.domElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
 
-        _ndc.set(0, 0);
-        _raycaster.setFromCamera(_ndc, map.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return;
+    _ndc.set(0, 0);
+    _raycaster.setFromCamera(_ndc, map.camera);
+    if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return;
 
-        const ndcOffsetX = (2 * barLengthPx) / rect.width;
-        _ndc.set(ndcOffsetX, 0);
-        _raycaster.setFromCamera(_ndc, map.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return;
+    const ndcOffsetX = (2 * barLengthPx) / rect.width;
+    _ndc.set(ndcOffsetX, 0);
+    _raycaster.setFromCamera(_ndc, map.camera);
+    if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return;
 
-        const [lon1, lat1] = map.unprojectToLonLat(
-            _hit1.x - worldPos.x, _hit1.z - worldPos.z
-        );
-        const [lon2, lat2] = map.unprojectToLonLat(
-            _hit2.x - worldPos.x, _hit2.z - worldPos.z
-        );
+    // ── углы: safe-путь ──────────────────────────────────────────
+    const safe = map.unprojectToLonLatSafe;
+const h1 = map.unprojectToLonLatSafe
+    ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
+    : (() => {
+        const v = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
+        return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+            && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+    })();
+if (!h1) { scaleLabel.textContent = ''; return; }
+const [lon1, lat1] = h1;
 
-        if (!Number.isFinite(lon1) || !Number.isFinite(lat1) ||
-            !Number.isFinite(lon2) || !Number.isFinite(lat2)) {
-            return;
-        }
-        if (Math.abs(lon1) > 180.0001 || Math.abs(lat1) > 90.0001) return;
-        if (Math.abs(lon2) > 180.0001 || Math.abs(lat2) > 90.0001) return;
+const h2 = map.unprojectToLonLatSafe
+    ? map.unprojectToLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z)
+    : (() => {
+        const v = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
+        return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+            && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+    })();
+if (!h2) { scaleLabel.textContent = ''; return; }
+const [lon2, lat2] = h2;
 
-        // Non-null assertion (!) говорит компилятору, что map.R точно есть,
-        // так как мы уже проверили это через Number.isFinite.
-        const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
-        
-        const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
+    const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
+    const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
 
-        if (distance > 0) {
-            const nice = niceDistance(distance);
-            const ratio = nice / distance;
-            scaleBar.style.width = (barLengthPx * ratio) + 'px';
-            scaleLabel.textContent = formatDistance(nice);
-        }
+    if (distance > 0) {
+        const nice  = niceDistance(distance);
+        const ratio = nice / distance;
+        scaleBar.style.width = (barLengthPx * ratio) + 'px';
+        scaleLabel.textContent = formatDistance(nice);
+    }
 
-  if (map.debug && zoomValueLabel) {
+    if (map.debug && zoomValueLabel) {
         zoomValueLabel.textContent =
             ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
     }
@@ -367,6 +376,10 @@ function updateScaleBar(): void {
 
 function animateUI(): void {
     if (destroyed) return;
+    if (!map.worldGroup || !map.controls || !map.renderer) {
+        destroyed = true;
+        return;
+    }
 
     if (map.debug && fpsLabel) {
         const now = performance.now();
@@ -378,13 +391,10 @@ function animateUI(): void {
             lastFpsUpdate = now;
         }
     }
-
     updateScaleBar();
 
     const bearingDeg = computeBearingDeg();
-    if (compassSvg) {
-        compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
-    }
+    if (compassSvg) compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
 
     rafId = requestAnimationFrame(animateUI);
 }

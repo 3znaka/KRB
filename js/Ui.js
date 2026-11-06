@@ -49,12 +49,10 @@ function collectAttributions(map) {
 export function initUI(map) {
     const container = map.targetElement;
     const getImgUrl = (filename) => new URL(`./img/${filename}`, import.meta.url).href;
-    // ---- Защита от повторной инициализации ----
-    let pane = container.querySelector('#krb-ui-pane');
-    if (pane) {
-        return { destroy: () => { } };
-    }
-    pane = document.createElement('div');
+    const existing = container.querySelector('#krb-ui-pane');
+    if (existing && existing.parentNode)
+        existing.parentNode.removeChild(existing);
+    const pane = document.createElement('div');
     pane.id = 'krb-ui-pane';
     pane.className = 'krb-ui-pane';
     container.appendChild(pane);
@@ -232,15 +230,26 @@ export function initUI(map) {
      * Обновляет масштабную линейку, координаты и подпись зума.
      */
     function updateScaleBar() {
+        if (!map.worldGroup || !map.controls || !map.renderer)
+            return;
         const worldPos = map.worldGroup.position;
         const target = map.controls.target;
         const centerX = target.x - worldPos.x;
         const centerZ = target.z - worldPos.z;
-        const [lon, lat] = map.unprojectToLonLat(centerX, centerZ);
-        if (!Number.isFinite(lon) || !Number.isFinite(lat) ||
-            Math.abs(lon) > 180.0001 || Math.abs(lat) > 90.0001) {
+        // ── центр: используем safe, если есть ────────────────────────
+        const centerLL = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(centerX, centerZ)
+            : (() => {
+                const v = map.unprojectToLonLat(centerX, centerZ);
+                if (!v || !Number.isFinite(v[0]) || !Number.isFinite(v[1]))
+                    return null;
+                if (Math.abs(v[0]) > 180.0001 || Math.abs(v[1]) > 90.0001)
+                    return null;
+                return v;
+            })();
+        if (!centerLL)
             return;
-        }
+        const [lon, lat] = centerLL;
         if (map.debug && coordLabel) {
             _dirVec.subVectors(map.camera.position, target);
             const dist = _dirVec.length();
@@ -263,18 +272,32 @@ export function initUI(map) {
         _raycaster.setFromCamera(_ndc, map.camera);
         if (!_raycaster.ray.intersectPlane(_plane, _hit2))
             return;
-        const [lon1, lat1] = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
-        const [lon2, lat2] = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
-        if (!Number.isFinite(lon1) || !Number.isFinite(lat1) ||
-            !Number.isFinite(lon2) || !Number.isFinite(lat2)) {
+        // ── углы: safe-путь ──────────────────────────────────────────
+        const safe = map.unprojectToLonLatSafe;
+        const h1 = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
+            : (() => {
+                const v = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+            })();
+        if (!h1) {
+            scaleLabel.textContent = '';
             return;
         }
-        if (Math.abs(lon1) > 180.0001 || Math.abs(lat1) > 90.0001)
+        const [lon1, lat1] = h1;
+        const h2 = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z)
+            : (() => {
+                const v = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+            })();
+        if (!h2) {
+            scaleLabel.textContent = '';
             return;
-        if (Math.abs(lon2) > 180.0001 || Math.abs(lat2) > 90.0001)
-            return;
-        // Non-null assertion (!) говорит компилятору, что map.R точно есть,
-        // так как мы уже проверили это через Number.isFinite.
+        }
+        const [lon2, lat2] = h2;
         const R = (Number.isFinite(map.R) && map.R > 0) ? map.R : 6371008.8;
         const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
         if (distance > 0) {
@@ -295,6 +318,10 @@ export function initUI(map) {
     function animateUI() {
         if (destroyed)
             return;
+        if (!map.worldGroup || !map.controls || !map.renderer) {
+            destroyed = true;
+            return;
+        }
         if (map.debug && fpsLabel) {
             const now = performance.now();
             frames++;
@@ -307,9 +334,8 @@ export function initUI(map) {
         }
         updateScaleBar();
         const bearingDeg = computeBearingDeg();
-        if (compassSvg) {
+        if (compassSvg)
             compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
-        }
         rafId = requestAnimationFrame(animateUI);
     }
     animateUI();

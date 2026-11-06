@@ -96,6 +96,7 @@ export class KrbMap {
     _padding = null;
     _maxBounds = null;
     _lastBoundsCheck = null;
+    _uiHandle = null;
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene;
     camera;
@@ -400,7 +401,11 @@ export class KrbMap {
             this.setMaxBounds(maxBounds);
         }
         this.animate();
-        requestAnimationFrame(() => initUI(this));
+        requestAnimationFrame(() => {
+            if (this._disposed)
+                return;
+            this._uiHandle = initUI(this); // стало
+        });
     }
     /* ================================================================
        Three.js: сцена, камера, рендерер, свет

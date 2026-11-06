@@ -170,6 +170,7 @@ _firstRenderDone: boolean;
 _padding: { top: number; right: number; bottom: number; left: number } | null = null;
 _maxBounds: { minLon: number; maxLon: number; minLat: number; maxLat: number } | null = null;
 _lastBoundsCheck: { tx: number; tz: number; wx: number; wz: number } | null = null;
+_uiHandle: { destroy: () => void } | null = null;
 
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene: any;
@@ -535,7 +536,10 @@ if (maxBounds) {
 
 
         this.animate();
-        requestAnimationFrame(() => initUI(this));
+      requestAnimationFrame(() => {
+    if (this._disposed) return;
+    this._uiHandle = initUI(this);              // стало
+});
     }
 
     /* ================================================================

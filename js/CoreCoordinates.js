@@ -1,6 +1,18 @@
 // CoreCoordinates.ts
 import { Projections } from './Projections.js';
 export const CoreCoordinatesMixin = {
+    unprojectToLonLatSafe(x, z) {
+        const coord = [x, -z];
+        const raw = this.projection?._raw ?? this.projection; // на случай ScaledProjection без делегата
+        const out = typeof raw?.toLonLatSafe === 'function'
+            ? raw.toLonLatSafe(coord)
+            : raw?.toLonLat(coord);
+        if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1]))
+            return null;
+        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001)
+            return null;
+        return [out[0], out[1]];
+    },
     _resolveViewCenter() {
         const v = this.view;
         const mapCode = this.projection.code; // строковый код (raw === world)
@@ -140,7 +152,12 @@ export const CoreCoordinatesMixin = {
         return typeof code === 'string' ? Projections.get(code) : code;
     },
     _wrapsLongitude() {
-        const def = this.projection.def || '';
+        const proj = this.projection;
+        if (proj?.wrapsLongitude === true)
+            return true;
+        if (proj?._raw?.wrapsLongitude === true)
+            return true; // ScaledProjection без делегата
+        const def = proj?.def || '';
         return /\+proj=merc\b/.test(def) || /\+proj=longlat\b/.test(def);
     },
     getTextureUrl(layer, z, x, y) {

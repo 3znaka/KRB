@@ -116,7 +116,7 @@
 /* Атрибуция */
 .krb-attribution {
     font-size: 12px;
-        max-width: 70%;
+
     pointer-events: auto;
     padding: 4px;
     background: rgba(255, 255, 255, 0.7);
@@ -130,3 +130,9 @@
 .krb-attribution-link:hover { text-decoration: underline;}
 
 .krb-btn img {    width: 50%;}
+
+@media (max-width: 900px) {
+.krb-attribution {
+max-width: 70%;
+}
+}

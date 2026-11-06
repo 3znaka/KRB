@@ -348,9 +348,21 @@ this._userData = options.userData ?? {};
 
         let geometry: any;
         switch (this._primitiveType.toLowerCase() as PrimitiveType) {
-            case 'sphere':   geometry = new THREE.SphereGeometry(w / 2, 32, 32); break;
-            case 'cylinder': geometry = new THREE.CylinderGeometry(w / 2, w / 2, h, 32); break;
-            case 'cone':     geometry = new THREE.ConeGeometry(w / 2, h, 32); break;
+            case 'sphere': {
+    geometry = new THREE.SphereGeometry(0.5, 32, 32);
+    geometry.scale(w, h, d);
+    break;
+}
+           case 'cylinder': {
+    geometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+    geometry.scale(w, h, d); 
+    break;
+}
+case 'cone': {
+    geometry = new THREE.ConeGeometry(0.5, 1, 32);
+    geometry.scale(w, h, d);
+    break;
+}
             case 'box':
             default:         geometry = new THREE.BoxGeometry(w, h, d); break;
         }

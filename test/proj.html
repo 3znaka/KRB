@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Test: formula CRS</title>
+    <link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; background: #dbeafe; }
+    #ui {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        background: rgba(255,255,255,.92); padding: 10px 12px;
+        border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+        font-size: 13px;
+    }
+    #ui button { margin: 3px 2px; padding: 4px 10px; cursor: pointer; }
+    #ui button.active { background: #3b82f6; color: #fff; border-color: #1d4ed8; }
+    #status { margin-top: 6px; color: #475569; font-size: 12px; max-width: 280px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="ui">
+    <div><b>CRS:</b></div>
+    <button data-crs="EPSG:3857">Mercator</button>
+    <button data-crs="TEST:EQC">Equirectangular</button>
+    <button data-crs="TEST:EE">Equal Earth</button>
+    <button data-crs="TEST:POLY">Polynomial</button>
+    <div id="status">загрузка…</div>
+</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// ─────────────────────────────────────────────────────────────────────
+// 1. РЕГИСТРАЦИЯ ФОРМУЛЬНЫХ ПРОЕКЦИЙ
+// ─────────────────────────────────────────────────────────────────────
+const R   = 6378137;
+const D2R = Math.PI / 180;
+const R2D = 180 / Math.PI;
+
+// ── Equirectangular (plate carrée) ──────────────────────────────────
+KRB.Projections.registerFormula('TEST:EQC', [
+    (lat, lon) => R * lon * D2R,
+    (lat, lon) => R * lat * D2R,
+    (x, y)     => y / R * R2D,
+    (x, y)     => x / R * R2D,
+], {
+    semiMajor:   R,
+    halfExtentX: R * Math.PI,
+    halfExtentY: R * Math.PI / 2,
+});
+
+// ── Equal Earth (Šavrič et al., 2018) ──────────────────────────────
+const A1 = 1.340264, A2 = -0.081106, A3 = 0.000893, A4 = 0.003796;
+const M  = Math.sqrt(3) / 2;
+const S3 = Math.sqrt(3);
+
+function eeX(lat, lon) {
+    const phi   = lat * D2R, lam = lon * D2R;
+    const theta = Math.asin(M * Math.sin(phi));
+    const t2 = theta * theta, t6 = t2 * t2 * t2;
+    const denom = A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2);
+    return R * 2 * S3 * lam * Math.cos(theta) / (3 * denom);
+}
+function eeY(lat, lon) {
+    const phi   = lat * D2R;
+    const theta = Math.asin(M * Math.sin(phi));
+    const t2 = theta * theta, t6 = t2 * t2 * t2;
+    return R * theta * (A1 + A2 * t2 + t6 * (A3 + A4 * t2));
+}
+function solveTheta(yp) {
+    let th = yp;
+    for (let i = 0; i < 12; i++) {
+        const t2 = th * th, t6 = t2 * t2 * t2;
+        const f  = th * (A1 + A2 * t2 + t6 * (A3 + A4 * t2)) - yp;
+        const fp = A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2);
+        const d  = f / fp;
+        th -= d;
+        if (Math.abs(d) < 1e-12) break;
+    }
+    return th;
+}
+function eeInvLat(x, y) {
+    const th = solveTheta(y / R);
+    return Math.asin(Math.sin(th) / M) * R2D;
+}
+function eeInvLon(x, y) {
+    const th = solveTheta(y / R);
+    const t2 = th * th, t6 = t2 * t2 * t2;
+    const denom = A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2);
+    return (x * 3 * denom / (2 * S3 * Math.cos(th) * R)) * R2D;
+}
+
+KRB.Projections.registerFormula('TEST:EE', [
+    eeX, eeY, eeInvLat, eeInvLon,
+], {
+    semiMajor:   R,
+    halfExtentX: R * 2.8,
+    halfExtentY: R * 1.4,
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Пользовательская полиномиальная проекция (коэффициенты bb[] и aa[])
+// ─────────────────────────────────────────────────────────────────────
+(function registerCustomPolynomial() {
+
+    // ── коэффициенты (порядок как в оригинале) ──────────────────────
+    const bb = [
+        52.81, -0.035186, 0.033369, -0.016102, 0.0029195, -0.000004,
+        -0.0079884, 0.0053805, 0.035531, -12.72, 1.5086, -1.9888,
+        0.26824, 0.12153, 0.061294, -0.41449, 0.18542, 0.099726,
+        -0.049223, -0.050489, 0.0064187, -0.0025242,
+    ];
+    const aa = [
+        63.354, 0.065299, 2.1814, 0.021535, 0.0029811, -0.0037641,
+        0.000832, -0.0000633, 0.055675, 2.7757, 0.0274, -0.078446,
+        0.048269, 0.048869, -0.6516, -0.014802, -0.016348, 0.001497,
+        0.0015999, 0.0011988,
+    ];
+
+    const K        = 100000;
+    const D2R      = Math.PI / 180;
+    const R2D      = 180 / Math.PI;
+    const PI       = Math.PI;
+    const HALF_PI  = Math.PI / 2;
+    const EPS      = 1e-12;
+    const MAX_ITER = 50;
+
+    // ── полиномы и их частные производные ───────────────────────────
+    function P(L, F) {
+        return bb[0] + bb[1]*L + bb[2]*L*L + bb[3]*L*L*L
+             + L*L*L*L*(bb[4] + bb[5]*L)
+             + L*F*(bb[13] + bb[14]*F + bb[15]*F*F + bb[16]*F**3
+                    + bb[17]*F**4 + bb[18]*F**5)
+             + F*(bb[8] + bb[9]*F + bb[10]*F*F + bb[11]*F**3 + bb[12]*F**4)
+             + L*L*F*(bb[19] + bb[6]*F + bb[20]*L + bb[7]*F*L + bb[21]*L*L);
+    }
+    function Q(L, F) {
+        return aa[0] + aa[1]*L + aa[2]*L*L
+             + L**3*(aa[3] + aa[4]*L + aa[5]*L**2 + aa[6]*L**3 + aa[7]*L**4)
+             + aa[8]*F + aa[9]*F*F + aa[10]*F**3
+             + L*F*(aa[11] + aa[12]*F + aa[16]*F*F + aa[18]*F**3)
+             + L*L*F*(aa[13] + aa[14]*F)
+             + L**3*F*(aa[15] + aa[19]*F + aa[17]*L);
+    }
+    function PL(L, F) {
+        return bb[1] + 2*bb[2]*L + 3*bb[3]*L*L
+             + 4*bb[4]*L**3 + 5*bb[5]*L**4
+             + F*(bb[13] + bb[14]*F + bb[15]*F*F + bb[16]*F**3
+                  + bb[17]*F**4 + bb[18]*F**5)
+             + 2*bb[19]*L*F + 2*bb[6]*L*F*F
+             + 3*bb[20]*L*L*F + 3*bb[7]*L*L*F*F + 4*bb[21]*L**3*F;
+    }
+    function PF(L, F) {
+        return L*(bb[13] + 2*bb[14]*F + 3*bb[15]*F*F + 4*bb[16]*F**3
+                  + 5*bb[17]*F**4 + 6*bb[18]*F**5)
+             + bb[8] + 2*bb[9]*F + 3*bb[10]*F*F + 4*bb[11]*F**3 + 5*bb[12]*F**4
+             + bb[19]*L*L + 2*bb[6]*L*L*F
+             + bb[20]*L**3 + 2*bb[7]*L**3*F + bb[21]*L**4;
+    }
+    function QL(L, F) {
+        return aa[1] + 2*aa[2]*L + 3*aa[3]*L*L + 4*aa[4]*L**3
+             + 5*aa[5]*L**4 + 6*aa[6]*L**5 + 7*aa[7]*L**6
+             + F*(aa[11] + aa[12]*F + aa[16]*F*F + aa[18]*F**3)
+             + 2*aa[13]*L*F + 2*aa[14]*L*F*F
+             + 3*aa[15]*L*L*F + 3*aa[19]*L*L*F*F + 4*aa[17]*L**3*F;
+    }
+    function QF(L, F) {
+        return aa[8] + 2*aa[9]*F + 3*aa[10]*F*F
+             + L*(aa[11] + 2*aa[12]*F + 3*aa[16]*F*F + 4*aa[18]*F**3)
+             + aa[13]*L*L + 2*aa[14]*L*L*F
+             + aa[15]*L**3 + 2*aa[19]*L**3*F + aa[17]*L**4;
+    }
+
+    // ── замыкание: фиксируем lon0 / scaleA / scaleB / swap ──────────
+    function makeProjection(lon0, scaleA, scaleB, swap) {
+        // внутренние: углы в градусах, L/F — в радианах
+        function forward(latDeg, lonDeg) {
+            const L = Math.abs(lonDeg - lon0) * D2R;
+            const F = Math.abs(latDeg)        * D2R;
+            const y0 = L * P(L, F) * K * scaleB;   // восток
+            const x0 = F * Q(L, F) * K * scaleA;   // север
+            const yF = lonDeg < lon0 ? -y0 : y0;
+            const xF = latDeg < 0    ? -x0 : x0;
+            // xF — север, yF — восток (как в формуле);
+            // swap=true → возвращаем (восток, север), как принято в proj4
+            return swap ? [yF, xF] : [xF, yF];
+        }
+        // внутренние: (x, y) → (latDeg, lonDeg)
+        function inverse(x, y) {
+            const xF = swap ? y : x;   // север-компонента
+            const yF = swap ? x : y;   // восток-компонента
+
+            const Y0 = Math.abs(yF) / (K * scaleB);
+            const X0 = Math.abs(xF) / (K * scaleA);
+
+            // начальное приближение
+            let L = Y0 / bb[0];
+            let F = X0 / aa[0];
+
+            // Ньютон по (L, F)
+            for (let i = 0; i < MAX_ITER; i++) {
+                const p  = P (L, F), q  = Q (L, F);
+                const pL = PL(L, F), pF = PF(L, F);
+                const qL = QL(L, F), qF = QF(L, F);
+
+                const H1 = L*p - Y0;     // ∂H1/∂L = p + L*pL;  ∂H1/∂F = L*pF
+                const H2 = F*q - X0;     // ∂H2/∂L = F*qL;      ∂H2/∂F = q + F*qF
+
+                const J11 = p + L*pL, J12 = L*pF;
+                const J21 = F*qL,     J22 = q + F*qF;
+                const det = J11*J22 - J12*J21;
+                if (Math.abs(det) < 1e-30) break;
+
+                const dL = (H1*J22 - J12*H2) / det;
+                const dF = (J11*H2 - H1*J21) / det;
+
+                L -= dL;  F -= dF;
+                if (L < 0) L = 0;
+                if (F < 0) F = 0;
+                if (Math.max(Math.abs(dL), Math.abs(dF)) < EPS) break;
+            }
+
+            const latDeg = (xF < 0 ? -F : xF > 0 ? F : 0) * R2D;
+            const lonDeg = lon0 + (yF < 0 ? -L : yF > 0 ? L : 0) * R2D;
+            return [latDeg, lonDeg];
+        }
+        return { forward, inverse };
+    }
+
+    // ── НАСТРОЙКИ ───────────────────────────────────────────────────
+    //  lon0 — центральный меридиан в ГРАДУСАХ. Для мировой карты — 0.
+    //  scaleA/B — обычно 1; если единицы вывода нужно поджать, меняй.
+    //  swap — x в формуле — «север», y — «восток» (так в оригинале).
+    //         Чтобы карта отрисовалась привычно (север сверху, восток
+    //         справа) в системе proj4-координат, нужен swap=true.
+    const LON0      = 0;
+    const SCALE_A   = 1;
+    const SCALE_B   = 1;
+    const SWAP_AXES = true;
+
+    const { forward, inverse } = makeProjection(LON0, SCALE_A, SCALE_B, SWAP_AXES);
+
+    // ── оценка half-extent сэмплированием ───────────────────────────
+    //  полином устойчив при L ∈ [0, π], F ∈ [0, π/2]; шире не пробуем.
+    let maxX = 0, maxY = 0;
+    for (let lat = -90; lat <= 90; lat += 5) {
+        for (let lon = -180; lon <= 180; lon += 5) {
+            const L = Math.abs(lon - LON0) * D2R;
+            const F = Math.abs(lat)        * D2R;
+            if (L > PI + 1e-6 || F > HALF_PI + 1e-6) continue;
+            const [x, y] = forward(lat, lon);
+            if (Number.isFinite(x)) maxX = Math.max(maxX, Math.abs(x));
+            if (Number.isFinite(y)) maxY = Math.max(maxY, Math.abs(y));
+        }
+    }
+    // 15% запас: полином гладкий, но на сетке 5° пик можно чуть «промахнуть»
+    const HALF_X = (maxX || 2e7) * 1.15;
+    const HALF_Y = (maxY || 2e7) * 1.15;
+
+    // ── регистрация ─────────────────────────────────────────────────
+    KRB.Projections.registerFormula('TEST:POLY', [
+        (lat, lon) => forward(lat, lon)[0],  // x
+        (lat, lon) => forward(lat, lon)[1],  // y
+        (x, y)     => inverse(x, y)[0],      // lat
+        (x, y)     => inverse(x, y)[1],      // lon
+    ], {
+        semiMajor:   6_371_000,
+        halfExtentX: HALF_X,
+        halfExtentY: HALF_Y,
+        maxAbsCoord: Math.max(HALF_X, HALF_Y) * 1.5,
+        wrapsLongitude: false,
+    });
+
+    // отладочный вывод — пригодится, если что-то «съедет»
+    console.log('[TEST:POLY] halfExtent =', HALF_X.toFixed(0), '×', HALF_Y.toFixed(0),
+                '| lon0 =', LON0, '| swap =', SWAP_AXES);
+})();
+
+// ─────────────────────────────────────────────────────────────────────
+// 2. КАРТА И ПЕРЕКЛЮЧЕНИЕ CRS
+// ─────────────────────────────────────────────────────────────────────
+const statusEl = document.getElementById('status');
+let current = null;
+let geojsonCache = null;
+
+async function loadGeojson() {
+    if (geojsonCache) return geojsonCache;
+    statusEl.textContent = 'загрузка world.geojson…';
+    const r = await fetch('./world.geojson');
+    if (!r.ok) throw new Error(`HTTP ${r.status} для world.geojson`);
+    geojsonCache = await r.json();
+    return geojsonCache;
+}
+
+async function show(crs) {
+    if (current) { current.map.dispose(); current = null; }
+    document.querySelectorAll('#ui button').forEach(b =>
+        b.classList.toggle('active', b.dataset.crs === crs)
+    );
+    statusEl.textContent = `создание карты в ${crs}…`;
+
+    // Ленивая подгрузка проекции из epsg_defs.json, если это код.
+    if (typeof crs === 'string' && KRB.Projections?.ensure) {
+        await KRB.Projections.ensure(crs);
+    }
+
+    const map = new KRB.Map({
+        target: 'map',
+        crs,
+        layers: [],                       // без тайлов — только вектор
+        view: new KRB.View({
+            centerLonLat: [10, 20],
+            zoom: 1,
+            minZoom: 0,
+            maxZoom: 8,
+        }),
+    });
+
+    console.log(`[${crs}] projection =`, map.projection);
+    console.log(`[${crs}] halfExtentX =`, map.projection.halfExtentX,
+                `halfExtentY =`, map.projection.halfExtentY);
+
+    const data = await loadGeojson();
+
+    const layer = new KRB.GeoJSONLayer({
+        data,
+        defaultFillColor:   '#3b82f6',
+        defaultFillOpacity: 0.28,
+        defaultStrokeColor: '#1e3a8a',
+        defaultStrokeWidth: 0.7,
+    });
+    layer.addTo(map);
+
+    current = { map, layer };
+    statusEl.textContent = `готово: ${crs}`;
+}
+
+document.getElementById('ui').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-crs]');
+    if (!btn) return;
+    show(btn.dataset.crs).catch(err => {
+        console.error(err);
+        statusEl.textContent = 'ошибка: ' + err.message;
+    });
+});
+
+show('EPSG:3857').catch(err => {
+    console.error(err);
+    statusEl.textContent = 'ошибка: ' + err.message;
+});
+</script>
+</body>
+</html>

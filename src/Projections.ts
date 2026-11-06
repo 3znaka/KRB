@@ -59,16 +59,172 @@ const ELLIPSOID_A = {
     'walbeck': 6376896.0,
 };
 
+// ============================================================
+// Формульные проекции
+// ============================================================
+
+/**
+ * Массив из четырёх функций:
+ *   [ x(lat, lon), y(lat, lon), lat(x, y), lon(x, y) ]
+ *
+ * Вход/выход lat/lon — в градусах (как в fromLonLat/toLonLat),
+ * x/y — в нативных единицах проекции (обычно метры).
+ */
+export type ProjectionFormula = [
+    (lat: number, lon: number) => number,
+    (lat: number, lon: number) => number,
+    (x: number, y: number) => number,
+    (x: number, y: number) => number,
+];
+
+export interface FormulaProjectionOptions {
+    code?: string;
+    semiMajor?: number;
+    isGeographic?: boolean;
+    isMercator?: boolean;
+    halfExtentX?: number;
+    halfExtentY?: number;
+    maxLatDeg?: number | null;
+    maxAbsCoord?: number;
+    wrapsLongitude?: boolean;
+}
+
+let _formulaCounter = 0;
+
+export class FormulaProjection {
+    constructor(formula, options = {}) {
+        if (!Array.isArray(formula) || formula.length !== 4) {
+            throw new Error('FormulaProjection: ожидается массив из 4 функций [x(lat,lon), y(lat,lon), lat(x,y), lon(x,y)]');
+        }
+        for (let i = 0; i < 4; i++) {
+            if (typeof formula[i] !== 'function') {
+                throw new Error(`FormulaProjection: элемент [${i}] не является функцией`);
+            }
+        }
+        this._formula = formula;
+        this.code        = options.code ?? `FORMULA:${++_formulaCounter}`;
+        this.def         = null;                    // совместимость с Projection
+        this.isGeographic = options.isGeographic ?? false;
+        this.isMercator   = options.isMercator   ?? false;
+        this.projName     = 'formula';
+        this.lon0         = 0;
+        this.maxLatDeg    = options.maxLatDeg ?? null;
+        this.maxAbsCoord  = options.maxAbsCoord ?? 2.5e7;
+        this.wrapsLongitude = options.wrapsLongitude ?? false;
+        this._semiMajor   = options.semiMajor ?? 6378137;
+        this._halfExtentX = options.halfExtentX;
+        this._halfExtentY = options.halfExtentY;
+    }
+
+    get semiMajor() { return this._semiMajor; }
+
+    get halfExtentX() {
+        if (this._halfExtentX !== undefined) return this._halfExtentX;
+        if (this.isGeographic) return (this._halfExtentX = 180);
+        const m = this._sampleExtent(0);
+        return (this._halfExtentX = m > 0 ? m : Math.PI * this._semiMajor);
+    }
+
+    get halfExtentY() {
+        if (this._halfExtentY !== undefined) return this._halfExtentY;
+        if (this.isGeographic) return (this._halfExtentY = 90);
+        const m = this._sampleExtent(1);
+        return (this._halfExtentY = m > 0 ? m : Math.PI * this._semiMajor);
+    }
+
+    /** @private max|x| (axis=0) или max|y| (axis=1) по грубой сетке. */
+    _sampleExtent(axis) {
+        const idx = axis === 0 ? 0 : 1;
+        let max = 0;
+        const lats = [-90, -89.9, -80, -60, -40, -20, 0, 20, 40, 60, 80, 89.9, 90];
+        const lons = [-180, -90, 0, 90, 180];
+        for (const lat of lats) {
+            for (const lon of lons) {
+                let v;
+                try { v = this._formula[idx](lat, lon); } catch { continue; }
+                if (!Number.isFinite(v)) continue;
+                const a = Math.abs(v);
+                if (a > max) max = a;
+            }
+        }
+        return max;
+    }
+
+    isValidLonLat(ll) {
+        if (!ll || ll.length < 2) return false;
+        const lon = ll[0], lat = ll[1];
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
+        if (Math.abs(lon) > 180.0001) return false;
+        if (Math.abs(lat) >  90.0001) return false;
+        return true;
+    }
+
+    isValidCoord(c) {
+        if (!c || c.length < 2) return false;
+        const x = c[0], y = c[1];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+        if (Math.abs(x) > this.maxAbsCoord || Math.abs(y) > this.maxAbsCoord) return false;
+        return true;
+    }
+
+    clampLonLat(ll) {
+        if (this.maxLatDeg === null) return ll;
+        const lon = ll[0], lat = ll[1];
+        if (!Number.isFinite(lat)) return ll;
+        if (Math.abs(lat) <= this.maxLatDeg) return ll;
+        return [lon, Math.sign(lat) * this.maxLatDeg];
+    }
+
+convertTo(other, coord) {
+    if (!other) return coord;
+    if (other.def == null && typeof other.fromLonLat === 'function') {
+        return other.fromLonLat(this.toLonLat(coord));
+    }
+    return proj4(this.def, other.def, coord);
+}
+
+    fromLonLat([lon, lat]) {
+        try { return [this._formula[0](lat, lon), this._formula[1](lat, lon)]; }
+        catch { return [NaN, NaN]; }
+    }
+
+    toLonLat([x, y]) {
+        try {
+            const lat = this._formula[2](x, y);
+            const lon = this._formula[3](x, y);
+            return [lon, lat];
+        } catch { return [NaN, NaN]; }
+    }
+
+    fromLonLatSafe(coord) {
+        if (!this.isValidLonLat(coord)) return null;
+        const clamped = this.clampLonLat(coord);
+        const out = this.fromLonLat(clamped);
+        return this.isValidCoord(out) ? out : null;
+    }
+
+    toLonLatSafe(coord) {
+        if (!this.isValidCoord(coord)) return null;
+        const out = this.toLonLat(coord);
+        if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1])) return null;
+        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001) return null;
+        return out;
+    }
+}
+
+// ============================================================
+// ScaledProjection: добавляем делегирование недостающих полей
+// ============================================================
 
 class ScaledProjection {
     constructor(raw, worldScale) {
         this._raw = raw;
         this.worldScale = worldScale;
-        this.code = raw.code;
-        this.isMercator = raw.isMercator;
-        this.semiMajor = raw.semiMajor;              
-        this.halfExtentX = raw.halfExtentX * worldScale;
-        this.halfExtentY = raw.halfExtentY * worldScale;
+        this.code         = raw.code;
+        this.isMercator   = raw.isMercator;
+        this.semiMajor    = raw.semiMajor;
+        this.halfExtentX  = raw.halfExtentX * worldScale;
+        this.halfExtentY  = raw.halfExtentY * worldScale;
     }
     fromLonLat(ll) {
         const p = this._raw.fromLonLat(ll);
@@ -90,11 +246,21 @@ class ScaledProjection {
         }
         return this._raw.toLonLat([xy[0] / this.worldScale, xy[1] / this.worldScale]);
     }
+    // ── NEW: прозрачное делегирование остального ──
+    get def()           { return this._raw.def; }
+    get isGeographic()  { return this._raw.isGeographic; }
+    get projName()      { return this._raw.projName; }
+    get lon0()          { return this._raw.lon0; }
+    get maxLatDeg()     { return this._raw.maxLatDeg; }
+    get maxAbsCoord()   { return this._raw.maxAbsCoord; }
+    get wrapsLongitude(){ return this._raw.wrapsLongitude; }
+    isValidLonLat(ll)   { return this._raw.isValidLonLat(ll); }
+    isValidCoord(c)     { return this._raw.isValidCoord(c); }
+    clampLonLat(ll)     { return this._raw.clampLonLat(ll); }
+    convertTo(o, c)     { return this._raw.convertTo(o, c); }
 }
 
-const _worldCache = new Map();
-
-
+const _worldCache = new Map(); // для строковых кодов (оставляем как было)
 /**
  * Обёртка над проекцией proj4 с минимальной валидацией.
  *
@@ -306,10 +472,13 @@ export const WGS84 = new Projection('EPSG:4326', HARDCODED['EPSG:4326']);
  */
 class ProjectionRegistry {
     constructor() {
-        /** @private @type {Map<string, Projection>} */
         this._map = new Map();
-        /** @private @type {Promise<Object>|null} */
         this._defsPromise = null;
+
+        // кэши формул — по идентичности массива/объекта спецификации
+        this._formulaRawCache    = new WeakMap(); // input → FormulaProjection
+        this._formulaWorldCache  = new WeakMap(); // input → (FormulaProjection|ScaledProjection)
+        this._worldInstanceCache = new WeakMap(); // raw instance → world
 
         this.register(WGS84);
         for (const [code, def] of Object.entries(HARDCODED)) {
@@ -317,13 +486,9 @@ class ProjectionRegistry {
         }
     }
 
-    /** @param {Projection} p @returns {Projection} */
     register(p) { this._map.set(p.code, p); return p; }
+    has(code)   { return typeof code === 'string' && this._map.has(code); }
 
-    /** @param {string} code @returns {boolean} */
-    has(code) { return this._map.has(code); }
-
-    /** @param {string} code @returns {Projection} */
     get(code) {
         const p = this._map.get(code);
         if (!p) throw new Error(
@@ -332,8 +497,67 @@ class ProjectionRegistry {
         return p;
     }
 
-    /** @param {string} code @returns {Promise<Projection>} */
+    // ── NEW: регистрация формулы под явным кодом ──
+    registerFormula(codeOrFormula, formulaOrOptions, maybeOptions) {
+        let code, formula, options;
+        if (typeof codeOrFormula === 'string') {
+            code    = codeOrFormula;
+            formula = formulaOrOptions;
+            options = maybeOptions ?? {};
+        } else {
+            formula = codeOrFormula;
+            options = formulaOrOptions ?? {};
+            code    = options.code;
+        }
+        if (!Array.isArray(formula) || formula.length !== 4) {
+            throw new Error('registerFormula: ожидается массив из 4 функций');
+        }
+        if (!code) code = `FORMULA:${++_formulaCounter}`;
+        const proj = new FormulaProjection(formula, { ...options, code });
+        this._map.set(code, proj);
+        this._formulaRawCache.set(formula, proj);
+        return proj;
+    }
+
+    /** @private */
+    _getOrCreateFormulaRaw(input) {
+        const cached = this._formulaRawCache.get(input);
+        if (cached) return cached;
+
+        let formula, options;
+        if (Array.isArray(input)) {
+            formula = input;
+            options = {};
+        } else if (input && input.formula) {
+            formula = input.formula;
+            options = input;
+        } else {
+            throw new Error('getRaw: неподдерживаемый тип проекции');
+        }
+
+        const code = options.code;
+        if (code && this._map.has(code)) {
+            const existing = this._map.get(code);
+            if (existing instanceof FormulaProjection && existing._formula === formula) {
+                this._formulaRawCache.set(input, existing);
+                return existing;
+            }
+            throw new Error(`CRS ${code} уже зарегистрирован другой проекцией`);
+        }
+
+        const raw = new FormulaProjection(formula, {
+            ...options,
+            code: code ?? `FORMULA:${++_formulaCounter}`,
+        });
+        this._map.set(raw.code, raw);
+        this._formulaRawCache.set(input, raw);
+        if (input !== formula) this._formulaRawCache.set(formula, raw);
+        return raw;
+    }
+
     async ensure(code) {
+        if (Array.isArray(code)) return this._getOrCreateFormulaRaw(code);
+        if (code && typeof code === 'object' && code.formula) return this._getOrCreateFormulaRaw(code);
         if (this._map.has(code)) return this._map.get(code);
         const defs = await this._loadDefs();
         const def = defs[code];
@@ -341,10 +565,8 @@ class ProjectionRegistry {
         return this.register(new Projection(code, def));
     }
 
-    /** @param {Array<string>} codes @returns {Promise<void>} */
     async ensureMany(codes) { for (const c of codes) await this.ensure(c); }
 
-    /** @private @returns {Promise<Object>} */
     _loadDefs() {
         if (!this._defsPromise) {
             this._defsPromise = fetch(new URL('./epsg_defs.json', import.meta.url))
@@ -353,27 +575,51 @@ class ProjectionRegistry {
         return this._defsPromise;
     }
 
-getRaw(codeOrProj) {
-        return typeof codeOrProj === 'string' ? this.get(codeOrProj) : codeOrProj;
+    getRaw(codeOrProj) {
+        if (typeof codeOrProj === 'string') return this.get(codeOrProj);
+        if (Array.isArray(codeOrProj))       return this._getOrCreateFormulaRaw(codeOrProj);
+        if (codeOrProj && codeOrProj.formula) return this._getOrCreateFormulaRaw(codeOrProj);
+        return codeOrProj;
     }
 
-    /** Проекция в нормализованных world-единицах (≈ как Mercator). */
-    getWorld(codeOrProj) {
-        if (typeof codeOrProj !== 'string') return codeOrProj;
-        const hit = _worldCache.get(codeOrProj);
-        if (hit) return hit;
-
-        const raw = this.get(codeOrProj);
+    /** @private обёртка raw → world (та же логика масштабирования, что была). */
+    _wrapWorld(raw) {
         let scale = WORLD_HALF_X / raw.halfExtentX;
         if (!Number.isFinite(scale) || scale <= 0) scale = 1;
-        if (Math.abs(scale - 1) < 1e-9) scale = 1;      // Mercator: без дрейфа
-
-        const wrapped = scale === 1 ? raw : new ScaledProjection(raw, scale);
-        _worldCache.set(codeOrProj, wrapped);
-        return wrapped;
+        if (Math.abs(scale - 1) < 1e-9) scale = 1;
+        return scale === 1 ? raw : new ScaledProjection(raw, scale);
     }
-    
+
+    getWorld(codeOrProj) {
+        // 1) строковый код — прежнее поведение
+        if (typeof codeOrProj === 'string') {
+            const hit = _worldCache.get(codeOrProj);
+            if (hit) return hit;
+            const wrapped = this._wrapWorld(this.get(codeOrProj));
+            _worldCache.set(codeOrProj, wrapped);
+            return wrapped;
+        }
+        // 2) массив/спецификация формулы
+        if (Array.isArray(codeOrProj) ||
+            (codeOrProj && typeof codeOrProj === 'object' && codeOrProj.formula)) {
+            const hit = this._formulaWorldCache.get(codeOrProj);
+            if (hit) return hit;
+            const raw = this._getOrCreateFormulaRaw(codeOrProj);
+            const wrapped = this._wrapWorld(raw);
+            this._formulaWorldCache.set(codeOrProj, wrapped);
+            return wrapped;
+        }
+        // 3) уже готовый инстанс
+        if (codeOrProj && typeof codeOrProj.fromLonLat === 'function') {
+            if (codeOrProj.worldScale !== undefined) return codeOrProj; // уже world
+            const hit = this._worldInstanceCache.get(codeOrProj);
+            if (hit) return hit;
+            const wrapped = this._wrapWorld(codeOrProj);
+            this._worldInstanceCache.set(codeOrProj, wrapped);
+            return wrapped;
+        }
+        return codeOrProj;
+    }
 }
 
-/** Глобальный реестр. @type {ProjectionRegistry} */
 export const Projections = new ProjectionRegistry();

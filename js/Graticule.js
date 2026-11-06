@@ -51,14 +51,8 @@ const SAMPLE_COUNT = 32;
 const MAX_CACHED_LINES = 3000;
 const PRUNE_PADDING_FACTOR = 3;
 const LABEL_MARGIN = 4;
-/**
- * Порог, ниже которого переходим на генерацию «по viewport».
- * Для geographic: step < 1° — уже много линий, весь мир = 360+180=540.
- * Для projected: step < 1% от extent — аналогично.
- */
 const FULL_WORLD_STEP_DEG = 1;
 const FULL_WORLD_STEP_FRAC = 0.01;
-/** Направление текста «внутрь экрана» для каждой стороны. */
 const INWARD_ANCHOR = {
     top: 'bottom',
     bottom: 'top',
@@ -66,7 +60,7 @@ const INWARD_ANCHOR = {
     right: 'left',
 };
 // ─────────────────────────────────────────────────────────────────────
-// LabelSource
+// Внутренние типы
 // ─────────────────────────────────────────────────────────────────────
 class GridLabelSource {
     _graticule;
@@ -133,9 +127,7 @@ export class Graticule {
     _material = null;
     _linesGroup = null;
     _lineInfos = [];
-    /** Форсирует полный rebuild на следующем _postUpdate. */
     _needsRebuild = true;
-    /** Режим генерации: 'full-world' | 'viewport'. */
     _genMode = 'full-world';
     _lastCamMatrix = new Float32Array(16);
     _lastWgMatrix = new Float32Array(16);
@@ -143,7 +135,6 @@ export class Graticule {
     _scratchSx = new Float32Array(SAMPLE_COUNT + 2);
     _scratchSy = new Float32Array(SAMPLE_COUNT + 2);
     _scratchVis = new Uint8Array(SAMPLE_COUNT + 2);
-    /** Локальный временный вектор для проекции в screen-space. */
     _tmpVec = new THREE.Vector3();
     constructor(options = {}) {
         this._crsCode = options.crs ?? 'EPSG:4326';
@@ -293,11 +284,6 @@ export class Graticule {
         return this;
     }
     getLabelStyle() { return { ...this._labelStyle }; }
-    /**
-     * Устанавливает набор сторон экрана, у которых должны появляться
-     * подписи. Меняет состав подписей → форсирует rebuild (сами линии
-     * пересоздаются, но это дёшево: сетка маленькая).
-     */
     setLabelSides(sides) {
         this._labelSides = new Set(sides);
         this._needsRebuild = true;
@@ -369,9 +355,7 @@ export class Graticule {
         this._lastWgMatrix.fill(0);
     }
     _dispose() { this.removeFromMap(); }
-    _applyRenderOrder(_base) {
-        // Сетка всегда поверх — управление через setRenderOrder().
-    }
+    _applyRenderOrder(_base) { }
     getBounds(_crs) { return null; }
     // ─────────────────────────────────────────────────────────────────
     // Per-frame update
@@ -399,7 +383,6 @@ export class Graticule {
             return;
         const step = this._resolveStep(viewport);
         const stepChanged = step !== this._currentStep;
-        // Решаем режим генерации.
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
         const fullWorld = isGeo
@@ -477,12 +460,6 @@ export class Graticule {
             r.set(canvas.width, canvas.height);
         }
     }
-    /**
-     * Всегда возвращает валидный viewport. Если getBounds() не смог
-     * построить bbox (углы ушли в небо / за пределы мира), используем
-     * весь мир. Это критично для Equal Earth / Polynomial, где углы
-     * экрана часто не проецируются.
-     */
     _getViewport() {
         let minLon = -180, maxLon = 180, minLat = -90, maxLat = 90;
         const b = this._map.getBounds();
@@ -540,11 +517,6 @@ export class Graticule {
         this._clearAllLines();
         this._addMissingLines(viewport, step, mode);
     }
-    /**
-     * Добавляет линии для текущего режима.
-     *  - 'full-world': весь мир (для грубой сетки — дёшево и надёжно).
-     *  - 'viewport':   viewport + запас (для мелкой сетки).
-     */
     _addMissingLines(viewport, step, mode) {
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
@@ -568,8 +540,6 @@ export class Graticule {
             const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
             if (!p1 || !p2)
                 return;
-            // Расширяем viewport в 1.5× — чтобы пан не выходил за пределы
-            // сгенерированного региона.
             const cx = (p1[0] + p2[0]) * 0.5;
             const cy = (p1[1] + p2[1]) * 0.5;
             const hx = Math.abs(p2[0] - p1[0]) * 0.75;
@@ -592,16 +562,17 @@ export class Graticule {
             const id = `grid:m:${round6(value)}`;
             if (existing.has(id))
                 continue;
-            const points = isGeo
+            const sampled = isGeo
                 ? this._sampleMeridianGeo(value, N)
                 : this._sampleMeridianProj(value, N);
-            if (points.length < 2)
+            if (sampled.pts.length < 2)
                 continue;
             const text = this._formatLabel(value, false, step, isGeo);
             const info = {
                 stableId: id, kind: 'meridian', value, text,
-                line2: this._buildLine2(points),
-                points3D: points,
+                line2: this._buildLine2(sampled.pts),
+                points3D: sampled.pts,
+                crsSamples: sampled.crs,
                 labels: this._buildLabelAnchors(id, text, value, step, isGeo),
             };
             if (this._linesGroup)
@@ -616,16 +587,17 @@ export class Graticule {
             const id = `grid:p:${round6(value)}`;
             if (existing.has(id))
                 continue;
-            const points = isGeo
+            const sampled = isGeo
                 ? this._sampleParallelGeo(value, N)
                 : this._sampleParallelProj(value, N);
-            if (points.length < 2)
+            if (sampled.pts.length < 2)
                 continue;
             const text = this._formatLabel(value, true, step, isGeo);
             const info = {
                 stableId: id, kind: 'parallel', value, text,
-                line2: this._buildLine2(points),
-                points3D: points,
+                line2: this._buildLine2(sampled.pts),
+                points3D: sampled.pts,
+                crsSamples: sampled.crs,
                 labels: this._buildLabelAnchors(id, text, value, step, isGeo),
             };
             if (this._linesGroup)
@@ -642,14 +614,6 @@ export class Graticule {
             this._pruneFarLines(viewport, mode);
         }
     }
-    /**
-     * Создаёт набор подписей для линии по всем разрешённым сторонам.
-     * Ограничение «меридианы только top/bottom, параллели только left/right»
-     * снято: при повороте bearing линии меняют ориентацию на экране,
-     * и подпись должна появляться на той стороне, которую линия реально
-     * пересекает. Естественные стороны (для «привязки к концам», когда
-     * линия целиком в кадре) определяются уже в `_findEdgeAnchor`.
-     */
     _buildLabelAnchors(lineId, text, value, step, isGeo) {
         const roundness = computeRoundness(value, step, isGeo);
         const result = [];
@@ -671,7 +635,7 @@ export class Graticule {
     }
     _pruneFarLines(viewport, mode) {
         if (mode === 'full-world')
-            return; // нечего прореживать — там ~сотни линий
+            return;
         const crs = this._crsRaw;
         const p1 = crs.fromLonLat([viewport.minLon, viewport.minLat]);
         const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
@@ -702,6 +666,7 @@ export class Graticule {
     _sampleMeridianGeo(lon, N) {
         const map = this._map;
         const pts = [];
+        const crs = [];
         const latMin = -89.99, latMax = 89.99;
         for (let i = 0; i <= N; i++) {
             const lat = latMin + (latMax - latMin) * (i / N);
@@ -709,48 +674,55 @@ export class Graticule {
             if (!world)
                 continue;
             pts.push([world[0], this._altitude, world[1]]);
+            crs.push([lon, lat]);
         }
-        return pts;
+        return { pts, crs };
     }
     _sampleParallelGeo(lat, N) {
         const map = this._map;
         const pts = [];
+        const crs = [];
         for (let i = 0; i <= N; i++) {
             const lon = -180 + 360 * (i / N);
             const world = map.projectSafe([lon, lat], this._crsRaw);
             if (!world)
                 continue;
             pts.push([world[0], this._altitude, world[1]]);
+            crs.push([lon, lat]);
         }
-        return pts;
+        return { pts, crs };
     }
     _sampleMeridianProj(x, N) {
         const map = this._map;
         const crs = this._crsRaw;
         const yMin = -crs.halfExtentY, yMax = crs.halfExtentY;
         const pts = [];
+        const crsArr = [];
         for (let i = 0; i <= N; i++) {
             const y = yMin + (yMax - yMin) * (i / N);
             const world = map.projectSafe([x, y], crs);
             if (!world)
                 continue;
             pts.push([world[0], this._altitude, world[1]]);
+            crsArr.push([x, y]);
         }
-        return pts;
+        return { pts, crs: crsArr };
     }
     _sampleParallelProj(y, N) {
         const map = this._map;
         const crs = this._crsRaw;
         const xMin = -crs.halfExtentX, xMax = crs.halfExtentX;
         const pts = [];
+        const crsArr = [];
         for (let i = 0; i <= N; i++) {
             const x = xMin + (xMax - xMin) * (i / N);
             const world = map.projectSafe([x, y], crs);
             if (!world)
                 continue;
             pts.push([world[0], this._altitude, world[1]]);
+            crsArr.push([x, y]);
         }
-        return pts;
+        return { pts, crs: crsArr };
     }
     // ── Line2 ──
     _buildLine2(points) {
@@ -766,8 +738,6 @@ export class Graticule {
         const line = new Line2(geom, this._material);
         line.computeLineDistances();
         line.renderOrder = this._renderOrder;
-        // Стандартный frustum culling: линии вне экрана не рендерятся,
-        // видимые — рендерятся всегда. Никаких ручных line2.visible.
         line.frustumCulled = true;
         return line;
     }
@@ -782,25 +752,11 @@ export class Graticule {
         catch { }
         info.line2 = null;
     }
-    /**
-     * Ищет точку подписи для конкретной стороны экрана.
-     *   1) Пересечение полилинии с этим краем.
-     *   2) Fallback: линия видна, но не пересекает этот край.
-     *      Для меридианов: самая удалённая от центра линии видимая
-     *      точка в северной (top) или южной (bottom) половине.
-     *      Для параллелей: то же самое, но в западной (left) или
-     *      восточной (right) половине.
-     *      Раньше брался экстремум по оси (top = min Y, left = min X) —
-     *      на выпуклых проекциях (Equal Earth, Polynomial) это bulge
-     *      линии, который на повёрнутой карте проецируется в центр
-     *      экрана, и подпись «уезжает» туда.
-     *   3) Если линия вообще не видна — null.
-     */
+    // ── Подписи ──
     _findEdgeAnchor(side, kind, sx, sy, vis, n, W, H) {
         const M = LABEL_MARGIN;
         const clampX = (x) => Math.max(M, Math.min(W - M, x));
         const clampY = (y) => Math.max(M, Math.min(H - M, y));
-        // 1) Пересечение с краем. (без изменений)
         for (let i = 0; i < n - 1; i++) {
             if (!vis[i] || !vis[i + 1])
                 continue;
@@ -831,7 +787,6 @@ export class Graticule {
                 return { x: side === 'left' ? M : W - M, y: clampY(y) };
             }
         }
-        // 2) Fallback — «самая дальняя от центра видимая точка в своей половине».
         const isNaturalSide = kind === 'meridian'
             ? (side === 'top' || side === 'bottom')
             : (side === 'left' || side === 'right');
@@ -963,6 +918,171 @@ export class Graticule {
         return true;
     }
     // ─────────────────────────────────────────────────────────────────
+    // Публичный API: точки сетки
+    // ─────────────────────────────────────────────────────────────────
+    /**
+     * Возвращает точки пересечений меридианов×параллелей и точки
+     * пересечения линий сетки с рёбрами вьюпорта.
+     *
+     * Для каждой точки:
+     *   - `crs`   — координаты в CRS сетки: [lon, lat] или [x, y];
+     *   - `world` — соответствующие world-координаты (worldGroup-local):
+     *               [x, altitude, z].
+     */
+    getPoints(options = {}) {
+        const includeIntersections = options.includeIntersections ?? true;
+        const includeEdges = options.includeEdges ?? true;
+        const visibleOnly = options.visibleOnly ?? true;
+        const sides = options.sides
+            ?? ['top', 'bottom', 'left', 'right'];
+        const result = [];
+        if (!this._map || !this._lineInfos.length)
+            return result;
+        const map = this._map;
+        const camera = map.camera;
+        const canvas = map.renderer.domElement;
+        const W = canvas.clientWidth;
+        const H = canvas.clientHeight;
+        const wgPos = map.worldGroup.position;
+        const tmp = new THREE.Vector3();
+        const onScreen = (x, y, z) => {
+            tmp.set(x + wgPos.x, y + wgPos.y, z + wgPos.z);
+            tmp.project(camera);
+            if (tmp.z <= -1 || tmp.z >= 1)
+                return false;
+            const px = (tmp.x * 0.5 + 0.5) * W;
+            const py = (-tmp.y * 0.5 + 0.5) * H;
+            return px >= -1 && px <= W + 1 && py >= -1 && py <= H + 1;
+        };
+        // ── 1. Пересечения ──
+        if (includeIntersections) {
+            const meridians = [];
+            const parallels = [];
+            for (const info of this._lineInfos) {
+                (info.kind === 'meridian' ? meridians : parallels).push(info);
+            }
+            for (const m of meridians) {
+                for (const p of parallels) {
+                    const w2 = map.projectSafe([m.value, p.value], this._crsRaw);
+                    if (!w2)
+                        continue;
+                    const world = [w2[0], this._altitude, w2[1]];
+                    if (visibleOnly && !onScreen(world[0], world[1], world[2]))
+                        continue;
+                    result.push({
+                        id: `${m.stableId}×${p.stableId}`,
+                        kind: 'intersection',
+                        crs: [m.value, p.value],
+                        world,
+                        meridianId: m.stableId,
+                        parallelId: p.stableId,
+                    });
+                }
+            }
+        }
+        // ── 2. Точки на краях ──
+        if (includeEdges) {
+            const sx = new Float32Array(SAMPLE_COUNT + 2);
+            const sy = new Float32Array(SAMPLE_COUNT + 2);
+            const vis = new Uint8Array(SAMPLE_COUNT + 2);
+            for (const info of this._lineInfos) {
+                const pts = info.points3D;
+                const crsS = info.crsSamples;
+                if (pts.length < 2 || crsS.length !== pts.length)
+                    continue;
+                const n = pts.length;
+                for (let i = 0; i < n; i++) {
+                    const [px, py, pz] = pts[i];
+                    tmp.set(px + wgPos.x, py + wgPos.y, pz + wgPos.z);
+                    tmp.project(camera);
+                    vis[i] = (tmp.z > -1 && tmp.z < 1) ? 1 : 0;
+                    sx[i] = (tmp.x * 0.5 + 0.5) * W;
+                    sy[i] = (-tmp.y * 0.5 + 0.5) * H;
+                }
+                for (const side of sides) {
+                    const crossings = this._findEdgeCrossings(side, sx, sy, vis, n, W, H);
+                    for (const cr of crossings) {
+                        const iA = cr.segment, iB = iA + 1, t = cr.t;
+                        const pA = pts[iA], pB = pts[iB];
+                        const cA = crsS[iA], cB = crsS[iB];
+                        const world = [
+                            pA[0] + (pB[0] - pA[0]) * t,
+                            pA[1] + (pB[1] - pA[1]) * t,
+                            pA[2] + (pB[2] - pA[2]) * t,
+                        ];
+                        const crs = [
+                            cA[0] + (cB[0] - cA[0]) * t,
+                            cA[1] + (cB[1] - cA[1]) * t,
+                        ];
+                        if (visibleOnly && !onScreen(world[0], world[1], world[2]))
+                            continue;
+                        result.push({
+                            id: `${info.stableId}:${side}:${iA}:${t.toFixed(4)}`,
+                            kind: 'edge',
+                            crs,
+                            world,
+                            edge: side,
+                            lineId: info.stableId,
+                            lineKind: info.kind,
+                        });
+                    }
+                }
+            }
+        }
+        return result;
+    }
+    /**
+     * То же, что getPoints(), но в виде словаря:
+     *   ключ   — "crsX,crsY"
+     *   значение — GraticulePoint.
+     */
+    getPointsMap(options = {}) {
+        const out = new Map();
+        for (const p of this.getPoints(options)) {
+            out.set(`${p.crs[0]},${p.crs[1]}`, p);
+        }
+        return out;
+    }
+    // ── Хелпер: все пересечения с ребром ──
+    _findEdgeCrossings(side, sx, sy, vis, n, W, H) {
+        const out = [];
+        if (side === 'top' || side === 'bottom') {
+            const edgeY = side === 'top' ? 0 : H;
+            for (let i = 0; i < n - 1; i++) {
+                if (!vis[i] || !vis[i + 1])
+                    continue;
+                const y1 = sy[i], y2 = sy[i + 1];
+                const crosses = (y1 >= edgeY && y2 < edgeY)
+                    || (y1 < edgeY && y2 >= edgeY);
+                if (!crosses)
+                    continue;
+                const t = (edgeY - y1) / (y2 - y1);
+                const x = sx[i] + (sx[i + 1] - sx[i]) * t;
+                if (x < 0 || x > W)
+                    continue;
+                out.push({ segment: i, t });
+            }
+        }
+        else {
+            const edgeX = side === 'left' ? 0 : W;
+            for (let i = 0; i < n - 1; i++) {
+                if (!vis[i] || !vis[i + 1])
+                    continue;
+                const x1 = sx[i], x2 = sx[i + 1];
+                const crosses = (x1 >= edgeX && x2 < edgeX)
+                    || (x1 < edgeX && x2 >= edgeX);
+                if (!crosses)
+                    continue;
+                const t = (edgeX - x1) / (x2 - x1);
+                const y = sy[i] + (sy[i + 1] - sy[i]) * t;
+                if (y < 0 || y > H)
+                    continue;
+                out.push({ segment: i, t });
+            }
+        }
+        return out;
+    }
+    // ─────────────────────────────────────────────────────────────────
     // Форматирование
     // ─────────────────────────────────────────────────────────────────
     _formatLabel(value, isLat, step, isGeo) {
@@ -1021,15 +1141,15 @@ function computeRoundness(value, step, isGeo) {
     const absV = Math.abs(value);
     const eps = Math.max(step * 1e-6, 1e-9);
     if (absV < eps)
-        return 1000; // 0°
+        return 1000;
     if (isGeo && absV >= 179.999)
-        return 999; // ±180°
+        return 999;
     if (isGeo) {
         const nice = [90, 60, 45, 30, 20, 15, 10, 5, 2, 1];
         for (let i = 0; i < nice.length; i++) {
             const d = nice[i];
             if (d < step * 0.999)
-                continue; // делитель меньше шага — не наш
+                continue;
             const rem = absV % d;
             if (rem < eps || d - rem < eps) {
                 return 900 - i * 50;
@@ -1037,7 +1157,6 @@ function computeRoundness(value, step, isGeo) {
         }
         return 100;
     }
-    // Linear: кратность «круглым» линейным шагам (10·base, 5·base, 2·base, base).
     const mag = Math.pow(10, Math.floor(Math.log10(Math.max(absV, step))));
     const niceLinear = [mag * 10, mag * 5, mag * 2, mag];
     for (let i = 0; i < niceLinear.length; i++) {

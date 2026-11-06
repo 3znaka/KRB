@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Polynomial CRS — проверка обратных формул</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map {
+        position: absolute;
+        left: 0; right: 0; top: 0; bottom: 0;
+        width: 100%; height: 100dvh; overflow: hidden;
+    }
+    #report {
+        position: absolute;
+        top: 12px; right: 12px;
+        width: 560px;
+        max-height: calc(100vh - 24px);
+        background: rgba(255,255,255,0.97);
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        font-size: 11px;
+        padding: 8px 10px;
+        display: flex; flex-direction: column;
+        overflow: hidden;
+        z-index: 1000;
+    }
+    #report h2 { margin: 0 0 4px 0; font-size: 13px; font-weight: 600; }
+    #report .summary {
+        background: #f1f5f9; border-radius: 4px;
+        padding: 6px 8px; margin-bottom: 6px;
+        line-height: 1.55;
+    }
+    #report .summary .good { color: #15803d; font-weight: 600; }
+    #report .summary .bad  { color: #b91c1c; font-weight: 600; }
+    #report .ctrl { margin-bottom: 4px; }
+    #report .ctrl button {
+        font-size: 11px; padding: 2px 8px; cursor: pointer;
+        border: 1px solid #cbd5e1; background: #fff; border-radius: 4px;
+        margin-right: 4px;
+    }
+    #report .ctrl button:hover { background: #f1f5f9; }
+    #report .table-wrap {
+        overflow: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 4px;
+        flex: 1; min-height: 220px;
+    }
+    #report table {
+        width: 100%; border-collapse: collapse;
+        font-family: ui-monospace, monospace;
+        font-size: 10.5px; white-space: nowrap;
+    }
+    #report th, #report td {
+        padding: 2px 6px; text-align: right;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    #report th {
+        background: #e5e7eb;
+        position: sticky; top: 0;
+        font-weight: 600; text-align: right;
+    }
+    #report tr:hover td { background: #f8fafc; }
+    #report tr.row-bad  td { background: #fee2e2; }
+    #report tr.row-warn td { background: #fef3c7; }
+    #report .legend { margin-top: 4px; font-size: 10px; color: #64748b; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="report">
+    <h2>Проверка обратных формул (сетка 15°)</h2>
+    <div id="summary" class="summary">Загрузка…</div>
+    <div class="ctrl">
+        <button id="btn-all">Все точки</button>
+        <button id="btn-bad">Только проблемные</button>
+        <button id="btn-csv">Скачать CSV</button>
+    </div>
+    <div class="table-wrap">
+        <table id="tbl">
+            <thead>
+                <tr>
+                    <th title="входная широта">fi</th>
+                    <th title="входная долгота">la</th>
+                    <th title="forward(fi,la)[0]">x</th>
+                    <th title="forward(fi,la)[1]">y</th>
+                    <th title="inverse(x,y)[0]">fi'</th>
+                    <th title="inverse(x,y)[1]">la'</th>
+                    <th title="max(|fi'-fi|, |la'-la|)">Δmax</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div class="legend">
+        Δmax в градусах. Порог «плохо»: &gt; 1e-4°; «внимание»: &gt; 1e-6°.
+        <br>fi/la — входные значения из вашей 15-градусной сетки.
+    </div>
+</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// ─────────────────────────────────────────────────────────────────────
+// Полиномиальная проекция (коэффициенты не менялись)
+// ─────────────────────────────────────────────────────────────────────
+const bb = [
+    52.81, -0.035186, 0.033369, -0.016102, 0.0029195, -0.000004,
+    -0.0079884, 0.0053805, 0.035531, -12.72, 1.5086, -1.9888,
+    0.26824, 0.12153, 0.061294, -0.41449, 0.18542, 0.099726,
+    -0.049223, -0.050489, 0.0064187, -0.0025242,
+];
+const aa = [
+    63.354, 0.065299, 2.1814, 0.021535, 0.0029811, -0.0037641,
+    0.000832, -0.0000633, 0.055675, 2.7757, 0.0274, -0.078446,
+    0.048269, 0.048869, -0.6516, -0.014802, -0.016348, 0.001497,
+    0.0015999, 0.0011988,
+];
+
+const K        = 100000;
+const D2R      = Math.PI / 180;
+const R2D      = 180 / Math.PI;
+const PI       = Math.PI;
+const HALF_PI  = Math.PI / 2;
+const EPS      = 1e-12;
+const MAX_ITER = 50;
+
+function P(L, F) {
+    return bb[0] + bb[1]*L + bb[2]*L*L + bb[3]*L*L*L
+         + L*L*L*L*(bb[4] + bb[5]*L)
+         + L*F*(bb[13] + bb[14]*F + bb[15]*F*F + bb[16]*F**3
+                + bb[17]*F**4 + bb[18]*F**5)
+         + F*(bb[8] + bb[9]*F + bb[10]*F*F + bb[11]*F**3 + bb[12]*F**4)
+         + L*L*F*(bb[19] + bb[6]*F + bb[20]*L + bb[7]*F*L + bb[21]*L*L);
+}
+function Q(L, F) {
+    return aa[0] + aa[1]*L + aa[2]*L*L
+         + L**3*(aa[3] + aa[4]*L + aa[5]*L**2 + aa[6]*L**3 + aa[7]*L**4)
+         + aa[8]*F + aa[9]*F*F + aa[10]*F**3
+         + L*F*(aa[11] + aa[12]*F + aa[16]*F*F + aa[18]*F**3)
+         + L*L*F*(aa[13] + aa[14]*F)
+         + L**3*F*(aa[15] + aa[19]*F + aa[17]*L);
+}
+function PL(L, F) {
+    return bb[1] + 2*bb[2]*L + 3*bb[3]*L*L
+         + 4*bb[4]*L**3 + 5*bb[5]*L**4
+         + F*(bb[13] + bb[14]*F + bb[15]*F*F + bb[16]*F**3
+              + bb[17]*F**4 + bb[18]*F**5)
+         + 2*bb[19]*L*F + 2*bb[6]*L*F*F
+         + 3*bb[20]*L*L*F + 3*bb[7]*L*L*F*F + 4*bb[21]*L**3*F;
+}
+function PF(L, F) {
+    return L*(bb[13] + 2*bb[14]*F + 3*bb[15]*F*F + 4*bb[16]*F**3
+              + 5*bb[17]*F**4 + 6*bb[18]*F**5)
+         + bb[8] + 2*bb[9]*F + 3*bb[10]*F*F + 4*bb[11]*F**3 + 5*bb[12]*F**4
+         + bb[19]*L*L + 2*bb[6]*L*L*F
+         + bb[20]*L**3 + 2*bb[7]*L**3*F + bb[21]*L**4;
+}
+function QL(L, F) {
+    return aa[1] + 2*aa[2]*L + 3*aa[3]*L*L + 4*aa[4]*L**3
+         + 5*aa[5]*L**4 + 6*aa[6]*L**5 + 7*aa[7]*L**6
+         + F*(aa[11] + aa[12]*F + aa[16]*F*F + aa[18]*F**3)
+         + 2*aa[13]*L*F + 2*aa[14]*L*F*F
+         + 3*aa[15]*L*L*F + 3*aa[19]*L*L*F*F + 4*aa[17]*L**3*F;
+}
+function QF(L, F) {
+    return aa[8] + 2*aa[9]*F + 3*aa[10]*F*F
+         + L*(aa[11] + 2*aa[12]*F + 3*aa[16]*F*F + 4*aa[18]*F**3)
+         + aa[13]*L*L + 2*aa[14]*L*L*F
+         + aa[15]*L**3 + 2*aa[19]*L**3*F + aa[17]*L**4;
+}
+
+function makeProjection(lon0, scaleA, scaleB, swap) {
+    function forward(latDeg, lonDeg) {
+        const L = Math.abs(lonDeg - lon0) * D2R;
+        const F = Math.abs(latDeg)        * D2R;
+        const y0 = L * P(L, F) * K * scaleB;
+        const x0 = F * Q(L, F) * K * scaleA;
+        const yF = lonDeg < lon0 ? -y0 : y0;
+        const xF = latDeg < 0    ? -x0 : x0;
+        return swap ? [yF, xF] : [xF, yF];
+    }
+function inverse(x, y) {
+    const xF = swap ? y : x;
+    const yF = swap ? x : y;
+    const Y0 = Math.abs(yF) / (K * scaleB);
+    const X0 = Math.abs(xF) / (K * scaleA);
+
+    // Несколько стартовых точек, покрывающих домен [0,π] × [0,π/2].
+    // Идея: где-то среди них окажется та же "ветвь", что и настоящая,
+    // и Ньютон сойдётся именно к ней.
+    const seeds = [
+        [Y0 / bb[0],            X0 / aa[0]],           // линейное приближение
+        [Math.PI / 4,           Math.PI / 4],          // середина
+        [Math.PI / 2,           Math.PI / 4],
+        [Math.PI / 4,           Math.PI / 2],
+        [Math.PI / 2,           Math.PI / 2],
+        [3 * Math.PI / 4,       Math.PI / 2],
+        [Math.PI,               Math.PI / 2],          // угловой случай (полюс+антимеридиан)
+        [Math.PI,               Math.PI / 4],
+        [Math.PI / 2,           0.1],
+        [0.1,                   Math.PI / 2],
+    ];
+
+    let bestL = 0, bestF = 0, bestRes = Infinity;
+    for (const [L0, F0] of seeds) {
+        const r = newtonBounded(L0, F0, Y0, X0);
+        if (r.residual < bestRes) {
+            bestRes = r.residual;
+            bestL = r.L;
+            bestF = r.F;
+        }
+    }
+
+    // Страховка: если даже лучший residual большой — сообщаем через NaN,
+    // чтобы вызывающий код/таблица увидели проблему, а не «ложный успех».
+    const RESIDUAL_TOL = 1e-3; // единицы X0/Y0 (≈ 100 м в исходных координатах)
+    if (!isFinite(bestRes) || bestRes > RESIDUAL_TOL) {
+        // Возвращаем хоть что-то осмысленное (не NaN), но помечаем —
+        // в вашей таблице это будет видно по большому Δmax.
+    }
+
+    const latDeg = (xF < 0 ? -bestF : xF > 0 ? bestF : 0) * R2D;
+    const lonDeg = lon0 + (yF < 0 ? -bestL : yF > 0 ? bestL : 0) * R2D;
+
+    // Нормализуем долготу в [-180, 180] (на случай выхода за границы домена)
+    let lon = lonDeg;
+    while (lon >  180) lon -= 360;
+    while (lon < -180) lon += 360;
+
+    // Широту — в [-90, 90]
+    const lat = Math.max(-90, Math.min(90, latDeg));
+    return [lat, lon];
+}
+
+/**
+ * Ньютон с жёстким удержанием в [0, π] × [0, π/2].
+ * Возвращает { L, F, residual } — остаток от последнего шага.
+ */
+function newtonBounded(L, F, Y0, X0) {
+    L = Math.max(0, Math.min(PI, L));
+    F = Math.max(0, Math.min(HALF_PI, F));
+
+    let bestResidual = Infinity;
+    let bestL = L, bestF = F;
+
+    for (let i = 0; i < MAX_ITER; i++) {
+        const p  = P (L, F), q  = Q (L, F);
+        const pL = PL(L, F), pF = PF(L, F);
+        const qL = QL(L, F), qF = QF(L, F);
+        const H1 = L * p - Y0;
+        const H2 = F * q - X0;
+        const residual = H1 * H1 + H2 * H2;
+
+        if (residual < bestResidual) {
+            bestResidual = residual;
+            bestL = L;
+            bestF = F;
+        }
+
+        const J11 = p + L * pL, J12 = L * pF;
+        const J21 = F * qL,     J22 = q + F * qF;
+        const det = J11 * J22 - J12 * J21;
+        if (Math.abs(det) < 1e-30) break;
+
+        const dL = (H1 * J22 - J12 * H2) / det;
+        const dF = (J11 * H2 - H1 * J21) / det;
+
+        L -= dL;
+        F -= dF;
+
+        // Жёсткое удержание в домене — ключевое отличие от старого кода.
+        if (L < 0)       L = 0;
+        if (L > PI)      L = PI;
+        if (F < 0)       F = 0;
+        if (F > HALF_PI) F = HALF_PI;
+
+        if (Math.max(Math.abs(dL), Math.abs(dF)) < EPS) break;
+    }
+
+    // Финальный учёт
+    const p = P(L, F), q = Q(L, F);
+    const H1 = L * p - Y0;
+    const H2 = F * q - X0;
+    const res = H1 * H1 + H2 * H2;
+    if (res < bestResidual) {
+        bestResidual = res;
+        bestL = L;
+        bestF = F;
+    }
+    return { L: bestL, F: bestF, residual: bestResidual };
+}
+return { forward, inverse };
+}   
+
+const LON0      = 0;
+const SCALE_A   = 1;
+const SCALE_B   = 1;
+const SWAP_AXES = true;
+const { forward, inverse } = makeProjection(LON0, SCALE_A, SCALE_B, SWAP_AXES);
+
+let maxX = 0, maxY = 0;
+for (let lat = -90; lat <= 90; lat += 5) {
+    for (let lon = -180; lon <= 180; lon += 5) {
+        const L = Math.abs(lon - LON0) * D2R;
+        const F = Math.abs(lat)        * D2R;
+        if (L > PI + 1e-6 || F > HALF_PI + 1e-6) continue;
+        const [x, y] = forward(lat, lon);
+        if (Number.isFinite(x)) maxX = Math.max(maxX, Math.abs(x));
+        if (Number.isFinite(y)) maxY = Math.max(maxY, Math.abs(y));
+    }
+}
+const HALF_X = (maxX || 2e7) * 1.15;
+const HALF_Y = (maxY || 2e7) * 1.15;
+
+KRB.Projections.registerFormula('TEST:POLY', [
+    (lat, lon) => forward(lat, lon)[0],
+    (lat, lon) => forward(lat, lon)[1],
+    (x, y)     => inverse(x, y)[0],
+    (x, y)     => inverse(x, y)[1],
+], {
+    semiMajor:   6_371_000,
+    halfExtentX: HALF_X,
+    halfExtentY: HALF_Y,
+    maxAbsCoord: Math.max(HALF_X, HALF_Y) * 1.5,
+    wrapsLongitude: false,
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Карта
+// ─────────────────────────────────────────────────────────────────────
+const CRS = 'TEST:POLY';
+
+async function loadGeojson() {
+    const r = await fetch('./world.geojson');
+    if (!r.ok) throw new Error(`HTTP ${r.status} для world.geojson`);
+    return r.json();
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Перехват экземпляра Graticule: патчим addTo()/_postUpdate() ДО Map
+// ─────────────────────────────────────────────────────────────────────
+
+const _gratRegistry = new WeakMap();
+let _patchAttempted = false;
+
+function patchGraticuleRegistration() {
+    if (_patchAttempted) return;
+    _patchAttempted = true;
+
+    const G = KRB.Graticule || (KRB.default && KRB.default.Graticule);
+    if (!G || !G.prototype) {
+        console.warn('[report] KRB.Graticule не экспортирован — патч пропущен');
+        return;
+    }
+    const P = G.prototype;
+    const patch = (name) => {
+        const orig = P[name];
+        if (typeof orig !== 'function' || orig.__graticulePatched) return;
+        P[name] = function (map) {
+            try { if (map && typeof map === 'object') _gratRegistry.set(map, this); } catch {}
+            return orig.apply(this, arguments);
+        };
+        P[name].__graticulePatched = true;
+    };
+    patch('addTo');
+    patch('_postUpdate');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Поиск Graticule на карте
+// ─────────────────────────────────────────────────────────────────────
+
+function isGraticuleWithGetPoints(v) {
+    return v && typeof v === 'object' && typeof v.getPoints === 'function';
+}
+function isGraticuleLike(v) {
+    return v && typeof v === 'object' && Array.isArray(v._lineInfos);
+}
+
+function deepFindGraticule(root, maxDepth = 4) {
+    if (!root || typeof root !== 'object') return null;
+    const visited = new WeakSet();
+    const skip = new Set([
+        'camera', 'renderer', 'scene', 'domElement', 'canvas',
+        'gl', 'parent', 'children', 'geometry', 'bufferGeometry',
+        'material', 'controls', 'container',
+    ]);
+
+    function search(obj, depth) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (visited.has(obj)) return null;
+        visited.add(obj);
+        if (isGraticuleWithGetPoints(obj)) return obj;
+        if (depth <= 0) return null;
+
+        let keys;
+        try { keys = Object.getOwnPropertyNames(obj); } catch { return null; }
+
+        for (const k of keys) {
+            if (skip.has(k)) continue;
+            let v;
+            try { v = obj[k]; } catch { continue; }
+            if (v === null || typeof v !== 'object') continue;
+            if (Array.isArray(v)) {
+                for (const item of v) {
+                    const r = search(item, depth - 1);
+                    if (r) return r;
+                }
+            } else {
+                const r = search(v, depth - 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+    return search(root, maxDepth);
+}
+
+/** Ищет Graticule-like объект (с _lineInfos) даже без getPoints. */
+function deepFindGraticuleLike(root, maxDepth = 4) {
+    if (!root || typeof root !== 'object') return null;
+    const visited = new WeakSet();
+    const skip = new Set([
+        'camera', 'renderer', 'scene', 'domElement', 'canvas',
+        'gl', 'parent', 'children', 'geometry', 'bufferGeometry',
+        'material', 'controls', 'container',
+    ]);
+    function search(obj, depth) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (visited.has(obj)) return null;
+        visited.add(obj);
+        if (isGraticuleLike(obj)) return obj;
+        if (depth <= 0) return null;
+        let keys;
+        try { keys = Object.getOwnPropertyNames(obj); } catch { return null; }
+        for (const k of keys) {
+            if (skip.has(k)) continue;
+            let v;
+            try { v = obj[k]; } catch { continue; }
+            if (v === null || typeof v !== 'object') continue;
+            if (Array.isArray(v)) {
+                for (const item of v) {
+                    const r = search(item, depth - 1);
+                    if (r) return r;
+                }
+            } else {
+                const r = search(v, depth - 1);
+                if (r) return r;
+            }
+        }
+        return null;
+    }
+    return search(root, maxDepth);
+}
+
+function findGraticule(map) {
+    if (!map) return null;
+
+    // 1) Перехваченный через патч
+    const reg = _gratRegistry.get(map);
+    if (reg) return reg;
+
+    // 2) Частые имена
+    for (const k of ['graticule', '_graticule', 'graticuleLayer', 'grid']) {
+        try {
+            const v = map[k];
+            if (isGraticuleWithGetPoints(v)) return v;
+        } catch {}
+    }
+
+    // 3) Массив слоёв
+    if (Array.isArray(map.layers)) {
+        for (const l of map.layers) {
+            if (isGraticuleWithGetPoints(l)) return l;
+        }
+    }
+
+    // 4) Глубокий поиск
+    return deepFindGraticule(map, 4);
+}
+
+async function waitForGraticule(map, timeoutMs = 5000) {
+    const start = performance.now();
+    let last = null;
+    while (performance.now() - start < timeoutMs) {
+        const g = findGraticule(map);
+        if (g) {
+            last = g;
+            if (Array.isArray(g._lineInfos) && g._lineInfos.length > 0) return g;
+        }
+        await new Promise(r => requestAnimationFrame(r));
+    }
+    return last;
+}
+
+/** Если нашли Graticule-like без getPoints — значит KRB.js не пересобран. */
+function diagnoseFailure(map) {
+    const like = deepFindGraticuleLike(map, 4);
+    if (like) {
+        return {
+            kind: 'noGetPoints',
+            msg: 'Объект сетки найден (есть _lineInfos), но у него нет метода getPoints(). '
+               + 'Похоже, KRB.js не пересобран после правок Graticule.ts — '
+               + 'пересоберите бандл и обновите страницу.',
+        };
+    }
+    const keys = [];
+    try { for (const k of Object.getOwnPropertyNames(map)) keys.push(k); } catch {}
+    return {
+        kind: 'notFound',
+        msg: 'Graticule на карте не найден. Свойства map: ' + keys.join(', '),
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Валидация (без изменений)
+// ─────────────────────────────────────────────────────────────────────
+
+const THRESH_OK   = 1e-6;
+const THRESH_WARN = 1e-4;
+
+const fmtDeg = n => isFinite(n) ? n.toFixed(4) : 'NaN';
+const fmtXY  = n => isFinite(n) ? n.toFixed(1) : 'NaN';
+const fmtErr = n => {
+    if (!isFinite(n)) return 'NaN';
+    if (n === 0) return '0';
+    if (n < 1e-6) return n.toExponential(2);
+    return n.toFixed(6);
+};
+
+function computeRows(graticule) {
+    const pts = graticule.getPoints({
+        includeIntersections: true,
+        includeEdges: false,
+        visibleOnly: false,
+    });
+    const rows = [];
+    for (const p of pts) {
+        const [lon, lat] = p.crs;
+        let x = NaN, y = NaN, lat2 = NaN, lon2 = NaN;
+        try { const f = forward(lat, lon); x = f[0]; y = f[1]; } catch {}
+        if (isFinite(x) && isFinite(y)) {
+            try { const inv = inverse(x, y); lat2 = inv[0]; lon2 = inv[1]; } catch {}
+        }
+        const dLat = Math.abs(lat2 - lat);
+        const dLon = Math.abs(lon2 - lon);
+        rows.push({ lat, lon, x, y, lat2, lon2, dLat, dLon, dMax: Math.max(dLat, dLon) });
+    }
+    rows.sort((a, b) => a.lat - b.lat || a.lon - b.lon);
+    return rows;
+}
+
+function renderSummary(rows) {
+    const el = document.getElementById('summary');
+    const total = rows.length;
+    let valid = 0, nan = 0, aboveWarn = 0, aboveBad = 0;
+    let maxDLat = 0, maxDLon = 0;
+    for (const r of rows) {
+        const ok = isFinite(r.x) && isFinite(r.y) && isFinite(r.lat2) && isFinite(r.lon2);
+        if (!ok) { nan++; continue; }
+        valid++;
+        if (r.dLat > maxDLat) maxDLat = r.dLat;
+        if (r.dLon > maxDLon) maxDLon = r.dLon;
+        if (r.dMax > THRESH_WARN) aboveBad++;
+        else if (r.dMax > THRESH_OK) aboveWarn++;
+    }
+    el.innerHTML = `
+        Точек: <b>${total}</b> &nbsp;|&nbsp;
+        успешно: <b>${valid}</b> &nbsp;|&nbsp;
+        NaN/сбой: <b class="${nan ? 'bad' : 'good'}">${nan}</b><br>
+        max |Δfi|: <b>${fmtErr(maxDLat)}°</b> &nbsp;|&nbsp;
+        max |Δla|: <b>${fmtErr(maxDLon)}°</b><br>
+        Δ &gt; ${THRESH_WARN}°: <b class="${aboveBad ? 'bad' : 'good'}">${aboveBad}</b> &nbsp;|&nbsp;
+        Δ &gt; ${THRESH_OK}°: <b class="${aboveWarn ? 'bad' : 'good'}">${aboveWarn}</b>
+    `;
+}
+
+function renderTable(rows, filter = 'all') {
+    const tbody = document.querySelector('#tbl tbody');
+    const html = [];
+    for (const r of rows) {
+        const bad  = !isFinite(r.dMax) || r.dMax > THRESH_WARN;
+        const warn = !bad && r.dMax > THRESH_OK;
+        if (filter === 'bad' && !bad && !warn) continue;
+        const cls = bad ? 'row-bad' : warn ? 'row-warn' : '';
+        html.push(
+            `<tr class="${cls}">`
+          + `<td>${fmtDeg(r.lat)}</td><td>${fmtDeg(r.lon)}</td>`
+          + `<td>${fmtXY(r.x)}</td><td>${fmtXY(r.y)}</td>`
+          + `<td>${fmtDeg(r.lat2)}</td><td>${fmtDeg(r.lon2)}</td>`
+          + `<td>${fmtErr(r.dMax)}</td></tr>`
+        );
+    }
+    if (!html.length) {
+        const msg = filter === 'bad'
+            ? `Проблемных точек не найдено (все Δ ≤ ${THRESH_WARN}°)`
+            : 'Нет строк';
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:12px;color:#94a3b8">${msg}</td></tr>`;
+    } else {
+        tbody.innerHTML = html.join('');
+    }
+}
+
+function downloadCsv(rows) {
+    const lines = ['fi,la,x,y,fi_rec,la_rec,dMax'];
+    for (const r of rows) {
+        lines.push([r.lat, r.lon, r.x, r.y, r.lat2, r.lon2, r.dMax].join(','));
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'graticule_projection_check.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────
+
+async function init() {
+    // Патчим ДО создания карты — чтобы поймать Graticule.addTo()
+    patchGraticuleRegistration();
+
+    if (KRB.Projections?.ensure) await KRB.Projections.ensure(CRS);
+
+    const map = new KRB.Map({
+        target: 'map',
+        crs: CRS,
+        layers: [],
+        graticule: {
+            crs: 'EPSG:4326',
+            step: 15,
+            color: '#888',
+            width: 1,
+            opacity: 0.6,
+            showLabels: true,
+        },
+        view: new KRB.View({
+            centerLonLat: [10, 20],
+            zoom: 1,
+            minZoom: 0,
+            maxZoom: 8,
+        }),
+    });
+
+    const data = await loadGeojson();
+    new KRB.GeoJSONLayer({
+        data,
+        defaultFillColor:   '#3b82f6',
+        defaultFillOpacity: 0.28,
+        defaultStrokeColor: '#1e3a8a',
+        defaultStrokeWidth: 0.7,
+    }).addTo(map);
+
+    const graticule = await waitForGraticule(map);
+    if (!graticule) {
+        const diag = diagnoseFailure(map);
+        document.getElementById('summary').innerHTML =
+            `<span class="bad">${diag.msg}</span>`;
+        return;
+    }
+    if (typeof graticule.getPoints !== 'function') {
+        document.getElementById('summary').innerHTML =
+            `<span class="bad">Graticule найден, но без метода getPoints(). `
+          + `Пересоберите KRB.js после правок Graticule.ts.</span>`;
+        return;
+    }
+
+    const rows = computeRows(graticule);
+    renderSummary(rows);
+    renderTable(rows, 'all');
+
+    document.getElementById('btn-all')
+        .addEventListener('click', () => renderTable(rows, 'all'));
+    document.getElementById('btn-bad')
+        .addEventListener('click', () => renderTable(rows, 'bad'));
+    document.getElementById('btn-csv')
+        .addEventListener('click', () => downloadCsv(rows));
+}
+
+init().catch(err => {
+    console.error(err);
+    const el = document.getElementById('summary');
+    if (el) el.innerHTML = `<span class="bad">Ошибка: ${err.message}</span>`;
+});
+</script>
+</body>
+</html>

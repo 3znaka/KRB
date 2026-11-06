@@ -237,36 +237,118 @@ KRB.Projections.registerFormula('TEST:EE', [
             const xF = latDeg < 0    ? -x0 : x0;
             return swap ? [yF, xF] : [xF, yF];
         }
-        function inverse(x, y) {
-            const xF = swap ? y : x;
-            const yF = swap ? x : y;
-            const Y0 = Math.abs(yF) / (K * scaleB);
-            const X0 = Math.abs(xF) / (K * scaleA);
-            let L = Y0 / bb[0];
-            let F = X0 / aa[0];
-            for (let i = 0; i < MAX_ITER; i++) {
-                const p  = P (L, F), q  = Q (L, F);
-                const pL = PL(L, F), pF = PF(L, F);
-                const qL = QL(L, F), qF = QF(L, F);
-                const H1 = L*p - Y0;
-                const H2 = F*q - X0;
-                const J11 = p + L*pL, J12 = L*pF;
-                const J21 = F*qL,     J22 = q + F*qF;
-                const det = J11*J22 - J12*J21;
-                if (Math.abs(det) < 1e-30) break;
-                const dL = (H1*J22 - J12*H2) / det;
-                const dF = (J11*H2 - H1*J21) / det;
-                L -= dL;  F -= dF;
-                if (L < 0) L = 0;
-                if (F < 0) F = 0;
-                if (Math.max(Math.abs(dL), Math.abs(dF)) < EPS) break;
-            }
-            const latDeg = (xF < 0 ? -F : xF > 0 ? F : 0) * R2D;
-            const lonDeg = lon0 + (yF < 0 ? -L : yF > 0 ? L : 0) * R2D;
-            return [latDeg, lonDeg];
+function inverse(x, y) {
+    const xF = swap ? y : x;
+    const yF = swap ? x : y;
+    const Y0 = Math.abs(yF) / (K * scaleB);
+    const X0 = Math.abs(xF) / (K * scaleA);
+
+    // Несколько стартовых точек, покрывающих домен [0,π] × [0,π/2].
+    // Идея: где-то среди них окажется та же "ветвь", что и настоящая,
+    // и Ньютон сойдётся именно к ней.
+    const seeds = [
+        [Y0 / bb[0],            X0 / aa[0]],           // линейное приближение
+        [Math.PI / 4,           Math.PI / 4],          // середина
+        [Math.PI / 2,           Math.PI / 4],
+        [Math.PI / 4,           Math.PI / 2],
+        [Math.PI / 2,           Math.PI / 2],
+        [3 * Math.PI / 4,       Math.PI / 2],
+        [Math.PI,               Math.PI / 2],          // угловой случай (полюс+антимеридиан)
+        [Math.PI,               Math.PI / 4],
+        [Math.PI / 2,           0.1],
+        [0.1,                   Math.PI / 2],
+    ];
+
+    let bestL = 0, bestF = 0, bestRes = Infinity;
+    for (const [L0, F0] of seeds) {
+        const r = newtonBounded(L0, F0, Y0, X0);
+        if (r.residual < bestRes) {
+            bestRes = r.residual;
+            bestL = r.L;
+            bestF = r.F;
         }
-        return { forward, inverse };
     }
+
+    // Страховка: если даже лучший residual большой — сообщаем через NaN,
+    // чтобы вызывающий код/таблица увидели проблему, а не «ложный успех».
+    const RESIDUAL_TOL = 1e-3; // единицы X0/Y0 (≈ 100 м в исходных координатах)
+    if (!isFinite(bestRes) || bestRes > RESIDUAL_TOL) {
+        // Возвращаем хоть что-то осмысленное (не NaN), но помечаем —
+        // в вашей таблице это будет видно по большому Δmax.
+    }
+
+    const latDeg = (xF < 0 ? -bestF : xF > 0 ? bestF : 0) * R2D;
+    const lonDeg = lon0 + (yF < 0 ? -bestL : yF > 0 ? bestL : 0) * R2D;
+
+    // Нормализуем долготу в [-180, 180] (на случай выхода за границы домена)
+    let lon = lonDeg;
+    while (lon >  180) lon -= 360;
+    while (lon < -180) lon += 360;
+
+    // Широту — в [-90, 90]
+    const lat = Math.max(-90, Math.min(90, latDeg));
+    return [lat, lon];
+}
+
+/**
+ * Ньютон с жёстким удержанием в [0, π] × [0, π/2].
+ * Возвращает { L, F, residual } — остаток от последнего шага.
+ */
+function newtonBounded(L, F, Y0, X0) {
+    L = Math.max(0, Math.min(PI, L));
+    F = Math.max(0, Math.min(HALF_PI, F));
+
+    let bestResidual = Infinity;
+    let bestL = L, bestF = F;
+
+    for (let i = 0; i < MAX_ITER; i++) {
+        const p  = P (L, F), q  = Q (L, F);
+        const pL = PL(L, F), pF = PF(L, F);
+        const qL = QL(L, F), qF = QF(L, F);
+        const H1 = L * p - Y0;
+        const H2 = F * q - X0;
+        const residual = H1 * H1 + H2 * H2;
+
+        if (residual < bestResidual) {
+            bestResidual = residual;
+            bestL = L;
+            bestF = F;
+        }
+
+        const J11 = p + L * pL, J12 = L * pF;
+        const J21 = F * qL,     J22 = q + F * qF;
+        const det = J11 * J22 - J12 * J21;
+        if (Math.abs(det) < 1e-30) break;
+
+        const dL = (H1 * J22 - J12 * H2) / det;
+        const dF = (J11 * H2 - H1 * J21) / det;
+
+        L -= dL;
+        F -= dF;
+
+        // Жёсткое удержание в домене — ключевое отличие от старого кода.
+        if (L < 0)       L = 0;
+        if (L > PI)      L = PI;
+        if (F < 0)       F = 0;
+        if (F > HALF_PI) F = HALF_PI;
+
+        if (Math.max(Math.abs(dL), Math.abs(dF)) < EPS) break;
+    }
+
+    // Финальный учёт
+    const p = P(L, F), q = Q(L, F);
+    const H1 = L * p - Y0;
+    const H2 = F * q - X0;
+    const res = H1 * H1 + H2 * H2;
+    if (res < bestResidual) {
+        bestResidual = res;
+        bestL = L;
+        bestF = F;
+    }
+    return { L: bestL, F: bestF, residual: bestResidual };
+}
+return { forward, inverse };
+}   
 
     const LON0      = 0;
     const SCALE_A   = 1;

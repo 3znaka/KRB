@@ -6,7 +6,13 @@
     <link href="../KRB.css" rel="stylesheet">
 <style>
     html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
-    #map { position: absolute; inset: 0; background: #dbeafe; }
+       #map { position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100dvh; overflow:hidden;}
     #ui {
         position: absolute; top: 12px; left: 12px; z-index: 10;
         background: rgba(255,255,255,.92); padding: 10px 12px;
@@ -438,6 +444,14 @@ async function show(crs) {
         target: 'map',
         crs,
         layers: [],
+        graticule: {
+        crs: 'EPSG:4326',
+        step: 15,
+        color: '#888',
+        width: 1,
+        opacity: 0.6,
+        showLabels: true,
+    },
         view: new KRB.View({
             centerLonLat: [10, 20],
             zoom: 1,
@@ -495,6 +509,8 @@ show('EPSG:3857').catch(err => {
     console.error(err);
     statusEl.textContent = 'ошибка: ' + err.message;
 });
+
+
 </script>
 </body>
 </html>

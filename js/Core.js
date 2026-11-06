@@ -8,6 +8,7 @@ import { initUI } from './Ui.js';
 import { PopupManager } from './PopupManager.js';
 import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
+import { Graticule } from './Graticule.js';
 // Примеси
 import { CoreElevationMixin } from './CoreElevation.js';
 import { CoreCameraMixin } from './CoreCamera.js';
@@ -353,21 +354,47 @@ export class KrbMap {
                     this._surfaceMaxHeightCache.clear();
             });
         }
+        // ── Инициализация объектных слоёв ──
+        // 1) явные objectLayers[]
+        // 2) graticule из options (instance или config)
+        // 3) предупреждение, если пользователь по ошибке положил объект в layers[]
         for (const layer of this.layers) {
             if (!layer)
                 continue;
             if (layer.texture || layer.elevation)
                 continue;
-            if (typeof layer.addTo !== 'function')
-                continue;
+            if (typeof layer.addTo === 'function') {
+                console.warn('KrbMap: объектный слой найден в `layers[]` — перенесите его ' +
+                    'в `objectLayers[]` (или используйте опцию `graticule`).');
+            }
+        }
+        const initialObjects = [];
+        if (options.objectLayers) {
+            for (const l of options.objectLayers) {
+                if (!l)
+                    continue;
+                if (initialObjects.includes(l))
+                    continue;
+                initialObjects.push(l);
+            }
+        }
+        if (options.graticule !== undefined && options.graticule !== false) {
+            const g = (options.graticule instanceof Graticule)
+                ? options.graticule
+                : new Graticule(options.graticule);
+            if (!initialObjects.includes(g))
+                initialObjects.push(g);
+        }
+        for (const layer of initialObjects) {
             if (layer._map === this)
                 continue;
             try {
                 layer.addTo(this);
-                this._tryApplyLayerBackground(layer); // ← NEW
+                this._tryApplyLayerBackground(layer);
+                this._dynamicLayers.push(layer);
             }
             catch (err) {
-                console.warn('KrbMap: layer.addTo() failed', layer, err);
+                console.warn('KrbMap: object layer addTo() failed', layer, err);
             }
         }
         // ── END NEW ────────────────────────────────────────────────────────
@@ -404,7 +431,7 @@ export class KrbMap {
         requestAnimationFrame(() => {
             if (this._disposed)
                 return;
-            this._uiHandle = initUI(this); // стало
+            this._uiHandle = initUI(this);
         });
     }
     /* ================================================================
@@ -439,6 +466,45 @@ export class KrbMap {
             color = this._defaultBackgroundColor;
         this.scene.background = new THREE.Color(color);
         this._backgroundColor = color;
+    }
+    addObjectLayer(layer) {
+        if (this._disposed)
+            return;
+        if (!layer)
+            return;
+        if (layer._map === this)
+            return;
+        try {
+            layer.addTo(this);
+            this._tryApplyLayerBackground(layer);
+            this._dynamicLayers.push(layer);
+            this._rebuildLayerStack();
+            this.maybeUpdateVisibleTiles(true);
+        }
+        catch (err) {
+            console.warn('KrbMap.addObjectLayer: addTo() failed', layer, err);
+        }
+    }
+    removeObjectLayer(layer) {
+        if (!layer)
+            return;
+        const idx = this._dynamicLayers.indexOf(layer);
+        if (idx < 0)
+            return;
+        try {
+            layer.removeFromMap();
+        }
+        catch (err) {
+            console.warn('KrbMap.removeObjectLayer: removeFromMap() failed', err);
+        }
+        this._dynamicLayers.splice(idx, 1);
+        if (!this._disposed) {
+            this._rebuildLayerStack();
+            this.maybeUpdateVisibleTiles(true);
+        }
+    }
+    getObjectLayers() {
+        return [...this._dynamicLayers];
     }
     _tryApplyLayerBackground(layer) {
         if (this._backgroundExplicit)

@@ -57,21 +57,34 @@ export const CoreLayersMixin: CoreLayersMethods & ThisType<KrbMap> = {
         });
     },
 
-    setLayerOrder(layer, index) {
-        if (this._disposed || !Number.isFinite(index)) return;
-        const stack = this._getLayersInOrder();
-        const currentIndex = stack.indexOf(layer);
-        if (currentIndex < 0) return;
-        const targetIndex = Math.max(0, Math.min(Math.trunc(index), stack.length - 1));
-        if (currentIndex === targetIndex) { this._rebuildLayerStack(); return; }
-        const primaryCount = new Set(this.layers.filter(Boolean)).size;
-        stack.splice(currentIndex, 1);
-        stack.splice(targetIndex, 0, layer);
-        this.layers.splice(0, this.layers.length, ...stack.slice(0, primaryCount));
-        this._dynamicLayers.splice(0, this._dynamicLayers.length, ...stack.slice(primaryCount));
-        this._rebuildLayerStack();
-        this.maybeUpdateVisibleTiles(true);
-    },
+setLayerOrder(layer, index) {
+    if (this._disposed || !Number.isFinite(index)) return;
+    const stack = this._getLayersInOrder();
+    const currentIndex = stack.indexOf(layer);
+    if (currentIndex < 0) return;
+
+    const primaryCount = this.layers.filter(Boolean).length;
+
+    // Тайловые слои упорядочены по массиву `layers[]` — их не двигаем.
+    if (currentIndex < primaryCount) {
+        console.warn('setLayerOrder: порядок тайловых слоёв задаётся массивом layers[]');
+        return;
+    }
+
+    const minIdx = primaryCount;
+    const targetIndex = Math.max(minIdx, Math.min(Math.trunc(index), stack.length - 1));
+    if (currentIndex === targetIndex) { this._rebuildLayerStack(); return; }
+
+    const dynIdx = this._dynamicLayers.indexOf(layer);
+    if (dynIdx < 0) return;
+    const targetDynIdx = targetIndex - primaryCount;
+
+    this._dynamicLayers.splice(dynIdx, 1);
+    this._dynamicLayers.splice(targetDynIdx, 0, layer);
+
+    this._rebuildLayerStack();
+    this.maybeUpdateVisibleTiles(true);
+},
 
     bringToFront(layer) { this.setLayerOrder(layer, this._getLayersInOrder().length - 1); },
     sendToBack(layer) { this.setLayerOrder(layer, 0); },

@@ -458,6 +458,8 @@ class ProjectionRegistry {
     constructor() {
         this._map = new Map();
         this._defsPromise = null;
+        this._customLoading = new Map(); // code → Promise (дедуп параллельных вызовов)
+        this._customMisses = new Set(); // code → 404 (чтобы не дёргать повторно)
         // кэши формул — по идентичности массива/объекта спецификации
         this._formulaRawCache = new WeakMap(); // input → FormulaProjection
         this._formulaWorldCache = new WeakMap(); // input → (FormulaProjection|ScaledProjection)
@@ -473,7 +475,8 @@ class ProjectionRegistry {
     get(code) {
         const p = this._map.get(code);
         if (!p)
-            throw new Error(`CRS ${code} не загружен. Сначала вызовите await Projections.ensure('${code}')`);
+            throw new Error(`CRS ${code} не загружен. Вызовите \`await Projections.addCrs('${code}')\` ` +
+                `до создания карты.`);
         return p;
     }
     // ── NEW: регистрация формулы под явным кодом ──
@@ -535,25 +538,94 @@ class ProjectionRegistry {
             this._formulaRawCache.set(formula, raw);
         return raw;
     }
-    async ensure(code) {
-        if (Array.isArray(code))
-            return this._getOrCreateFormulaRaw(code);
-        if (code && typeof code === 'object' && code.formula)
-            return this._getOrCreateFormulaRaw(code);
+    async _addOne(code) {
         if (this._map.has(code))
-            return this._map.get(code);
+            return;
+        // 1) customCRS/<code с : → _>.js
+        if (!this._customMisses.has(code)) {
+            const inflight = this._customLoading.get(code);
+            if (inflight) {
+                await inflight;
+                if (this._map.has(code))
+                    return;
+            }
+            else {
+                const p = this._loadCustom(code)
+                    .finally(() => this._customLoading.delete(code));
+                this._customLoading.set(code, p);
+                await p;
+                if (this._map.has(code))
+                    return;
+            }
+        }
+        // 2) epsg_defs.json
         const defs = await this._loadDefs();
-        const def = defs[code];
-        if (!def)
-            throw new Error(`CRS ${code} не найден в epsg_defs.json`);
-        return this.register(new Projection(code, def));
+        const def = defs?.[code];
+        if (def) {
+            this.register(new Projection(code, def));
+            return;
+        }
+        throw new Error(`addCrs(${code}): не найден ни в customCRS/${code.replace(':', '_')}.js, ` +
+            `ни в epsg_defs.json`);
     }
-    async ensureMany(codes) { for (const c of codes)
-        await this.ensure(c); }
+    async _loadCustom(code) {
+        const fileName = code.replace(':', '_') + '.js';
+        let url;
+        try {
+            url = new URL(`./customCRS/${fileName}`, import.meta.url).href;
+        }
+        catch {
+            // невалидный код — файла точно нет
+            this._customMisses.add(code);
+            return;
+        }
+        let mod;
+        try {
+            mod = await import(/* @vite-ignore */ url);
+        }
+        catch (err) {
+            const msg = String(err?.message || err);
+            const isNotFound = /failed to fetch dynamically imported module/i.test(msg) ||
+                /error loading dynamically imported module/i.test(msg) ||
+                /importing a module script failed/i.test(msg) ||
+                err?.name === 'TypeError'; // сетевые ошибки обычно TypeError
+            if (isNotFound) {
+                this._customMisses.add(code);
+                return;
+            }
+            // Файл есть, но упал при исполнении/парсинге — не притворяемся, что его нет
+            throw new Error(`addCrs(${code}): файл customCRS/${fileName} есть, но не загрузился: ${msg}`);
+        }
+        const spec = mod?.default;
+        if (!spec || typeof spec !== 'object') {
+            throw new Error(`addCrs(${code}): ${fileName} не экспортирует default-спек`);
+        }
+        if (spec.formula) {
+            if (!Array.isArray(spec.formula) || spec.formula.length !== 4) {
+                throw new Error(`addCrs(${code}): spec.formula должен быть массивом из 4 функций`);
+            }
+            const proj = new FormulaProjection(spec.formula, { ...(spec.options || {}), code });
+            this._formulaRawCache.set(spec.formula, proj);
+            this._map.set(code, proj);
+            return;
+        }
+        if (spec.def) {
+            this._map.set(code, new Projection(code, spec.def));
+            return;
+        }
+        throw new Error(`addCrs(${code}): спек должен содержать 'formula' или 'def'`);
+    }
+    async addCrs(codeOrCodes) {
+        const list = Array.isArray(codeOrCodes) ? codeOrCodes : [codeOrCodes];
+        await Promise.all(list.map(c => this._addOne(c)));
+    }
+    ensure(code) { return this.addCrs(code); }
+    ensureMany(codes) { return this.addCrs(codes); }
     _loadDefs() {
         if (!this._defsPromise) {
             this._defsPromise = fetch(new URL('./epsg_defs.json', import.meta.url))
-                .then(r => r.json());
+                .then(r => r.ok ? r.json() : {})
+                .catch(() => ({}));
         }
         return this._defsPromise;
     }
@@ -611,3 +683,4 @@ class ProjectionRegistry {
     }
 }
 export const Projections = new ProjectionRegistry();
+export const addCrs = (codeOrCodes) => Projections.addCrs(codeOrCodes);

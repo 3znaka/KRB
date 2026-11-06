@@ -139,6 +139,7 @@ export class Polyline extends SpatialObject {
         this._line.renderOrder = 999;
         map.worldGroup.add(this._line);
         this._registerInteraction(map);
+        this._isVisible = false;
     }
     _teardown() {
         if (this._unregisterInteraction) {
@@ -177,9 +178,6 @@ export class Polyline extends SpatialObject {
     getLabelType() { return 'line'; }
     getTitleVerticalAlign() {
         return this._titleVerticalAlign || 'center';
-    }
-    isVisible() {
-        return this._line?.visible ?? false;
     }
     getScreenPosition() {
         return this.getScreenPositionAt(this._labelT);

@@ -244,11 +244,9 @@ export class Polygon extends SpatialObject {
         this._lastCentroidHeightUpdateTime = 0;
     }
     getLabelType() { return 'polygon'; }
+    // Polygon.ts
     getScreenPosition() {
-        return this._centroidScreenPos;
-    }
-    isVisible() {
-        return this._group?.visible ?? false;
+        return this._isVisible ? this._centroidScreenPos : null;
     }
     /** @internal */
     _getBatchStyleKey() {

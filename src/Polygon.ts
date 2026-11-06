@@ -363,13 +363,10 @@ export class Polygon extends SpatialObject {
 
     getLabelType(): 'polygon' { return 'polygon'; }
 
-    getScreenPosition(): { x: number; y: number } | null {
-        return this._centroidScreenPos;
-    }
-
-    isVisible(): boolean {
-        return this._group?.visible ?? false;
-    }
+// Polygon.ts
+getScreenPosition(): { x: number; y: number } | null {
+    return this._isVisible ? this._centroidScreenPos : null;
+}
 
     /** @internal */
     _getBatchStyleKey(): string | null {

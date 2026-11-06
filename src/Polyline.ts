@@ -218,6 +218,7 @@ this._userData = options.userData ?? {};
         map.worldGroup.add(this._line);
 
         this._registerInteraction(map);
+        this._isVisible = false;
     }
 
     protected _teardown(): void {
@@ -262,9 +263,7 @@ this._userData = options.userData ?? {};
         return this._titleVerticalAlign || 'center';
     }
 
-    override isVisible(): boolean {
-        return this._line?.visible ?? false;
-    }
+
 
     override getScreenPosition(): { x: number; y: number } | null {
         return this.getScreenPositionAt(this._labelT);

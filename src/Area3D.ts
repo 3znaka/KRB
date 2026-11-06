@@ -226,6 +226,7 @@ this._userData = options.userData ?? {};
 
         this._registerInteraction(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
+         this._isVisible = false;
     }
 
     protected _teardown(): void {
@@ -287,9 +288,7 @@ this._userData = options.userData ?? {};
 
     getLabelType(): 'area3d' { return 'area3d'; }
 
-    override isVisible(): boolean {
-        return this._group?.visible ?? false;
-    }
+
 
     override getTitleVerticalAlign(): TitleAlignV {
         switch (this._titlePlacement) {

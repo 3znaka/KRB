@@ -21,6 +21,7 @@ const assets = [
   ['src/sprite',         'js/sprite'],
   ['src/demotiles',      'js/demotiles'],
   ['src/js_TP',          'js/js_TP'],
+  ['src/customCRS',          'js/customCRS'],
   ['src/epsg_defs.json', 'js/epsg_defs.json'],
 ];
 

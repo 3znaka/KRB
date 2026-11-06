@@ -149,6 +149,7 @@ export class Area3D extends SpatialObject {
         }
         this._registerInteraction(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
+        this._isVisible = false;
     }
     _teardown() {
         if (this._unregisterInteraction) {
@@ -206,9 +207,6 @@ export class Area3D extends SpatialObject {
         this._lastHeightUpdateTime = 0;
     }
     getLabelType() { return 'area3d'; }
-    isVisible() {
-        return this._group?.visible ?? false;
-    }
     getTitleVerticalAlign() {
         switch (this._titlePlacement) {
             case 'bottom': return 'top';

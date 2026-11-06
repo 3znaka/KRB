@@ -12,10 +12,40 @@
         background: rgba(255,255,255,.92); padding: 10px 12px;
         border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
         font-size: 13px;
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        max-width: 380px;
     }
     #ui button { margin: 3px 2px; padding: 4px 10px; cursor: pointer; }
     #ui button.active { background: #3b82f6; color: #fff; border-color: #1d4ed8; }
-    #status { margin-top: 6px; color: #475569; font-size: 12px; max-width: 280px; }
+    #status { margin-top: 6px; color: #475569; font-size: 12px; max-width: 340px; }
+
+    .custom-panel {
+        border-top: 1px solid #cbd5e1;
+        margin-top: 8px; padding-top: 8px;
+    }
+    .custom-panel h4 {
+        margin: 0 0 4px 0; font-size: 12px; color: #1e293b;
+    }
+    .custom-panel .hint {
+        font-size: 10px; color: #64748b; margin-bottom: 4px;
+        font-family: ui-monospace, monospace;
+    }
+    .custom-panel label {
+        display: block; font-size: 11px; color: #334155; margin-top: 6px;
+    }
+    .custom-panel textarea {
+        width: 100%; box-sizing: border-box;
+        height: 56px;
+        font-family: ui-monospace, monospace; font-size: 11px;
+        padding: 4px; border: 1px solid #cbd5e1; border-radius: 4px;
+        resize: vertical;
+    }
+    .custom-panel input[type=number] {
+        width: 100px; padding: 2px 4px; font-size: 11px;
+        border: 1px solid #cbd5e1; border-radius: 4px;
+    }
+    .custom-panel .row { display: flex; gap: 8px; }
 </style>
 </head>
 <body>
@@ -26,7 +56,28 @@
     <button data-crs="TEST:EQC">Equirectangular</button>
     <button data-crs="TEST:EE">Equal Earth</button>
     <button data-crs="TEST:POLY">Polynomial</button>
+    <button data-crs="TEST:CUSTOM">Custom</button>
     <div id="status">загрузка…</div>
+
+    <div class="custom-panel">
+        <h4>Пользовательская проекция</h4>
+        <div class="hint">Доступно: lat, lon, x, y, R, D2R, R2D, PI, HALF_PI</div>
+
+        <label>Forward: (lat, lon) → [x, y]</label>
+        <textarea id="fwd-formula">[lon, lat]</textarea>
+
+        <label>Inverse: (x, y) → [lat, lon]</label>
+        <textarea id="inv-formula">[y, x]</textarea>
+
+        <div class="row">
+            <label>halfExtentX
+                <input id="he-x" type="number" step="any" value="180">
+            </label>
+            <label>halfExtentY
+                <input id="he-y" type="number" step="any" value="90">
+            </label>
+        </div>
+    </div>
 </div>
 
 <script type="module">
@@ -104,8 +155,6 @@ KRB.Projections.registerFormula('TEST:EE', [
 // Пользовательская полиномиальная проекция (коэффициенты bb[] и aa[])
 // ─────────────────────────────────────────────────────────────────────
 (function registerCustomPolynomial() {
-
-    // ── коэффициенты (порядок как в оригинале) ──────────────────────
     const bb = [
         52.81, -0.035186, 0.033369, -0.016102, 0.0029195, -0.000004,
         -0.0079884, 0.0053805, 0.035531, -12.72, 1.5086, -1.9888,
@@ -127,7 +176,6 @@ KRB.Projections.registerFormula('TEST:EE', [
     const EPS      = 1e-12;
     const MAX_ITER = 50;
 
-    // ── полиномы и их частные производные ───────────────────────────
     function P(L, F) {
         return bb[0] + bb[1]*L + bb[2]*L*L + bb[3]*L*L*L
              + L*L*L*L*(bb[4] + bb[5]*L)
@@ -173,55 +221,40 @@ KRB.Projections.registerFormula('TEST:EE', [
              + aa[15]*L**3 + 2*aa[19]*L**3*F + aa[17]*L**4;
     }
 
-    // ── замыкание: фиксируем lon0 / scaleA / scaleB / swap ──────────
     function makeProjection(lon0, scaleA, scaleB, swap) {
-        // внутренние: углы в градусах, L/F — в радианах
         function forward(latDeg, lonDeg) {
             const L = Math.abs(lonDeg - lon0) * D2R;
             const F = Math.abs(latDeg)        * D2R;
-            const y0 = L * P(L, F) * K * scaleB;   // восток
-            const x0 = F * Q(L, F) * K * scaleA;   // север
+            const y0 = L * P(L, F) * K * scaleB;
+            const x0 = F * Q(L, F) * K * scaleA;
             const yF = lonDeg < lon0 ? -y0 : y0;
             const xF = latDeg < 0    ? -x0 : x0;
-            // xF — север, yF — восток (как в формуле);
-            // swap=true → возвращаем (восток, север), как принято в proj4
             return swap ? [yF, xF] : [xF, yF];
         }
-        // внутренние: (x, y) → (latDeg, lonDeg)
         function inverse(x, y) {
-            const xF = swap ? y : x;   // север-компонента
-            const yF = swap ? x : y;   // восток-компонента
-
+            const xF = swap ? y : x;
+            const yF = swap ? x : y;
             const Y0 = Math.abs(yF) / (K * scaleB);
             const X0 = Math.abs(xF) / (K * scaleA);
-
-            // начальное приближение
             let L = Y0 / bb[0];
             let F = X0 / aa[0];
-
-            // Ньютон по (L, F)
             for (let i = 0; i < MAX_ITER; i++) {
                 const p  = P (L, F), q  = Q (L, F);
                 const pL = PL(L, F), pF = PF(L, F);
                 const qL = QL(L, F), qF = QF(L, F);
-
-                const H1 = L*p - Y0;     // ∂H1/∂L = p + L*pL;  ∂H1/∂F = L*pF
-                const H2 = F*q - X0;     // ∂H2/∂L = F*qL;      ∂H2/∂F = q + F*qF
-
+                const H1 = L*p - Y0;
+                const H2 = F*q - X0;
                 const J11 = p + L*pL, J12 = L*pF;
                 const J21 = F*qL,     J22 = q + F*qF;
                 const det = J11*J22 - J12*J21;
                 if (Math.abs(det) < 1e-30) break;
-
                 const dL = (H1*J22 - J12*H2) / det;
                 const dF = (J11*H2 - H1*J21) / det;
-
                 L -= dL;  F -= dF;
                 if (L < 0) L = 0;
                 if (F < 0) F = 0;
                 if (Math.max(Math.abs(dL), Math.abs(dF)) < EPS) break;
             }
-
             const latDeg = (xF < 0 ? -F : xF > 0 ? F : 0) * R2D;
             const lonDeg = lon0 + (yF < 0 ? -L : yF > 0 ? L : 0) * R2D;
             return [latDeg, lonDeg];
@@ -229,12 +262,6 @@ KRB.Projections.registerFormula('TEST:EE', [
         return { forward, inverse };
     }
 
-    // ── НАСТРОЙКИ ───────────────────────────────────────────────────
-    //  lon0 — центральный меридиан в ГРАДУСАХ. Для мировой карты — 0.
-    //  scaleA/B — обычно 1; если единицы вывода нужно поджать, меняй.
-    //  swap — x в формуле — «север», y — «восток» (так в оригинале).
-    //         Чтобы карта отрисовалась привычно (север сверху, восток
-    //         справа) в системе proj4-координат, нужен swap=true.
     const LON0      = 0;
     const SCALE_A   = 1;
     const SCALE_B   = 1;
@@ -242,8 +269,6 @@ KRB.Projections.registerFormula('TEST:EE', [
 
     const { forward, inverse } = makeProjection(LON0, SCALE_A, SCALE_B, SWAP_AXES);
 
-    // ── оценка half-extent сэмплированием ───────────────────────────
-    //  полином устойчив при L ∈ [0, π], F ∈ [0, π/2]; шире не пробуем.
     let maxX = 0, maxY = 0;
     for (let lat = -90; lat <= 90; lat += 5) {
         for (let lon = -180; lon <= 180; lon += 5) {
@@ -255,16 +280,14 @@ KRB.Projections.registerFormula('TEST:EE', [
             if (Number.isFinite(y)) maxY = Math.max(maxY, Math.abs(y));
         }
     }
-    // 15% запас: полином гладкий, но на сетке 5° пик можно чуть «промахнуть»
     const HALF_X = (maxX || 2e7) * 1.15;
     const HALF_Y = (maxY || 2e7) * 1.15;
 
-    // ── регистрация ─────────────────────────────────────────────────
     KRB.Projections.registerFormula('TEST:POLY', [
-        (lat, lon) => forward(lat, lon)[0],  // x
-        (lat, lon) => forward(lat, lon)[1],  // y
-        (x, y)     => inverse(x, y)[0],      // lat
-        (x, y)     => inverse(x, y)[1],      // lon
+        (lat, lon) => forward(lat, lon)[0],
+        (lat, lon) => forward(lat, lon)[1],
+        (x, y)     => inverse(x, y)[0],
+        (x, y)     => inverse(x, y)[1],
     ], {
         semiMajor:   6_371_000,
         halfExtentX: HALF_X,
@@ -273,13 +296,113 @@ KRB.Projections.registerFormula('TEST:EE', [
         wrapsLongitude: false,
     });
 
-    // отладочный вывод — пригодится, если что-то «съедет»
     console.log('[TEST:POLY] halfExtent =', HALF_X.toFixed(0), '×', HALF_Y.toFixed(0),
                 '| lon0 =', LON0, '| swap =', SWAP_AXES);
 })();
 
 // ─────────────────────────────────────────────────────────────────────
-// 2. КАРТА И ПЕРЕКЛЮЧЕНИЕ CRS
+// 2. ПОЛЬЗОВАТЕЛЬСКАЯ ПРОЕКЦИЯ (компилятор формул)
+// ─────────────────────────────────────────────────────────────────────
+const CUSTOM_CODE_PREFIX = 'TEST:CUSTOM:';
+let customVersion = 0;
+
+/**
+ * Компилирует строку-формулу в функцию.
+ * Если содержит `return` — трактуется как тело функции,
+ * иначе — как выражение (оборачивается в `return (...)`).
+ *
+ * @param {string} code
+ * @param {string[]} argNames — имена аргументов (lat, lon) / (x, y)
+ * @returns {(...args) => any}
+ */
+function compileFormula(code, argNames) {
+    const trimmed = (code || '').trim();
+    if (!trimmed) throw new Error('пустая формула');
+
+    const scope = {
+        R, D2R, R2D,
+        PI: Math.PI,
+        HALF_PI: Math.PI / 2,
+    };
+    const scopeNames  = Object.keys(scope);
+    const scopeValues = Object.values(scope);
+
+    let raw;
+    try {
+        if (/\breturn\b/.test(trimmed)) {
+            raw = new Function(...scopeNames, ...argNames, trimmed);
+        } else {
+            raw = new Function(...scopeNames, ...argNames, `return (${trimmed});`);
+        }
+    } catch (e) {
+        throw new Error('синтаксическая ошибка: ' + e.message);
+    }
+    return (...args) => raw(...scopeValues, ...args);
+}
+
+/**
+ * Читает поля, компилирует, регистрирует под новым кодом TEST:CUSTOM:N.
+ * Возвращает код зарегистрированной проекции.
+ */
+function buildCustomProjection() {
+    const fwdCode = document.getElementById('fwd-formula').value;
+    const invCode = document.getElementById('inv-formula').value;
+    const heX = parseFloat(document.getElementById('he-x').value);
+    const heY = parseFloat(document.getElementById('he-y').value);
+
+    const fwd = compileFormula(fwdCode, ['lat', 'lon']);
+    const inv = compileFormula(invCode, ['x', 'y']);
+
+    // быстрый smoke-test
+    const t1 = fwd(0, 0);
+    if (!Array.isArray(t1) || t1.length < 2 ||
+        !Number.isFinite(t1[0]) || !Number.isFinite(t1[1])) {
+        throw new Error('forward должна вернуть [x, y] (числа)');
+    }
+    const t2 = inv(0, 0);
+    if (!Array.isArray(t2) || t2.length < 2 ||
+        !Number.isFinite(t2[0]) || !Number.isFinite(t2[1])) {
+        throw new Error('inverse должна вернуть [lat, lon] (числа)');
+    }
+
+    const hx = Number.isFinite(heX) ? heX : 180;
+    const hy = Number.isFinite(heY) ? heY : 90;
+    const code = CUSTOM_CODE_PREFIX + (++customVersion);
+
+    KRB.Projections.registerFormula(code, [
+        (lat, lon) => { const r = fwd(lat, lon); return r[0]; },
+        (lat, lon) => { const r = fwd(lat, lon); return r[1]; },
+        (x, y)     => { const r = inv(x, y);   return r[0]; },
+        (x, y)     => { const r = inv(x, y);   return r[1]; },
+    ], {
+        semiMajor:   R,
+        halfExtentX: hx,
+        halfExtentY: hy,
+        maxAbsCoord: Math.max(Math.abs(hx), Math.abs(hy), 1) * 1.5,
+        wrapsLongitude: false,
+    });
+
+    // сохраняем в localStorage для удобства
+    try {
+        localStorage.setItem('customProj', JSON.stringify({
+            fwd: fwdCode, inv: invCode, heX: hx, heY: hy,
+        }));
+    } catch (_) { /* ignore */ }
+
+    return code;
+}
+
+// восстановление из localStorage
+try {
+    const saved = JSON.parse(localStorage.getItem('customProj') || '{}');
+    if (typeof saved.fwd === 'string') document.getElementById('fwd-formula').value = saved.fwd;
+    if (typeof saved.inv === 'string') document.getElementById('inv-formula').value = saved.inv;
+    if (Number.isFinite(saved.heX))    document.getElementById('he-x').value = saved.heX;
+    if (Number.isFinite(saved.heY))    document.getElementById('he-y').value = saved.heY;
+} catch (_) { /* ignore */ }
+
+// ─────────────────────────────────────────────────────────────────────
+// 3. КАРТА И ПЕРЕКЛЮЧЕНИЕ CRS
 // ─────────────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status');
 let current = null;
@@ -296,12 +419,17 @@ async function loadGeojson() {
 
 async function show(crs) {
     if (current) { current.map.dispose(); current = null; }
-    document.querySelectorAll('#ui button').forEach(b =>
-        b.classList.toggle('active', b.dataset.crs === crs)
-    );
-    statusEl.textContent = `создание карты в ${crs}…`;
 
-    // Ленивая подгрузка проекции из epsg_defs.json, если это код.
+    const isCustom = typeof crs === 'string' && crs.startsWith(CUSTOM_CODE_PREFIX);
+    const label = isCustom ? 'CUSTOM' : crs;
+
+    document.querySelectorAll('#ui button').forEach(b => {
+        const bc = b.dataset.crs;
+        const match = (bc === crs) || (isCustom && bc === 'TEST:CUSTOM');
+        b.classList.toggle('active', match);
+    });
+    statusEl.textContent = `создание карты в ${label}…`;
+
     if (typeof crs === 'string' && KRB.Projections?.ensure) {
         await KRB.Projections.ensure(crs);
     }
@@ -309,7 +437,7 @@ async function show(crs) {
     const map = new KRB.Map({
         target: 'map',
         crs,
-        layers: [],                       // без тайлов — только вектор
+        layers: [],
         view: new KRB.View({
             centerLonLat: [10, 20],
             zoom: 1,
@@ -318,8 +446,8 @@ async function show(crs) {
         }),
     });
 
-    console.log(`[${crs}] projection =`, map.projection);
-    console.log(`[${crs}] halfExtentX =`, map.projection.halfExtentX,
+    console.log(`[${label}] projection =`, map.projection);
+    console.log(`[${label}] halfExtentX =`, map.projection.halfExtentX,
                 `halfExtentY =`, map.projection.halfExtentY);
 
     const data = await loadGeojson();
@@ -334,12 +462,29 @@ async function show(crs) {
     layer.addTo(map);
 
     current = { map, layer };
-    statusEl.textContent = `готово: ${crs}`;
+    statusEl.textContent = `готово: ${label}`;
+}
+
+function applyCustomAndShow() {
+    try {
+        const code = buildCustomProjection();
+        show(code).catch(err => {
+            console.error(err);
+            statusEl.textContent = 'ошибка: ' + err.message;
+        });
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'ошибка формулы: ' + err.message;
+    }
 }
 
 document.getElementById('ui').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-crs]');
     if (!btn) return;
+    if (btn.dataset.crs === 'TEST:CUSTOM') {
+        applyCustomAndShow();
+        return;
+    }
     show(btn.dataset.crs).catch(err => {
         console.error(err);
         statusEl.textContent = 'ошибка: ' + err.message;

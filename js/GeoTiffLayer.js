@@ -1,316 +1,280 @@
 // @ts-nocheck
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { Layer } from './Layers.js';
+import { SpatialObject } from './SpatialObject.js';
 import { fromUrl, fromArrayBuffer, Pool } from './js_TP/geotiff.bundle.js';
 import { resolveColorRamp, sampleColorRamp, parseColorToRGBA } from './ColorRamps.js';
-/** @private */
-const GEOTIFF_RENDER_ORDER = 995;
-/** @private */
-const DEFAULT_WORKER_URL = new URL('./js_TP/geotiff.worker.js', import.meta.url).href;
-/** @private */
-const DEFAULT_HEIGHT_SCALE = 1.0;
-/** @private */
-const DEFAULT_POLYGON_OFFSET = -4;
+/** @private */ const GEOTIFF_RENDER_ORDER = 995;
+/** @private */ const DEFAULT_WORKER_URL = new URL('./js_TP/geotiff.worker.js', import.meta.url).href;
+/** @private */ const DEFAULT_HEIGHT_SCALE = 1.0;
+/** @private */ const DEFAULT_POLYGON_OFFSET = -4;
 /**
- * Слой GeoTIFF-растра.
+ * Слой GeoTIFF-растра. Наследует SpatialObject (zoom bounds, видимость,
+ * tooltip/onClick/onHover, подпись, altitude, zoomInterpolate, properties).
  *
  * @example
- * const tiff = new GeoTiffLayer({
- *     source: 'https://example.com/dem.tif',
- *     colorRamp: 'terrain',
- *     opacity: 0.8,
- *     onLoad: (layer) => map.fitTo(layer)
- * });
- * tiff.addTo(map);
- *
- * @example
- * // Раскрашенный DEM + физический рельеф тайлов одновременно:
- * new GeoTiffLayer({
- *     source: 'https://example.com/dem.tif',
- *     asElevation: true,
- *     colorRamp: 'terrain',
- *     opacity: 0.6,
- *     heightScale: 1.2
- * }).addTo(map);
+ * new GeoTiffLayer({ source: 'dem.tif', colorRamp: 'terrain', opacity: 0.8 }).addTo(map);
  */
-export class GeoTiffLayer extends Layer {
-    /**
-     * @param {Object} options
-     * @param {string|URL|ArrayBuffer|ArrayBufferView|Blob} options.source
-     * @param {string} [options.crs] — принудительный CRS растра.
-     * @param {boolean} [options.useWorker=false]
-     * @param {number} [options.poolSize=2]
-     * @param {string} [options.workerUrl]
-     * @param {Pool} [options.pool]
-     * @param {number} [options.opacity=1]
-     * @param {string|number} [options.blending='normal']
-     * @param {number} [options.minZoom=-Infinity]
-     * @param {number} [options.maxZoom=Infinity]
-     * @param {number} [options.renderOrder=995]
-     * @param {Function} [options.onProgress]
-     * @param {Function} [options.onLoad]
-     * @param {Function} [options.onError]
-     * @param {boolean} [options.alwaysOnTop=false]
-     * @param {number} [options.elevationOffset=0]
-     * @param {number} [options.polygonOffset=-4]
-     * @param {string|Array} [options.colorRamp]
-     * @param {number|null} [options.minValue=null]
-     * @param {number|null} [options.maxValue=null]
-     * @param {number|null} [options.noDataValue=null]
-     * @param {string|null} [options.noDataColor='transparent']
-     * @param {boolean} [options.asElevation=false]
-     * @param {number} [options.heightScale=1.0]
-     * @param {boolean} [options.keepRawData] — сохранять сырые значения пикселей
-     *     для повторной генерации текстуры (`setColorRamp`) и сэмплирования
-     *     высот. Автоматически = `true`, если задан `colorRamp` или
-     *     `asElevation: true`. Явный `false` имеет приоритет над авто-логикой
-     *     (кроме `asElevation`, которому данные нужны всегда).
-     * @param {boolean} [options.drape] — драпировать меш по рельефу.
-     *     По умолчанию = `asElevation`. Требует `_keepRawData` и геопривязки.
-     * @param {number|null} [options.meshSegments] — сегментов сетки драпировки.
-     *     null → авто: max(64, min(256, ceil(max(W,H)/8))).
-     * @param {string} [options.title='']
-     * @param {Object} [options.titleStyle]
-     * @param {number} [options.titleMinZoom=-Infinity]
-     * @param {number} [options.titleMaxZoom=Infinity]
-     * @param {string} [options.titleAlign='center']
-     * @param {Array.<number>} [options.titleOffset=[0,0]]
-     * @param {boolean} [options.titleAllowOverflow=false]
-     * @param {number} [options.titlePriority=0]
-     * @param {string} [options.tooltip='']
-     * @param {Function} [options.onClick]
-     * @param {Function} [options.onHover]
-     */
+export class GeoTiffLayer extends SpatialObject {
     constructor(options = {}) {
         super();
-        if (!options.source) {
+        if (!options.source)
             throw new Error('GeoTiffLayer: options.source is required');
-        }
-        // --- Источник и СК ---
-        /** @private */ this._source = options.source;
-        /** @private @type {string|null} */ this._crsCode = options.crs ?? null;
-        /** @private @type {import('./Projections.js').Projection|null} */ this._crs = null;
-        // --- Внешний вид ---
-        /** @private */ this._opacity = options.opacity ?? 1;
-        /** @private */ this._blending = options.blending || 'normal';
-        /** @private */ this._minZoom = options.minZoom ?? -Infinity;
-        /** @private */ this._maxZoom = options.maxZoom ?? Infinity;
-        /** @private */ this._renderOrder = options.renderOrder ?? GEOTIFF_RENDER_ORDER;
-        // --- Z-fighting ---
-        /** @private @type {boolean} */
+        this._source = options.source;
+        this._crsCode = options.crs ?? null;
+        this._crs = null;
+        this._opacity = options.opacity ?? 1;
+        this._blending = options.blending || 'normal';
+        this._renderOrder = options.renderOrder ?? GEOTIFF_RENDER_ORDER;
         this._alwaysOnTop = options.alwaysOnTop === true;
-        /** @private @type {number} */
-        this._elevationOffset = Number.isFinite(options.elevationOffset)
-            ? options.elevationOffset
-            : 0;
-        /** @private @type {number} */
         this._polygonOffset = Number.isFinite(options.polygonOffset)
-            ? options.polygonOffset
-            : DEFAULT_POLYGON_OFFSET;
-        // --- Пул воркеров ---
-        /** @private */ this._useWorker = options.useWorker === true;
-        /** @private */ this._poolSize = options.poolSize ?? 2;
-        /** @private */ this._workerUrl = options.workerUrl ?? DEFAULT_WORKER_URL;
-        /** @private @type {Pool|null} */ this._pool = options.pool || null;
-        /** @private */ this._ownsPool = false;
-        /** @private @type {string|null} */ this._blobWorkerUrl = null;
-        // --- Колбэки ---
-        /** @private */ this._onProgress = options.onProgress || null;
-        /** @private */ this._onLoad = options.onLoad || null;
-        /** @private */ this._onError = options.onError || null;
-        // --- Подпись ---
-        /** @private */ this._title = options.title || '';
-        /** @private */ this._titleStyle = options.titleStyle || {};
-        /** @private */ this._titleMinZoom = options.titleMinZoom ?? -Infinity;
-        /** @private */ this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
-        /** @private */ this._titleAlign = options.titleAlign || 'center';
-        /** @private */ this._titleOffset = options.titleOffset || [0, 0];
-        /** @private */ this._titleAllowOverflow = options.titleAllowOverflow || false;
-        /** @private */ this._titlePriority = options.titlePriority ?? 0;
-        // --- Интерактивность ---
-        /** @private */ this._tooltipText = options.tooltip || '';
-        /** @private */ this._onClick = options.onClick || null;
-        /** @private */ this._onHover = options.onHover || null;
-        /** @private */ this._isHovered = false;
-        // --- Рамповый режим ---
-        /** @private */ this._colorRampInput = options.colorRamp ?? undefined;
-        /** @private @type {Array<{value:number,r:number,g:number,b:number,a:number}>|null} */
+            ? options.polygonOffset : DEFAULT_POLYGON_OFFSET;
+        this._useWorker = options.useWorker === true;
+        this._poolSize = options.poolSize ?? 2;
+        this._workerUrl = options.workerUrl ?? DEFAULT_WORKER_URL;
+        this._pool = options.pool || null;
+        this._ownsPool = false;
+        this._blobWorkerUrl = null;
+        this._onProgress = options.onProgress || null;
+        this._onLoad = options.onLoad || null;
+        this._onError = options.onError || null;
+        // SpatialObject state
+        this._minZoom = options.minZoom ?? -Infinity;
+        this._maxZoom = options.maxZoom ?? Infinity;
+        this._altitude = Number.isFinite(options.altitude)
+            ? options.altitude
+            : (Number.isFinite(options.elevationOffset) ? options.elevationOffset : 0);
+        this._title = options.title || '';
+        this._titleStyle = options.titleStyle || {};
+        this._titleMinZoom = options.titleMinZoom ?? -Infinity;
+        this._titleMaxZoom = options.titleMaxZoom ?? Infinity;
+        this._titleAlign = options.titleAlign || 'center';
+        this._userTitleOffset = options.titleOffset || null;
+        this._titleAllowOverflow = options.titleAllowOverflow || false;
+        this._titlePriority = options.titlePriority ?? 0;
+        this._tooltipText = options.tooltip || '';
+        this._onClick = options.onClick || null;
+        this._onHover = options.onHover || null;
+        this._resolveTitleOffset();
+        // Ramp
+        this._colorRampInput = options.colorRamp ?? undefined;
         this._colorRampNormalized = null;
-        /** @private */ this._minValue = options.minValue ?? null;
-        /** @private */ this._maxValue = options.maxValue ?? null;
-        /** @private */ this._noDataValue = options.noDataValue ?? null;
-        /** @private */ this._noDataColor = options.noDataColor !== undefined
-            ? options.noDataColor
-            : 'transparent';
-        /** @private @type {number|null} */ this._effectiveMin = null;
-        /** @private @type {number|null} */ this._effectiveMax = null;
-        /** @private @type {number|null} */ this._effectiveNoData = null;
-        // --- Источник высот ---
-        /** @private @type {boolean} */
+        this._minValue = options.minValue ?? null;
+        this._maxValue = options.maxValue ?? null;
+        this._noDataValue = options.noDataValue ?? null;
+        this._noDataColor = options.noDataColor !== undefined ? options.noDataColor : 'transparent';
+        this._effectiveMin = null;
+        this._effectiveMax = null;
+        this._effectiveNoData = null;
+        // Elevation
         this._asElevation = options.asElevation === true;
-        /** @private @type {number} */
         this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
-        // keepRawData включается автоматически, когда он заведомо нужен:
-        //  - asElevation — для сэмплирования высот (всегда);
-        //  - задан colorRamp — чтобы setColorRamp мог менять палитру
-        //    без повторного readRasters() (это и есть причина RangeError
-        //    на сжатых/тайловых GeoTIFF).
-        // Явные true/false имеют приоритет, кроме случая asElevation.
-        if (this._asElevation) {
+        if (this._asElevation)
             this._keepRawData = true;
-        }
-        else if (options.keepRawData === true) {
+        else if (options.keepRawData === true)
             this._keepRawData = true;
-        }
-        else if (options.keepRawData === false) {
+        else if (options.keepRawData === false)
             this._keepRawData = false;
-        }
-        else {
+        else
             this._keepRawData = options.colorRamp !== undefined;
-        }
-        /** @private @type {ArrayLike<number>|null} */ this._rawData = null;
-        /** @private @type {number} */ this._rawWidth = 0;
-        /** @private @type {number} */ this._rawHeight = 0;
-        /** @private @type {[number, number]|null} */ this._geoOrigin = null;
-        /** @private @type {[number, number]|null} */ this._geoResolution = null;
-        /** @private @type {number|null} */ this._geoNoData = null;
-        // --- Драпировка меша по рельефу ---
-        /** @private @type {boolean} */
-        this._drape = options.drape !== undefined
-            ? options.drape === true
-            : this._asElevation;
-        /** @private @type {number|null} */
-        this._meshSegments = (typeof options.meshSegments === 'number'
-            && options.meshSegments > 0)
-            ? Math.floor(options.meshSegments)
-            : null;
-        /** @private @type {number} */ this._imageWidth = 0;
-        /** @private @type {number} */ this._imageHeight = 0;
-        // --- Внутреннее состояние ---
-        /** @private @type {THREE.Group} */ this._group = new THREE.Group();
-        /** @private @type {THREE.Mesh|null} */ this._mesh = null;
-        /** @private @type {THREE.BufferGeometry|null} */ this._geometry = null;
-        /** @private @type {THREE.Material|null} */ this._material = null;
-        /** @private @type {THREE.DataTexture|null} */ this._texture = null;
-        /** @private */ this._textLabel = null;
-        /** @private @type {import('./js_TP/geotiff.bundle.js').GeoTIFFImage|null} */ this._image = null;
-        /** @private */ this._tiff = null;
-        /** @private @type {THREE.Vector3[]} */ this._worldPositions = [];
-        /** @private @type {THREE.Vector3} */ this._centroidWorld = new THREE.Vector3();
-        /** @private @type {number} */ this._boundingSphereRadius = 0;
-        /** @private @type {THREE.Vector3} */ this._tempVec3 = new THREE.Vector3();
-        /** @private */ this._loaded = false;
-        /** @private */ this._loading = false;
-        /** @private @type {Promise<void>|null} */ this._loadPromise = null;
-        /** @private */ this._isVisible = false;
-        /** @private @type {(() => void)|null} */
-        this._unregisterInteraction = null;
-    }
-    /* ================================================================
-       Публичный API
-       ================================================================ */
-    /** @param {import('./Core.js').KrbMap} map @returns {GeoTiffLayer} */
-    addTo(map) {
-        if (this._map === map)
-            return this;
-        super.addTo(map);
-        if (!this._loaded && !this._loading) {
-            this._load();
-        }
-        return this;
-    }
-    removeFromMap() {
-        if (this._unregisterInteraction) {
-            try {
-                this._unregisterInteraction();
-            }
-            catch (e) { /* swallow */ }
-            this._unregisterInteraction = null;
-        }
-        if (this._map?.elevationProvider === this) {
-            this._map.setElevationProvider(null);
-        }
-        if (this._group && this._group.parent) {
-            this._group.parent.remove(this._group);
-        }
-        this._disposeGpu();
-        if (this._textLabel && this._map?.textManager) {
-            this._map.textManager.removeLabel(this._textLabel);
-            this._textLabel = null;
-        }
-        if (this._ownsPool && this._pool) {
-            try {
-                this._pool.destroy();
-            }
-            catch (e) { /* swallow */ }
-            this._pool = null;
-            this._ownsPool = false;
-        }
-        if (this._blobWorkerUrl) {
-            try {
-                URL.revokeObjectURL(this._blobWorkerUrl);
-            }
-            catch (_) { /* swallow */ }
-            this._blobWorkerUrl = null;
-        }
-        this._image = null;
-        this._tiff = null;
-        this._loaded = false;
-        this._isVisible = false;
-        this._worldPositions.length = 0;
         this._rawData = null;
         this._rawWidth = 0;
         this._rawHeight = 0;
         this._geoOrigin = null;
         this._geoResolution = null;
         this._geoNoData = null;
+        // Drape
+        this._drape = options.drape !== undefined ? options.drape === true : this._asElevation;
+        this._meshSegments = (typeof options.meshSegments === 'number' && options.meshSegments > 0)
+            ? Math.floor(options.meshSegments) : null;
         this._imageWidth = 0;
         this._imageHeight = 0;
-        this._colorRampNormalized = null;
-        this._effectiveMin = null;
-        this._effectiveMax = null;
-        this._effectiveNoData = null;
-        super.removeFromMap();
+        // State
+        this._group = new THREE.Group();
+        this._mesh = null;
+        this._geometry = null;
+        this._material = null;
+        this._texture = null;
+        this._textLabel = null;
+        this._image = null;
+        this._tiff = null;
+        this._worldPositions = [];
+        this._centroidWorld = new THREE.Vector3();
+        this._boundingSphereRadius = 0;
+        this._tempVec3 = new THREE.Vector3();
+        this._loaded = false;
+        this._loading = false;
+        this._loadPromise = null;
+        this._isHovered = false;
+        this._unregisterInteraction = null;
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
+        if (options.zoomInterpolate)
+            this.setZoomInterpolations(options.zoomInterpolate);
     }
-    /** @returns {boolean} */
+    /* ==== Public API ==== */
+    addTo(map) {
+        if (this._map === map)
+            return this;
+        super.addTo(map);
+        if (!this._loaded && !this._loading)
+            this._load();
+        return this;
+    }
+    removeFromMap() { this.remove(); }
     isLoaded() { return this._loaded; }
-    /** @returns {boolean} */
     isLoading() { return this._loading; }
-    /** @returns {import('./js_TP/geotiff.bundle.js').GeoTIFFImage|null} */
     getImage() { return this._image; }
-    /** @returns {{min:number, max:number}|null} */
     getDataRange() {
         if (this._effectiveMin === null)
             return null;
         return { min: this._effectiveMin, max: this._effectiveMax };
     }
-    /**
-     * Меняет палитру и перестраивает текстуру на лету (только ramp-режим).
-     *
-     * Если исходные данные были сохранены (`keepRawData: true`, что
-     * автоматически включается при заданном `colorRamp`), повторного
-     * чтения растра не происходит — только пересчёт RGBA-текстуры.
-     * Если же данные не были сохранены, будет предпринята попытка
-     * перечитать их через `image.readRasters()`, что для некоторых
-     * сжатых/тайловых GeoTIFF может привести к `RangeError`.
-     *
-     * @param {string|Array} ramp
-     * @returns {Promise<void>}
-     */
+    /* ==== Style ==== */
+    setOpacity(v) {
+        this._opacity = Math.max(0, Math.min(1, v));
+        if (this._material) {
+            this._material.opacity = this._opacity;
+            this._material.transparent = this._opacity < 1;
+            this._material.needsUpdate = true;
+        }
+        return this;
+    }
+    getOpacity() { return this._opacity; }
+    setBlending(v) {
+        this._blending = v;
+        if (this._material)
+            this._material.blending = this._normalizeBlending(v);
+        return this;
+    }
+    getBlending() { return this._blending; }
+    setRenderOrder(v) {
+        this._renderOrder = v;
+        if (this._mesh)
+            this._mesh.renderOrder = v;
+        return this;
+    }
+    getRenderOrder() { return this._renderOrder; }
+    setAlwaysOnTop(v) {
+        this._alwaysOnTop = !!v;
+        if (this._material) {
+            this._material.depthTest = !this._alwaysOnTop;
+            this._material.polygonOffset = !this._alwaysOnTop;
+            this._material.needsUpdate = true;
+        }
+        return this;
+    }
+    getAlwaysOnTop() { return this._alwaysOnTop; }
+    setPolygonOffset(v) {
+        if (!Number.isFinite(v))
+            return this;
+        this._polygonOffset = v;
+        if (this._material) {
+            this._material.polygonOffsetFactor = v;
+            this._material.polygonOffsetUnits = v;
+        }
+        return this;
+    }
+    getPolygonOffset() { return this._polygonOffset; }
+    setHeightScale(v) {
+        if (!Number.isFinite(v) || this._elevationHeightScale === v)
+            return this;
+        this._elevationHeightScale = v;
+        if (this._loaded && this._mesh)
+            this._buildMesh();
+        return this;
+    }
+    getHeightScale() { return this._elevationHeightScale; }
+    /* ==== Pixel values ==== */
+    /** Значение пикселя по пиксельным координатам. Требует keepRawData: true. */
+    getValueAtPixel(px, py, opts = {}) {
+        if (!this._rawData)
+            return null;
+        if (opts.bilinear) {
+            if (px < 0 || py < 0 || px > this._rawWidth - 1 || py > this._rawHeight - 1)
+                return null;
+            return this._bilinearSample(px, py);
+        }
+        const x = Math.floor(px), y = Math.floor(py);
+        if (x < 0 || y < 0 || x >= this._rawWidth || y >= this._rawHeight)
+            return null;
+        const v = this._rawData[y * this._rawWidth + x];
+        if (this._geoNoData !== null && v === this._geoNoData)
+            return null;
+        return Number.isFinite(v) ? v : null;
+    }
+    /** Значение растра по lon/lat (сырое, без heightScale). */
+    getValueAtLonLat(lon, lat) {
+        if (!this._rawData)
+            return null;
+        const v = this._sampleAtLonLat(lon, lat);
+        if (v === null || !Number.isFinite(v))
+            return null;
+        if (this._geoNoData !== null && v === this._geoNoData)
+            return null;
+        return v;
+    }
+    /** Значение растра по world-координатам карты. */
+    getValueAtWorld(worldX, worldZ, map) {
+        const lonLat = map.unprojectToLonLat(worldX, worldZ);
+        if (!lonLat)
+            return null;
+        return this.getValueAtLonLat(lonLat[0], lonLat[1]);
+    }
+    /** Pick по событию → { value, lonLat, pixel, point } или null. */
+    pick(event) {
+        if (!this._mesh || !this._map)
+            return null;
+        const rect = this._map.renderer.domElement.getBoundingClientRect();
+        const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, this._map.camera);
+        const hits = raycaster.intersectObject(this._mesh, false);
+        if (!hits.length)
+            return null;
+        const point = hits[0].point;
+        const lonLat = this._map.unprojectToLonLat(point.x, point.z);
+        if (!lonLat)
+            return null;
+        const value = this.getValueAtLonLat(lonLat[0], lonLat[1]);
+        if (value === null)
+            return null;
+        let pixel = null;
+        if (this._geoOrigin && this._geoResolution) {
+            const code = this._crs?.code;
+            let xy;
+            if (code === 'EPSG:4326' || code === 'CRS:84')
+                xy = lonLat;
+            else if (typeof this._crs?.fromLonLatSafe === 'function')
+                xy = this._crs.fromLonLatSafe(lonLat);
+            else if (typeof this._crs?.fromLonLat === 'function') {
+                try {
+                    xy = this._crs.fromLonLat(lonLat);
+                }
+                catch {
+                    xy = null;
+                }
+            }
+            if (xy) {
+                pixel = [
+                    (xy[0] - this._geoOrigin[0]) / this._geoResolution[0],
+                    (xy[1] - this._geoOrigin[1]) / this._geoResolution[1],
+                ];
+            }
+        }
+        return { value, lonLat, pixel, point };
+    }
+    /* ==== Color ramp ==== */
     async setColorRamp(ramp) {
         this._colorRampInput = ramp;
         this._colorRampNormalized = null;
-        // Если загрузка ещё идёт — дождёмся её завершения.
         if (this._loadPromise) {
             try {
                 await this._loadPromise;
             }
-            catch (e) { /* ошибка уже обработана в _performLoad */ }
+            catch { /* handled */ }
         }
-        if (!this._image)
-            return;
-        if (!this._isRampImage(this._image))
+        if (!this._image || !this._isRampImage(this._image))
             return;
         try {
             const { texture } = await this._readAsRampTexture(this._image, this._image.getWidth(), this._image.getHeight());
@@ -323,33 +287,18 @@ export class GeoTiffLayer extends Layer {
             }
         }
         catch (err) {
-            console.error('GeoTiffLayer.setColorRamp: не удалось пересобрать текстуру. ' +
-                'Для смены палитры после загрузки передайте keepRawData: true ' +
-                'при создании слоя (или задайте colorRamp — он включает ' +
-                'keepRawData автоматически).', err);
+            console.error('GeoTiffLayer.setColorRamp: rebuild failed. Use keepRawData: true.', err);
             throw err;
         }
     }
-    /* ================================================================
-       Провайдер высот
-       ================================================================ */
-    /** @returns {boolean} */
+    /* ==== Elevation provider ==== */
     isElevationProvider() {
-        // Для сэмплирования нужны не только сами данные, но и геопривязка.
         return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0
             && !!this._geoOrigin && !!this._geoResolution;
     }
-    /**
-     * Возвращает высоты для сетки тайла (segments+1)², row-major от NW к SE,
-     * уже умноженные на `heightScale`. Используется `TileManager`.
-     *
-     * @param {number} z @param {number} virtX @param {number} y @param {number} segments
-     * @returns {Float32Array}
-     */
     getTileHeights(z, virtX, y, segments) {
         const grid = segments + 1;
-        const count = grid * grid;
-        const out = new Float32Array(count);
+        const out = new Float32Array(grid * grid);
         if (!this.isElevationProvider())
             return out;
         const n = 1 << z;
@@ -357,31 +306,17 @@ export class GeoTiffLayer extends Layer {
         const hs = this._elevationHeightScale;
         for (let row = 0; row < grid; row++) {
             const v = row / segments;
-            const tileY = y + v;
-            const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / n))) * 180 / Math.PI;
+            const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + v) / n))) * 180 / Math.PI;
             for (let col = 0; col < grid; col++) {
                 const u = col / segments;
-                const tileX = virtX + u;
-                const lon = tileX / n * 360 - 180;
+                const lon = (virtX + u) / n * 360 - 180;
                 const value = this._sampleAtLonLat(lon, lat);
-                out[row * grid + col] =
-                    (value === null || value === nd || !Number.isFinite(value))
-                        ? 0
-                        : value * hs;
+                out[row * grid + col] = (value === null || value === nd || !Number.isFinite(value))
+                    ? 0 : value * hs;
             }
         }
         return out;
     }
-    /**
-     * Прямое сэмплирование высоты в world-координатах карты, независимо
-     * от того, загружены ли уже тайлы. Возвращает высоту, уже умноженную
-     * на `heightScale`, либо `null`, если точка вне данных / NoData.
-     *
-     * @param {number} worldX
-     * @param {number} worldZ
-     * @param {import('./Core.js').KrbMap} map
-     * @returns {number|null}
-     */
     sampleAtWorld(worldX, worldZ, map) {
         if (!this.isElevationProvider())
             return null;
@@ -395,36 +330,104 @@ export class GeoTiffLayer extends Layer {
             return null;
         return v * this._elevationHeightScale;
     }
-    /**
-     * Максимальная высота в тайле `(z, x, y)`. Возвращает `0`, если данных
-     * нет (тайл целиком в NoData или вне покрытия растра).
-     *
-     * @param {number} z @param {number} x @param {number} y @param {number} segments
-     * @returns {number}
-     */
     getTileMaxHeight(z, x, y, segments) {
         const heights = this.getTileHeights(z, x, y, segments);
         let max = -Infinity;
-        for (let i = 0; i < heights.length; i++) {
+        for (let i = 0; i < heights.length; i++)
             if (heights[i] > max)
                 max = heights[i];
-        }
         return max === -Infinity ? 0 : max;
     }
-    /**
-     * Нижняя/верхняя граница нативных DEM-зумов для TileManager.
-     * Провайдер сэмплирует на любом зуме: выше — overzoom DEM по своей
-     * сетке, ниже — тоже работает (шаг сетки крупнее пикселя).
-     *
-     * Не путать с `options.minZoom`/`options.maxZoom` (видимость слоя).
-     * @type {number}
-     */
     get elevationMinZoom() { return 0; }
     get elevationMaxZoom() { return Infinity; }
-    /* ================================================================
-       Загрузка
-       ================================================================ */
-    /** @private */
+    /* ==== SpatialObject hooks ==== */
+    _onAttached(map) { }
+    _teardown() {
+        if (this._unregisterInteraction) {
+            try {
+                this._unregisterInteraction();
+            }
+            catch { /* swallow */ }
+            this._unregisterInteraction = null;
+        }
+        if (this._map?.elevationProvider === this)
+            this._map.setElevationProvider(null);
+        if (this._group.parent)
+            this._group.parent.remove(this._group);
+        this._disposeGpu();
+        if (this._ownsPool && this._pool) {
+            try {
+                this._pool.destroy();
+            }
+            catch { /* swallow */ }
+            this._pool = null;
+            this._ownsPool = false;
+        }
+        if (this._blobWorkerUrl) {
+            try {
+                URL.revokeObjectURL(this._blobWorkerUrl);
+            }
+            catch { /* swallow */ }
+            this._blobWorkerUrl = null;
+        }
+        this._image = null;
+        this._tiff = null;
+        this._loaded = false;
+        this._loading = false;
+        this._worldPositions.length = 0;
+        this._rawData = null;
+        this._rawWidth = 0;
+        this._rawHeight = 0;
+        this._geoOrigin = null;
+        this._geoResolution = null;
+        this._geoNoData = null;
+        this._imageWidth = 0;
+        this._imageHeight = 0;
+        this._colorRampNormalized = null;
+        this._effectiveMin = null;
+        this._effectiveMax = null;
+        this._effectiveNoData = null;
+        this._isHovered = false;
+        this._isVisible = false;
+    }
+    _applyHidden() {
+        if (this._group)
+            this._group.visible = false;
+    }
+    _onAltitudeChanged() {
+        if (this._group)
+            this._group.position.y = this._altitude;
+        this._centroidWorld.y = this._altitude;
+    }
+    _onTooltipChanged() { this._registerInteraction(); }
+    _update(map) {
+        if (!this._loaded || !this._group)
+            return;
+        this._applyZoomInterpolations(map.continuousZoom);
+        if (!this._isWithinView()) {
+            this._applyHidden();
+            this._isVisible = false;
+            return;
+        }
+        if (this._boundingSphereRadius > 0) {
+            const maxDist = map.maxObjectDistance;
+            if (maxDist !== Infinity) {
+                const worldCenter = this._tempVec3
+                    .copy(this._group.position)
+                    .add(map.worldGroup.position);
+                const dist = map.camera.position.distanceTo(worldCenter);
+                if (dist - this._boundingSphereRadius > maxDist) {
+                    this._applyHidden();
+                    this._isVisible = false;
+                    return;
+                }
+            }
+        }
+        this._group.visible = true;
+        this._isVisible = true;
+    }
+    getLabelType() { return 'geotiff'; }
+    /* ==== Loading ==== */
     async _load() {
         if (this._loadPromise)
             return this._loadPromise;
@@ -439,7 +442,6 @@ export class GeoTiffLayer extends Layer {
             this._loadPromise = null;
         }
     }
-    /** @private */
     async _performLoad() {
         try {
             await this._ensurePool();
@@ -451,6 +453,8 @@ export class GeoTiffLayer extends Layer {
             const { texture } = await this._readAsTexture(image);
             this._texture = texture;
             this._progress(0.9);
+            if (!this._map)
+                return;
             this._computeWorldCorners(image);
             this._buildMesh();
             this._map.worldGroup.add(this._group);
@@ -458,9 +462,8 @@ export class GeoTiffLayer extends Layer {
                 this._textLabel = this._map.textManager.addLabel(this);
             }
             this._registerInteraction();
-            if (this._asElevation) {
+            if (this._asElevation)
                 this._map.setElevationProvider(this);
-            }
             this._loaded = true;
             this._progress(1);
             if (this._onLoad) {
@@ -473,7 +476,7 @@ export class GeoTiffLayer extends Layer {
             }
         }
         catch (err) {
-            console.error('GeoTiffLayer: ошибка загрузки', err);
+            console.error('GeoTiffLayer: load failed', err);
             if (this._onError) {
                 try {
                     this._onError(err);
@@ -484,22 +487,19 @@ export class GeoTiffLayer extends Layer {
             }
         }
     }
-    /** @private */
     async _ensurePool() {
         if (this._pool)
             return;
         if (!this._useWorker)
             return;
         try {
-            const url = this._workerUrl;
-            const resp = await fetch(url, { mode: 'cors' });
-            if (!resp.ok) {
-                throw new Error(`worker fetch failed: ${resp.status} ${resp.statusText}`);
-            }
+            const resp = await fetch(this._workerUrl, { mode: 'cors' });
+            if (!resp.ok)
+                throw new Error(`worker fetch failed: ${resp.status}`);
             const code = await resp.text();
             const trimmed = code.trimStart();
             if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-                throw new Error('worker URL вернул HTML вместо JavaScript');
+                throw new Error('worker URL returned HTML');
             }
             const blob = new Blob([code], { type: 'application/javascript' });
             const blobUrl = URL.createObjectURL(blob);
@@ -508,73 +508,66 @@ export class GeoTiffLayer extends Layer {
             this._blobWorkerUrl = blobUrl;
         }
         catch (e) {
-            console.warn('GeoTiffLayer: не удалось создать Pool, декодирование в основном потоке', e);
+            console.warn('GeoTiffLayer: pool creation failed, decoding in main thread', e);
             if (this._blobWorkerUrl) {
                 try {
                     URL.revokeObjectURL(this._blobWorkerUrl);
                 }
-                catch (_) { /* swallow */ }
+                catch { /* swallow */ }
                 this._blobWorkerUrl = null;
             }
             this._pool = null;
             this._ownsPool = false;
         }
     }
-    /** @private */
     async _openTiff() {
         const src = this._source;
         if (typeof src === 'string' || src instanceof URL) {
             return await fromUrl(src.toString(), { pool: this._pool || undefined });
         }
-        if (src instanceof ArrayBuffer) {
+        if (src instanceof ArrayBuffer)
             return await fromArrayBuffer(src);
-        }
         if (ArrayBuffer.isView(src)) {
-            const view = src;
-            const buf = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+            const buf = src.buffer.slice(src.byteOffset, src.byteOffset + src.byteLength);
             return await fromArrayBuffer(buf);
         }
         if (typeof Blob !== 'undefined' && src instanceof Blob) {
-            const buf = await src.arrayBuffer();
-            return await fromArrayBuffer(buf);
+            return await fromArrayBuffer(await src.arrayBuffer());
         }
-        throw new Error('GeoTiffLayer: неподдерживаемый тип source');
+        throw new Error('GeoTiffLayer: unsupported source type');
     }
-    /** @private */
     _resolveCrs(image) {
-        if (this._crsCode) {
+        if (this._crsCode)
             return Projections.get(this._crsCode);
-        }
         let geoKeys = null;
         try {
             geoKeys = image.getGeoKeys();
         }
-        catch (e) { /* ignore */ }
+        catch { /* ignore */ }
         const tryCode = (code) => {
             try {
                 return Projections.get(code);
             }
-            catch (e) {
-                console.warn(`GeoTiffLayer: проекция ${code} недоступна в Projections, пропускаем`);
+            catch {
+                console.warn(`GeoTiffLayer: projection ${code} unavailable`);
                 return null;
             }
         };
         if (geoKeys) {
             if (geoKeys.ProjectedCSTypeGeoKey) {
-                const proj = tryCode(`EPSG:${geoKeys.ProjectedCSTypeGeoKey}`);
-                if (proj)
-                    return proj;
+                const p = tryCode(`EPSG:${geoKeys.ProjectedCSTypeGeoKey}`);
+                if (p)
+                    return p;
             }
             if (geoKeys.GeographicTypeGeoKey) {
-                const proj = tryCode(`EPSG:${geoKeys.GeographicTypeGeoKey}`);
-                if (proj)
-                    return proj;
+                const p = tryCode(`EPSG:${geoKeys.GeographicTypeGeoKey}`);
+                if (p)
+                    return p;
             }
         }
-        console.warn('GeoTiffLayer: не удалось определить CRS из GeoKeys, используем EPSG:4326');
+        console.warn('GeoTiffLayer: CRS unknown, using EPSG:4326');
         return Projections.get('EPSG:4326');
     }
-    /** @private */
     async _readAsTexture(image) {
         const width = image.getWidth();
         const height = image.getHeight();
@@ -594,17 +587,11 @@ export class GeoTiffLayer extends Layer {
         }
         return { texture: this._makeDataTexture(rgba, width, height), width, height };
     }
-    /** @private */
     _isRampImage(image) {
         const photometric = image.fileDirectory?.PhotometricInterpretation;
         if (photometric === 2 || photometric === 3) {
-            if (this._asElevation) {
-                console.warn('GeoTiffLayer: asElevation проигнорирован — ' +
-                    `изображение цветное/палитровое (PhotometricInterpretation=${photometric})`);
-            }
-            else if (this._colorRampInput !== undefined) {
-                console.warn('GeoTiffLayer: colorRamp проигнорирован — изображение цветное/палитровое ' +
-                    `(PhotometricInterpretation=${photometric})`);
+            if (this._asElevation || this._colorRampInput !== undefined) {
+                console.warn('GeoTiffLayer: color image, ramp/elevation ignored');
             }
             return false;
         }
@@ -612,12 +599,8 @@ export class GeoTiffLayer extends Layer {
             ? image.getSamplesPerPixel()
             : (image.fileDirectory?.SamplesPerPixel ?? 1);
         if (samples !== 1) {
-            if (this._asElevation) {
-                console.warn('GeoTiffLayer: asElevation проигнорирован — ' +
-                    `изображение многоканальное (samplesPerPixel=${samples})`);
-            }
-            else if (this._colorRampInput !== undefined) {
-                console.warn(`GeoTiffLayer: colorRamp проигнорирован — изображение многоканальное (samplesPerPixel=${samples})`);
+            if (this._asElevation || this._colorRampInput !== undefined) {
+                console.warn(`GeoTiffLayer: multi-channel image (spp=${samples}), ramp/elevation ignored`);
             }
             return false;
         }
@@ -639,32 +622,17 @@ export class GeoTiffLayer extends Layer {
             return true;
         return false;
     }
-    /* ================================================================
-       Рамповый режим
-       ================================================================ */
-    /**
-     * Строит RGBA-текстуру по палитре.
-     *
-     * Если сырые данные уже сохранены (`_rawData`) — используются они,
-     * без повторного `image.readRasters()`. Это критично для сжатых и
-     * тайловых GeoTIFF, где повторное чтение может упасть с
-     * `RangeError: Offset is outside the bounds of the DataView`.
-     *
-     * @private
-     */
     async _readAsRampTexture(image, width, height) {
-        // NoData нужен и для кэширования, и для раскраски —
-        // вычисляем заранее, до возможного раннего return.
         let noData = this._noDataValue;
         if (noData === null) {
             try {
                 if (typeof image.getGDALNoData === 'function') {
                     const gdalNd = image.getGDALNoData();
-                    if (gdalNd !== null && gdalNd !== undefined)
+                    if (gdalNd != null)
                         noData = gdalNd;
                 }
             }
-            catch (e) { /* ignore */ }
+            catch { /* ignore */ }
         }
         let data = this._rawData;
         if (!data) {
@@ -674,7 +642,7 @@ export class GeoTiffLayer extends Layer {
             const rasters = await image.readRasters(readOpts);
             data = rasters[0];
             if (!data)
-                throw new Error('GeoTiffLayer: readRasters вернул пустой результат');
+                throw new Error('GeoTiffLayer: readRasters empty');
             if (this._keepRawData) {
                 this._rawData = data;
                 this._rawWidth = width;
@@ -685,11 +653,9 @@ export class GeoTiffLayer extends Layer {
                     this._geoResolution = image.getResolution();
                 }
                 catch (e) {
-                    console.warn('GeoTiffLayer: не удалось прочитать origin/resolution', e);
+                    console.warn('GeoTiffLayer: origin/resolution unavailable', e);
                     this._geoOrigin = null;
                     this._geoResolution = null;
-                    // ВАЖНО: не обнуляем _rawData — он всё ещё нужен
-                    // для последующих вызовов setColorRamp().
                 }
             }
         }
@@ -726,8 +692,7 @@ export class GeoTiffLayer extends Layer {
         const ndColor = this._parseNoDataColor(this._noDataColor);
         const range = maxV - minV;
         const rgba = new Uint8Array(width * height * 4);
-        const n = data.length;
-        for (let i = 0; i < n; i++) {
+        for (let i = 0; i < data.length; i++) {
             const v = data[i];
             const j = i * 4;
             if (!Number.isFinite(v) || (noData !== null && v === noData)) {
@@ -752,7 +717,6 @@ export class GeoTiffLayer extends Layer {
         }
         return { texture: this._makeDataTexture(rgba, width, height), width, height };
     }
-    /** @private */
     _makeDataTexture(rgba, width, height) {
         const texture = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat);
         texture.flipY = true;
@@ -763,14 +727,12 @@ export class GeoTiffLayer extends Layer {
         texture.needsUpdate = true;
         return texture;
     }
-    /** @private */
     _getColorRamp() {
         if (this._colorRampNormalized)
             return this._colorRampNormalized;
         this._colorRampNormalized = resolveColorRamp(this._colorRampInput);
         return this._colorRampNormalized;
     }
-    /** @private */
     _parseNoDataColor(c) {
         if (c === null || c === undefined)
             return null;
@@ -779,32 +741,25 @@ export class GeoTiffLayer extends Layer {
         const rgba = parseColorToRGBA(c);
         return [rgba.r, rgba.g, rgba.b, rgba.a];
     }
-    /* ================================================================
-       Сэмплирование сырых DEM-данных
-       ================================================================ */
-    /** @private */
     _sampleAtLonLat(lon, lat) {
         if (!this._rawData || !this._geoOrigin || !this._geoResolution)
             return null;
         let xy;
         const code = this._crs?.code;
-        if (code === 'EPSG:4326' || code === 'CRS:84') {
+        if (code === 'EPSG:4326' || code === 'CRS:84')
             xy = [lon, lat];
-        }
-        else if (typeof this._crs?.fromLonLatSafe === 'function') {
+        else if (typeof this._crs?.fromLonLatSafe === 'function')
             xy = this._crs.fromLonLatSafe([lon, lat]);
-        }
         else if (typeof this._crs?.fromLonLat === 'function') {
             try {
                 xy = this._crs.fromLonLat([lon, lat]);
             }
-            catch (e) {
+            catch {
                 xy = null;
             }
         }
-        else {
+        else
             return null;
-        }
         if (!xy || !Number.isFinite(xy[0]) || !Number.isFinite(xy[1]))
             return null;
         const [ox, oy] = this._geoOrigin;
@@ -813,62 +768,45 @@ export class GeoTiffLayer extends Layer {
             return null;
         const px = (xy[0] - ox) / rx;
         const py = (xy[1] - oy) / ry;
-        if (px < 0 || py < 0 || px > this._rawWidth - 1 || py > this._rawHeight - 1) {
+        if (px < 0 || py < 0 || px > this._rawWidth - 1 || py > this._rawHeight - 1)
             return null;
-        }
         return this._bilinearSample(px, py);
     }
-    /** @private */
     _bilinearSample(px, py) {
-        const w = this._rawWidth;
-        const h = this._rawHeight;
-        const d = this._rawData;
-        const nd = this._geoNoData;
-        const x0 = Math.floor(px);
-        const y0 = Math.floor(py);
-        const x1 = Math.min(x0 + 1, w - 1);
-        const y1 = Math.min(y0 + 1, h - 1);
-        const fx = px - x0;
-        const fy = py - y0;
-        const v00 = d[y0 * w + x0];
-        const v10 = d[y0 * w + x1];
-        const v01 = d[y1 * w + x0];
-        const v11 = d[y1 * w + x1];
-        const isValid = (v) => Number.isFinite(v) && (nd === null || v !== nd);
-        if (isValid(v00) && isValid(v10) && isValid(v01) && isValid(v11)) {
+        const w = this._rawWidth, h = this._rawHeight, d = this._rawData, nd = this._geoNoData;
+        const x0 = Math.floor(px), y0 = Math.floor(py);
+        const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+        const fx = px - x0, fy = py - y0;
+        const v00 = d[y0 * w + x0], v10 = d[y0 * w + x1];
+        const v01 = d[y1 * w + x0], v11 = d[y1 * w + x1];
+        const valid = (v) => Number.isFinite(v) && (nd === null || v !== nd);
+        if (valid(v00) && valid(v10) && valid(v01) && valid(v11)) {
             const a = v00 * (1 - fx) + v10 * fx;
             const b = v01 * (1 - fx) + v11 * fx;
             return a * (1 - fy) + b * fy;
         }
-        let sum = 0;
-        let cnt = 0;
-        if (isValid(v00)) {
+        let sum = 0, cnt = 0;
+        if (valid(v00)) {
             sum += v00;
             cnt++;
         }
-        if (isValid(v10)) {
+        if (valid(v10)) {
             sum += v10;
             cnt++;
         }
-        if (isValid(v01)) {
+        if (valid(v01)) {
             sum += v01;
             cnt++;
         }
-        if (isValid(v11)) {
+        if (valid(v11)) {
             sum += v11;
             cnt++;
         }
         return cnt > 0 ? sum / cnt : null;
     }
-    /* ================================================================
-       Геопривязка и геометрия
-       ================================================================ */
-    /** @private */
     _computeWorldCorners(image) {
-        const width = image.getWidth();
-        const height = image.getHeight();
-        const origin = image.getOrigin();
-        const resolution = image.getResolution();
+        const width = image.getWidth(), height = image.getHeight();
+        const origin = image.getOrigin(), resolution = image.getResolution();
         this._imageWidth = width;
         this._imageHeight = height;
         const ox = origin[0], oy = origin[1];
@@ -880,42 +818,27 @@ export class GeoTiffLayer extends Layer {
             [ox + width * rx, oy + height * ry]
         ];
         const map = this._map;
-        const y = this._elevationOffset;
-        const positions = [];
-        for (const [x, yCrs] of cornersCrs) {
+        const y = this._altitude;
+        this._worldPositions = cornersCrs.map(([x, yCrs]) => {
             const [wx, wz] = map.project([x, yCrs], this._crs);
-            positions.push(new THREE.Vector3(wx, y, wz));
-        }
-        this._worldPositions = positions;
+            return new THREE.Vector3(wx, y, wz);
+        });
     }
-    /** @private */
     _autoMeshSegments() {
-        const w = this._imageWidth || 512;
-        const h = this._imageHeight || 512;
-        const maxDim = Math.max(w, h);
+        const maxDim = Math.max(this._imageWidth || 512, this._imageHeight || 512);
         return Math.min(256, Math.max(64, Math.ceil(maxDim / 8)));
     }
-    /**
-     * Строит геометрию меша. Если `drape` включён и есть сырые данные,
-     * вершины сетки поднимаются по тем же высотам, что отдаются тайлам.
-     * Иначе — плоский quad, как раньше.
-     *
-     * @private
-     */
     _buildMesh() {
         const positions = this._worldPositions;
         if (positions.length < 4)
             return;
+        this._disposeMesh();
         const centroid = new THREE.Vector3();
         positions.forEach(p => centroid.add(p));
         centroid.divideScalar(positions.length);
         this._centroidWorld.copy(centroid);
-        const canDrape = this._drape
-            && this._rawData
-            && this._geoOrigin
-            && this._geoResolution
-            && this._imageWidth > 0
-            && this._imageHeight > 0;
+        const canDrape = this._drape && this._rawData && this._geoOrigin
+            && this._geoResolution && this._imageWidth > 0 && this._imageHeight > 0;
         const seg = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
         const grid = seg + 1;
         const geometry = new THREE.PlaneGeometry(1, 1, seg, seg);
@@ -928,13 +851,10 @@ export class GeoTiffLayer extends Layer {
         else {
             const [ox, oy] = this._geoOrigin;
             const [rx, ry] = this._geoResolution;
-            const W = this._imageWidth;
-            const H = this._imageHeight;
+            const W = this._imageWidth, H = this._imageHeight;
             const hs = this._elevationHeightScale;
-            const map = this._map;
-            const crs = this._crs;
-            const maxPx = W - 1;
-            const maxPy = H - 1;
+            const map = this._map, crs = this._crs;
+            const maxPx = W - 1, maxPy = H - 1;
             for (let j = 0; j < grid; j++) {
                 const v = j / seg;
                 const srcY = oy + v * H * ry;
@@ -947,21 +867,18 @@ export class GeoTiffLayer extends Layer {
                     if (hgt === null || !Number.isFinite(hgt))
                         hgt = 0;
                     const [wx, wz] = map.project([srcX, srcY], crs);
-                    const idx = j * grid + i;
-                    posAttr.setXYZ(idx, wx - centroid.x, hgt * hs, // локальный Y; offset — в group.position.y
-                    wz - centroid.z);
+                    posAttr.setXYZ(j * grid + i, wx - centroid.x, hgt * hs, wz - centroid.z);
                 }
             }
         }
         posAttr.needsUpdate = true;
         geometry.computeVertexNormals();
         geometry.computeBoundingSphere();
-        const transparent = this._opacity < 1;
         const onTop = this._alwaysOnTop;
         const material = new THREE.MeshBasicMaterial({
             map: this._texture,
             side: THREE.DoubleSide,
-            transparent,
+            transparent: this._opacity < 1,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
             depthTest: !onTop,
@@ -978,26 +895,26 @@ export class GeoTiffLayer extends Layer {
         this._geometry = geometry;
         this._material = material;
         this._mesh = mesh;
-        // Bounding sphere — по фактическим вершинам.
         let maxRadiusSq = 0;
         const cnt = posAttr.count;
         for (let k = 0; k < cnt; k++) {
-            const x = posAttr.getX(k);
-            const y = posAttr.getY(k);
-            const z = posAttr.getZ(k);
+            const x = posAttr.getX(k), y = posAttr.getY(k), z = posAttr.getZ(k);
             const rSq = x * x + y * y + z * z;
             if (rSq > maxRadiusSq)
                 maxRadiusSq = rSq;
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
     }
-    /* ================================================================
-       Интерактивность
-       ================================================================ */
-    /** @private */
     _registerInteraction() {
+        if (this._unregisterInteraction) {
+            try {
+                this._unregisterInteraction();
+            }
+            catch { /* swallow */ }
+            this._unregisterInteraction = null;
+        }
         const hasHandlers = this._onClick || this._onHover || this._tooltipText;
-        if (!hasHandlers || !this._map.interaction || !this._mesh)
+        if (!hasHandlers || !this._map?.interaction || !this._mesh)
             return;
         const layer = this;
         this._unregisterInteraction = this._map.interaction.register(this, {
@@ -1011,67 +928,21 @@ export class GeoTiffLayer extends Layer {
                     .clone();
                 return { center, radius: layer._boundingSphereRadius };
             },
-            onHover: this._onHover
-                ? (isHovered) => layer._onHover(isHovered, layer)
-                : null,
-            onClick: this._onClick
-                ? (event) => layer._onClick(event, layer)
-                : null,
-            getTooltip: this._tooltipText
-                ? () => layer._tooltipText
-                : null,
+            onHover: this._onHover ? (isHovered) => layer._onHover(isHovered, layer) : null,
+            onClick: this._onClick ? (event) => layer._onClick(event, layer) : null,
+            getTooltip: this._tooltipText ? () => layer._tooltipText : null,
             isVisible: () => layer._group.visible
         });
     }
-    /* ================================================================
-       Апдейт / видимость
-       ================================================================ */
-    /** @private */
-    _postUpdate(map) {
-        if (!this._loaded || !this._group)
-            return;
-        const zoom = map.continuousZoom;
-        if (!this.visible) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (zoom < this._minZoom || zoom > this._maxZoom) {
-            this._group.visible = false;
-            this._isVisible = false;
-            return;
-        }
-        if (this._boundingSphereRadius > 0) {
-            const maxDist = map.maxObjectDistance;
-            if (maxDist !== Infinity) {
-                const worldCenter = this._tempVec3
-                    .copy(this._group.position)
-                    .add(map.worldGroup.position);
-                const distToCenter = map.camera.position.distanceTo(worldCenter);
-                if (distToCenter - this._boundingSphereRadius > maxDist) {
-                    this._group.visible = false;
-                    this._isVisible = false;
-                    return;
-                }
-            }
-        }
-        this._group.visible = true;
-        this._isVisible = true;
-    }
-    /* ================================================================
-       Внутренние утилиты
-       ================================================================ */
-    /** @private */
     _progress(value) {
         if (!this._onProgress)
             return;
         try {
             this._onProgress(value);
         }
-        catch (e) { /* swallow */ }
+        catch { /* swallow */ }
     }
-    /** @private */
-    _disposeGpu() {
+    _disposeMesh() {
         if (this._geometry) {
             this._geometry.dispose();
             this._geometry = null;
@@ -1080,13 +951,15 @@ export class GeoTiffLayer extends Layer {
             this._material.dispose();
             this._material = null;
         }
+        this._mesh = null;
+    }
+    _disposeGpu() {
+        this._disposeMesh();
         if (this._texture) {
             this._texture.dispose();
             this._texture = null;
         }
-        this._mesh = null;
     }
-    /** @private */
     _normalizeBlending(blending) {
         if (typeof blending === 'number')
             return blending;
@@ -1094,78 +967,44 @@ export class GeoTiffLayer extends Layer {
             case 'additive': return THREE.AdditiveBlending;
             case 'multiply': return THREE.MultiplyBlending;
             case 'subtract': return THREE.SubtractiveBlending;
-            case 'normal':
             default: return THREE.NormalBlending;
         }
     }
-    /* ================================================================
-       Интерфейс для TextManager
-       ================================================================ */
-    /** @returns {string} */ getText() { return this._title; }
-    /** @returns {Object} */
-    getTextStyle() {
-        return Object.assign({
-            fontFamily: 'sans-serif',
-            color: '#333',
-            fontSize: '12px',
-            textAlign: this._titleAlign
-        }, this._titleStyle);
-    }
-    /** @returns {{min:number, max:number}} */
-    getTextZoomBounds() {
-        return { min: this._titleMinZoom, max: this._titleMaxZoom };
-    }
-    /** @returns {string} */ getLabelType() { return 'geotiff'; }
-    /** @returns {boolean} */ isVisible() { return this._isVisible; }
-    /** @returns {{x:number, y:number}|null} */
+    /* ==== TextManager override ==== */
     getScreenPosition() {
-        if (!this._isVisible || !this._group)
+        if (!this._isVisible || !this._group || !this._map)
             return null;
         const worldPos = this._tempVec3
             .copy(this._group.position)
             .add(this._map.worldGroup.position);
         const screenPos = worldPos.clone().project(this._map.camera);
-        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
+        if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)
             return null;
-        }
         const canvas = this._map.renderer.domElement;
         return {
             x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
             y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight
         };
     }
-    /** @returns {string} */ getTitleAlign() { return this._titleAlign; }
-    /** @returns {Array.<number>} */ getTitleOffset() { return this._titleOffset; }
-    /** @returns {string} */ getTitleVerticalAlign() { return 'center'; }
-    /** @returns {boolean} */ getAllowOverflow() { return this._titleAllowOverflow; }
-    /** @returns {number} */ getPriority() { return this._titlePriority; }
-    /* ================================================================
-       Интерфейс для KrbMap#fitTo / getBounds
-       ================================================================ */
-    /**
-     * @param {string|import('./Projections.js').Projection} [crs='EPSG:4326']
-     * @returns {Array.<Array.<number>>|null}
-     */
+    /* ==== Bounds ==== */
     getBounds(crs = 'EPSG:4326') {
         if (!this._image || !this._crs)
             return null;
         const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
         if (!dst)
             return null;
-        const width = this._image.getWidth();
-        const height = this._image.getHeight();
-        const origin = this._image.getOrigin();
-        const resolution = this._image.getResolution();
+        const width = this._image.getWidth(), height = this._image.getHeight();
+        const origin = this._image.getOrigin(), resolution = this._image.getResolution();
         const ox = origin[0], oy = origin[1];
         const rx = resolution[0], ry = resolution[1];
-        const cornersCrs = [
+        const corners = [
             [ox, oy],
             [ox + width * rx, oy],
             [ox, oy + height * ry],
             [ox + width * rx, oy + height * ry]
         ];
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const [x, y] of cornersCrs) {
+        for (const [x, y] of corners) {
             let tx, ty;
             if (this._crs === dst) {
                 tx = x;
@@ -1173,9 +1012,9 @@ export class GeoTiffLayer extends Layer {
             }
             else {
                 const lonLat = this._crs.toLonLat([x, y]);
-                const converted = dst.fromLonLat(lonLat);
-                tx = converted[0];
-                ty = converted[1];
+                const conv = dst.fromLonLat(lonLat);
+                tx = conv[0];
+                ty = conv[1];
             }
             if (!isFinite(tx) || !isFinite(ty))
                 continue;

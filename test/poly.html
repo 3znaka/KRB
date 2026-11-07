@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8" />
-<title>GeoJSON declarative style</title>
+<title>Polynomial CRS</title>
 <link href="../KRB.css" rel="stylesheet">
 <style>
     html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
@@ -18,135 +18,41 @@
 
 <script type="module">
 import * as KRB from '../js/KRB.js';
+const { Projections, ELLIPSOIDS } = await import('./../js/Projections.js');
 
-// ─────────────────────────────────────────────────────────────────
-// 1. Инлайновый GeoJSON. `category` — поле для классификации,
-//    `name` — человекочитаемая подпись.
-// ─────────────────────────────────────────────────────────────────
-const data_route = {
-    type: 'FeatureCollection',
-    features: [
-        {
-            type: 'Feature',
-            properties: { name: 'Центр', category: 'residential' },
-            geometry: {
-                type: 'Polygon',
-                coordinates: [[
-                    [37.55, 55.74], [37.62, 55.74],
-                    [37.62, 55.78], [37.55, 55.78], [37.55, 55.74],
-                ]],
-            },
-        },
-        {
-            type: 'Feature',
-            properties: { name: 'Завод', category: 'industrial' },
-            geometry: {
-                type: 'Polygon',
-                coordinates: [[
-                    [37.63, 55.74], [37.70, 55.74],
-                    [37.70, 55.78], [37.63, 55.78], [37.63, 55.74],
-                ]],
-            },
-        },
-        {
-            type: 'Feature',
-            properties: { name: 'Парк', category: 'park' },
-            geometry: {
-                type: 'Polygon',
-                coordinates: [[
-                    [37.55, 55.79], [37.62, 55.79],
-                    [37.62, 55.83], [37.55, 55.83], [37.55, 55.79],
-                ]],
-            },
-        },
-        {
-            type: 'Feature',
-            properties: { name: 'Жилмассив', category: 'residential' },
-            geometry: {
-                type: 'Polygon',
-                coordinates: [[
-                    [37.63, 55.79], [37.70, 55.79],
-                    [37.70, 55.83], [37.63, 55.83], [37.63, 55.79],
-                ]],
-            },
-        },
-        {
-            type: 'Feature',
-            properties: { name: 'Маршрут', category: 'route' },
-            geometry: {
-                type: 'LineString',
-                coordinates: [
-                    [37.555, 55.755],
-                    [37.600, 55.765],
-                    [37.640, 55.760],
-                    [37.675, 55.775],
-                    [37.680, 55.820],
-                ],
-            },
-        },
-        {
-            type: 'Feature',
-            properties: { name: 'Склад', category: 'warehouse' },
-            geometry: { type: 'Point', coordinates: [37.615, 55.762] },
-        },
-    ],
-};
+await KRB.addCrs(['ADPKP:0057', 'EPSG:32637', 'EPSG:32601']);
 
-// Иконка-точка как data-URI — пример самодостаточен, без внешних файлов.
-const POINT_ICON = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">' +
-    '<circle cx="16" cy="16" r="14" fill="#e74c3c" stroke="#fff" stroke-width="3"/>' +
-    '</svg>'
-);
+ const map = new KRB.Map({
+        target: 'map',
 
-// ─────────────────────────────────────────────────────────────────
-// 2. Карта.
-// ─────────────────────────────────────────────────────────────────
-const map = new KRB.Map({
-    target: 'map',
-    crs: 'EPSG:3857',
-    layers: [],
-    view: new KRB.View({
-        centerLonLat: [37.62, 55.785],
-        zoom: 12,
-        minZoom: 0,
-        maxZoom: 18,
-    }),
-});
-
-// ─────────────────────────────────────────────────────────────────
-// 3. Слой — декларативный стиль, ноль коллбэков.
-//
-//    Общие правила (`cases` / `default`) применяются ко ВСЕМ геометриям.
-//    Per-type секции (`line`, `point`, …) мержатся поверх общих —
-//    удобно, когда хочется один цвет по категории для полигонов и
-//    линий, но у линий дополнительно толщина, а у точек — иконка.
-//
-//    Алиасы `fill` / `stroke` / `stroke-width` / `icon` работают
-//    и здесь, и в коллбэках — единый словарь.
-// ─────────────────────────────────────────────────────────────────
-new KRB.GeoJSONLayer({
-    data: data_route,
-    title: 'name',
-
-    style: {
-        cases: {
-            residential: { fill: '#4a90e2', stroke: '#1c5fad' },
-            industrial:  { fill: '#f5a623', stroke: '#a86a10' },
-            park:        { fill: '#7ed321', stroke: '#3d8b00' },
-            route:       { stroke: '#ff6600' },
-            warehouse:   { fill: '#e74c3c', stroke: '#922b21' },
+        crs: 'ADPKP:0057',
+        layers: [],
+        graticule: {
+            crs: 'EPSG:4326',
+            step: 15,
+            color: '#888',
+            width: 1,
+            opacity: 0.6,
+            showLabels: true,
         },
-        default: { fill: '#cccccc', stroke: '#666666' },
+        view: new KRB.View({
+            centerLonLat: [10, 20],
+            zoom: 1,
+            minZoom: 0,
+            maxZoom: 8,
+        }),
+    });
 
-        line: {
-            default: { 'stroke-width': 4 },
-        },
-        point: {
-            default: { icon: POINT_ICON, iconSize: [32, 32], anchor: [0.5, 0.5] },
-        },
-    },
-}).addTo(map);
+
+  const world = new KRB.GeoJSONLayer({
+        url: 'world.geojson',
+        defaultFillColor:   '#aa0101',
+      
+        defaultStrokeColor: '#000000',
+        defaultStrokeWidth: 0.3,
+    }).addTo(map);
+
+
 </script>
 </body>
 </html>

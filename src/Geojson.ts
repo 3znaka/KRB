@@ -1,25 +1,15 @@
 /**
- * Geojson.ts — слой GeoJSON (Point, LineString, MultiLineString, Polygon,
- * MultiPolygon) с поддержкой 3D-вариантов и векторных линий.
+ * Geojson.ts — слой GeoJSON с поддержкой 3D и векторных линий.
  *
- * Координаты по умолчанию интерпретируются как WGS84 (EPSG:4326);
- * при необходимости задайте `options.crs` или переопределите CRS
- * точечно в коллбэках.
+ * Стилизация: декларативный `style` (тематическая карта по одному полю)
+ * или коллбэки `*ToOptions` (escape hatch). Оба принимают канонические
+ * ключи `*Options` и CSS-подобные алиасы (`fill`, `stroke`, `stroke-width`,
+ * `icon`, `model`).
  *
- * Ключевые принципы:
- *   - коллбэки `*ToOptions` вызываются РОВНО ОДИН РАЗ на feature/geometry;
- *   - результат коллбэка мержится с дефолтами через spread — пользователь
- *     может передать любое поле соответствующего `*Options`;
- *   - коллбэк может возвращать как канонические ключи (`fillColor`,
- *     `strokeWidth`, `color`, …), так и CSS-подобные алиасы (`fill`,
- *     `stroke`, `stroke-width`, `icon`, `model`, …) — алиасы нормализуются
- *     в канонические до слияния с дефолтами;
- *   - декларативный `style` (см. {@link StyleConfig}) позволяет описать
- *     тематическую карту без коллбэков: `by: 'category'`, `cases: {...}`,
- *     `default: {...}`, плюс per-type override (`style.polygon`, `style.line`, …);
- *   - `[lon, lat, alt]` для Point нормализуется до `[lon, lat]` + `altitude`;
- *   - дефолты `altitudeMode` для линий/полигонов — `'absolute'`, а не `'ground'`
- *     (последнее для `Polyline`/`Polygon` невалидно).
+ * Фильтрация: JS-выражение строкой (`"type = 'city'"`), объект-спецификация
+ * (`{ type: 'city' }`) или предикат. Строковая форма исполняется через
+ * `new Function` и видит глобальный scope — не передавайте в неё
+ * пользовательский ввод без валидации.
  *
  * @module Geojson
  */
@@ -102,21 +92,9 @@ export type GeoJSONInput =
 // =====================================================================
 // Style aliases
 // =====================================================================
-//
-// В `properties` пользователь привык к «плоским» именам (fill, stroke,
-// stroke-width, icon, model). Чтобы не заставлять его помнить разницу
-// между props-алиасами и `*Options`-ключами, коллбэки и style-правила
-// принимают те же алиасы и нормализуют их до канонических имён до
-// слияния с дефолтами.
-// =====================================================================
 
-export interface PointStyleAliases {
-    icon?: string;
-}
-
-export interface Marker3DStyleAliases {
-    model?: string | null;
-}
+export interface PointStyleAliases { icon?: string; }
+export interface Marker3DStyleAliases { model?: string | null; }
 
 export interface LineStyleAliases {
     stroke?: string | number;
@@ -135,9 +113,7 @@ export interface PolygonStyleAliases {
     'stroke-opacity'?: number;
 }
 
-export interface Area3DStyleAliases {
-    model?: string | null;
-}
+export interface Area3DStyleAliases { model?: string | null; }
 
 export interface VectorStyleAliases {
     stroke?: string | number;
@@ -149,18 +125,15 @@ export interface VectorStyleAliases {
 const POINT_ALIASES: Record<string, string> = {
     'icon': 'iconUrl',
 };
-
 const MARKER3D_ALIASES: Record<string, string> = {
     'model': 'modelUrl',
 };
-
 const LINE_ALIASES: Record<string, string> = {
     'stroke': 'color',
     'stroke-color': 'color',
     'stroke-width': 'width',
     'stroke-opacity': 'opacity',
 };
-
 const POLYGON_ALIASES: Record<string, string> = {
     'fill': 'fillColor',
     'fill-color': 'fillColor',
@@ -170,11 +143,9 @@ const POLYGON_ALIASES: Record<string, string> = {
     'stroke-width': 'strokeWidth',
     'stroke-opacity': 'strokeOpacity',
 };
-
 const AREA3D_ALIASES: Record<string, string> = {
     'model': 'modelUrl',
 };
-
 const VECTOR_ALIASES: Record<string, string> = {
     'stroke': 'color',
     'stroke-color': 'color',
@@ -182,42 +153,21 @@ const VECTOR_ALIASES: Record<string, string> = {
     'stroke-opacity': 'opacity',
 };
 
-/**
- * Канонические ключи `*Options`, значения которых должны быть числами.
- * Если пользователь передал строку через alias — прогоняем через `_asNumber`.
- */
 const NUMERIC_OPTION_KEYS = new Set<string>([
-    'fillOpacity',
-    'strokeOpacity',
-    'strokeWidth',
-    'width',
-    'opacity',
-    'arrowSize',
+    'fillOpacity', 'strokeOpacity', 'strokeWidth',
+    'width', 'opacity', 'arrowSize',
 ]);
 
 // =====================================================================
 // Declarative style types
 // =====================================================================
-//
-// Позволяет описать тематическую карту чистым JSON-объектом, без функций.
-// Порядок резолва для одного feature:
-//   1. по `by` берём значение из `properties`;
-//   2. ищем `style.cases[value]`, иначе — `style.default` (shared);
-//   3. ищем `style[type].cases[value]`, иначе — `style[type].default` (per-type);
-//   4. мержим per-type поверх shared.
-//
-// Итог мержится в порядке: `defaults → style → callback → enforced`.
-// Callback остаётся как escape hatch для нетривиальной логики.
-// =====================================================================
 
 export interface StyleRule {
-    // Polygon / Area3D
     fill?: string | number;
     'fill-color'?: string | number;
     'fill-opacity'?: number;
     fillColor?: string | number;
     fillOpacity?: number;
-    // Line / Vector
     stroke?: string | number;
     'stroke-color'?: string | number;
     'stroke-width'?: number;
@@ -228,16 +178,13 @@ export interface StyleRule {
     color?: string | number;
     width?: number;
     opacity?: number;
-    // Point
     icon?: string;
     iconUrl?: string;
     iconSize?: IconSize;
-    // 3D
     model?: string | null;
     modelUrl?: string | null;
     size?: SizeSpec | null;
     primitiveType?: PrimitiveType;
-    // Common
     title?: string;
     tooltip?: string;
     minZoom?: number;
@@ -245,42 +192,310 @@ export interface StyleRule {
     altitude?: number;
     altitudeMode?: 'clampToGround' | 'absolute';
     anchor?: [number, number] | [number, number, number];
-    // Всё остальное (extruded, height, depthTest, …) разрешено через index sig.
     [key: string]: any;
 }
 
 export interface StyleTypeConfig {
-    /** Случаи по значению поля `style.by` (`category` по умолчанию). */
     cases?: Record<string, StyleRule>;
-    /** Fallback, если значения нет в `cases`. */
     default?: StyleRule;
 }
 
 export type StyleTypeKey =
-    | 'polygon'
-    | 'line'
-    | 'point'
-    | 'area3D'
-    | 'marker3D'
-    | 'vector';
+    | 'polygon' | 'line' | 'point' | 'area3D' | 'marker3D' | 'vector';
 
 export interface StyleConfig extends StyleTypeConfig {
-    /** Имя поля в `properties`, по которому идёт классификация. @default 'category' */
     by?: string;
-    /** Per-type override для полигонов. */
     polygon?: StyleTypeConfig;
-    /** Per-type override для линий. */
     line?: StyleTypeConfig;
-    /** Per-type override для точек-маркеров. */
     point?: StyleTypeConfig;
-    /** Per-type override для Area3D. */
     area3D?: StyleTypeConfig;
-    /** Per-type override для Marker3D. */
     marker3D?: StyleTypeConfig;
-    /** Per-type override для Vector3D. */
     vector?: StyleTypeConfig;
 }
 
+// =====================================================================
+// Feature filter types
+// =====================================================================
+
+/**
+ * Объектная спецификация. Поддерживает:
+ *   - равенство:       `{ type: 'city' }`
+ *   - OR по значениям: `{ category: ['park', 'reserve'] }`
+ *   - вложенные пути:  `{ 'address.city': 'Москва' }`
+ *   - всё вместе = AND.
+ */
+export type FeatureFilterSpec = Record<
+    string,
+    string | number | boolean | null
+    | readonly (string | number | boolean | null)[]
+>;
+
+/**
+ * Что принимает `featureFilter` / `setFeatureFilter`:
+ *   - строка-выражение (`"type = 'city'"`, `"pop > 100"`);
+ *   - объект-спецификация (безопасно для UI);
+ *   - предикат (escape hatch);
+ *   - `null` — снять.
+ */
+export type FeatureFilterInput =
+    | string
+    | FeatureFilterSpec
+    | readonly unknown[]
+    | ((feature: GeoJSONFeature) => boolean)
+    | null;
+
+// =====================================================================
+// Expression compiler
+// =====================================================================
+
+/**
+ * Заменяет одиночный `=` на `===`, не трогая `==`, `===`, `!=`, `!==`,
+ * `<=`, `>=`, `=>` и содержимое строк.
+ */
+function replaceEqualityOutsideStrings(expr: string): string {
+    let out = '';
+    let i = 0;
+    let str: string | null = null;
+    while (i < expr.length) {
+        const ch = expr[i];
+        if (str) {
+            out += ch;
+            if (ch === '\\' && i + 1 < expr.length) { out += expr[++i]; i++; continue; }
+            if (ch === str) str = null;
+            i++;
+            continue;
+        }
+        if (ch === "'" || ch === '"' || ch === '`') { str = ch; out += ch; i++; continue; }
+        if (ch === '=') {
+            const prev = out[out.length - 1];
+            const next = expr[i + 1];
+            if (prev === '<' || prev === '>' || prev === '!' || prev === '='
+                || next === '=' || next === '>') {
+                out += ch; i++; continue;
+            }
+            out += '==='; i++; continue;
+        }
+        out += ch; i++;
+    }
+    return out;
+}
+
+/**
+ * `field === 'a' || 'b'` → `field === 'a' || field === 'b'`.
+ * Трогает только цепочки, целиком состоящие из литералов.
+ */
+function expandOrChains(expr: string): string {
+    const LIT = String.raw`(?:'[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*"|\d+(?:\.\d+)?|true|false|null)`;
+    const FIELD = String.raw`[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*`;
+    const chainRe = new RegExp(
+        `(${FIELD})\\s*===\\s*(${LIT}(?:\\s*\\|\\|\\s*${LIT})+)`, 'g',
+    );
+    const litRe = new RegExp(LIT, 'g');
+    return expr.replace(chainRe, (_m, field: string, chain: string) => {
+        const lits = chain.match(litRe);
+        if (!lits || lits.length < 2) return _m;
+        return lits.map(lit => `${field} === ${lit}`).join(' || ');
+    });
+}
+
+// =====================================================================
+// Mapbox filter → JS expression
+// =====================================================================
+
+/** Top-level: `['==', key, value]` → `(key === value)`. */
+function mapboxToJsExpr(node: unknown): string {
+    if (!Array.isArray(node) || node.length === 0) {
+        throw new Error('Invalid Mapbox filter (expected non-empty array)');
+    }
+    const op = node[0] as string;
+    const rest = node.slice(1) as unknown[];
+
+    switch (op) {
+        case '==': case '!=': case '<': case '<=': case '>': case '>=': {
+            if (rest.length !== 2) throw new Error(`Mapbox "${op}" needs 2 args`);
+            const jsOp = op === '==' ? '===' : op === '!=' ? '!==' : op;
+            return `(${mapboxField(rest[0])} ${jsOp} ${mapboxLiteral(rest[1])})`;
+        }
+        case 'in': case '!in': {
+            if (rest.length < 2) throw new Error(`Mapbox "${op}" needs key + values`);
+            const key = mapboxField(rest[0]);
+            // New-style: ['in', ['get', 'x'], ['literal', ['a','b']]]
+            // Legacy:    ['in', 'x', 'a', 'b']
+            const rawValues = (rest.length === 2
+                && Array.isArray(rest[1]) && (rest[1] as any[])[0] === 'literal')
+                ? (rest[1] as any[])[1]
+                : rest.slice(1);
+            const ors = (rawValues as unknown[])
+                .map(v => `${key} === ${mapboxLiteral(v)}`).join(' || ');
+            return op === 'in' ? `(${ors})` : `!(${ors})`;
+        }
+        case 'has': {
+            if (rest.length !== 1) throw new Error('Mapbox "has" needs 1 arg');
+            return `(${mapboxField(rest[0])} !== undefined)`;
+        }
+        case '!has': {
+            if (rest.length !== 1) throw new Error('Mapbox "!has" needs 1 arg');
+            return `(${mapboxField(rest[0])} === undefined)`;
+        }
+        case 'all': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' && ')})` : 'true';
+        case 'any': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' || ')})` : 'false';
+        case 'none': return rest.length ? `!(${rest.map(mapboxToJsExpr).join(' || ')})` : 'true';
+        case '!': {
+            if (rest.length !== 1) throw new Error('Mapbox "!" needs 1 arg');
+            return `!(${mapboxToJsExpr(rest[0])})`;
+        }
+        default:
+            throw new Error(`Unsupported Mapbox operator: "${op}"`);
+    }
+}
+
+/** Операнд в позиции КЛЮЧА (левая часть сравнения). */
+function mapboxField(node: unknown): string {
+    if (typeof node === 'string') {
+        if (node === '$type') return 'geometry';
+        if (node === '$id')   return 'feature.id';
+        // Любой другой ключ — bracket access, безопасно для `foo-bar`, `a.b` и т.п.
+        return `props[${JSON.stringify(node)}]`;
+    }
+    if (Array.isArray(node)) {
+        const head = node[0];
+        if (head === 'get') {
+            if (node.length < 2) throw new Error('Mapbox "get" needs a key');
+            return mapboxField(node[1]);
+        }
+        if (head === 'geometry-type') return 'geometry';
+        if (head === 'id')            return 'feature.id';
+    }
+    throw new Error(`Unsupported Mapbox field operand: ${JSON.stringify(node)}`);
+}
+
+/** Операнд в позиции ЗНАЧЕНИЯ (правая часть сравнения). */
+function mapboxLiteral(node: unknown): string {
+    if (typeof node === 'string')  return JSON.stringify(node);
+    if (typeof node === 'number')  return Number.isFinite(node) ? String(node) : 'null';
+    if (typeof node === 'boolean') return String(node);
+    if (node === null)             return 'null';
+    if (Array.isArray(node)) {
+        // ['literal', x] → JSON x; ['get', x] → поле; иначе литеральный массив.
+        if (node[0] === 'literal') return JSON.stringify(node[1]);
+        if (node[0] === 'get')     return mapboxField(node[1]);
+        return JSON.stringify(node);
+    }
+    throw new Error(`Unsupported Mapbox literal operand: ${JSON.stringify(node)}`);
+}
+
+/**
+ * Компилирует строку-выражение в предикат.
+ * Идентификаторы резолвятся через `props`; глобалы (`Math`, `Number`) —
+ * снаружи.
+ */
+function compileExpressionFilter(expr: string): (feature: GeoJSONFeature) => boolean {
+    const processed = expandOrChains(replaceEqualityOutsideStrings(expr));
+
+    // Резолвер: reserved names → feature-level, иначе → props.
+    //   feature      — весь GeoJSONFeature
+    //   props        — properties как объект (для явного доступа)
+    //   geometry     — feature.geometry.type  (строка!)
+    //   geometryType — alias для `geometry`
+    //
+    // Если имя НЕ зарезервировано и есть в props — берётся из props.
+    // Если нет ни там, ни там — уходит в глобальный scope (`Math`, `Number`, …).
+    const src = `
+        const props = feature.properties ?? {};
+        const geometryType = feature.geometry?.type ?? null;
+        const __scope = new Proxy(
+            Object.assign(Object.create(null), {
+                feature,
+                props,
+                geometry: geometryType,
+                geometryType,
+            }),
+            {
+                has: (t, k) => typeof k === 'string' && (
+                    Object.prototype.hasOwnProperty.call(t, k) ||
+                    Object.prototype.hasOwnProperty.call(props, k)
+                ),
+                get: (t, k) => {
+                    if (typeof k !== 'string') return undefined;
+                    if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
+                    return props[k];
+                },
+            }
+        );
+        with (__scope) { return Boolean(${processed}); }
+    `;
+
+    let fn: (feature: any) => boolean;
+    try {
+        fn = new Function('feature', src) as (feature: any) => boolean;
+    } catch (err) {
+        console.warn('GeoJSONLayer: invalid filter expression', expr, err);
+        return () => false;
+    }
+
+    return (feature) => {
+        try {
+            return fn(feature);
+        } catch (err) {
+            console.warn('GeoJSONLayer: filter expression threw, treating as false', err);
+            return false;
+        }
+    };
+}
+
+function getPath(obj: any, path: string): any {
+    if (!path.includes('.')) return obj?.[path];
+    let cur = obj;
+    for (const part of path.split('.')) {
+        if (cur == null) return undefined;
+        cur = cur[part];
+    }
+    return cur;
+}
+
+function matchFilterValue(
+    actual: any,
+    expected: FeatureFilterSpec[string],
+): boolean {
+    if (Array.isArray(expected)) return expected.some(v => v === actual);
+    if (expected === null) return actual == null;
+    return actual === expected;
+}
+
+/**
+ * Разрешает путь в объектной форме. Симметрично строковой:
+ *   - `geometry` / `geometryType` → feature.geometry.type
+ *   - `feature`, `feature.type`, `feature.id`, `feature.geometry.*` → из feature
+ *   - `props`, `props.category` → из properties
+ *   - иначе → путь в properties (с точками).
+ */
+function resolveFilterPath(feature: GeoJSONFeature, path: string): any {
+    const props = feature.properties ?? {};
+    const geometryType = feature.geometry?.type ?? null;
+
+    if (path === 'geometry' || path === 'geometryType') return geometryType;
+    if (path === 'feature') return feature;
+    if (path === 'props')   return props;
+
+    if (path.startsWith('feature.')) {
+        return getPath(feature, path.slice('feature.'.length));
+    }
+    if (path.startsWith('props.')) {
+        return getPath(props, path.slice('props.'.length));
+    }
+    return getPath(props, path);
+}
+
+function compileObjectFilter(spec: FeatureFilterSpec): (feature: GeoJSONFeature) => boolean {
+    const entries = Object.entries(spec);
+    return (feature) => {
+        for (const [path, expected] of entries) {
+            const actual = resolveFilterPath(feature, path);
+            if (!matchFilterValue(actual, expected)) return false;
+        }
+        return true;
+    };
+}
 // =====================================================================
 // Callback types
 // =====================================================================
@@ -323,40 +538,18 @@ export interface GeoJSONLayerOptions {
     data?: GeoJSONInput;
     crs?: string;
 
-    /**
-     * Предикат на уровне GeoJSON-feature: `false` — feature не создаётся
-     * вообще (не попадает в `_objects`, не влияет на `getBounds`).
-     *
-     * НЕ путать с унаследованным `Layer.filter(predicate)` — тот работает
-     * по уже созданным объектам слоя (`SpatialObject`) и лишь скрывает их.
-     */
-    featureFilter?: (feature: GeoJSONFeature) => boolean;
-
+    /** Фильтр на уровне feature (не путать с `Layer.filter` по объектам). */
+    featureFilter?: FeatureFilterInput;
     /** @deprecated Используйте `featureFilter`. */
-    filter?: (feature: GeoJSONFeature) => boolean;
+    filter?: FeatureFilterInput;
     onEachFeature?: OnEachFeatureCallback;
 
-    /**
-     * Декларативная таблица стилей (тематическая карта без коллбэков).
-     * См. {@link StyleConfig}.
-     */
+    /** Декларативная таблица стилей. См. {@link StyleConfig}. */
     style?: StyleConfig;
 
-    /**
-     * Имя поля в `properties`, из которого брать `title`.
-     * Если задано — `props[titleField]` имеет приоритет над `props.title` /
-     * `props.name`; при пустом значении поля работает старый fallback.
-     *
-     * @example
-     * titleField: 'name',   // props.name → title
-     */
+    /** Откуда брать `title`: `props[titleField]` приоритетнее `props.title`/`props.name`. */
     titleField?: string | null;
-
-    /**
-     * Имя поля в `properties`, из которого брать `tooltip`.
-     * Если задано — `props[tooltipField]` имеет приоритет над
-     * `props.tooltip` / `props.description`.
-     */
+    /** Откуда брать `tooltip`: `props[tooltipField]` приоритетнее `props.tooltip`/`props.description`. */
     tooltipField?: string | null;
 
     pointToOptions?: PointOptionsCallback;
@@ -431,78 +624,53 @@ export interface GeoJSONLayerOptions {
 // =====================================================================
 
 /**
- * Слой, создающий маркеры, линии, полигоны и векторные объекты из GeoJSON.
- *
- * Стилизация поддерживает два подхода, которые можно комбинировать:
- *
- *   1. **Декларативный `style`** — тематическая карта без коллбэков:
- *      классификация по одному полю (`style.by`), fallback (`style.default`),
- *      per-type override (`style.polygon`, `style.line`, …).
- *   2. **Коллбэки `*ToOptions`** — escape hatch для нетривиальной логики.
- *      Мержатся поверх `style`; `style` — поверх дефолтов.
- *
- * И ключи `style`, и результаты коллбэков принимают как канонические
- * имена `*Options` (`fillColor`, `strokeWidth`, `iconUrl`, `modelUrl`, …),
- * так и CSS-подобные алиасы (`fill`, `stroke`, `stroke-width`, `icon`,
- * `model`, …). Канонический ключ приоритетнее alias.
+ * Слой GeoJSON: создаёт маркеры, линии, полигоны и векторные объекты из
+ * FeatureCollection / Feature / Geometry.
  *
  * Порядок merge для каждого объекта:
  *   `defaults → style → callback → enforced (rings/positions/position)`.
  *
- * @example Декларативный style: тематическая карта по одному полю
- * const layer = new GeoJSONLayer({
+ * @example Декларативный style
+ * new GeoJSONLayer({
  *     data,
  *     titleField: 'name',
  *     style: {
  *         by: 'category',
- *         cases: {
- *             residential: { fill: '#4a90e2', stroke: '#1c5fad' },
- *             industrial:  { fill: '#f5a623', stroke: '#a86a10' },
- *             park:        { fill: '#7ed321', stroke: '#3d8b00' },
- *         },
- *         default: { fill: '#cccccc', stroke: '#666666' },
- *         line:  { default: { stroke: '#ff6600', 'stroke-width': 4 } },
+ *         cases: { park: { fill: '#7ed321', stroke: '#3d8b00' } },
+ *         default: { fill: '#cccccc' },
+ *         line:  { default: { 'stroke-width': 4 } },
  *         point: { default: { icon: 'pin.png', iconSize: [32, 32] } },
  *     },
  * }).addTo(map);
  *
- * @example Callback как escape hatch (мержится поверх style)
- * new GeoJSONLayer({
- *     data,
- *     style: { by: 'category', cases: { park: { fill: '#7ed321' } } },
- *     polygonToOptions: (f, p) => p.highlight ? { strokeWidth: 4 } : null,
- * });
- *
- * @example Только коллбэки (старый API, работает как раньше)
+ * @example Коллбэки (escape hatch, мержатся поверх style)
  * new GeoJSONLayer({
  *     data,
  *     polygonToOptions: (f, p) => ({ title: p.name, fill: '#ff0000' }),
  * });
  */
 export class GeoJSONLayer extends Layer {
-    // ── Данные ──
     public url: string | null = null;
     public data: GeoJSONInput | null = null;
     public crs: string | null = null;
+
     /**
-     * Предикат на уровне GeoJSON-feature. `false` — feature не создаётся.
-     *
-     * Это НЕ то же самое, что унаследованный {@link Layer#filter}:
-     *   - `featureFilter` — применяется при парсинге, feature вообще
-     *     не попадает в слой (влияет на `_objects.length` и `getBounds`);
-     *   - `filter()` — применяется к уже созданным объектам и лишь
-     *     скрывает их через `SpatialObject.setVisible()`, объекты
-     *     остаются в `_objects`.
+     * Скомпилированный предикат. `null` — фильтра нет.
+     * Для установки используйте `setFeatureFilter` — он корректно
+     * обновляет `filterSpec` / `filterExpression` и делает `reload()`.
      */
     public featureFilter: ((feature: GeoJSONFeature) => boolean) | null = null;
+    /** Исходная объектная спецификация (для UI). */
+    public filterSpec: FeatureFilterSpec | null = null;
+    /** Исходное строковое выражение (для UI). */
+    public filterExpression: string | null = null;
+
     public onEachFeature: OnEachFeatureCallback | null = null;
 
-    // ── Декларативный стиль ──
     public style: StyleConfig | null = null;
     public titleField: string | null = null;
     public tooltipField: string | null = null;
 
-    // ── Коллбэки ──
     public pointToOptions: PointOptionsCallback | null = null;
     public point3DToOptions: Point3DOptionsCallback | null = null;
     public lineToOptions: LineOptionsCallback | null = null;
@@ -510,19 +678,16 @@ export class GeoJSONLayer extends Layer {
     public polygon3DToOptions: Polygon3DOptionsCallback | null = null;
     public vectorToOptions: VectorOptionsCallback | null = null;
 
-    // ── Дефолты: Marker ──
     public defaultIconUrl: string = 'marker.png';
     public defaultIconSize: IconSize = [16, 16];
     public defaultAnchor: [number, number] = [0.5, 1.0];
 
-    // ── Дефолты: Marker3D ──
     public default3DPrimitiveType: PrimitiveType = 'box';
     public default3DSize: SizeSpec | null = [100, 100, 100];
     public default3DAnchor: Vec3 = [0.5, 0, 0.5];
     public default3DAltitude: number = 0;
     public default3DAltitudeMode: 'clampToGround' | 'absolute' = 'clampToGround';
 
-    // ── Дефолты: Polyline ──
     public defaultLineColor: string | number = '#3388ff';
     public defaultLineWidth: number = 2;
     public defaultLineOpacity: number = 1;
@@ -533,7 +698,6 @@ export class GeoJSONLayer extends Layer {
     public defaultLineMinZoom: number = -Infinity;
     public defaultLineMaxZoom: number = Infinity;
 
-    // ── Дефолты: Polygon ──
     public defaultFillColor: string | number = '#3388ff';
     public defaultFillOpacity: number = 0.5;
     public defaultStrokeColor: string | number = '#000000';
@@ -549,7 +713,6 @@ export class GeoJSONLayer extends Layer {
     public defaultPolygonHeight: number = 0;
     public defaultPolygonMinHeight: number = 0;
 
-    // ── Дефолты: Area3D ──
     public defaultPolygon3DPrimitiveType: PrimitiveType = 'box';
     public defaultPolygon3DSize: SizeSpec | null = null;
     public defaultPolygon3DAnchor: [number, number, number] = [0.5, 0, 0.5];
@@ -563,14 +726,19 @@ export class GeoJSONLayer extends Layer {
 
     private _loaded = false;
 
+static fromMapboxFilter(arr: readonly unknown[]): string {
+    return mapboxToJsExpr(arr);
+}
+
     constructor(options: GeoJSONLayerOptions = {}) {
         super();
 
         this.url = options.url ?? null;
         this.data = options.data ?? null;
         this.crs = options.crs ?? null;
-        this.featureFilter = options.featureFilter ?? options.filter ?? null;
         this.onEachFeature = options.onEachFeature ?? null;
+
+        this._applyFilter(options.featureFilter ?? options.filter ?? null);
 
         this.style = options.style ?? null;
         this.titleField = options.titleField ?? null;
@@ -598,8 +766,7 @@ export class GeoJSONLayer extends Layer {
         this.defaultLineOpacity = options.defaultLineOpacity ?? 1;
         this.defaultLineAltitudeMode = options.defaultLineAltitudeMode ?? 'absolute';
         this.defaultLineAltitude = options.defaultLineAltitude
-            ?? options.defaultLineAltitudeOffset
-            ?? 10;
+            ?? options.defaultLineAltitudeOffset ?? 10;
         this.defaultLineDepthTest = options.defaultLineDepthTest ?? false;
         this.defaultLineDepthWrite = options.defaultLineDepthWrite ?? false;
         this.defaultLineMinZoom = options.defaultLineMinZoom ?? -Infinity;
@@ -612,8 +779,7 @@ export class GeoJSONLayer extends Layer {
         this.defaultStrokeOpacity = options.defaultStrokeOpacity ?? 1;
         this.defaultPolygonAltitudeMode = options.defaultPolygonAltitudeMode ?? 'absolute';
         this.defaultPolygonAltitude = options.defaultPolygonAltitude
-            ?? options.defaultPolygonAltitudeOffset
-            ?? 10;
+            ?? options.defaultPolygonAltitudeOffset ?? 10;
         this.defaultPolygonDepthTest = options.defaultPolygonDepthTest ?? false;
         this.defaultPolygonDepthWrite = options.defaultPolygonDepthWrite ?? false;
         this.defaultPolygonMinZoom = options.defaultPolygonMinZoom ?? -Infinity;
@@ -655,75 +821,130 @@ export class GeoJSONLayer extends Layer {
     }
 
     /**
-     * Меняет feature-фильтр. При активной карте и загруженных данных
-     * автоматически вызывает `reload()`, чтобы применить фильтр к уже
-     * загруженным feature.
+     * Меняет feature-фильтр. При активной карте автоматически `reload()`.
      *
      * @example
-     * layer.setFeatureFilter(f => f.properties?.type === 'city');
-     * layer.setFeatureFilter(null);   // снять фильтр
+     * layer.setFeatureFilter("type = 'city'");
+     * layer.setFeatureFilter("type = 'city' || 'village'");
+     * layer.setFeatureFilter("population > 100000");
+     * layer.setFeatureFilter({ type: 'city' });
+     * layer.setFeatureFilter(f => f.properties?.max > f.properties?.min);
+     * layer.setFeatureFilter(null);   // снять
      */
-    setFeatureFilter(predicate: ((feature: GeoJSONFeature) => boolean) | null): this {
-        this.featureFilter = predicate;
+    setFeatureFilter(input: FeatureFilterInput): this {
+        this._applyFilter(input);
         if (this._map && this._loaded) this.reload();
         return this;
     }
 
-    /**
-     * Меняет декларативную таблицу стилей. При активной карте автоматически
-     * перезагружает объекты, чтобы стили применились к уже созданным фичам.
-     *
-     * @example
-     * layer.setStyle({
-     *     by: 'category',
-     *     cases: { school: { fill: '#ff0000' } },
-     *     default: { fill: '#888888' },
-     * });
-     * layer.setStyle(null);   // снять декларативный стиль
-     */
+    /** Меняет декларативный style. При активной карте — `reload()`. */
     setStyle(style: StyleConfig | null): this {
         this.style = style;
         if (this._map && this._loaded) this.reload();
         return this;
     }
 
-    /**
-     * Заменяет данные слоя. При активной карте автоматически перезагружает
-     * объекты. Передайте `null`, чтобы очистить слой.
-     *
-     * @example
-     * const layer = new GeoJSONLayer({ url: 'routes.geojson' }).addTo(map);
-     * layer.setData(newRoute);          // заменил маршрут
-     * layer.setData(null);              // очистил
-     */
+    /** Заменяет данные. `null` — очистить. При активной карте — `reload()`. */
     setData(data: GeoJSONInput | null): this {
         this.data = data;
-        if (this._map) {
-            this.reload();
-        } else {
-            this._loaded = false;
-        }
-        return this;
-    }
-
-    setUrl(url: string | null): this {
-        this.url = url;
-        if (this._map) {
-            this.reload();
-        } else {
-            this._loaded = false;
-        }
+        if (this._map) this.reload(); else this._loaded = false;
         return this;
     }
 
     /**
-     * Добавляет новые GeoJSON-объекты к уже загруженным, не удаляя существующие.
-     * Полезно для инкрементального обновления (трек, лог событий и т.п.).
-     */
+ * Alias для {@link setFeatureFilter} — удобен при переходе с Mapbox GL JS.
+ *
+ * НЕ путать с унаследованным {@link Layer#filter}(predicate): тот работает
+ * по уже созданным объектам и лишь скрывает их. `setFilter` /
+ * `setFeatureFilter` пересобирает слой — отфильтрованные feature
+ * вообще не попадают в `_objects` и не влияют на `getBounds()`.
+ */
+setFilter(input: FeatureFilterInput): this {
+    return this.setFeatureFilter(input);
+}
+
+/**
+ * Возвращает текущий фильтр в исходной форме:
+ * строковое выражение, объект-спецификация, предикат или `null`.
+ */
+getFilter(): FeatureFilterInput {
+    if (this.filterExpression != null) return this.filterExpression;
+    if (this.filterSpec != null) return this.filterSpec;
+    return this.featureFilter;
+}
+
+    /** Заменяет url. При активной карте — `reload()`. */
+    setUrl(url: string | null): this {
+        this.url = url;
+        if (this._map) this.reload(); else this._loaded = false;
+        return this;
+    }
+
+    /** Добавляет объекты к уже загруженным, не удаляя существующие. */
     addData(data: GeoJSONInput): this {
         this._parse(data);
         return this;
     }
+
+private _applyFilter(input: unknown): void {
+    // ── Mapbox-style array → JS expression string ──────────────────
+    if (Array.isArray(input)) {
+        try {
+            const converted = GeoJSONLayer.fromMapboxFilter(input);
+            console.debug('GeoJSONLayer: Mapbox filter converted', input, '→', converted);
+            input = converted;   // теперь строка, дальше обычный путь
+        } catch (err) {
+            console.warn(
+                'GeoJSONLayer: cannot convert Mapbox filter. ' +
+                "Use a JS expression string (e.g. \"type = 'city'\") " +
+                'or an object spec (e.g. { type: \'city\' }).',
+                err, input,
+            );
+            this.featureFilter = null;
+            this.filterSpec = null;
+            this.filterExpression = null;
+            return;
+        }
+    }
+
+    if (!input) {
+        this.featureFilter = null;
+        this.filterSpec = null;
+        this.filterExpression = null;
+        return;
+    }
+    if (typeof input === 'function') {
+        this.featureFilter = input as (feature: GeoJSONFeature) => boolean;
+        this.filterSpec = null;
+        this.filterExpression = null;
+        return;
+    }
+    if (typeof input === 'string') {
+        const trimmed = input.trim();
+        if (!trimmed) {
+            this.featureFilter = null;
+            this.filterSpec = null;
+            this.filterExpression = null;
+            return;
+        }
+        this.featureFilter = compileExpressionFilter(trimmed);
+        this.filterSpec = null;
+        this.filterExpression = trimmed;
+        return;
+    }
+
+    // После всех проверок input — объект-спецификация.
+    const spec = input as FeatureFilterSpec;
+    if (!Object.keys(spec).length) {
+        this.featureFilter = null;
+        this.filterSpec = null;
+        this.filterExpression = null;
+        return;
+    }
+    this.featureFilter = compileObjectFilter(spec);
+    this.filterSpec = spec;
+    this.filterExpression = null;
+}
 
     private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
@@ -750,7 +971,6 @@ export class GeoJSONLayer extends Layer {
     // Style resolution
     // =================================================================
 
-    /** Заголовок: `props[titleField]` (если задан) иначе `props.title` / `props.name`. */
     private _getTitle(props: Props): string {
         if (this.titleField) {
             const v = props[this.titleField];
@@ -759,7 +979,6 @@ export class GeoJSONLayer extends Layer {
         return props.title || props.name || '';
     }
 
-    /** Тултип: `props[tooltipField]` (если задан) иначе `props.tooltip` / `props.description`. */
     private _getTooltip(props: Props): string {
         if (this.tooltipField) {
             const v = props[this.tooltipField];
@@ -768,21 +987,14 @@ export class GeoJSONLayer extends Layer {
         return props.tooltip || props.description || '';
     }
 
-    /**
-     * Находит стиль для feature: shared (`style.cases[value]` / `style.default`)
-     * мержится с per-type (`style[type].cases[value]` / `style[type].default`),
-     * per-type перекрывает shared. Возвращает `null`, если стиля нет.
-     */
+    /** shared (`style.cases`/`style.default`) ← per-type (`style[type].*`). */
     private _resolveStyle(props: Props, type: StyleTypeKey): StyleRule | null {
         const style = this.style;
         if (!style) return null;
-
         const by = style.by ?? 'category';
         const value = props[by];
-
         const shared = this._pickStyleLevel(style, value);
         const perType = this._pickStyleLevel(style[type], value);
-
         if (!shared && !perType) return null;
         if (!shared) return perType;
         if (!perType) return shared;
@@ -802,36 +1014,29 @@ export class GeoJSONLayer extends Layer {
     }
 
     /**
-     * Приводит результат коллбэка или style-правила к каноническим
-     * ключам `*Options`:
-     *   - alias (`fill`, `stroke`, `stroke-width`, `icon`, `model`, …)
-     *     копируется в канонический ключ, если тот не задан явно;
-     *   - alias удаляется из результата, чтобы не улетал в конструктор;
-     *   - числовые канонические ключи (`width`, `opacity`, `fillOpacity`, …)
-     *     прогоняются через `_asNumber` (строки `"2"` → `2`);
-     *   - если alias == null — он не используется (срабатывает дефолт).
-     *
-     * Канонический ключ имеет приоритет над alias.
+     * Нормализует alias'ы (`fill` → `fillColor`, `stroke-width` → `width`/…)
+     * и приводит числовые канонические ключи к `number`. Canonical побеждает
+     * alias; alias удаляется из результата.
      */
-   private _normalizeStyle<T extends Record<string, any>>(
-    src: Record<string, any> | null | undefined,
-    aliases: Record<string, string>,
-): Partial<T> | null {
-    if (!src) return null;
-    const out: any = { ...src };
-    for (const [alias, canonical] of Object.entries(aliases)) {
-        if (out[canonical] === undefined && out[alias] != null) {
-            if (NUMERIC_OPTION_KEYS.has(canonical)) {
-                const num = this._asNumber(out[alias]);
-                if (num !== undefined) out[canonical] = num;
-            } else {
-                out[canonical] = out[alias];
+    private _normalizeStyle<T extends Record<string, any>>(
+        src: Record<string, any> | null | undefined,
+        aliases: Record<string, string>,
+    ): Partial<T> | null {
+        if (!src) return null;
+        const out: any = { ...src };
+        for (const [alias, canonical] of Object.entries(aliases)) {
+            if (out[canonical] === undefined && out[alias] != null) {
+                if (NUMERIC_OPTION_KEYS.has(canonical)) {
+                    const num = this._asNumber(out[alias]);
+                    if (num !== undefined) out[canonical] = num;
+                } else {
+                    out[canonical] = out[alias];
+                }
             }
+            delete out[alias];
         }
-        delete out[alias];
+        return out as Partial<T>;
     }
-    return out as Partial<T>;
-}
 
     // =================================================================
     // Dispatch
@@ -868,7 +1073,6 @@ export class GeoJSONLayer extends Layer {
 
         switch (geom.type) {
             case 'Point':
-                // Для точки нужен явный флаг vector === true — иначе Marker/Marker3D.
                 if (this.vectorToOptions && props.vector === true) {
                     this._addVectorFeature(feature);
                 } else {
@@ -878,7 +1082,6 @@ export class GeoJSONLayer extends Layer {
 
             case 'LineString':
             case 'MultiLineString':
-                // Наличие vectorToOptions — сигнал, что автор слоя хочет вектор.
                 if (this.vectorToOptions || props.vector === true) {
                     this._addVectorFeature(feature);
                 } else {
@@ -909,7 +1112,6 @@ export class GeoJSONLayer extends Layer {
         const lonLat: LonLat = [coords[0], coords[1]];
         const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
 
-        // Коллбэк 3D вызываем РОВНО ОДИН РАЗ.
         const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
         const is3D = cb3D != null
             || props['3d'] === true
@@ -953,9 +1155,9 @@ export class GeoJSONLayer extends Layer {
             titlePriority: this._asNumber(props.titlePriority),
         };
 
-const normStyle = this._normalizeStyle<MarkerOptions>(
-    this._resolveStyle(props, 'point'), POINT_ALIASES);
-const normCb = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
+        const normStyle = this._normalizeStyle<MarkerOptions>(
+            this._resolveStyle(props, 'point'), POINT_ALIASES);
+        const normCb = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
         const merged: MarkerOptions = {
             ...defaults,
             ...(normStyle ?? {}),
@@ -1001,9 +1203,9 @@ const normCb = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
             playAnimation: props.playAnimation,
         };
 
-const normStyle = this._normalizeStyle<Marker3DOptions>(
-    this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
-const normCb = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
+        const normStyle = this._normalizeStyle<Marker3DOptions>(
+            this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
+        const normCb = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
         const merged: Marker3DOptions = {
             ...defaults,
             ...(normStyle ?? {}),
@@ -1060,9 +1262,9 @@ const normCb = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
                 titlePriority: this._asNumber(props.titlePriority),
             };
 
-const normStyle = this._normalizeStyle<PolylineOptions>(
-    this._resolveStyle(props, 'line'), LINE_ALIASES);
-const normCb = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
+            const normStyle = this._normalizeStyle<PolylineOptions>(
+                this._resolveStyle(props, 'line'), LINE_ALIASES);
+            const normCb = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
             const merged: PolylineOptions = {
                 ...defaults,
                 ...(normStyle ?? {}),
@@ -1090,7 +1292,6 @@ const normCb = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
         for (const rings of ringSets) {
             if (!rings.length || !rings[0].length) continue;
 
-            // Коллбэк 3D вызываем РОВНО ОДИН РАЗ.
             const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
             const is3D = cb3D != null
                 || props['3d'] === true
@@ -1142,9 +1343,9 @@ const normCb = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
             tooltip: this._getTooltip(props),
         };
 
-const normStyle = this._normalizeStyle<PolygonOptions>(
-    this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
-const normCb = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
+        const normStyle = this._normalizeStyle<PolygonOptions>(
+            this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
+        const normCb = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
         const merged: PolygonOptions = {
             ...defaults,
             ...(normStyle ?? {}),
@@ -1188,9 +1389,9 @@ const normCb = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
             tooltip: this._getTooltip(props),
         };
 
-const normStyle = this._normalizeStyle<Area3DOptions>(
-    this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
-const normCb = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
+        const normStyle = this._normalizeStyle<Area3DOptions>(
+            this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
+        const normCb = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
         const merged: Area3DOptions = {
             ...defaults,
             ...(normStyle ?? {}),
@@ -1210,8 +1411,6 @@ const normCb = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
         const geom = feature.geometry;
         const props = feature.properties ?? {};
 
-        // Наборы координат по умолчанию. Для Point — null (позиции
-        // должен задать vectorToOptions).
         let coordSets: (GeoJSONLineString | null)[];
         if (geom.type === 'LineString')           coordSets = [geom.coordinates];
         else if (geom.type === 'MultiLineString') coordSets = geom.coordinates;
@@ -1243,9 +1442,9 @@ const normCb = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
                 opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? 1,
             };
 
-const normStyle = this._normalizeStyle<Vector3DOptions>(
-    this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
-const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
+            const normStyle = this._normalizeStyle<Vector3DOptions>(
+                this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
+            const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
             const merged: Vector3DOptions = {
                 ...defaults,
                 ...(normStyle ?? {}),
@@ -1262,12 +1461,10 @@ const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
     // Внутренние парсеры / утилиты
     // =================================================================
 
-    /** Pad 2D → `[lon, lat, 0]` для `Vector3D`. */
     private _toVectorPositions(coords: GeoJSONLineString): Vector3DPosition[] {
         return coords.map(c => [c[0], c[1], c[2] ?? 0] as Vector3DPosition);
     }
 
-    /** `[w, h] | [w, h, d] | number` или строка `"w,h"` → `number[]`. */
     private _parseSize(raw: any): number[] | null {
         if (!raw) return null;
         if (Array.isArray(raw)) return raw as number[];
@@ -1280,21 +1477,18 @@ const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
         return null;
     }
 
-    /** Строго 2-элементный размер (для `IconSize`). */
     private _parseIconSize(raw: any): IconSize | null {
         const arr = this._parseSize(raw);
         if (!arr || arr.length !== 2) return null;
         return [arr[0], arr[1]];
     }
 
-    /** Строго 1..3-элементный размер (для `SizeSpec` в 3D-объектах). */
     private _parseSizeSpec(raw: any): SizeSpec | null {
         const arr = this._parseSize(raw);
         if (!arr || arr.length < 1 || arr.length > 3) return null;
         return arr;
     }
 
-    /** 2-элементный массив из `[a, b]` или строки `"a,b"`. */
     private _parsePair(raw: any): [number, number] | null {
         if (!raw) return null;
         if (Array.isArray(raw) && raw.length === 2) {
@@ -1312,7 +1506,6 @@ const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
         return null;
     }
 
-    /** 3-элементный массив из `[a, b, c]` или строки `"a,b,c"`. */
     private _parseTriple(raw: any): [number, number, number] | null {
         if (!raw) return null;
         if (Array.isArray(raw) && raw.length === 3) {
@@ -1331,7 +1524,6 @@ const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
         return null;
     }
 
-    /** Безопасное приведение к `number` (строки тоже принимаются). */
     private _asNumber(v: any): number | undefined {
         if (typeof v === 'number' && isFinite(v)) return v;
         if (typeof v === 'string' && v.trim() !== '') {

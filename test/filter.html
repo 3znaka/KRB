@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Mapbox-style setFilter</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+
+    #panel {
+        position: absolute;
+        top: 12px; left: 12px;
+        background: #fff;
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,.15);
+        font: 13px/1.4 system-ui, sans-serif;
+        width: 460px;
+        max-height: calc(100dvh - 24px);
+        overflow: auto;
+    }
+    #panel h3 { margin: 0 0 8px; font-size: 14px; }
+    #panel button {
+        display: block;
+        width: 100%;
+        margin: 4px 0;
+        padding: 8px;
+        text-align: left;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        font: 12px/1.3 ui-monospace, monospace;
+    }
+    #panel button:hover { background: #f1f5f9; }
+    #panel button.active {
+        background: #2563eb;
+        color: #fff;
+        border-color: #2563eb;
+    }
+    #panel .result {
+        margin-top: 10px;
+        padding: 8px;
+        background: #f1f5f9;
+        border-radius: 6px;
+        font: 12px/1.4 ui-monospace, monospace;
+        color: #334155;
+        word-break: break-all;
+    }
+    #panel .result .label {
+        font-size: 10px;
+        text-transform: uppercase;
+        color: #64748b;
+        margin-bottom: 2px;
+    }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+    <h3>layer.setFilter(/* Mapbox array */)</h3>
+    <div id="buttons"></div>
+    <div class="result">
+        <div class="label">Принято</div>
+        <div id="received">null</div>
+        <div class="label" style="margin-top:8px">Скомпилировано в</div>
+        <div id="compiled">—</div>
+    </div>
+</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// ─────────────────────────────────────────────────────────────────
+// Mapbox-фильтры (массивы). setFilter их конвертирует автоматически.
+// ─────────────────────────────────────────────────────────────────
+const FILTERS = [
+    { label: '(нет фильтра)',                                                          value: null },
+    { label: `['==', 'category', 'residential']`,                                       value: ['==', 'category', 'residential'] },
+    { label: `['!=', 'category', 'residential']`,                                       value: ['!=', 'category', 'residential'] },
+    { label: `['in', 'category', 'park', 'industrial']`,                                value: ['in', 'category', 'park', 'industrial'] },
+    { label: `['==', '$type', 'LineString']`,                                           value: ['==', '$type', 'LineString'] },
+    { label: `['==', '$type', 'Polygon']`,                                              value: ['==', '$type', 'Polygon'] },
+    { label: `['==', '$type', 'Point']`,                                                value: ['==', '$type', 'Point'] },
+    { label: `['==', ['geometry-type'], 'Polygon']`,                                    value: ['==', ['geometry-type'], 'Polygon'] },
+    { label: `['==', ['get', 'category'], 'route']`,                                    value: ['==', ['get', 'category'], 'route'] },
+    { label: `['has', 'name']`,                                                         value: ['has', 'name'] },
+    { label: `['!', ['==', 'category', 'residential']]`,                                value: ['!', ['==', 'category', 'residential']] },
+    { label: `['all', ['==', '$type', 'Polygon'], ['!=', 'category', 'residential']]`,  value: ['all', ['==', '$type', 'Polygon'], ['!=', 'category', 'residential']] },
+    { label: `['any', ['==', 'category', 'park'], ['==', 'category', 'warehouse']]`,    value: ['any', ['==', 'category', 'park'], ['==', 'category', 'warehouse']] },
+    { label: `['in', ['get', 'category'], ['literal', ['park', 'route']]]`,             value: ['in', ['get', 'category'], ['literal', ['park', 'route']]] },
+];
+
+// ─────────────────────────────────────────────────────────────────
+// Данные
+// ─────────────────────────────────────────────────────────────────
+const data = {
+    type: 'FeatureCollection',
+    features: [
+        { type: 'Feature', properties: { name: 'Центр', category: 'residential' },
+          geometry: { type: 'Polygon', coordinates: [[
+              [37.55, 55.74], [37.62, 55.74], [37.62, 55.78], [37.55, 55.78], [37.55, 55.74],
+          ]] } },
+        { type: 'Feature', properties: { name: 'Завод', category: 'industrial' },
+          geometry: { type: 'Polygon', coordinates: [[
+              [37.63, 55.74], [37.70, 55.74], [37.70, 55.78], [37.63, 55.78], [37.63, 55.74],
+          ]] } },
+        { type: 'Feature', properties: { name: 'Парк', category: 'park' },
+          geometry: { type: 'Polygon', coordinates: [[
+              [37.55, 55.79], [37.62, 55.79], [37.62, 55.83], [37.55, 55.83], [37.55, 55.79],
+          ]] } },
+        { type: 'Feature', properties: { name: 'Жилмассив', category: 'residential' },
+          geometry: { type: 'Polygon', coordinates: [[
+              [37.63, 55.79], [37.70, 55.79], [37.70, 55.83], [37.63, 55.83], [37.63, 55.79],
+          ]] } },
+        { type: 'Feature', properties: { name: 'Маршрут', category: 'route' },
+          geometry: { type: 'LineString', coordinates: [
+              [37.555, 55.755], [37.600, 55.765], [37.640, 55.760],
+              [37.675, 55.775], [37.680, 55.820],
+          ] } },
+        { type: 'Feature', properties: { name: 'Склад', category: 'warehouse' },
+          geometry: { type: 'Point', coordinates: [37.615, 55.762] } },
+    ],
+};
+
+// ─────────────────────────────────────────────────────────────────
+// Карта + слой
+// ─────────────────────────────────────────────────────────────────
+const map = new KRB.Map({
+    target: 'map',
+    crs: 'EPSG:3857',
+    layers: [],
+    view: new KRB.View({
+        centerLonLat: [37.62, 55.785],
+        zoom: 12, minZoom: 0, maxZoom: 18,
+    }),
+});
+
+const layer = new KRB.GeoJSONLayer({
+    data,
+    titleField: 'name',
+    style: {
+        by: 'category',
+        cases: {
+            residential: { fill: '#4a90e2', stroke: '#1c5fad' },
+            industrial:  { fill: '#f5a623', stroke: '#a86a10' },
+            park:        { fill: '#7ed321', stroke: '#3d8b00' },
+            route:       { stroke: '#ff6600' },
+            warehouse:   { fill: '#e74c3c', stroke: '#922b21' },
+        },
+        default: { fill: '#ccc', stroke: '#666' },
+        line:  { default: { 'stroke-width': 4 } },
+        point: { default: { iconSize: [24, 24], anchor: [0.5, 0.5] } },
+    },
+}).addTo(map);
+
+// ─────────────────────────────────────────────────────────────────
+// Кнопки + отображение
+// ─────────────────────────────────────────────────────────────────
+const buttonsEl = document.getElementById('buttons');
+const receivedEl = document.getElementById('received');
+const compiledEl = document.getElementById('compiled');
+const buttons = [];
+
+function apply(value) {
+    layer.setFilter(value);
+    receivedEl.textContent = value === null ? 'null' : JSON.stringify(value);
+    // Смотрим, во что сконвертировалось (для наглядности).
+    if (Array.isArray(value)) {
+        try {
+            compiledEl.textContent = KRB.GeoJSONLayer.fromMapboxFilter(value);
+        } catch (e) {
+            compiledEl.textContent = '⚠ ' + e.message;
+        }
+    } else {
+        compiledEl.textContent = '—';
+    }
+    buttons.forEach(b => b.classList.toggle('active', b._value === value));
+}
+
+for (const f of FILTERS) {
+    const btn = document.createElement('button');
+    btn.textContent = f.label;
+    btn._value = f.value;
+    btn.addEventListener('click', () => apply(f.value));
+    buttonsEl.appendChild(btn);
+    buttons.push(btn);
+}
+
+apply(null);
+</script>
+</body>
+</html>

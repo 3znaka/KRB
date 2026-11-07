@@ -1,17 +1,6 @@
 // @ts-nocheck
 /**
  * SurfacePolygon — полигон, "натянутый" на рельеф.
- *
- * Создаёт наложение поверх каждого тайла карты, повторяя его геометрию
- * и рисуя полигон в текстуру. Все параметры стиля — мутабельны, как
- * у `Polygon`/`Marker3D`: изменения применяются к уже созданным
- * оверлеям без пересоздания объекта.
- *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
- * altitude, properties/userData, zoomInterpolations и TextManager-контракт
- * берутся из базового класса. `getScreenPosition()` возвращает `null` —
- * у объекта нет единственной точки на экране, поэтому подпись не рисуется.
- *
  * @module SurfacePolygon
  */
 
@@ -79,6 +68,13 @@ export class SurfacePolygon extends SpatialObject {
     private _disposeCallback: ((inst: any) => void) | null = null;
     private _unregisterInteraction: (() => void) | null = null;
 
+    /**
+     * Кэш колец, спроецированных в worldGroup-local XZ
+     * (тот же space, что и `map.project()`). Инвалидируется при
+     * смене колец/CRS/teardown; переживает движение камеры.
+     */
+    private _projectedRingsCache: Array<Array<[number, number]>> | null = null;
+
     constructor(options: SurfacePolygonOptions) {
         super();
 
@@ -116,6 +112,8 @@ export class SurfacePolygon extends SpatialObject {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
+
+        this._projectedRingsCache = null;
 
         // Применяем интерполяции по текущему зуму ДО создания оверлеев,
         // чтобы первый рендер шёл с актуальными значениями.
@@ -168,6 +166,7 @@ export class SurfacePolygon extends SpatialObject {
         }
         this._overlays.clear();
 
+        this._projectedRingsCache = null;
         this._crs = null;
     }
 
@@ -280,6 +279,7 @@ export class SurfacePolygon extends SpatialObject {
             return this;
         }
         this._rings = rings;
+        this._projectedRingsCache = null;
         this._rebuildAllOverlays();
         return this;
     }
@@ -430,6 +430,36 @@ export class SurfacePolygon extends SpatialObject {
         overlayMesh.renderOrder = inst.mesh.renderOrder + 1;
         overlayMesh.userData.surfacePolygon = this;
 
+        // ── Override raycast ───────────────────────────────────────
+        // Геометрия оверлея = геометрия всего тайла. Стандартный
+        // raycast дал бы попадание в любую точку тайла. Отфильтровываем
+        // пересечения, чья XZ-проекция не лежит внутри полигона.
+        const meshRef = overlayMesh;
+        overlayMesh.raycast = (raycaster: any, intersects: any[]) => {
+            if (!meshRef.visible) return;
+            const start = intersects.length;
+            THREE.Mesh.prototype.raycast.call(meshRef, raycaster, intersects);
+            if (intersects.length === start) return;
+
+            const wg = this._map?.worldGroup;
+            if (!wg) { intersects.length = start; return; }
+
+            const rings = this._getProjectedRings();
+            if (!rings.length) { intersects.length = start; return; }
+
+            const invMatrix = new THREE.Matrix4().copy(wg.matrixWorld).invert();
+            const tmpVec = new THREE.Vector3();
+
+            for (let i = intersects.length - 1; i >= start; i--) {
+                const hit = intersects[i];
+                if (!hit?.point) { intersects.splice(i, 1); continue; }
+                tmpVec.copy(hit.point).applyMatrix4(invMatrix);
+                if (!this._pointInProjectedPolygon(tmpVec.x, tmpVec.z, rings)) {
+                    intersects.splice(i, 1);
+                }
+            }
+        };
+
         // Оверлей — ребёнок тайла: наследует видимость и трансформации.
         inst.mesh.add(overlayMesh);
 
@@ -494,6 +524,63 @@ export class SurfacePolygon extends SpatialObject {
         mesh.geometry?.dispose();
         if (mesh.material?.map) mesh.material.map.dispose();
         mesh.material?.dispose();
+    }
+
+    // =================================================================
+    // Point-in-polygon (raycast filter)
+    // =================================================================
+
+    /**
+     * Кольца, спроецированные в worldGroup-local XZ
+     * (`map.project(pt, crs) → [x, z]`). Стабильны при движении камеры,
+     * кэшируются до `setRings` / смены CRS / teardown.
+     */
+    private _getProjectedRings(): Array<Array<[number, number]>> {
+        if (this._projectedRingsCache) return this._projectedRingsCache;
+        const map = this._map;
+        if (!map) return [];
+        this._projectedRingsCache = this._rings.map(ring =>
+            ring.map(pt => {
+                const [x, z] = map.project(pt, this._crs);
+                return [x, z] as [number, number];
+            })
+        );
+        return this._projectedRingsCache;
+    }
+
+    /**
+     * Even-odd point-in-polygon с поддержкой дырок:
+     * точка внутри внешнего кольца и вне всех внутренних.
+     */
+    private _pointInProjectedPolygon(
+        px: number,
+        pz: number,
+        rings: Array<Array<[number, number]>>,
+    ): boolean {
+        if (!rings.length) return false;
+        if (!this._pointInRingXZ(rings[0], px, pz)) return false;
+        for (let r = 1; r < rings.length; r++) {
+            if (this._pointInRingXZ(rings[r], px, pz)) return false;
+        }
+        return true;
+    }
+
+    private _pointInRingXZ(
+        ring: Array<[number, number]>,
+        px: number,
+        pz: number,
+    ): boolean {
+        let inside = false;
+        const n = ring.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = ring[i][0], zi = ring[i][1];
+            const xj = ring[j][0], zj = ring[j][1];
+            if (((zi > pz) !== (zj > pz)) &&
+                (px < (xj - xi) * (pz - zi) / (zj - zi) + xi)) {
+                inside = !inside;
+            }
+        }
+        return inside;
     }
 
     // =================================================================

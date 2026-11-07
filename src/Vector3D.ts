@@ -1075,22 +1075,27 @@ this._userData = options.userData ?? {};
         return ranges;
     }
 
-    private _rebuildOverlay(anim: AnimSlot, map: any, ranges: Array<[number, number]>): void {
-        const positions: number[] = [];
-        for (const [t0, t1] of ranges) {
-            this._emitRangeSegments(t0, t1, positions);
-            if (positions.length / 6 > MAX_DASH_SEGMENTS) break;
-        }
-
-        if (positions.length === 0) {
-            anim.overlay.visible = false;
-            return;
-        }
-
-        anim.overlayGeo.setPositions(positions);
-        anim.overlayGeo.computeBoundingSphere();
-        anim.overlay.visible = true;
+private _rebuildOverlay(anim: AnimSlot, map: any, ranges: Array<[number, number]>): void {
+    const positions: number[] = [];
+    for (const [t0, t1] of ranges) {
+        this._emitRangeSegments(t0, t1, positions);
+        if (positions.length / 6 > MAX_DASH_SEGMENTS) break;
     }
+
+    if (positions.length === 0) {
+        anim.overlay.visible = false;
+        return;
+    }
+
+    const instanceCount = positions.length / 6;
+
+    anim.overlayGeo.setPositions(positions);
+    (anim.overlayGeo as any)._maxInstanceCount = undefined;
+    anim.overlayGeo.instanceCount = instanceCount;
+
+    anim.overlayGeo.computeBoundingSphere();
+    anim.overlay.visible = true;
+}
 
     private _rebuildHeadCones(anim: AnimSlot, map: any, ranges: Array<[number, number]>): void {
         if (!anim.headConeGroup || !anim.headConePool) return;

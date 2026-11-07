@@ -828,7 +828,10 @@ export class Vector3D extends SpatialObject {
             anim.overlay.visible = false;
             return;
         }
+        const instanceCount = positions.length / 6;
         anim.overlayGeo.setPositions(positions);
+        anim.overlayGeo._maxInstanceCount = undefined;
+        anim.overlayGeo.instanceCount = instanceCount;
         anim.overlayGeo.computeBoundingSphere();
         anim.overlay.visible = true;
     }

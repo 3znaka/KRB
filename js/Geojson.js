@@ -10,6 +10,13 @@
  *   - коллбэки `*ToOptions` вызываются РОВНО ОДИН РАЗ на feature/geometry;
  *   - результат коллбэка мержится с дефолтами через spread — пользователь
  *     может передать любое поле соответствующего `*Options`;
+ *   - коллбэк может возвращать как канонические ключи (`fillColor`,
+ *     `strokeWidth`, `color`, …), так и CSS-подобные алиасы (`fill`,
+ *     `stroke`, `stroke-width`, `icon`, `model`, …) — алиасы нормализуются
+ *     в канонические до слияния с дефолтами;
+ *   - декларативный `style` (см. {@link StyleConfig}) позволяет описать
+ *     тематическую карту без коллбэков: `by: 'category'`, `cases: {...}`,
+ *     `default: {...}`, плюс per-type override (`style.polygon`, `style.line`, …);
  *   - `[lon, lat, alt]` для Point нормализуется до `[lon, lat]` + `altitude`;
  *   - дефолты `altitudeMode` для линий/полигонов — `'absolute'`, а не `'ground'`
  *     (последнее для `Polyline`/`Polygon` невалидно).
@@ -23,22 +30,99 @@ import { Area3D, } from './Area3D.js';
 import { Polyline, } from './Polyline.js';
 import { Polygon, } from './Polygon.js';
 import { Vector3D, } from './Vector3D.js';
+const POINT_ALIASES = {
+    'icon': 'iconUrl',
+};
+const MARKER3D_ALIASES = {
+    'model': 'modelUrl',
+};
+const LINE_ALIASES = {
+    'stroke': 'color',
+    'stroke-color': 'color',
+    'stroke-width': 'width',
+    'stroke-opacity': 'opacity',
+};
+const POLYGON_ALIASES = {
+    'fill': 'fillColor',
+    'fill-color': 'fillColor',
+    'fill-opacity': 'fillOpacity',
+    'stroke': 'strokeColor',
+    'stroke-color': 'strokeColor',
+    'stroke-width': 'strokeWidth',
+    'stroke-opacity': 'strokeOpacity',
+};
+const AREA3D_ALIASES = {
+    'model': 'modelUrl',
+};
+const VECTOR_ALIASES = {
+    'stroke': 'color',
+    'stroke-color': 'color',
+    'stroke-width': 'width',
+    'stroke-opacity': 'opacity',
+};
+/**
+ * Канонические ключи `*Options`, значения которых должны быть числами.
+ * Если пользователь передал строку через alias — прогоняем через `_asNumber`.
+ */
+const NUMERIC_OPTION_KEYS = new Set([
+    'fillOpacity',
+    'strokeOpacity',
+    'strokeWidth',
+    'width',
+    'opacity',
+    'arrowSize',
+]);
 // =====================================================================
 // GeoJSONLayer
 // =====================================================================
 /**
  * Слой, создающий маркеры, линии, полигоны и векторные объекты из GeoJSON.
  *
- * @example
+ * Стилизация поддерживает два подхода, которые можно комбинировать:
+ *
+ *   1. **Декларативный `style`** — тематическая карта без коллбэков:
+ *      классификация по одному полю (`style.by`), fallback (`style.default`),
+ *      per-type override (`style.polygon`, `style.line`, …).
+ *   2. **Коллбэки `*ToOptions`** — escape hatch для нетривиальной логики.
+ *      Мержатся поверх `style`; `style` — поверх дефолтов.
+ *
+ * И ключи `style`, и результаты коллбэков принимают как канонические
+ * имена `*Options` (`fillColor`, `strokeWidth`, `iconUrl`, `modelUrl`, …),
+ * так и CSS-подобные алиасы (`fill`, `stroke`, `stroke-width`, `icon`,
+ * `model`, …). Канонический ключ приоритетнее alias.
+ *
+ * Порядок merge для каждого объекта:
+ *   `defaults → style → callback → enforced (rings/positions/position)`.
+ *
+ * @example Декларативный style: тематическая карта по одному полю
  * const layer = new GeoJSONLayer({
- *     url: 'data.geojson',
- *     crs: 'EPSG:4326',
- *     pointToOptions: (f, p) => ({ title: p.name, rotation: p.rot }),
- *     polygonToOptions: (f, p) => ({ fillColor: p.fill }),
- *     onEachFeature: (f, obj) => console.log(f, obj),
+ *     data,
+ *     titleField: 'name',
+ *     style: {
+ *         by: 'category',
+ *         cases: {
+ *             residential: { fill: '#4a90e2', stroke: '#1c5fad' },
+ *             industrial:  { fill: '#f5a623', stroke: '#a86a10' },
+ *             park:        { fill: '#7ed321', stroke: '#3d8b00' },
+ *         },
+ *         default: { fill: '#cccccc', stroke: '#666666' },
+ *         line:  { default: { stroke: '#ff6600', 'stroke-width': 4 } },
+ *         point: { default: { icon: 'pin.png', iconSize: [32, 32] } },
+ *     },
+ * }).addTo(map);
+ *
+ * @example Callback как escape hatch (мержится поверх style)
+ * new GeoJSONLayer({
+ *     data,
+ *     style: { by: 'category', cases: { park: { fill: '#7ed321' } } },
+ *     polygonToOptions: (f, p) => p.highlight ? { strokeWidth: 4 } : null,
  * });
- * layer.addTo(map);
- * layer.reload();
+ *
+ * @example Только коллбэки (старый API, работает как раньше)
+ * new GeoJSONLayer({
+ *     data,
+ *     polygonToOptions: (f, p) => ({ title: p.name, fill: '#ff0000' }),
+ * });
  */
 export class GeoJSONLayer extends Layer {
     // ── Данные ──
@@ -57,6 +141,10 @@ export class GeoJSONLayer extends Layer {
      */
     featureFilter = null;
     onEachFeature = null;
+    // ── Декларативный стиль ──
+    style = null;
+    titleField = null;
+    tooltipField = null;
     // ── Коллбэки ──
     pointToOptions = null;
     point3DToOptions = null;
@@ -118,6 +206,9 @@ export class GeoJSONLayer extends Layer {
         this.crs = options.crs ?? null;
         this.featureFilter = options.featureFilter ?? options.filter ?? null;
         this.onEachFeature = options.onEachFeature ?? null;
+        this.style = options.style ?? null;
+        this.titleField = options.titleField ?? null;
+        this.tooltipField = options.tooltipField ?? null;
         this.pointToOptions = options.pointToOptions ?? null;
         this.point3DToOptions = options.point3DToOptions ?? null;
         this.lineToOptions = options.lineToOptions ?? null;
@@ -191,18 +282,73 @@ export class GeoJSONLayer extends Layer {
             this._load();
     }
     /**
- * Меняет feature-фильтр. При активной карте и загруженных данных
- * автоматически вызывает `reload()`, чтобы применить фильтр к уже
- * загруженным feature.
- *
- * @example
- * layer.setFeatureFilter(f => f.properties?.type === 'city');
- * layer.setFeatureFilter(null);   // снять фильтр
- */
+     * Меняет feature-фильтр. При активной карте и загруженных данных
+     * автоматически вызывает `reload()`, чтобы применить фильтр к уже
+     * загруженным feature.
+     *
+     * @example
+     * layer.setFeatureFilter(f => f.properties?.type === 'city');
+     * layer.setFeatureFilter(null);   // снять фильтр
+     */
     setFeatureFilter(predicate) {
         this.featureFilter = predicate;
         if (this._map && this._loaded)
             this.reload();
+        return this;
+    }
+    /**
+     * Меняет декларативную таблицу стилей. При активной карте автоматически
+     * перезагружает объекты, чтобы стили применились к уже созданным фичам.
+     *
+     * @example
+     * layer.setStyle({
+     *     by: 'category',
+     *     cases: { school: { fill: '#ff0000' } },
+     *     default: { fill: '#888888' },
+     * });
+     * layer.setStyle(null);   // снять декларативный стиль
+     */
+    setStyle(style) {
+        this.style = style;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    /**
+     * Заменяет данные слоя. При активной карте автоматически перезагружает
+     * объекты. Передайте `null`, чтобы очистить слой.
+     *
+     * @example
+     * const layer = new GeoJSONLayer({ url: 'routes.geojson' }).addTo(map);
+     * layer.setData(newRoute);          // заменил маршрут
+     * layer.setData(null);              // очистил
+     */
+    setData(data) {
+        this.data = data;
+        if (this._map) {
+            this.reload();
+        }
+        else {
+            this._loaded = false;
+        }
+        return this;
+    }
+    setUrl(url) {
+        this.url = url;
+        if (this._map) {
+            this.reload();
+        }
+        else {
+            this._loaded = false;
+        }
+        return this;
+    }
+    /**
+     * Добавляет новые GeoJSON-объекты к уже загруженным, не удаляя существующие.
+     * Полезно для инкрементального обновления (трек, лог событий и т.п.).
+     */
+    addData(data) {
+        this._parse(data);
         return this;
     }
     async _load() {
@@ -227,6 +373,89 @@ export class GeoJSONLayer extends Layer {
         catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
         }
+    }
+    // =================================================================
+    // Style resolution
+    // =================================================================
+    /** Заголовок: `props[titleField]` (если задан) иначе `props.title` / `props.name`. */
+    _getTitle(props) {
+        if (this.titleField) {
+            const v = props[this.titleField];
+            if (v != null && v !== '')
+                return String(v);
+        }
+        return props.title || props.name || '';
+    }
+    /** Тултип: `props[tooltipField]` (если задан) иначе `props.tooltip` / `props.description`. */
+    _getTooltip(props) {
+        if (this.tooltipField) {
+            const v = props[this.tooltipField];
+            if (v != null && v !== '')
+                return String(v);
+        }
+        return props.tooltip || props.description || '';
+    }
+    /**
+     * Находит стиль для feature: shared (`style.cases[value]` / `style.default`)
+     * мержится с per-type (`style[type].cases[value]` / `style[type].default`),
+     * per-type перекрывает shared. Возвращает `null`, если стиля нет.
+     */
+    _resolveStyle(props, type) {
+        const style = this.style;
+        if (!style)
+            return null;
+        const by = style.by ?? 'category';
+        const value = props[by];
+        const shared = this._pickStyleLevel(style, value);
+        const perType = this._pickStyleLevel(style[type], value);
+        if (!shared && !perType)
+            return null;
+        if (!shared)
+            return perType;
+        if (!perType)
+            return shared;
+        return { ...shared, ...perType };
+    }
+    _pickStyleLevel(cfg, value) {
+        if (!cfg)
+            return null;
+        if (value != null && cfg.cases) {
+            const c = cfg.cases[value];
+            if (c)
+                return c;
+        }
+        return cfg.default ?? null;
+    }
+    /**
+     * Приводит результат коллбэка или style-правила к каноническим
+     * ключам `*Options`:
+     *   - alias (`fill`, `stroke`, `stroke-width`, `icon`, `model`, …)
+     *     копируется в канонический ключ, если тот не задан явно;
+     *   - alias удаляется из результата, чтобы не улетал в конструктор;
+     *   - числовые канонические ключи (`width`, `opacity`, `fillOpacity`, …)
+     *     прогоняются через `_asNumber` (строки `"2"` → `2`);
+     *   - если alias == null — он не используется (срабатывает дефолт).
+     *
+     * Канонический ключ имеет приоритет над alias.
+     */
+    _normalizeStyle(src, aliases) {
+        if (!src)
+            return null;
+        const out = { ...src };
+        for (const [alias, canonical] of Object.entries(aliases)) {
+            if (out[canonical] === undefined && out[alias] != null) {
+                if (NUMERIC_OPTION_KEYS.has(canonical)) {
+                    const num = this._asNumber(out[alias]);
+                    if (num !== undefined)
+                        out[canonical] = num;
+                }
+                else {
+                    out[canonical] = out[alias];
+                }
+            }
+            delete out[alias];
+        }
+        return out;
     }
     // =================================================================
     // Dispatch
@@ -317,8 +546,8 @@ export class GeoJSONLayer extends Layer {
         const defaults = {
             position: lonLat,
             crs: this.crs ?? undefined,
-            title: props.title || props.name || '',
-            tooltip: props.tooltip || props.description || '',
+            title: this._getTitle(props),
+            tooltip: this._getTooltip(props),
             iconUrl: props.icon || this.defaultIconUrl,
             iconSize: this._parseIconSize(props.iconSize) ?? this.defaultIconSize,
             anchor: this._parsePair(props.anchor) ?? this.defaultAnchor,
@@ -335,7 +564,14 @@ export class GeoJSONLayer extends Layer {
             titleAllowOverflow: props.titleAllowOverflow,
             titlePriority: this._asNumber(props.titlePriority),
         };
-        const merged = { ...defaults, ...(cb ?? {}), position: lonLat };
+        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'point'), POINT_ALIASES);
+        const normCb = this._normalizeStyle(cb, POINT_ALIASES);
+        const merged = {
+            ...defaults,
+            ...(normStyle ?? {}),
+            ...(normCb ?? {}),
+            position: lonLat,
+        };
         const marker = new Marker(merged);
         this.add(marker);
         if (this.onEachFeature)
@@ -345,8 +581,8 @@ export class GeoJSONLayer extends Layer {
         const defaults = {
             position: lonLat,
             crs: this.crs ?? undefined,
-            title: props.title || props.name || '',
-            tooltip: props.tooltip || props.description || '',
+            title: this._getTitle(props),
+            tooltip: this._getTooltip(props),
             primitiveType: props.primitiveType || this.default3DPrimitiveType,
             size: this._parseSizeSpec(props.size) ?? this.default3DSize,
             anchor: this._parseTriple(props.anchor) ?? this.default3DAnchor,
@@ -368,7 +604,14 @@ export class GeoJSONLayer extends Layer {
             depthWrite: props.depthWrite,
             playAnimation: props.playAnimation,
         };
-        const merged = { ...defaults, ...(cb ?? {}), position: lonLat };
+        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
+        const normCb = this._normalizeStyle(cb, MARKER3D_ALIASES);
+        const merged = {
+            ...defaults,
+            ...(normStyle ?? {}),
+            ...(normCb ?? {}),
+            position: lonLat,
+        };
         const marker = new Marker3D(merged);
         this.add(marker);
         if (this.onEachFeature)
@@ -403,8 +646,8 @@ export class GeoJSONLayer extends Layer {
                 depthWrite: props.depthWrite ?? this.defaultLineDepthWrite,
                 minZoom: this._asNumber(props.minZoom) ?? this.defaultLineMinZoom,
                 maxZoom: this._asNumber(props.maxZoom) ?? this.defaultLineMaxZoom,
-                title: props.title || props.name || '',
-                tooltip: props.tooltip || props.description || '',
+                title: this._getTitle(props),
+                tooltip: this._getTooltip(props),
                 titleOffset: this._parsePair(props.titleOffset) ?? undefined,
                 titleAlign: props.titleAlign,
                 titleStyle: props.titleStyle,
@@ -414,7 +657,14 @@ export class GeoJSONLayer extends Layer {
                 titleAllowOverflow: props.titleAllowOverflow,
                 titlePriority: this._asNumber(props.titlePriority),
             };
-            const merged = { ...defaults, ...(cb ?? {}), positions: coords };
+            const normStyle = this._normalizeStyle(this._resolveStyle(props, 'line'), LINE_ALIASES);
+            const normCb = this._normalizeStyle(cb, LINE_ALIASES);
+            const merged = {
+                ...defaults,
+                ...(normStyle ?? {}),
+                ...(normCb ?? {}),
+                positions: coords,
+            };
             const polyline = new Polyline(merged);
             this.add(polyline);
             if (this.onEachFeature)
@@ -468,7 +718,7 @@ export class GeoJSONLayer extends Layer {
             extruded: props.extruded ?? this.defaultPolygonExtruded,
             height: this._asNumber(props.height) ?? this.defaultPolygonHeight,
             minHeight: this._asNumber(props.minHeight) ?? this.defaultPolygonMinHeight,
-            title: props.title || props.name || '',
+            title: this._getTitle(props),
             titleOffset: this._parsePair(props.titleOffset) ?? undefined,
             titleAlign: props.titleAlign,
             titleStyle: props.titleStyle,
@@ -476,9 +726,16 @@ export class GeoJSONLayer extends Layer {
             titleMaxZoom: this._asNumber(props.titleMaxZoom),
             titleAllowOverflow: props.titleAllowOverflow,
             titlePriority: this._asNumber(props.titlePriority),
-            tooltip: props.tooltip || props.description || '',
+            tooltip: this._getTooltip(props),
         };
-        const merged = { ...defaults, ...(cb ?? {}), rings };
+        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
+        const normCb = this._normalizeStyle(cb, POLYGON_ALIASES);
+        const merged = {
+            ...defaults,
+            ...(normStyle ?? {}),
+            ...(normCb ?? {}),
+            rings,
+        };
         const polygon = new Polygon(merged);
         this.add(polygon);
         if (this.onEachFeature)
@@ -501,16 +758,23 @@ export class GeoJSONLayer extends Layer {
             depthWrite: props.depthWrite ?? this.defaultPolygon3DDepthWrite,
             minZoom: this._asNumber(props.minZoom),
             maxZoom: this._asNumber(props.maxZoom),
-            title: props.title || props.name || '',
+            title: this._getTitle(props),
             titlePlacement: props.titlePlacement || 'top',
             titleAlign: props.titleAlign,
             titleOffset: this._parsePair(props.titleOffset) ?? undefined,
             titleStyle: props.titleStyle,
             titleMinZoom: this._asNumber(props.titleMinZoom),
             titleMaxZoom: this._asNumber(props.titleMaxZoom),
-            tooltip: props.tooltip || props.description || '',
+            tooltip: this._getTooltip(props),
         };
-        const merged = { ...defaults, ...(cb ?? {}), rings };
+        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
+        const normCb = this._normalizeStyle(cb, AREA3D_ALIASES);
+        const merged = {
+            ...defaults,
+            ...(normStyle ?? {}),
+            ...(normCb ?? {}),
+            rings,
+        };
         const area = new Area3D(merged);
         this.add(area);
         if (this.onEachFeature)
@@ -540,7 +804,7 @@ export class GeoJSONLayer extends Layer {
             const defaults = {
                 positions,
                 crs: this.crs ?? undefined,
-                title: props.title || props.name || '',
+                title: this._getTitle(props),
                 titleStyle: props.titleStyle,
                 titleOffset: this._parsePair(props.titleOffset) ?? undefined,
                 titleAlign: props.titleAlign,
@@ -548,7 +812,7 @@ export class GeoJSONLayer extends Layer {
                 titleMinZoom: this._asNumber(props.titleMinZoom),
                 titleMaxZoom: this._asNumber(props.titleMaxZoom),
                 titlePlacement: props.titlePlacement || 'start',
-                tooltip: props.tooltip || props.description || '',
+                tooltip: this._getTooltip(props),
                 minZoom: this._asNumber(props.minZoom),
                 maxZoom: this._asNumber(props.maxZoom),
                 color: props.stroke || props.color || '#3388ff',
@@ -556,7 +820,14 @@ export class GeoJSONLayer extends Layer {
                 arrowSize: this._asNumber(props.arrowSize) ?? 10,
                 opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? 1,
             };
-            const merged = { ...defaults, ...(cb ?? {}), positions };
+            const normStyle = this._normalizeStyle(this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
+            const normCb = this._normalizeStyle(cb, VECTOR_ALIASES);
+            const merged = {
+                ...defaults,
+                ...(normStyle ?? {}),
+                ...(normCb ?? {}),
+                positions,
+            };
             const vector = new Vector3D(merged);
             this.add(vector);
             if (this.onEachFeature)

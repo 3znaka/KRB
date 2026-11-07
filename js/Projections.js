@@ -257,6 +257,11 @@ export class Projection {
         this._ellipsoid = parseEllipsoid(def);
         this._halfExtentX = undefined;
         this._halfExtentY = undefined;
+        this._conv = null; // WGS84 <-> this
+        this._convTo = new Map(); // this -> other.code
+        this._fastMerc = this.isMercator && this._ellipsoid.isSphere
+            && !/\+x_0=(?!0\b)|\+y_0=(?!0\b)|\+k=(?!1\b)/.test(def) && this.lon0 === 0;
+        this._a = this._ellipsoid.a;
     }
     get ellipsoid() { return this._ellipsoid; }
     get semiMajor() { return this._ellipsoid.a; }
@@ -349,8 +354,35 @@ export class Projection {
         return [lon, Math.sign(lat) * this.maxLatDeg];
     }
     convertTo(other, coord) { return proj4(this.def, other.def, coord); }
-    fromLonLat(coord) { return proj4(HARDCODED['EPSG:4326'], this.def, coord); }
-    toLonLat(coord) { return proj4(this.def, HARDCODED['EPSG:4326'], coord); }
+    _getConv() {
+        return this._conv ?? (this._conv = proj4(HARDCODED['EPSG:4326'], this.def));
+    }
+    fromLonLat(coord) {
+        if (this._fastMerc) {
+            const a = this._a, D = Math.PI / 180;
+            return [a * coord[0] * D, a * Math.log(Math.tan(Math.PI / 4 + coord[1] * D / 2))];
+        }
+        return this._getConv().forward(coord);
+    }
+    toLonLat(coord) {
+        if (this._fastMerc) {
+            const a = this._a, R = 180 / Math.PI;
+            return [coord[0] / a * R, (2 * Math.atan(Math.exp(coord[1] / a)) - Math.PI / 2) * R];
+        }
+        return this._getConv().inverse(coord);
+    }
+    convertTo(other, coord) {
+        if (!other)
+            return coord;
+        if (other.def == null)
+            return other.fromLonLat(this.toLonLat(coord));
+        let c = this._convTo.get(other.code);
+        if (!c) {
+            c = proj4(this.def, other.def);
+            this._convTo.set(other.code, c);
+        }
+        return c.forward(coord);
+    }
     fromLonLatSafe(coord) {
         if (!this.isValidLonLat(coord))
             return null;
@@ -553,6 +585,16 @@ class ProjectionRegistry {
         if (codeOrProj && codeOrProj.formula)
             return this._getOrCreateFormulaRaw(codeOrProj);
         return codeOrProj;
+    }
+    /** URL файла customCRS/<code>.js, если он существует по соглашению об именах. */
+    getCustomCrsUrl(code) {
+        const fileName = code.replace(':', '_') + '.js';
+        try {
+            return new URL(`./customCRS/${fileName}`, import.meta.url).href;
+        }
+        catch {
+            return null;
+        }
     }
     /** @private обёртка raw → world. */
     _wrapWorld(raw) {

@@ -2,18 +2,27 @@
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
-import { fromUrl, fromArrayBuffer, Pool } from './js_TP/geotiff.bundle.js';
+import { fromArrayBuffer, Pool } from './js_TP/geotiff.bundle.js';
 import { resolveColorRamp, sampleColorRamp, parseColorToRGBA } from './ColorRamps.js';
 /** @private */ const GEOTIFF_RENDER_ORDER = 995;
 /** @private */ const DEFAULT_WORKER_URL = new URL('./js_TP/geotiff.worker.js', import.meta.url).href;
 /** @private */ const DEFAULT_HEIGHT_SCALE = 1.0;
 /** @private */ const DEFAULT_POLYGON_OFFSET = -4;
+/** @private */ const TILE_TEXTURE_CACHE_MAX = 200;
 /**
- * Слой GeoTIFF-растра. Наследует SpatialObject (zoom bounds, видимость,
- * tooltip/onClick/onHover, подпись, altitude, zoomInterpolate, properties).
+ * Слой GeoTIFF-растра.
  *
- * @example
- * new GeoTiffLayer({ source: 'dem.tif', colorRamp: 'terrain', opacity: 0.8 }).addTo(map);
+ * В режиме `asElevation: true` и `mergeIntoTiles: true` (по умолчанию)
+ * собственный меш **не строится**: растр инжектится как overlay-текстура
+ * в материал тайлов (см. `TileManager.loadTile` → `setMeshOverlay`).
+ * Это устраняет z-fighting с поверхностью тайлов, т.к. поверхность одна.
+ *
+ * Прозрачность и noData пробрасываются через альфу overlay-текстуры
+ * (`mix(tileColor, rampColor, ramp.a * opacity)`), так что тайлы под
+ * полупрозрачным GeoTIFF остаются видны.
+ *
+ * Если `mergeIntoTiles: false` (или `asElevation` выключен) — работает
+ * классический режим с отдельным мешем (как раньше).
  */
 export class GeoTiffLayer extends SpatialObject {
     constructor(options = {}) {
@@ -69,6 +78,8 @@ export class GeoTiffLayer extends SpatialObject {
         // Elevation
         this._asElevation = options.asElevation === true;
         this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
+        // Merge-into-tiles: применяется только если слой реально elevation.
+        this._mergeIntoTiles = options.mergeIntoTiles !== false;
         if (this._asElevation)
             this._keepRawData = true;
         else if (options.keepRawData === true)
@@ -107,6 +118,9 @@ export class GeoTiffLayer extends SpatialObject {
         this._loadPromise = null;
         this._isHovered = false;
         this._unregisterInteraction = null;
+        // Merge-mode state
+        this._tileTextureCache = new Map(); // key "z,vx,y,size" -> THREE.Texture | null
+        this._mergedIntoMap = false; // добавили ли мы свой overlay в тайлы
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (options.zoomInterpolate)
@@ -130,6 +144,8 @@ export class GeoTiffLayer extends SpatialObject {
             return null;
         return { min: this._effectiveMin, max: this._effectiveMax };
     }
+    /** true, если слой сейчас «слит» в тайлы (без собственного меша). */
+    isMergedIntoTiles() { return this._mergedIntoMap; }
     /* ==== Style ==== */
     setOpacity(v) {
         this._opacity = Math.max(0, Math.min(1, v));
@@ -138,6 +154,8 @@ export class GeoTiffLayer extends SpatialObject {
             this._material.transparent = this._opacity < 1;
             this._material.needsUpdate = true;
         }
+        if (this._mergedIntoMap)
+            this._syncOverlayOpacity();
         return this;
     }
     getOpacity() { return this._opacity; }
@@ -167,7 +185,7 @@ export class GeoTiffLayer extends SpatialObject {
     getAlwaysOnTop() { return this._alwaysOnTop; }
     setPolygonOffset(v) {
         if (!Number.isFinite(v))
-            return this;
+            return;
         this._polygonOffset = v;
         if (this._material) {
             this._material.polygonOffsetFactor = v;
@@ -180,13 +198,17 @@ export class GeoTiffLayer extends SpatialObject {
         if (!Number.isFinite(v) || this._elevationHeightScale === v)
             return this;
         this._elevationHeightScale = v;
-        if (this._loaded && this._mesh)
+        if (this._loaded && this._mesh) {
             this._buildMesh();
+        }
+        else if (this._mergedIntoMap) {
+            // высоты в тайлах уже посчитаны — пересобираем их
+            this._refreshTerrainTiles();
+        }
         return this;
     }
     getHeightScale() { return this._elevationHeightScale; }
     /* ==== Pixel values ==== */
-    /** Значение пикселя по пиксельным координатам. Требует keepRawData: true. */
     getValueAtPixel(px, py, opts = {}) {
         if (!this._rawData)
             return null;
@@ -203,7 +225,6 @@ export class GeoTiffLayer extends SpatialObject {
             return null;
         return Number.isFinite(v) ? v : null;
     }
-    /** Значение растра по lon/lat (сырое, без heightScale). */
     getValueAtLonLat(lon, lat) {
         if (!this._rawData)
             return null;
@@ -214,14 +235,17 @@ export class GeoTiffLayer extends SpatialObject {
             return null;
         return v;
     }
-    /** Значение растра по world-координатам карты. */
     getValueAtWorld(worldX, worldZ, map) {
         const lonLat = map.unprojectToLonLat(worldX, worldZ);
         if (!lonLat)
             return null;
         return this.getValueAtLonLat(lonLat[0], lonLat[1]);
     }
-    /** Pick по событию → { value, lonLat, pixel, point } или null. */
+    /**
+     * Pick по событию. В merge-режиме собственного меша нет — возвращает
+     * null. Для получения значения в этом режиме используйте
+     * `map.on('click', e => layer.getValueAtWorld(e.worldX, e.worldZ, map))`.
+     */
     pick(event) {
         if (!this._mesh || !this._map)
             return null;
@@ -274,8 +298,13 @@ export class GeoTiffLayer extends SpatialObject {
             }
             catch { /* handled */ }
         }
+        if (this._mergedIntoMap) {
+            this._clearTileTextureCache();
+            this._refreshTerrainTiles();
+            return this;
+        }
         if (!this._image || !this._isRampImage(this._image))
-            return;
+            return this;
         try {
             const { texture } = await this._readAsRampTexture(this._image, this._image.getWidth(), this._image.getHeight());
             if (this._texture)
@@ -290,6 +319,7 @@ export class GeoTiffLayer extends SpatialObject {
             console.error('GeoTiffLayer.setColorRamp: rebuild failed. Use keepRawData: true.', err);
             throw err;
         }
+        return this;
     }
     /* ==== Elevation provider ==== */
     isElevationProvider() {
@@ -340,6 +370,131 @@ export class GeoTiffLayer extends SpatialObject {
     }
     get elevationMinZoom() { return 0; }
     get elevationMaxZoom() { return Infinity; }
+    /* ==== Merge-into-tiles: per-tile overlay texture ==== */
+    /**
+     * Возвращает RGBA-текстуру рампы GeoTIFF для тайла `{z}/{virtX}/{y}`.
+     * Кэшируется (LRU); null — тайл полностью вне растра / нет данных.
+     *
+     * Вызывается TileManager'ом на этапе загрузки тайла. Синхронно
+     * (bottleneck при быстром скроллинге; при необходимости вынести
+     * генерацию в worker).
+     */
+    getTileTexture(z, virtX, y, size = 256) {
+        if (!this.isElevationProvider())
+            return null;
+        if (this._effectiveMin === null || this._effectiveMax === null)
+            return null;
+        if (typeof document === 'undefined')
+            return null;
+        const key = `${z},${virtX},${y},${size}`;
+        if (this._tileTextureCache.has(key)) {
+            // touch для LRU
+            const tex = this._tileTextureCache.get(key);
+            this._tileTextureCache.delete(key);
+            this._tileTextureCache.set(key, tex);
+            return tex;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(size, size);
+        const ramp = this._getColorRamp();
+        const minV = this._effectiveMin, maxV = this._effectiveMax;
+        const range = maxV - minV;
+        const nd = this._effectiveNoData;
+        const ndColor = this._parseNoDataColor(this._noDataColor);
+        const crs = this._crs;
+        const [ox, oy] = this._geoOrigin;
+        const [rx, ry] = this._geoResolution;
+        const W = this._rawWidth, H = this._rawHeight;
+        const n = 1 << z;
+        const denom = size - 1;
+        let hasPixels = false;
+        for (let py = 0; py < size; py++) {
+            // py = 0 → север (стандартная XYZ-конвенция). При использовании
+            // CanvasTexture (flipY=true) это совпадает с UV-конвенцией
+            // тайлового меша (UV(0,0) = юг).
+            const mercY = 1 - 2 * (y + py / denom) / n;
+            const lat = Math.atan(Math.sinh(Math.PI * mercY)) * 180 / Math.PI;
+            for (let px = 0; px < size; px++) {
+                const lon = ((virtX + px / denom) / n) * 360 - 180;
+                let xy;
+                if (crs.code === 'EPSG:4326' || crs.code === 'CRS:84')
+                    xy = [lon, lat];
+                else if (typeof crs.fromLonLatSafe === 'function')
+                    xy = crs.fromLonLatSafe([lon, lat]);
+                else {
+                    try {
+                        xy = crs.fromLonLat([lon, lat]);
+                    }
+                    catch {
+                        xy = null;
+                    }
+                }
+                const j = (py * size + px) * 4;
+                if (!xy || !Number.isFinite(xy[0]) || !Number.isFinite(xy[1]))
+                    continue;
+                const gpx = (xy[0] - ox) / rx;
+                const gpy = (xy[1] - oy) / ry;
+                if (gpx < 0 || gpy < 0 || gpx > W - 1 || gpy > H - 1)
+                    continue;
+                const val = this._bilinearSample(gpx, gpy);
+                if (val === null || !Number.isFinite(val) || (nd !== null && val === nd)) {
+                    if (ndColor) {
+                        imgData.data[j] = ndColor[0];
+                        imgData.data[j + 1] = ndColor[1];
+                        imgData.data[j + 2] = ndColor[2];
+                        imgData.data[j + 3] = ndColor[3];
+                        hasPixels = true;
+                    }
+                    continue;
+                }
+                let t = (val - minV) / range;
+                if (t < 0)
+                    t = 0;
+                else if (t > 1)
+                    t = 1;
+                const c = sampleColorRamp(ramp, t);
+                imgData.data[j] = c[0];
+                imgData.data[j + 1] = c[1];
+                imgData.data[j + 2] = c[2];
+                imgData.data[j + 3] = c[3];
+                hasPixels = true;
+            }
+        }
+        if (!hasPixels) {
+            this._tileTextureCache.set(key, null);
+            this._evictTileTextureCache();
+            return null;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.flipY = true;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        this._tileTextureCache.set(key, tex);
+        this._evictTileTextureCache();
+        return tex;
+    }
+    _evictTileTextureCache() {
+        while (this._tileTextureCache.size > TILE_TEXTURE_CACHE_MAX) {
+            const oldest = this._tileTextureCache.keys().next().value;
+            const t = this._tileTextureCache.get(oldest);
+            if (t)
+                t.dispose();
+            this._tileTextureCache.delete(oldest);
+        }
+    }
+    _clearTileTextureCache() {
+        for (const t of this._tileTextureCache.values()) {
+            if (t)
+                t.dispose();
+        }
+        this._tileTextureCache.clear();
+    }
     /* ==== SpatialObject hooks ==== */
     _onAttached(map) { }
     _teardown() {
@@ -350,11 +505,13 @@ export class GeoTiffLayer extends SpatialObject {
             catch { /* swallow */ }
             this._unregisterInteraction = null;
         }
+        this._mergedIntoMap = false;
         if (this._map?.elevationProvider === this)
             this._map.setElevationProvider(null);
         if (this._group.parent)
             this._group.parent.remove(this._group);
         this._disposeGpu();
+        this._clearTileTextureCache();
         if (this._ownsPool && this._pool) {
             try {
                 this._pool.destroy();
@@ -401,9 +558,24 @@ export class GeoTiffLayer extends SpatialObject {
     }
     _onTooltipChanged() { this._registerInteraction(); }
     _update(map) {
-        if (!this._loaded || !this._group)
+        if (!this._loaded)
             return;
         this._applyZoomInterpolations(map.continuousZoom);
+        if (this._mergedIntoMap) {
+            // Меша нет — рендерит тайловый слой. Здесь только:
+            //  1) синхронизируем opacity (может поменяться интерполяцией);
+            //  2) обновляем видимость для подписи.
+            this._syncOverlayOpacity();
+            if (!this._isWithinView()) {
+                this._isVisible = false;
+            }
+            else {
+                this._isVisible = true;
+            }
+            return;
+        }
+        if (!this._group)
+            return;
         if (!this._isWithinView()) {
             this._applyHidden();
             this._isVisible = false;
@@ -427,6 +599,29 @@ export class GeoTiffLayer extends SpatialObject {
         this._isVisible = true;
     }
     getLabelType() { return 'geotiff'; }
+    /* ==== Merge-mode helpers ==== */
+    _syncOverlayOpacity() {
+        if (!this._map || !this._map._tileManagers)
+            return;
+        const v = this._opacity;
+        for (const mgr of this._map._tileManagers) {
+            if (mgr && typeof mgr.setOverlayOpacity === 'function') {
+                mgr.setOverlayOpacity(v);
+            }
+        }
+    }
+    _refreshTerrainTiles() {
+        if (!this._map || !this._map._tileManagers)
+            return;
+        for (const mgr of this._map._tileManagers) {
+            if (mgr && typeof mgr._disposeAllTiles === 'function') {
+                mgr._disposeAllTiles();
+            }
+        }
+        if (typeof this._map.maybeUpdateVisibleTiles === 'function') {
+            this._map.maybeUpdateVisibleTiles(true);
+        }
+    }
     /* ==== Loading ==== */
     async _load() {
         if (this._loadPromise)
@@ -456,8 +651,23 @@ export class GeoTiffLayer extends SpatialObject {
             if (!this._map)
                 return;
             this._computeWorldCorners(image);
-            this._buildMesh();
-            this._map.worldGroup.add(this._group);
+            this._computeCentroid();
+            // Решение: рисовать отдельный меш или слиться в тайлы?
+            // Решаем ДО setElevationProvider — иначе не сможем откатиться.
+            const canMerge = this._asElevation
+                && this._mergeIntoTiles
+                && this.isElevationProvider();
+            if (canMerge) {
+                // Меш не строим. Позицию группы всё равно ставим — она нужна
+                // для getScreenPosition (подпись).
+                this._group.position.copy(this._centroidWorld);
+                this._mergedIntoMap = true;
+            }
+            else {
+                this._buildMesh();
+                this._map.worldGroup.add(this._group);
+                this._mergedIntoMap = false;
+            }
             if (this._title && this._map.textManager) {
                 this._textLabel = this._map.textManager.addLabel(this);
             }
@@ -523,7 +733,34 @@ export class GeoTiffLayer extends SpatialObject {
     async _openTiff() {
         const src = this._source;
         if (typeof src === 'string' || src instanceof URL) {
-            return await fromUrl(src.toString(), { pool: this._pool || undefined });
+            const url = src.toString();
+            const resp = await fetch(url, { mode: 'cors' });
+            if (!resp.ok) {
+                throw new Error(`GeoTIFF fetch failed: ${resp.status} ${resp.statusText}`);
+            }
+            const buf = await resp.arrayBuffer();
+            // Санити-чек: magic bytes TIFF
+            if (buf.byteLength < 8) {
+                throw new Error(`GeoTIFF: file too small (${buf.byteLength} bytes)`);
+            }
+            const view = new DataView(buf);
+            const b0 = view.getUint8(0);
+            const b1 = view.getUint8(1);
+            const isLE = b0 === 0x49 && b1 === 0x49; // 'II'
+            const isBE = b0 === 0x4D && b1 === 0x4D; // 'MM'
+            if (!isLE && !isBE) {
+                throw new Error(`GeoTIFF: invalid magic bytes 0x${b0.toString(16)} 0x${b1.toString(16)} — ` +
+                    `file is not a TIFF (or download was corrupted)`);
+            }
+            const version = isLE ? view.getUint16(2, true) : view.getUint16(2, false);
+            if (version !== 42 && version !== 43) {
+                throw new Error(`GeoTIFF: unexpected TIFF version ${version} (expected 42 or 43)`);
+            }
+            if (version === 43) {
+                console.warn('GeoTIFF: BigTIFF (version 43) detected — ' +
+                    'поддержка зависит от сборки geotiff.js, могут быть ошибки');
+            }
+            return await fromArrayBuffer(buf, { pool: this._pool || undefined });
         }
         if (src instanceof ArrayBuffer)
             return await fromArrayBuffer(src);
@@ -824,6 +1061,18 @@ export class GeoTiffLayer extends SpatialObject {
             return new THREE.Vector3(wx, y, wz);
         });
     }
+    _computeCentroid() {
+        const positions = this._worldPositions;
+        if (positions.length < 4) {
+            this._centroidWorld.set(0, 0, 0);
+            return;
+        }
+        this._centroidWorld.set(0, 0, 0);
+        for (const p of positions)
+            this._centroidWorld.add(p);
+        this._centroidWorld.multiplyScalar(1 / positions.length);
+        this._centroidWorld.y = this._altitude;
+    }
     _autoMeshSegments() {
         const maxDim = Math.max(this._imageWidth || 512, this._imageHeight || 512);
         return Math.min(256, Math.max(64, Math.ceil(maxDim / 8)));
@@ -913,6 +1162,10 @@ export class GeoTiffLayer extends SpatialObject {
             catch { /* swallow */ }
             this._unregisterInteraction = null;
         }
+        // В merge-режиме собственного меша нет — интерактив через overlay
+        // не поддержан. Пользуйтесь getValueAtWorld.
+        if (this._mergedIntoMap)
+            return;
         const hasHandlers = this._onClick || this._onHover || this._tooltipText;
         if (!hasHandlers || !this._map?.interaction || !this._mesh)
             return;
@@ -972,10 +1225,10 @@ export class GeoTiffLayer extends SpatialObject {
     }
     /* ==== TextManager override ==== */
     getScreenPosition() {
-        if (!this._isVisible || !this._group || !this._map)
+        if (!this._isVisible || !this._map)
             return null;
         const worldPos = this._tempVec3
-            .copy(this._group.position)
+            .copy(this._centroidWorld)
             .add(this._map.worldGroup.position);
         const screenPos = worldPos.clone().project(this._map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1)

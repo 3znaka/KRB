@@ -21,6 +21,9 @@ export const CoreElevationMixin = {
         for (const mgr of this._tileManagers)
             mgr.setElevationProvider(provider);
         this._surfaceMaxHeightCache?.clear();
+        if (this.renderer && !this.renderer.autoClear) {
+            this.renderer.clear();
+        }
     },
     enableGeotiffElevation(layer) {
         if (!layer)

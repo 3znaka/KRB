@@ -4,36 +4,16 @@ import { DEFAULTS } from './Defaults.js';
 import { getVirtKey, getOriginZ } from './TileKey.js';
 import { Projections } from './Projections.js';
 
-
-/** Максимальное количество кэшируемых тайлов на один слой. @private */
 const MAX_CACHED_TILES = 350;
-
-/** Количество уровней предков для фолбэка при приближении. @private */
 const ANCESTOR_FALLBACK = 4;
-
-/** Максимальная глубина поиска потомков при отдалении. @private */
 const MAX_COVER_DEPTH = 2;
-
-/** Сегментов по стороне деформированного тайла без рельефа. @private */
 const DEFORM_SEGMENTS_FLAT = 8;
-
-/** Освещение тайлов по умолчанию. @private */
 const TILE_DEFAULT_ROUGHNESS = 0.7;
 const TILE_DEFAULT_METALNESS = 0.0;
-const TILE_DEFAULT_EMISSIVE  = 0.5;
+const TILE_DEFAULT_EMISSIVE = 0.5;
+const BUILD_BUDGET_MS = 4;
 
-/**
- * Растровый тайловый слой.
- *
- * Зумы:
- *  - видимость слоя — `minZoom` / `maxZoom`;
- *  - растровые данные — `minNativeZoom` / `maxNativeZoom` (overzoom выше);
- *  - DEM-данные — `minElevationNativeZoom` / `maxElevationNativeZoom`
- *    (overzoom выше `maxElevationNativeZoom`).
- *
- * CRS сетки `{z}/{x}/{y}` — `crs`. Линейный режим, если совпадает с CRS
- * карты и обе в Mercator-семействе, иначе deformed через lon/lat.
- */
+/** Растровый тайловый слой (z/x/y сетка `crs`). */
 export class Tile {
     constructor(options) {
         this.texture = options.texture;
@@ -44,13 +24,11 @@ export class Tile {
         this.heightScale = options.heightScale;
         this.zoomOffset = options.zoomOffset ?? 0;
 
-        // Видимость слоя
         this.visible = options.visible ?? true;
         this.opacity = options.opacity ?? 1;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
 
-        // Зум растровых данных
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn('Tile: maxSourceZoom устарела, используйте maxNativeZoom.');
         }
@@ -60,7 +38,6 @@ export class Tile {
         this.minNativeZoom = options.minNativeZoom ?? options.minSourceZoom ?? 0;
         this.maxNativeZoom = options.maxNativeZoom ?? options.maxSourceZoom ?? 22;
 
-        // Зум DEM-данных
         if (options.maxReliefZ !== undefined &&
             options.maxElevationZoom === undefined &&
             options.maxElevationNativeZoom === undefined) {
@@ -88,88 +65,33 @@ export class Tile {
             ?? options.maxReliefZ
             ?? DEFAULTS.MAX_RELIEF_Z;
 
-        // Deprecated-алиасы без warning'ов.
         Object.defineProperty(this, 'minElevationZoom', {
-            configurable: true,
-            enumerable: false,
+            configurable: true, enumerable: false,
             get: () => this.minElevationNativeZoom,
             set: (v) => { this.minElevationNativeZoom = v; },
         });
         Object.defineProperty(this, 'maxElevationZoom', {
-            configurable: true,
-            enumerable: false,
+            configurable: true, enumerable: false,
             get: () => this.maxElevationNativeZoom,
             set: (v) => { this.maxElevationNativeZoom = v; },
         });
 
-        // CRS
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(
                 `Tile: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`
             );
         }
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
-
-        /**
-         * База для `mesh.renderOrder` (назначает `KrbMap._rebuildLayerStack`).
-         * @type {number}
-         */
         this.baseRenderOrder = 0;
     }
 }
 
-/**
- * Менеджер растровых тайлов одного слоя.
- *
- * ## Источник рельефа
- *
- * Менеджер не хранит собственного «мнения» о наличии рельефа. Источник
- * истины — `KrbMap._elevationProvider` (единственный на карту). Менеджер
- * получает его в конструкторе через `engine.elevationProvider` и
- * обновляет через {@link TileManager#setElevationProvider}.
- *
- * `hasElevation` — геттер: `true`, если задан провайдер карты **или** у
- * самого `layer` есть `elevation` (URL DEM). Никакой ручной синхронизации
- * `this.hasElevation` между картой и менеджером больше нет.
- *
- * ## Порядок отрисовки и depth
- *
- *  - **плоские тайлы** — `depthTest: false`, `depthWrite: false`,
- *    порядок по `renderOrder = baseRenderOrder + z`;
- *  - **тайлы с elevation** — `depthTest: true`, `depthWrite: true`
- *    (реальная 3D-геометрия, без depth-буфера дальняя гора рисовалась
- *    бы поверх ближней).
- *
- * Решение per-layer: наличие elevation у одного слоя не включает depth
- * для плоских слоёв на той же карте.
- *
- * ## DEM-границы и overzoom
- *
- * Границы берутся из приоритета:
- *  1. `elevationProvider.minZoom` / `.maxZoom` (GeoTIFF/Noise — обычно
- *     `[0, Infinity]` — они сэмплируют на любом зуме);
- *  2. `layer.minElevationNativeZoom` / `.maxElevationNativeZoom` (URL DEM);
- *  3. `engine.MIN_RELIEF_Z` / `.MAX_RELIEF_Z` / `DEFAULTS.*`.
- *
- * Выше `maxElevationNativeZoom` — overzoom: `getFallbackElevation`
- * растягивает DEM предка на сетку текущего тайла.
- *
- * ## Сетка тайлов и эллипсоид
- *
- * Для эллипсоидального Mercator (например, EPSG:3395) `halfExtentX ≠
- * halfExtentY`. Поэтому тайлы прямоугольные: `tileSizeX` берётся из
- * `_mapHalfX`, `tileSizeY` — из `_mapHalfY`. Единой `tileSize` больше
- * нет — использовать `tileSizeX` для X и `tileSizeY` для Z.
- */
+/** Менеджер растровых тайлов одного слоя. */
 export class TileManager {
-    /**
-     * @param {Object} engine — KrbMap.
-     * @param {Tile|null} [layer]
-     */
     constructor(engine, layer = null) {
         this.engine = engine;
         this.layer = layer ?? engine._tileLayer ?? engine.layers?.[0] ?? null;
-
+        this._deadKeys = new Set();
         this.tiles = new Map();
         this.textureCache = new Map();
         this._inFlightTextures = new Map();
@@ -177,11 +99,10 @@ export class TileManager {
         this.textureLoader.setCrossOrigin('anonymous');
         this.frame = 0;
 
-        /**
-         * Единственный источник DEM. Задаётся картой; менеджер читает
-         * его через `_elevationProvider` (см. геттер `hasElevation`).
-         * @private @type {Object|null}
-         */
+        this._buildQueue = [];
+        this._buildRaf = 0;
+        this._lastIdealZ = 0;
+
         this._elevationProvider = engine.elevationProvider ?? null;
 
         this.tileLighting = engine.tileLighting === true;
@@ -207,89 +128,85 @@ export class TileManager {
 
         this._lastPrefetchZoom = -1;
 
-        if (this.hasElevation) {
-            this.initWorker();
-        }
+        // Кэши для дорогой deformed-ветки update().
+        this._deformedRangeCache = null;   // { key, xMin, xMax, yMin, yMax }
+        this._edgeTileIdxCache  = null;    // { idealZ, layer, count, idx: Float64Array }
+        this._edgePts = undefined;
+
+        if (this.hasElevation) this.initWorker();
 
         this.onTileHeightAppliedCallbacks = [];
         this.onTileDisposedCallbacks = [];
     }
 
-    /* ================================================================
-       Extent-хелперы (единая точка правды)
-
-       Вся координатная математика тайлов идёт через эти геттеры, чтобы
-       нигде в коде не было «голых» `MAX_MERCATOR` / `WORLD_SIZE`.
-       В норме источник — `engine.mapHalfExtentX/Y` (вычисляются из
-       `projection.halfExtentX/Y`, а те — из PROJ-строки).
-       ================================================================ */
-
-    /** Полу-ширина мира (map-CRS) в world-единицах. */
     get _mapHalfX() {
         const v = this.engine.mapHalfExtentX;
         if (v !== undefined) return v;
-        console.warn('TileManager: engine.mapHalfExtentX отсутствует — используйте правки в Core.ts. Fallback: MAX_MERCATOR.');
+        console.warn('TileManager: engine.mapHalfExtentX отсутствует. Fallback: MAX_MERCATOR.');
         return this.engine.MAX_MERCATOR;
     }
 
-    /** Полу-высота мира (map-CRS) в world-единицах. */
     get _mapHalfY() {
         const v = this.engine.mapHalfExtentY;
         if (v !== undefined) return v;
-        console.warn('TileManager: engine.mapHalfExtentY отсутствует — используйте правки в Core.ts. Fallback: MAX_MERCATOR.');
+        console.warn('TileManager: engine.mapHalfExtentY отсутствует. Fallback: MAX_MERCATOR.');
         return this.engine.MAX_MERCATOR;
     }
 
+    _enqueueBuild(inst, job) {
+        return new Promise((resolve) => {
+            this._buildQueue.push({ inst, job, resolve });
+            if (!this._buildRaf) this._buildRaf = requestAnimationFrame(() => this._pumpBuilds());
+        });
+    }
+
+    _pumpBuilds() {
+        this._buildRaf = 0;
+        const q = this._buildQueue;
+        if (!q.length) return;
+
+        const iz = this._lastIdealZ;
+        q.sort((a, b) =>
+            Math.abs(a.inst.z - iz) - Math.abs(b.inst.z - iz) ||
+            b.inst.lastUsed - a.inst.lastUsed);
+
+        const t0 = performance.now();
+        let done = 0;
+        while (q.length && (done === 0 || performance.now() - t0 < BUILD_BUDGET_MS)) {
+            const { job, resolve } = q.shift();
+            try { resolve(job()); } catch (e) { resolve(null); console.warn(e); }
+            done++;
+        }
+        if (q.length) this._buildRaf = requestAnimationFrame(() => this._pumpBuilds());
+    }
+
     /* ================================================================
-       Рельеф: источник, зум-границы, смена провайдера
+       Источник DEM
        ================================================================ */
 
-    /**
-     * Есть ли у слоя 3D-рельеф: либо провайдер карты, либо `layer.elevation`.
-     * @type {boolean}
-     */
     get hasElevation() {
         return !!this._elevationProvider || !!this.layer?.elevation;
     }
 
-    /**
-     * Устанавливает источник DEM. Единственная точка входа для смены
-     * состояния «есть рельеф / нет рельефа / рельеф из другого источника».
-     *
-     * При любом изменении тайлы пересоздаются (`_disposeAllTiles`):
-     * старые высоты в геометрии уже невалидны.
-     *
-     * @param {Object|null} provider
-     */
     setElevationProvider(provider) {
         if (this._elevationProvider === provider) return;
-
         const had = this.hasElevation;
         this._elevationProvider = provider;
         const has = this.hasElevation;
-
         if (!had && !has) return;
-
         if (has && !this.worker) this.initWorker();
-
         this._disposeAllTiles();
         this.srcKeyToElevUrl.clear();
         this.frame = 0;
     }
 
-    /** @private */
     _disposeAllTiles() {
         const toDispose = Array.from(this.tiles.values());
         for (const inst of toDispose) this.disposeTile(inst);
     }
 
-    get _maxNativeZoom() {
-        return this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
-    }
-
-    get _minNativeZoom() {
-        return this.layer?.minNativeZoom ?? 0;
-    }
+    get _maxNativeZoom() { return this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM; }
+    get _minNativeZoom() { return this.layer?.minNativeZoom ?? 0; }
 
     get _maxElevationNativeZoom() {
         const p = this._elevationProvider;
@@ -305,9 +222,7 @@ export class TileManager {
         return this.engine.MIN_RELIEF_Z ?? DEFAULTS.MIN_RELIEF_Z;
     }
 
-    get _baseRenderOrder() {
-        return this.layer?.baseRenderOrder ?? 0;
-    }
+    get _baseRenderOrder() { return this.layer?.baseRenderOrder ?? 0; }
 
     get _isVisible() {
         const layer = this.layer;
@@ -331,51 +246,103 @@ export class TileManager {
         return typeof code === 'string' ? Projections.get(code) : code;
     }
 
-    key(z, virtX, y) {
-        return getVirtKey(z, virtX, y);
-    }
+    key(z, virtX, y) { return getVirtKey(z, virtX, y); }
 
     /* ================================================================
        Материал тайла
        ================================================================ */
 
-    /**
-     * Создаёт материал тайла. `depthTest`/`depthWrite` по умолчанию равны
-     * `hasElevation` (у слоя с рельефом — `true`, у плоского — `false`).
-     * Явные `opts.depthTest`/`opts.depthWrite` переопределяют.
-     * @private
-     */
     _createTileMaterial(texture, opts = {}) {
         const layerHasElevation = this.hasElevation;
-
         const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : layerHasElevation;
         const depthTest  = opts.depthTest  !== undefined ? opts.depthTest  : layerHasElevation;
-
-        const rawOpacity = this.layer?.opacity;
-        const opacity = Number.isFinite(rawOpacity) ? rawOpacity : 1;
+        const opacity = Number.isFinite(this.layer?.opacity) ? this.layer.opacity : 1;
         const transparent = opacity < 1;
-
         const common = { map: texture, depthWrite, depthTest, opacity, transparent };
 
+        let mat;
         if (!this.tileLighting) {
-            return new THREE.MeshBasicMaterial(common);
+            mat = new THREE.MeshBasicMaterial(common);
+        } else {
+            mat = new THREE.MeshStandardMaterial({
+                ...common,
+                roughness: this.tileRoughness,
+                metalness: this.tileMetalness
+            });
+            if (this.tileEmissive > 0) {
+                mat.emissive = new THREE.Color(0xffffff);
+                mat.emissiveIntensity = this.tileEmissive;
+                if (texture) mat.emissiveMap = texture;
+            }
         }
 
-        const mat = new THREE.MeshStandardMaterial({
-            ...common,
-            roughness: this.tileRoughness,
-            metalness: this.tileMetalness
-        });
+        mat.userData.overlayMap = null;
+        mat.userData.overlayOpacity = 1;
+        mat.userData.hasOverlay = 0;
+        mat.userData._overlayUniforms = null;
 
-        if (this.tileEmissive > 0) {
-            mat.emissive = new THREE.Color(0xffffff);
-            mat.emissiveIntensity = this.tileEmissive;
-            if (texture) mat.emissiveMap = texture;
-        }
+        mat.onBeforeCompile = (shader) => {
+            shader.uniforms.overlayMap     = { value: mat.userData.overlayMap };
+            shader.uniforms.overlayOpacity = { value: mat.userData.overlayOpacity };
+            shader.uniforms.hasOverlay     = { value: mat.userData.hasOverlay };
+
+            shader.vertexShader =
+                'varying vec2 vOverlayUv;\n' +
+                shader.vertexShader.replace(
+                    '#include <begin_vertex>',
+                    `#include <begin_vertex>
+                     vOverlayUv = uv;`
+                );
+
+            shader.fragmentShader =
+                `uniform sampler2D overlayMap;
+                 uniform float overlayOpacity;
+                 uniform float hasOverlay;
+                 varying vec2 vOverlayUv;\n` +
+                shader.fragmentShader.replace(
+                    '#include <map_fragment>',
+                    `#include <map_fragment>
+                     if (hasOverlay > 0.5) {
+                         vec4 ov = texture2D(overlayMap, vOverlayUv);
+                         diffuseColor.rgb = mix(diffuseColor.rgb, ov.rgb, ov.a * overlayOpacity);
+                     }`
+                );
+
+            mat.userData._overlayUniforms = shader.uniforms;
+        };
+
         return mat;
     }
 
-    /** @param {THREE.Mesh} mesh @param {THREE.Texture} texture */
+    setMeshOverlay(mesh, texture, opacity = 1) {
+        if (!mesh || !mesh.material) return;
+        const mat = mesh.material;
+        mat.userData.overlayMap     = texture || null;
+        mat.userData.overlayOpacity = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+        mat.userData.hasOverlay     = texture ? 1 : 0;
+
+        const u = mat.userData._overlayUniforms;
+        if (u) {
+            u.overlayMap.value     = mat.userData.overlayMap;
+            u.overlayOpacity.value = mat.userData.overlayOpacity;
+            u.hasOverlay.value     = mat.userData.hasOverlay;
+        } else {
+            mat.needsUpdate = true;
+        }
+    }
+
+    setOverlayOpacity(opacity) {
+        const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+        for (const inst of this.tiles.values()) {
+            if (!inst.overlayTex || !inst.mesh) continue;
+            const mat = inst.mesh.material;
+            if (!mat) continue;
+            mat.userData.overlayOpacity = v;
+            const u = mat.userData._overlayUniforms;
+            if (u) u.overlayOpacity.value = v;
+        }
+    }
+
     setMeshTexture(mesh, texture) {
         if (!mesh || !mesh.material) return;
         mesh.material.map = texture;
@@ -385,24 +352,17 @@ export class TileManager {
         mesh.material.needsUpdate = true;
     }
 
-    /** @param {boolean} visible */
     setVisible(visible) {
         for (const inst of this.tiles.values()) {
             if (inst.mesh) inst.mesh.visible = !!visible;
         }
     }
 
-    /**
-     * Устанавливает прозрачность слоя (0..1). `depth*` не трогает —
-     * они зависят только от наличия рельефа.
-     * @param {number} opacity
-     */
     setOpacity(opacity) {
         if (!this.layer) return;
         const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
         if (this.layer.opacity === v) return;
         this.layer.opacity = v;
-
         const transparent = v < 1;
         for (const inst of this.tiles.values()) {
             const mat = inst.mesh?.material;
@@ -416,13 +376,9 @@ export class TileManager {
     }
 
     /* ================================================================
-       Основной метод — вызывается из Core.maybeUpdateVisibleTiles
+       Обновление видимых тайлов
        ================================================================ */
 
-    /**
-     * Обновляет видимые тайлы слоя.
-     * @returns {number} идеальный дискретный зум.
-     */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
         if (!this._isVisible) {
             this.setVisible(false);
@@ -434,14 +390,11 @@ export class TileManager {
         const idealZ = (typeof this.engine.getTileZoom === 'function')
             ? this.engine.getTileZoom(this.layer)
             : this.engine.tileZoom;
+        this._lastIdealZ = idealZ;
 
         const layerCrs = this.layer?.crs;
         const isDeformed = this._isDeformed;
 
-        // Камера и `worldGroupPos` живут в map-координатах. Для Mercator-
-        // семейства до фикса эллипсоида `_mapHalfX === _mapHalfY`; теперь
-        // для 3395 они различаются, поэтому tileSizeX / tileSizeY
-        // вычисляем отдельно и используем по осям.
         const halfX = this._mapHalfX;
         const halfY = this._mapHalfY;
         const tileSizeX = (2 * halfX) / Math.pow(2, idealZ);
@@ -459,82 +412,71 @@ export class TileManager {
         let xMin, xMax, yMin, yMax;
 
         if (isDeformed) {
-            let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
-
-            const spanW = maxX - minX;
-            const spanH = maxZ - minZ;
-
-            const G = 16;
-            for (let i = 0; i <= G; i++) {
-                const wx = minX + spanW * (i / G);
-                for (let j = 0; j <= G; j++) {
-                    const wz = minZ + spanH * (j / G);
-                    const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
-                    if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-                    if (tx < minTx) minTx = tx;
-                    if (tx > maxTx) maxTx = tx;
-                    if (ty < minTy) minTy = ty;
-                    if (ty > maxTy) maxTy = ty;
-                }
-            }
-
-            const proj = this.engine.projection;
-            if (proj && typeof proj.fromLonLatSafe === 'function') {
-                const B = 64;
-                for (let k = 0; k <= B; k++) {
-                    const lat = -90 + 180 * (k / B);
-                    for (let e = 0; e < 2; e++) {
-                        const lon = e === 0 ? -180 : 180;
-                        const p = proj.fromLonLatSafe([lon, lat]);
-                        if (!p) continue;
-                        const wx = p[0], wz = -p[1];
-                        if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
-                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
-                        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-                        if (tx < minTx) minTx = tx;
-                        if (tx > maxTx) maxTx = tx;
-                        if (ty < minTy) minTy = ty;
-                        if (ty > maxTy) maxTy = ty;
-                    }
-                }
-                for (let k = 0; k <= B; k++) {
-                    const lon = -180 + 360 * (k / B);
-                    for (let e = 0; e < 2; e++) {
-                        const lat = e === 0 ? -90 : 90;
-                        const p = proj.fromLonLatSafe([lon, lat]);
-                        if (!p) continue;
-                        const wx = p[0], wz = -p[1];
-                        if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
-                        const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
-                        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-                        if (tx < minTx) minTx = tx;
-                        if (tx > maxTx) maxTx = tx;
-                        if (ty < minTy) minTy = ty;
-                        if (ty > maxTy) maxTy = ty;
-                    }
-                }
-            }
-
-            if (Number.isFinite(minTx)) {
-                xMin = Math.max(0, Math.floor(minTx) - 1);
-                xMax = Math.min(maxTile, Math.ceil(maxTx) + 1);
-                yMin = Math.max(0, Math.floor(minTy) - 1);
-                yMax = Math.min(maxTile, Math.ceil(maxTy) + 1);
+            // Быстрый путь: фрустум полностью накрывает bbox мира — все тайлы видны.
+            // Покрывает подавляющее большинство кадров на зумах 0–2, где раньше
+            // считались сотни proj4-конверсий на кадр.
+            if (minX <= -halfX && maxX >= halfX && minZ <= -halfY && maxZ >= halfY) {
+                xMin = 0; xMax = maxTile; yMin = 0; yMax = maxTile;
             } else {
-                // Ни одна сэмплированная точка не дала валидный tile-index.
-                // Если фрустум вообще пересекает мир — отрисовываем весь зум-уровень.
-                if (maxX > -halfX && minX < halfX &&
-                    maxZ > -halfY && minZ < halfY) {
-                    xMin = 0; xMax = maxTile;
-                    yMin = 0; yMax = maxTile;
+                const qx = tileSizeX * 0.25, qy = tileSizeY * 0.25;
+                const ckey = `${idealZ}|${Math.round(minX / qx)}|${Math.round(maxX / qx)}|` +
+                             `${Math.round(minZ / qy)}|${Math.round(maxZ / qy)}`;
+                const cached = this._deformedRangeCache;
+                if (cached && cached.key === ckey) {
+                    ({ xMin, xMax, yMin, yMax } = cached);
                 } else {
-                    xMin = 1; xMax = 0; yMin = 1; yMax = 0;
+                    let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
+                    const spanW = maxX - minX;
+                    const spanH = maxZ - minZ;
+
+                    // Адаптивная сетка: плотность ~= числу видимых тайлов, 4..16.
+                    // На зуме 0–2 spanTiles ≈ 1–4 → G = 4 (25 сэмплов вместо 289).
+                    const spanTiles = Math.max(spanW / tileSizeX, spanH / tileSizeY);
+                    const G = Math.max(4, Math.min(16, Math.ceil(spanTiles)));
+                    for (let i = 0; i <= G; i++) {
+                        const wx = minX + spanW * (i / G);
+                        for (let j = 0; j <= G; j++) {
+                            const wz = minZ + spanH * (j / G);
+                            const [tx, ty] = this.engine.worldToTileIndex(wx, wz, idealZ, layerCrs);
+                            if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+                            if (tx < minTx) minTx = tx;
+                            if (tx > maxTx) maxTx = tx;
+                            if (ty < minTy) minTy = ty;
+                            if (ty > maxTy) maxTy = ty;
+                        }
+                    }
+
+                    // Граничные точки мира: world-CRS и tile-индексы закэшированы
+                    // по (idealZ, layer) — пересчитываются только при смене зума.
+                    const edgePts = this._getWorldEdgePoints();
+                    const edgeIdx = this._getEdgeTileIndices(idealZ, layerCrs, edgePts.length);
+                    for (let i = 0; i < edgePts.length; i += 2) {
+                        const wx = edgePts[i], wz = edgePts[i + 1];
+                        if (wx < minX || wx > maxX || wz < minZ || wz > maxZ) continue;
+                        const tx = edgeIdx[i], ty = edgeIdx[i + 1];
+                        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+                        if (tx < minTx) minTx = tx;
+                        if (tx > maxTx) maxTx = tx;
+                        if (ty < minTy) minTy = ty;
+                        if (ty > maxTy) maxTy = ty;
+                    }
+
+                    if (Number.isFinite(minTx)) {
+                        xMin = Math.max(0, Math.floor(minTx) - 1);
+                        xMax = Math.min(maxTile, Math.ceil(maxTx) + 1);
+                        yMin = Math.max(0, Math.floor(minTy) - 1);
+                        yMax = Math.min(maxTile, Math.ceil(maxTy) + 1);
+                    } else if (maxX > -halfX && minX < halfX && maxZ > -halfY && minZ < halfY) {
+                        xMin = 0; xMax = maxTile;
+                        yMin = 0; yMax = maxTile;
+                    } else {
+                        xMin = 1; xMax = 0; yMin = 1; yMax = 0;
+                    }
+
+                    this._deformedRangeCache = { key: ckey, xMin, xMax, yMin, yMax };
                 }
             }
         } else {
-            // Линейный режим (map-CRS === tile-CRS, обе Mercator).
-            // X-ось — по tileSizeX, Z-ось — по tileSizeY (для эллипсоидального
-            // Mercator они различаются ~1%).
             const off = worldGroupPos;
             xMin = Math.floor((minX - off.x + halfX) / tileSizeX);
             xMax = Math.floor((maxX - off.x + halfX) / tileSizeX);
@@ -589,7 +531,8 @@ export class TileManager {
         return idealZ;
     }
 
-    /** @private */
+    _collectCover = null; // placeholder (см. ниже)
+
     collectCover(z, virtX, y, renderSet, depth = 0) {
         if (z > this._maxNativeZoom) return false;
 
@@ -612,7 +555,6 @@ export class TileManager {
         return full;
     }
 
-    /** @private */
     findReadyAncestor(z, virtX, y) {
         const minZ = Math.max(this.engine.MIN_ZOOM, this._minNativeZoom);
         for (let dz = 1; dz <= ANCESTOR_FALLBACK && z - dz >= minZ; dz++) {
@@ -626,9 +568,17 @@ export class TileManager {
         return null;
     }
 
-    /** @private */
     ensureTile(z, virtX, y) {
         const k = this.key(z, virtX, y);
+        if (this._deadKeys.has(k)) {
+            const inst = {
+                z, virtX, y, mesh: null, geometry: null,
+                ready: true, failed: true, unrenderable: true,
+                loading: false, lastUsed: this.frame,
+            };
+            this.tiles.set(k, inst);
+            return inst;
+        }
         let inst = this.tiles.get(k);
         if (inst) {
             inst.lastUsed = this.frame;
@@ -639,7 +589,8 @@ export class TileManager {
             mesh: null, geometry: null,
             ready: false, failed: false, unrenderable: false,
             loading: true, texUrl: null, lastUsed: this.frame,
-            heightsApplied: false, elevationAppliedLevel: 0, expectsElevation: false
+            heightsApplied: false, elevationAppliedLevel: 0, expectsElevation: false,
+            overlayTex: null,
         };
         this.tiles.set(k, inst);
         this.loadTile(inst);
@@ -650,7 +601,6 @@ export class TileManager {
        Загрузка тайла
        ================================================================ */
 
-    /** @private */
     async loadTile(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         let texUrl = null;
@@ -667,18 +617,28 @@ export class TileManager {
             }
 
             const texture = await this.loadTextureAsync(texUrl);
-            if (this.tiles.get(k) !== inst) {
+            if (this.tiles.get(k) !== inst) { this.releaseTexture(texUrl); return; }
+
+            const build = () => {
+                if (this.tiles.get(k) !== inst) return undefined;
+                const mesh = this.createTileMesh(inst, texture);
+                if (mesh && texture) this.engine.renderer?.initTexture?.(texture);
+                return mesh;
+            };
+            const mesh = this._isDeformed ? await this._enqueueBuild(inst, build) : build();
+
+            if (mesh === undefined || this.tiles.get(k) !== inst) {
+                if (mesh) { mesh.geometry.dispose(); mesh.material.dispose(); }
                 this.releaseTexture(texUrl);
                 return;
             }
-
-            const mesh = this.createTileMesh(inst, texture);
             if (!mesh) {
-                this.releaseTexture(texUrl);
-                inst.loading = false;
-                inst.failed = true;
                 inst.unrenderable = true;
+                inst.failed = true;
+                inst.loading = false;
                 inst.ready = true;
+                this._deadKeys.add(k);
+                this.releaseTexture(texUrl);
                 return;
             }
 
@@ -686,6 +646,17 @@ export class TileManager {
             inst.geometry = mesh.geometry;
             inst.texUrl = texUrl;
             inst.loading = false;
+
+            const provider = this._elevationProvider;
+            if (provider &&
+                typeof provider.getTileTexture === 'function' &&
+                provider.isElevationProvider?.()) {
+                const overlayTex = provider.getTileTexture(inst.z, srcX, inst.y, this.engine.TILE_PIXELS);
+                if (overlayTex) {
+                    this.setMeshOverlay(mesh, overlayTex, provider.getOpacity?.() ?? 1);
+                    inst.overlayTex = overlayTex;
+                }
+            }
 
             this.engine.worldGroup.add(mesh);
 
@@ -711,17 +682,10 @@ export class TileManager {
         }
     }
 
-    /**
-     * Применять ли к тайлу рельеф вообще: `true` для всех тайлов не мельче
-     * `minElevationNativeZoom`. Выше `maxElevationNativeZoom` рельеф придёт
-     * через `getFallbackElevation` (overzoom).
-     * @private
-     */
     shouldApplyElevation(inst) {
         return inst.z >= this._minElevationNativeZoom;
     }
 
-    /** @private */
     createTileMesh(inst, texture) {
         if (this._isDeformed) {
             return this._createDeformedTileMesh(inst, texture);
@@ -734,8 +698,6 @@ export class TileManager {
         const originX = virtX * tileSizeX - this._mapHalfX;
         const originZ = getOriginZ(y, tileSizeY, this._mapHalfY);
 
-        // Кэш flatTileGeometry — квадратный, его нельзя переиспользовать,
-        // если мир не квадратный (эллипсоидальный Mercator, 4326 и т.п.).
         const canReuseFlat = !this.hasElevation
             && this.flatTileGeometry
             && this._mapHalfX === this._mapHalfY;
@@ -758,15 +720,12 @@ export class TileManager {
         return mesh;
     }
 
-    /** @private */
+    /** Плоское деформированное полотно: сетка seg×seg перепроецируется через lon/lat. */
     _createDeformedTileMesh(inst, texture) {
         const { z, virtX, y } = inst;
         const n = 1 << z;
         const mapProj = this.engine.projection;
         const tileCrs = this._layerCrs;
-
-        // ВАЖНО: extent тайловой сетки принадлежит tile-CRS, а не map-проекции.
-        // Обе оси берём из tile-CRS, чтобы поддержать неквадратные CRS.
         const tileHalfX = tileCrs.halfExtentX;
         const tileHalfY = tileCrs.halfExtentY;
 
@@ -776,78 +735,99 @@ export class TileManager {
 
         const geom = new THREE.PlaneGeometry(1, 1, seg, seg);
         geom.rotateX(-Math.PI / 2);
-
         const arr = geom.attributes.position.array;
 
-        let sumX = 0, sumZ = 0;
-        let hasInvalid = false;
-
-        for (let j = 0; j < grid; j++) {
-            const v = j / seg;
-            const tileY = y + v;
-            const tileWorldY = tileHalfY - (tileY / n) * 2 * tileHalfY;
+        // Для сепарабельных CRS lon зависит только от x, lat — только от y.
+        const separable = tileCrs.isMercator || tileCrs.isGeographic;
+        let lons = null, lats = null;
+        if (separable) {
+            lons = new Float64Array(grid);
+            lats = new Float64Array(grid);
             for (let i = 0; i < grid; i++) {
-                const u = i / seg;
-                const tileX = virtX + u;
-                const tileWorldX = (tileX / n) * 2 * tileHalfX - tileHalfX;
-
-                const lonLat = tileCrs.toLonLat([tileWorldX, tileWorldY]);
-                const k = (j * grid + i) * 3;
-                if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
-                    hasInvalid = true;
-                    arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0;
-                    continue;
-                }
-                const proj2 = typeof mapProj.fromLonLatSafe === 'function'
-                    ? mapProj.fromLonLatSafe(lonLat)
-                    : mapProj.fromLonLat(lonLat);
-                if (!proj2) {
-                    hasInvalid = true;
-                    arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0;
-                    continue;
-                }
-                const wx = proj2[0];
-                const wz = -proj2[1];
-                arr[k] = wx;
-                arr[k + 1] = 0;
-                arr[k + 2] = wz;
-                sumX += wx;
-                sumZ += wz;
+                const wx = ((virtX + i / seg) / n) * 2 * tileHalfX - tileHalfX;
+                lons[i] = tileCrs.toLonLat([wx, 0])[0];
+            }
+            for (let j = 0; j < grid; j++) {
+                const wy = tileHalfY - ((y + j / seg) / n) * 2 * tileHalfY;
+                lats[j] = tileCrs.toLonLat([0, wy])[1];
             }
         }
 
-        if (hasInvalid) return null;
+        const safe = typeof mapProj.fromLonLatSafe === 'function';
+        const ll = [0, 0];
 
-        const iNW = 0;
-        const iNE = seg;
-        const iSE = grid * seg + seg;
-        const iSW = grid * seg;
-        const nwX = arr[iNW * 3], nwZ = arr[iNW * 3 + 2];
-        const neX = arr[iNE * 3], neZ = arr[iNE * 3 + 2];
-        const seX = arr[iSE * 3], seZ = arr[iSE * 3 + 2];
-        const swX = arr[iSW * 3], swZ = arr[iSW * 3 + 2];
-        const area = 0.5 * (
-            nwX * neZ - neX * nwZ +
-            neX * seZ - seX * neZ +
-            seX * swZ - swX * seZ +
-            swX * nwZ - nwX * swZ
-        );
-        if (!(area > 0)) return null;
+        const valid = new Uint8Array(count);
+        const maxLat = mapProj.maxLatDeg;
+        let sumX = 0, sumZ = 0, nValid = 0;
 
-        const cx = sumX / count;
-        const cz = sumZ / count;
-        for (let k = 0; k < count; k++) {
-            arr[k * 3]     -= cx;
-            arr[k * 3 + 2] -= cz;
+        for (let j = 0; j < grid; j++) {
+            const tileWorldY = tileHalfY - ((y + j / seg) / n) * 2 * tileHalfY;
+            for (let i = 0; i < grid; i++) {
+                const idx = j * grid + i, k = idx * 3;
+                let lon, lat;
+                if (separable) { lon = lons[i]; lat = lats[j]; }
+                else {
+                    const tileWorldX = ((virtX + i / seg) / n) * 2 * tileHalfX - tileHalfX;
+                    const r = tileCrs.toLonLat([tileWorldX, tileWorldY]);
+                    lon = r?.[0]; lat = r?.[1];
+                }
+                if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+                if (maxLat != null && Math.abs(lat) > maxLat) lat = Math.sign(lat) * maxLat;
+                lon = Math.max(-179.9999, Math.min(179.9999, lon));
+
+                ll[0] = lon; ll[1] = lat;
+                const p = safe ? mapProj.fromLonLatSafe(ll) : mapProj.fromLonLat(ll);
+                if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) continue;
+
+                arr[k] = p[0]; arr[k + 1] = 0; arr[k + 2] = -p[1];
+                valid[idx] = 1; sumX += p[0]; sumZ -= p[1]; nValid++;
+            }
+        }
+        if (nValid < 3) { geom.dispose(); return null; }
+
+        const cx = sumX / nValid, cz = sumZ / nValid;
+        for (let idx = 0; idx < count; idx++) {
+            const k = idx * 3;
+            if (valid[idx]) { arr[k] -= cx; arr[k + 2] -= cz; }
+            else { arr[k] = 0; arr[k + 1] = 0; arr[k + 2] = 0; }
         }
 
+        // Отбрасываем треугольники, пересекающие разрез/полюс (слишком длинные рёбра),
+        // и перевёрнутые (по знаку площади).
+        const maxEdge2 = (0.25 * this.engine.WORLD_SIZE) ** 2;
+        const tris = [], signs = [];
+        let pos = 0, neg = 0;
+        const X = (i) => arr[i * 3], Z = (i) => arr[i * 3 + 2];
+        const d2 = (a, b) => (X(a) - X(b)) ** 2 + (Z(a) - Z(b)) ** 2;
+        const tryTri = (a, b, c) => {
+            if (!valid[a] || !valid[b] || !valid[c]) return;
+            if (d2(a, b) > maxEdge2 || d2(b, c) > maxEdge2 || d2(c, a) > maxEdge2) return;
+            const s = (X(b) - X(a)) * (Z(c) - Z(a)) - (X(c) - X(a)) * (Z(b) - Z(a));
+            if (s === 0) return;
+            tris.push(a, b, c); signs.push(s > 0 ? 1 : -1);
+            s > 0 ? pos++ : neg++;
+        };
+        for (let iy = 0; iy < seg; iy++) {
+            for (let ix = 0; ix < seg; ix++) {
+                const a = ix + grid * iy, b = ix + grid * (iy + 1);
+                const c = ix + 1 + grid * (iy + 1), d = ix + 1 + grid * iy;
+                tryTri(a, b, d); tryTri(b, c, d);
+            }
+        }
+        const keep = pos >= neg ? 1 : -1;
+        const out = [];
+        for (let t = 0; t < signs.length; t++) {
+            if (signs[t] === keep) out.push(tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]);
+        }
+        if (!out.length) { geom.dispose(); return null; }
+
+        const IndexArr = count > 65535 ? Uint32Array : Uint16Array;
+        geom.setIndex(new THREE.BufferAttribute(new IndexArr(out), 1));
         geom.attributes.position.needsUpdate = true;
-        geom.computeVertexNormals();
+        if (this.hasElevation || this.tileLighting) geom.computeVertexNormals();
         geom.computeBoundingSphere();
 
-        const mat = this._createTileMaterial(texture);
-
-        const mesh = new THREE.Mesh(geom, mat);
+        const mesh = new THREE.Mesh(geom, this._createTileMaterial(texture));
         mesh.position.set(cx, 0, cz);
         mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
@@ -855,7 +835,6 @@ export class TileManager {
         return mesh;
     }
 
-    /** @private */
     createStaticTileMesh(tileSize, originX, originZ, texture) {
         const geom = new THREE.PlaneGeometry(tileSize, tileSize, 1, 1);
         geom.rotateX(-Math.PI / 2);
@@ -869,9 +848,10 @@ export class TileManager {
         return mesh;
     }
 
-    /* ---- текстуры ---- */
+    /* ================================================================
+       Текстуры
+       ================================================================ */
 
-    /** @param {string} url @returns {Promise<THREE.Texture|null>} */
     async loadTextureAsync(url) {
         if (!url) return null;
 
@@ -907,7 +887,6 @@ export class TileManager {
         return texture;
     }
 
-    /** @param {string} url @private */
     releaseTexture(url) {
         if (!url) return;
         const e = this.textureCache.get(url);
@@ -919,16 +898,10 @@ export class TileManager {
         }
     }
 
-    /* ---- высоты ---- */
+    /* ================================================================
+       Высоты
+       ================================================================ */
 
-    /**
-     * Запрашивает высоты для тайла и применяет их к геометрии.
-     *
-     * Порядок источников:
-     *  - прямой DEM в native-диапазоне: `_elevationProvider` → URL;
-     *  - overzoom через `getFallbackElevation` (DEM предка).
-     * @private
-     */
     async requestElevation(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -976,7 +949,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     async getDirectElevData(srcKey, elevUrl, tileSize, originX, originZ) {
         const heightScale = this.getElevationHeightScale();
         if (this.parentElevCache.has(srcKey)) {
@@ -1023,7 +995,6 @@ export class TileManager {
         return promise;
     }
 
-    /** @private */
     _processElevationQueue() {
         while (this.activeElevationFetches < this.MAX_ELEVATION_FETCHES && this.elevationQueue.length > 0) {
             const { execute, resolve, reject } = this.elevationQueue.shift();
@@ -1031,10 +1002,6 @@ export class TileManager {
         }
     }
 
-    /**
-     * Overzoom: DEM предка растягивается на сетку текущего тайла.
-     * @private
-     */
     async getFallbackElevation(inst) {
         let fz = inst.z - 1;
         while (fz > this._maxElevationNativeZoom) fz--;
@@ -1069,7 +1036,6 @@ export class TileManager {
         return result.heights;
     }
 
-    /** @private */
     async getParentElevData(z, srcX, y) {
         if (z < this._minElevationNativeZoom || z > this._maxElevationNativeZoom) return null;
 
@@ -1104,7 +1070,6 @@ export class TileManager {
         return promise;
     }
 
-    /** @private */
     applyHeightsToGeometry(inst, heights) {
         const pos = inst.geometry.attributes.position.array;
         for (let i = 0; i < heights.length; i++) pos[i * 3 + 1] = heights[i];
@@ -1121,7 +1086,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     syncTileWithNeighbors(inst) {
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]];
         for (const [dx, dy] of neighbors) {
@@ -1134,7 +1098,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     syncEdgesBetween(instA, instB, dx, dy) {
         const posA = instA.geometry.attributes.position.array;
         const posB = instB.geometry.attributes.position.array;
@@ -1161,25 +1124,49 @@ export class TileManager {
     }
 
     /**
-     * Коэффициент перевода DEM-высот в метры (обычно 1 — DEM уже в метрах).
-     *
-     * ⚠️ Результат кладётся в `geometry.position[i+1]` как world-Y.
-     * Инвариант: `ProjectionRegistry._wrapWorld` нормирует `halfExtentX`
-     * любой проекции к `WORLD_HALF_X ≈ π·a_WGS84`, поэтому **1 world-unit
-     * ≈ 1 метр** для всех Earth-scale CRS (3857, 4326, 3395, UTM, GK).
-     * Не меняйте эту связку без пересчёта масштаба высот.
-     *
-     * Для локальных проекций с малым extent (город в метрах) инвариант
-     * сломается — в этом случае нужен явный пересчёт
-     * `height_m / worldScale · (π·a / WORLD_HALF_X)`.
-     *
-     * @private
+     * Масштаб DEM-высот (world-unit ≈ 1 м для всех Earth-scale CRS после
+     * `_wrapWorld`). Для локальных городских проекций инвариант не держится —
+     * задавайте `layer.heightScale` явно.
      */
     getElevationHeightScale() {
         return this.layer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
     }
 
-    /** @private */
+    /** Точки рамки мира (world-CRS), кэшируются один раз. */
+    _getWorldEdgePoints() {
+        if (this._edgePts) return this._edgePts;
+        const proj = this.engine.projection, pts = [], B = 64;
+        const push = (lon, lat) => {
+            const p = proj.fromLonLatSafe?.([lon, lat]);
+            if (p) pts.push(p[0], -p[1]);
+        };
+        for (let k = 0; k <= B; k++) {
+            const lat = -90 + 180 * k / B, lon = -180 + 360 * k / B;
+            push(-180, lat); push(180, lat); push(lon, -90); push(lon, 90);
+        }
+        return (this._edgePts = new Float64Array(pts));
+    }
+
+    /**
+     * Tile-индексы граничных точек мира при данном `idealZ` и слое.
+     * Кэшируется — пересчёт происходит только при смене зума/слоя.
+     */
+    _getEdgeTileIndices(idealZ, layerCrs, count) {
+        const c = this._edgeTileIdxCache;
+        if (c && c.idealZ === idealZ && c.layer === this.layer && c.count === count) {
+            return c.idx;
+        }
+        const pts = this._getWorldEdgePoints();
+        const idx = new Float64Array(count);
+        for (let i = 0; i < count; i += 2) {
+            const [tx, ty] = this.engine.worldToTileIndex(pts[i], pts[i + 1], idealZ, layerCrs);
+            idx[i] = Number.isFinite(tx) ? tx : NaN;
+            idx[i + 1] = Number.isFinite(ty) ? ty : NaN;
+        }
+        this._edgeTileIdxCache = { idealZ, layer: this.layer, count, idx };
+        return idx;
+    }
+
     prefetchParentElevations(center, z, worldGroupPos) {
         if (!this.hasElevation ||
             z < this._minElevationNativeZoom ||
@@ -1196,33 +1183,52 @@ export class TileManager {
         const margin = 2;
         const radiusX = tileSizeX * margin;
         const radiusY = tileSizeY * margin;
-        const radius = Math.max(radiusX, radiusY);  // для deformed-ветки
         const maxTile = (1 << z) - 1;
 
         let xMin, xMax, yMin, yMax;
 
         if (isDeformed) {
-            const samples = [
-                [center.x - radius, center.z - radius],
-                [center.x + radius, center.z - radius],
-                [center.x - radius, center.z + radius],
-                [center.x + radius, center.z + radius],
-                [center.x, center.z]
-            ];
-            let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
-            for (const [wx, wz] of samples) {
-                const [tx, ty] = this.engine.worldToTileIndex(wx, wz, z, layerCrs);
-                if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-                if (tx < minTx) minTx = tx;
-                if (tx > maxTx) maxTx = tx;
-                if (ty < minTy) minTy = ty;
-                if (ty > maxTy) maxTy = ty;
+            const c = this._rangeCache, tol = 0.25 * Math.min(tileSizeX, tileSizeY);
+            const minX = center.x - radiusX, maxX = center.x + radiusX;
+            const minZ = center.z - radiusY, maxZ = center.z + radiusY;
+            if (c && c.z === z &&
+                Math.abs(c.minX - minX) < tol && Math.abs(c.maxX - maxX) < tol &&
+                Math.abs(c.minZ - minZ) < tol && Math.abs(c.maxZ - maxZ) < tol) {
+                ({ xMin, xMax, yMin, yMax } = c);
+            } else {
+                let minTx = Infinity, maxTx = -Infinity, minTy = Infinity, maxTy = -Infinity;
+                const acc = (wx, wz) => {
+                    const t = this.engine.worldToTileIndex(wx, wz, z, layerCrs);
+                    const tx = t[0], ty = t[1];
+                    if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
+                    if (tx < minTx) minTx = tx; if (tx > maxTx) maxTx = tx;
+                    if (ty < minTy) minTy = ty; if (ty > maxTy) maxTy = ty;
+                };
+
+                const G = 8, spanW = maxX - minX, spanH = maxZ - minZ;
+                for (let i = 0; i <= G; i++) {
+                    const f = i / G;
+                    acc(minX + spanW * f, minZ); acc(minX + spanW * f, maxZ);
+                    acc(minX, minZ + spanH * f); acc(maxX, minZ + spanH * f);
+                }
+                const e = this._getWorldEdgePoints();
+                for (let k = 0; k < e.length; k += 2) {
+                    const wx = e[k], wz = e[k + 1];
+                    if (wx >= minX && wx <= maxX && wz >= minZ && wz <= maxZ) acc(wx, wz);
+                }
+
+                if (Number.isFinite(minTx)) {
+                    xMin = Math.max(0, Math.floor(minTx) - 1);
+                    xMax = Math.min(maxTile, Math.ceil(maxTx) + 1);
+                    yMin = Math.max(0, Math.floor(minTy) - 1);
+                    yMax = Math.min(maxTile, Math.ceil(maxTy) + 1);
+                } else if (maxX > -halfX && minX < halfX && maxZ > -halfY && minZ < halfY) {
+                    xMin = 0; xMax = maxTile; yMin = 0; yMax = maxTile;
+                } else {
+                    xMin = 1; xMax = 0; yMin = 1; yMax = 0;
+                }
+                this._rangeCache = { z, minX, maxX, minZ, maxZ, xMin, xMax, yMin, yMax };
             }
-            if (!Number.isFinite(minTx)) return;
-            xMin = Math.max(0, Math.floor(minTx));
-            xMax = Math.min(maxTile, Math.ceil(maxTx));
-            yMin = Math.max(0, Math.floor(minTy));
-            yMax = Math.min(maxTile, Math.ceil(maxTy));
         } else {
             xMin = Math.floor((center.x - radiusX - worldGroupPos.x + halfX) / tileSizeX);
             xMax = Math.floor((center.x + radiusX - worldGroupPos.x + halfX) / tileSizeX);
@@ -1245,7 +1251,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     prefetchNextZoomLevel(center, z, worldGroupPos) {
         const maxZ = Math.min(this.engine.MAX_ZOOM, this._maxNativeZoom);
         if (z < 0 || z > maxZ) return;
@@ -1269,9 +1274,10 @@ export class TileManager {
         }
     }
 
-    /* ---- LRU ---- */
+    /* ================================================================
+       LRU
+       ================================================================ */
 
-    /** @private */
     gc(renderSet) {
         if (this.tiles.size <= MAX_CACHED_TILES) return;
         const candidates = [];
@@ -1287,7 +1293,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     disposeTile(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         this.tiles.delete(k);
@@ -1303,13 +1308,14 @@ export class TileManager {
             inst.mesh.clear();
         }
         if (inst.texUrl) this.releaseTexture(inst.texUrl);
+        inst.overlayTex = null;
+        this._buildQueue = this._buildQueue.filter(j => j.inst !== inst);
     }
 
     /* ================================================================
        Воркер
        ================================================================ */
 
-    /** @private */
     initWorker() {
         const TILE_PIXELS = this.engine.TILE_PIXELS;
         const workerCode = `
@@ -1406,7 +1412,6 @@ export class TileManager {
         };
     }
 
-    /** @private */
     processWorkerQueue() {
         while (this.activeWorkerJobs < this.engine.MAX_WORKER_REQUESTS && this.pendingWorkerJobs.length > 0) {
             const job = this.pendingWorkerJobs.shift();
@@ -1415,7 +1420,6 @@ export class TileManager {
         }
     }
 
-    /** @private */
     scheduleWorkerJob(type, payload) {
         const id = this.nextJobId++;
         const promise = new Promise((resolve, reject) => {

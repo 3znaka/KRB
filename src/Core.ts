@@ -507,11 +507,14 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
 
         this._tileManagers = this._rasterLayers.map((layer: any) => new TileManager(this, layer));
 
-        for (const mgr of this._tileManagers) {
-            mgr.onTileHeightAppliedCallbacks.push(() => {
-                if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
-            });
+for (const mgr of this._tileManagers) {
+    mgr.onTileHeightAppliedCallbacks.push(() => {
+        if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
+        if (this.staticBgGroup && this.staticBgGroup.visible) {
+            this.staticBgGroup.visible = false;
         }
+    });
+}
 
 const objectsToAdd = new Set<MapObjectLayer>();
 
@@ -614,7 +617,8 @@ this.scene.background = new THREE.Color(initialBg);
             1,
             200000000
         );
-        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance',  logarithmicDepthBuffer: true,  });
+        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance',  logarithmicDepthBuffer: true, preserveDrawingBuffer: true,   });
+        this.renderer.autoClear = false;  
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);

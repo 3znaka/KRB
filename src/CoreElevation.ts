@@ -39,6 +39,9 @@ export const CoreElevationMixin: CoreElevationMethods & ThisType<KrbMap> = {
         this._elevationProvider = provider;
         for (const mgr of this._tileManagers) mgr.setElevationProvider(provider);
         this._surfaceMaxHeightCache?.clear();
+        if (this.renderer && !this.renderer.autoClear) {
+        this.renderer.clear();
+    }
     },
 
     enableGeotiffElevation(layer) {
@@ -141,6 +144,8 @@ _calibrateBaseDistance() {
             if (h > best) best = h;
         }
         return best;
+
+        
     },
 
     _sampleMaxHeightFromManager(mgrIdx, mgr, worldX, worldZ) {

@@ -98,6 +98,8 @@ export class GeoTiffLayer extends SpatialObject {
         this._drape = options.drape !== undefined ? options.drape === true : this._asElevation;
         this._meshSegments = (typeof options.meshSegments === 'number' && options.meshSegments > 0)
             ? Math.floor(options.meshSegments) : null;
+        this._warpSegments = options.warpSegments ?? null;
+        this._cornersCrs = null;
         this._imageWidth = 0;
         this._imageHeight = 0;
         // State
@@ -206,6 +208,24 @@ export class GeoTiffLayer extends SpatialObject {
             this._refreshTerrainTiles();
         }
         return this;
+    }
+    /**
+     * Задаёт число сегментов сетки для искривления рёбер GeoTIFF
+     * в деформированных проекциях. Больше — плавнее край, дороже геометрия.
+     * `null` — авто (по span в градусах: ~1 сегмент на 3°, 8..64).
+     */
+    setWarpSegments(v) {
+        const next = v === null ? null
+            : (Number.isFinite(v) && v >= 1 ? Math.floor(v) : this._warpSegments);
+        if (this._warpSegments === next)
+            return this;
+        this._warpSegments = next;
+        if (this._loaded && this._mesh)
+            this._buildMesh();
+        return this;
+    }
+    getWarpSegments() {
+        return this._warpSegments ?? this._autoWarpSegments();
     }
     getHeightScale() { return this._elevationHeightScale; }
     /* ==== Pixel values ==== */
@@ -539,6 +559,7 @@ export class GeoTiffLayer extends SpatialObject {
         this._geoResolution = null;
         this._geoNoData = null;
         this._imageWidth = 0;
+        this._cornersCrs = null;
         this._imageHeight = 0;
         this._colorRampNormalized = null;
         this._effectiveMin = null;
@@ -1054,6 +1075,7 @@ export class GeoTiffLayer extends SpatialObject {
             [ox, oy + height * ry],
             [ox + width * rx, oy + height * ry]
         ];
+        this._cornersCrs = cornersCrs; // ← NEW
         const map = this._map;
         const y = this._altitude;
         this._worldPositions = cornersCrs.map(([x, yCrs]) => {
@@ -1077,6 +1099,43 @@ export class GeoTiffLayer extends SpatialObject {
         const maxDim = Math.max(this._imageWidth || 512, this._imageHeight || 512);
         return Math.min(256, Math.max(64, Math.ceil(maxDim / 8)));
     }
+    /** true, если прямые в source-CRS могут изгибаться в map-CRS. */
+    _isWarpedProjection() {
+        const mapProj = this._map?.projection;
+        const srcCrs = this._crs;
+        if (!mapProj || !srcCrs)
+            return false;
+        if (mapProj === srcCrs || mapProj.code === srcCrs.code)
+            return false;
+        // Прямые сохраняются, если обе проекции — Mercator / geographic
+        // (или одна Mercator, другая geographic — параллели/меридианы прямые).
+        const bothMerc = mapProj.isMercator && srcCrs.isMercator;
+        const bothGeo = mapProj.isGeographic && srcCrs.isGeographic;
+        const mixedAxis = (mapProj.isMercator && srcCrs.isGeographic) ||
+            (mapProj.isGeographic && srcCrs.isMercator);
+        if (bothMerc || bothGeo || mixedAxis)
+            return false;
+        // Всё остальное — поликонические, конические, UTM, стерео, полиномиальные.
+        return true;
+    }
+    /** Авто-число сегментов для искривления: ~1 на 3° span, 8..64. */
+    _autoWarpSegments() {
+        const corners = this._cornersCrs;
+        if (!corners)
+            return 16;
+        let span = 60;
+        try {
+            const c0 = this._crs.toLonLat(corners[0]);
+            const c3 = this._crs.toLonLat(corners[3]);
+            if (c0 && c3) {
+                const dLon = Math.abs(c3[0] - c0[0]);
+                const dLat = Math.abs(c3[1] - c0[1]);
+                span = Math.max(dLon, dLat);
+            }
+        }
+        catch { /* fallback */ }
+        return Math.max(8, Math.min(64, Math.ceil(span / 3)));
+    }
     _buildMesh() {
         const positions = this._worldPositions;
         if (positions.length < 4)
@@ -1088,35 +1147,57 @@ export class GeoTiffLayer extends SpatialObject {
         this._centroidWorld.copy(centroid);
         const canDrape = this._drape && this._rawData && this._geoOrigin
             && this._geoResolution && this._imageWidth > 0 && this._imageHeight > 0;
-        const seg = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
+        // Для деформированных проекций рёбра source-прямоугольника изгибаются.
+        // Разбиваем сеткой — даже без drape.
+        const warped = this._isWarpedProjection();
+        const segDrape = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
+        const segWarp = (warped && !canDrape)
+            ? (this._warpSegments ?? this._autoWarpSegments())
+            : 1;
+        const seg = Math.max(segDrape, segWarp);
         const grid = seg + 1;
         const geometry = new THREE.PlaneGeometry(1, 1, seg, seg);
         const posAttr = geometry.attributes.position;
-        if (!canDrape) {
+        if (seg === 1) {
+            // 4 угла — плоский прямоугольник без искривления.
             for (let i = 0; i < 4; i++) {
                 posAttr.setXYZ(i, positions[i].x - centroid.x, positions[i].y - centroid.y, positions[i].z - centroid.z);
             }
         }
         else {
-            const [ox, oy] = this._geoOrigin;
-            const [rx, ry] = this._geoResolution;
-            const W = this._imageWidth, H = this._imageHeight;
-            const hs = this._elevationHeightScale;
+            // Сетка grid × grid: drape и/или warp.
             const map = this._map, crs = this._crs;
-            const maxPx = W - 1, maxPy = H - 1;
-            for (let j = 0; j < grid; j++) {
-                const v = j / seg;
-                const srcY = oy + v * H * ry;
-                const py = Math.min(maxPy, v * H);
-                for (let i = 0; i < grid; i++) {
-                    const u = i / seg;
-                    const srcX = ox + u * W * rx;
-                    const px = Math.min(maxPx, u * W);
-                    let hgt = this._bilinearSample(px, py);
-                    if (hgt === null || !Number.isFinite(hgt))
-                        hgt = 0;
-                    const [wx, wz] = map.project([srcX, srcY], crs);
-                    posAttr.setXYZ(j * grid + i, wx - centroid.x, hgt * hs, wz - centroid.z);
+            const hs = this._elevationHeightScale;
+            const corners = this._cornersCrs;
+            if (!corners || corners.length < 4) {
+                for (let i = 0; i < 4; i++) {
+                    posAttr.setXYZ(i, positions[i].x - centroid.x, positions[i].y - centroid.y, positions[i].z - centroid.z);
+                }
+            }
+            else {
+                const c0x = corners[0][0], c0y = corners[0][1];
+                const spanX = corners[1][0] - c0x;
+                const spanY = corners[2][1] - c0y;
+                const W = this._imageWidth, H = this._imageHeight;
+                const maxPx = W - 1, maxPy = H - 1;
+                for (let j = 0; j < grid; j++) {
+                    const v = j / seg;
+                    const srcY = c0y + v * spanY;
+                    const py = canDrape ? Math.min(maxPy, v * H) : 0;
+                    for (let i = 0; i < grid; i++) {
+                        const u = i / seg;
+                        const srcX = c0x + u * spanX;
+                        let yWorld = 0;
+                        if (canDrape) {
+                            const px = Math.min(maxPx, u * W);
+                            let hgt = this._bilinearSample(px, py);
+                            if (hgt === null || !Number.isFinite(hgt))
+                                hgt = 0;
+                            yWorld = hgt * hs;
+                        }
+                        const [wx, wz] = map.project([srcX, srcY], crs);
+                        posAttr.setXYZ(j * grid + i, wx - centroid.x, yWorld, wz - centroid.z);
+                    }
                 }
             }
         }

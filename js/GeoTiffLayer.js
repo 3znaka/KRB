@@ -1,22 +1,4 @@
 // @ts-nocheck
-/**
- * Модуль для отображения GeoTIFF-растров на карте.
- *
- * Поддерживает:
- *  - загрузку из URL, ArrayBuffer, Blob и URL-объекта;
- *  - автоопределение СК по GeoKeys с фолбэком на WGS84;
- *  - корректное размещение с учётом `ModelPixelScale` / `ModelTiepoint`;
- *  - чтение RGB/palette (8-бит) и одноканальных DEM (float / >8 бит);
- *  - произвольные палитры через {@link module:ColorRamps};
- *  - NoData (авто из GDAL_NODATA или явно);
- *  - Web Worker Pool для декодирования сжатых GeoTIFF;
- *  - интерактивность через `map.interaction`, подписи через `TextManager`;
- *  - `getBounds(crs)` для `map.fitTo(layer)`;
- *  - **режим источника высот** (`asElevation: true`);
- *  - **драпировку меша по рельефу** (`drape`, по умолчанию = `asElevation`).
- *
- * @module GeoTiffLayer
- */
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { Layer } from './Layers.js';
@@ -79,7 +61,11 @@ export class GeoTiffLayer extends Layer {
      * @param {string|null} [options.noDataColor='transparent']
      * @param {boolean} [options.asElevation=false]
      * @param {number} [options.heightScale=1.0]
-     * @param {boolean} [options.keepRawData=false]
+     * @param {boolean} [options.keepRawData] — сохранять сырые значения пикселей
+     *     для повторной генерации текстуры (`setColorRamp`) и сэмплирования
+     *     высот. Автоматически = `true`, если задан `colorRamp` или
+     *     `asElevation: true`. Явный `false` имеет приоритет над авто-логикой
+     *     (кроме `asElevation`, которому данные нужны всегда).
      * @param {boolean} [options.drape] — драпировать меш по рельефу.
      *     По умолчанию = `asElevation`. Требует `_keepRawData` и геопривязки.
      * @param {number|null} [options.meshSegments] — сегментов сетки драпировки.
@@ -165,8 +151,24 @@ export class GeoTiffLayer extends Layer {
         this._asElevation = options.asElevation === true;
         /** @private @type {number} */
         this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
-        /** @private @type {boolean} */
-        this._keepRawData = this._asElevation || options.keepRawData === true;
+        // keepRawData включается автоматически, когда он заведомо нужен:
+        //  - asElevation — для сэмплирования высот (всегда);
+        //  - задан colorRamp — чтобы setColorRamp мог менять палитру
+        //    без повторного readRasters() (это и есть причина RangeError
+        //    на сжатых/тайловых GeoTIFF).
+        // Явные true/false имеют приоритет, кроме случая asElevation.
+        if (this._asElevation) {
+            this._keepRawData = true;
+        }
+        else if (options.keepRawData === true) {
+            this._keepRawData = true;
+        }
+        else if (options.keepRawData === false) {
+            this._keepRawData = false;
+        }
+        else {
+            this._keepRawData = options.colorRamp !== undefined;
+        }
         /** @private @type {ArrayLike<number>|null} */ this._rawData = null;
         /** @private @type {number} */ this._rawWidth = 0;
         /** @private @type {number} */ this._rawHeight = 0;
@@ -200,6 +202,7 @@ export class GeoTiffLayer extends Layer {
         /** @private @type {THREE.Vector3} */ this._tempVec3 = new THREE.Vector3();
         /** @private */ this._loaded = false;
         /** @private */ this._loading = false;
+        /** @private @type {Promise<void>|null} */ this._loadPromise = null;
         /** @private */ this._isVisible = false;
         /** @private @type {(() => void)|null} */
         this._unregisterInteraction = null;
@@ -284,23 +287,47 @@ export class GeoTiffLayer extends Layer {
     }
     /**
      * Меняет палитру и перестраивает текстуру на лету (только ramp-режим).
+     *
+     * Если исходные данные были сохранены (`keepRawData: true`, что
+     * автоматически включается при заданном `colorRamp`), повторного
+     * чтения растра не происходит — только пересчёт RGBA-текстуры.
+     * Если же данные не были сохранены, будет предпринята попытка
+     * перечитать их через `image.readRasters()`, что для некоторых
+     * сжатых/тайловых GeoTIFF может привести к `RangeError`.
+     *
      * @param {string|Array} ramp
      * @returns {Promise<void>}
      */
     async setColorRamp(ramp) {
         this._colorRampInput = ramp;
         this._colorRampNormalized = null;
+        // Если загрузка ещё идёт — дождёмся её завершения.
+        if (this._loadPromise) {
+            try {
+                await this._loadPromise;
+            }
+            catch (e) { /* ошибка уже обработана в _performLoad */ }
+        }
         if (!this._image)
             return;
         if (!this._isRampImage(this._image))
             return;
-        const { texture } = await this._readAsRampTexture(this._image, this._image.getWidth(), this._image.getHeight());
-        if (this._texture)
-            this._texture.dispose();
-        this._texture = texture;
-        if (this._material) {
-            this._material.map = texture;
-            this._material.needsUpdate = true;
+        try {
+            const { texture } = await this._readAsRampTexture(this._image, this._image.getWidth(), this._image.getHeight());
+            if (this._texture)
+                this._texture.dispose();
+            this._texture = texture;
+            if (this._material) {
+                this._material.map = texture;
+                this._material.needsUpdate = true;
+            }
+        }
+        catch (err) {
+            console.error('GeoTiffLayer.setColorRamp: не удалось пересобрать текстуру. ' +
+                'Для смены палитры после загрузки передайте keepRawData: true ' +
+                'при создании слоя (или задайте colorRamp — он включает ' +
+                'keepRawData автоматически).', err);
+            throw err;
         }
     }
     /* ================================================================
@@ -308,7 +335,9 @@ export class GeoTiffLayer extends Layer {
        ================================================================ */
     /** @returns {boolean} */
     isElevationProvider() {
-        return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0;
+        // Для сэмплирования нужны не только сами данные, но и геопривязка.
+        return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0
+            && !!this._geoOrigin && !!this._geoResolution;
     }
     /**
      * Возвращает высоты для сетки тайла (segments+1)², row-major от NW к SE,
@@ -397,8 +426,21 @@ export class GeoTiffLayer extends Layer {
        ================================================================ */
     /** @private */
     async _load() {
+        if (this._loadPromise)
+            return this._loadPromise;
         this._loading = true;
         this._progress(0);
+        this._loadPromise = this._performLoad();
+        try {
+            await this._loadPromise;
+        }
+        finally {
+            this._loading = false;
+            this._loadPromise = null;
+        }
+    }
+    /** @private */
+    async _performLoad() {
         try {
             await this._ensurePool();
             const tiff = await this._openTiff();
@@ -440,9 +482,6 @@ export class GeoTiffLayer extends Layer {
                     console.warn(e);
                 }
             }
-        }
-        finally {
-            this._loading = false;
         }
     }
     /** @private */
@@ -603,15 +642,19 @@ export class GeoTiffLayer extends Layer {
     /* ================================================================
        Рамповый режим
        ================================================================ */
-    /** @private */
+    /**
+     * Строит RGBA-текстуру по палитре.
+     *
+     * Если сырые данные уже сохранены (`_rawData`) — используются они,
+     * без повторного `image.readRasters()`. Это критично для сжатых и
+     * тайловых GeoTIFF, где повторное чтение может упасть с
+     * `RangeError: Offset is outside the bounds of the DataView`.
+     *
+     * @private
+     */
     async _readAsRampTexture(image, width, height) {
-        const readOpts = { samples: [0] };
-        if (this._pool)
-            readOpts.pool = this._pool;
-        const rasters = await image.readRasters(readOpts);
-        const data = rasters[0];
-        if (!data)
-            throw new Error('GeoTiffLayer: readRasters вернул пустой результат');
+        // NoData нужен и для кэширования, и для раскраски —
+        // вычисляем заранее, до возможного раннего return.
         let noData = this._noDataValue;
         if (noData === null) {
             try {
@@ -623,20 +666,31 @@ export class GeoTiffLayer extends Layer {
             }
             catch (e) { /* ignore */ }
         }
-        if (this._keepRawData) {
-            this._rawData = data;
-            this._rawWidth = width;
-            this._rawHeight = height;
-            this._geoNoData = noData;
-            try {
-                this._geoOrigin = image.getOrigin();
-                this._geoResolution = image.getResolution();
-            }
-            catch (e) {
-                console.warn('GeoTiffLayer: не удалось прочитать origin/resolution', e);
-                this._geoOrigin = null;
-                this._geoResolution = null;
-                this._rawData = null;
+        let data = this._rawData;
+        if (!data) {
+            const readOpts = { samples: [0] };
+            if (this._pool)
+                readOpts.pool = this._pool;
+            const rasters = await image.readRasters(readOpts);
+            data = rasters[0];
+            if (!data)
+                throw new Error('GeoTiffLayer: readRasters вернул пустой результат');
+            if (this._keepRawData) {
+                this._rawData = data;
+                this._rawWidth = width;
+                this._rawHeight = height;
+                this._geoNoData = noData;
+                try {
+                    this._geoOrigin = image.getOrigin();
+                    this._geoResolution = image.getResolution();
+                }
+                catch (e) {
+                    console.warn('GeoTiffLayer: не удалось прочитать origin/resolution', e);
+                    this._geoOrigin = null;
+                    this._geoResolution = null;
+                    // ВАЖНО: не обнуляем _rawData — он всё ещё нужен
+                    // для последующих вызовов setColorRamp().
+                }
             }
         }
         let minV = this._minValue;

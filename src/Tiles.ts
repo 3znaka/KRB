@@ -406,9 +406,12 @@ export class TileManager {
         const idealZ = this._liveIdealZ();
         this._lastIdealZ = idealZ;
 
-        const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
-        const targetZ = Math.round(targetCont);
-        const rapidZoom = Math.abs(targetZ - idealZ) >= RAPID_ZOOM_GAP;
+const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
+const _layerOffset = this.layer?.zoomOffset ?? 0;
+const _minNZ = this.layer?.minNativeZoom ?? this.engine.MIN_ZOOM;
+const _maxNZ = this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
+const targetZ = Math.max(_minNZ, Math.min(_maxNZ, Math.round(targetCont + _layerOffset)));
+const rapidZoom = Math.abs(targetZ - idealZ) >= RAPID_ZOOM_GAP;
 
         const layerCrs = this.layer?.crs;
         const isDeformed = this._isDeformed;
@@ -975,13 +978,17 @@ export class TileManager {
         return texture;
     }
 
-    _pumpTextureQueue() {
-        const q = this._textureQueue;
-        while (this._activeTextureLoads < MAX_TEXTURE_LOADS && q.length > 0) {
-            const iz = Math.round(this.engine.targetContinuousZoom ?? this._liveIdealZ());
-            q.sort((a, b) => {
-                const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
-                const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
+_pumpTextureQueue() {
+    const q = this._textureQueue;
+    while (this._activeTextureLoads < MAX_TEXTURE_LOADS && q.length > 0) {
+        const _off = this.layer?.zoomOffset ?? 0;
+        const _tc = this.engine.targetContinuousZoom;
+        const iz = _tc != null
+            ? Math.round(_tc + _off)
+            : this._liveIdealZ();
+        q.sort((a, b) => {
+            const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
+            const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
                 if (az !== bz) return az - bz;
                 return (b.inst?.lastUsed ?? 0) - (a.inst?.lastUsed ?? 0);
             });

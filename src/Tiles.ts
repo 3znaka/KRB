@@ -248,15 +248,15 @@ export class TileManager {
 
     get _baseRenderOrder() { return this.layer?.baseRenderOrder ?? 0; }
 
-    get _isVisible() {
-        const layer = this.layer;
-        if (!layer) return true;
-        if (layer.visible === false) return false;
-        const dz = this.engine.currentDiscreteZoom;
-        if (dz < (layer.minZoom ?? 0)) return false;
-        if (dz > (layer.maxZoom ?? Infinity)) return false;
-        return true;
-    }
+get _isVisible() {
+    const layer = this.layer;
+    if (!layer) return false;   // ← было true
+    if (layer.visible === false) return false;
+    const dz = this.engine.currentDiscreteZoom;
+    if (dz < (layer.minZoom ?? 0)) return false;
+    if (dz > (layer.maxZoom ?? Infinity)) return false;
+    return true;
+}
 
     get _isDeformed() {
         if (typeof this.engine._isLayerLinear === 'function') {
@@ -766,12 +766,22 @@ export class TileManager {
                 if (elevUrl) this.srcKeyToElevUrl.set(srcKey, elevUrl);
             }
 
-            const texture = await this.loadTextureAsync(texUrl, inst);
-            if (!texture || this.tiles.get(k) !== inst || (this.frame - inst.lastUsed > 15 && inst.z !== this._lastIdealZ)) {
-                if (texture) this.releaseTexture(texUrl);
-                if (this.tiles.get(k) === inst) this.tiles.delete(k);
-                return;
-            }
+const texture = await this.loadTextureAsync(texUrl, inst);
+if (!texture) {
+    if (this.tiles.get(k) === inst) {
+        inst.loading = false;
+        inst.ready = true;
+        inst.failed = true;
+        inst.unrenderable = true;
+    }
+    this.releaseTexture(texUrl);
+    return;
+}
+if (this.tiles.get(k) !== inst || (this.frame - inst.lastUsed > 15 && inst.z !== this._lastIdealZ)) {
+    this.releaseTexture(texUrl);
+    if (this.tiles.get(k) === inst) this.tiles.delete(k);
+    return;
+}
             const build = () => {
                 if (this.tiles.get(k) !== inst) return undefined;
                 const mesh = this.createTileMesh(inst, texture);

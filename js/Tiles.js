@@ -3,19 +3,25 @@ import { THREE } from './js_TP/tpb.js';
 import { DEFAULTS } from './Defaults.js';
 import { getVirtKey, getOriginZ } from './TileKey.js';
 import { Projections } from './Projections.js';
-const MAX_CACHED_TILES = 500;
+const MAX_CACHED_TILES = 350;
 const ANCESTOR_FALLBACK = 4;
-const MAX_COVER_DEPTH = 1;
 const DEFORM_SEGMENTS_FLAT = 8;
 const TILE_DEFAULT_ROUGHNESS = 0.7;
 const TILE_DEFAULT_METALNESS = 0.0;
 const TILE_DEFAULT_EMISSIVE = 0.5;
 const BUILD_BUDGET_MS = 4;
-const MAX_TEXTURE_LOADS = 8;
+const MAX_TEXTURE_LOADS = 6;
 const STABILITY_DELAY_MS = 400;
 const ZOOM_STABLE_EPSILON = 0.001;
 const RAPID_ZOOM_GAP = 2;
-const MAX_HORIZON_TILES = 12;
+// Горизонтное расширение применяется только при stable-камере
+// и ограничено — иначе AABB разрастается в разы и мы тонем в lookup'ах.
+const MAX_HORIZON_TILES = 6;
+// Сколько новых тайлов разрешено инициировать за кадр в горизонте при stable.
+const STABLE_LOAD_BUDGET = 24;
+// GC: мягкий и жёсткий бюджеты на кадр.
+const GC_SOFT_BUDGET = 16;
+const GC_HARD_BUDGET = 64;
 /** Растровый тайловый слой (z/x/y сетка `crs`). */
 export class Tile {
     constructor(options) {
@@ -30,6 +36,7 @@ export class Tile {
         this.opacity = options.opacity ?? 1;
         this.minZoom = options.minZoom ?? 0;
         this.maxZoom = options.maxZoom ?? Infinity;
+        this._visibleKeysPrev = null;
         if (options.maxSourceZoom !== undefined && options.maxNativeZoom === undefined) {
             console.warn('Tile: maxSourceZoom устарела, используйте maxNativeZoom.');
         }
@@ -123,6 +130,7 @@ export class TileManager {
         this._deformedRangeCache = null;
         this._edgeTileIdxCache = null;
         this._edgePts = undefined;
+        this._rangeCache = null;
         if (this.hasElevation)
             this.initWorker();
         this.onTileHeightAppliedCallbacks = [];
@@ -178,9 +186,7 @@ export class TileManager {
         if (q.length)
             this._buildRaf = requestAnimationFrame(() => this._pumpBuilds());
     }
-    /* ================================================================
-       Источник DEM
-       ================================================================ */
+    /* ---------- DEM source ---------- */
     get hasElevation() {
         return !!this._elevationProvider || !!this.layer?.elevation;
     }
@@ -246,9 +252,7 @@ export class TileManager {
         return typeof code === 'string' ? Projections.get(code) : code;
     }
     key(z, virtX, y) { return getVirtKey(z, virtX, y); }
-    /* ================================================================
-       Материал тайла
-       ================================================================ */
+    /* ---------- Материал ---------- */
     _createTileMaterial(texture, opts = {}) {
         const layerHasElevation = this.hasElevation;
         const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : layerHasElevation;
@@ -340,10 +344,24 @@ export class TileManager {
         mesh.material.needsUpdate = true;
     }
     setVisible(visible) {
+        if (visible) {
+            // Показываем всё, что есть в кэше, и запоминаем это как «предыдущее видимое»,
+            // чтобы следующий update() корректно скрыл лишнее.
+            const keys = new Set();
+            for (const [k, inst] of this.tiles) {
+                if (!inst.mesh)
+                    continue;
+                inst.mesh.visible = true;
+                keys.add(k);
+            }
+            this._visibleKeysPrev = keys;
+            return;
+        }
         for (const inst of this.tiles.values()) {
             if (inst.mesh)
-                inst.mesh.visible = !!visible;
+                inst.mesh.visible = false;
         }
+        this._visibleKeysPrev = null;
     }
     setOpacity(opacity) {
         if (!this.layer)
@@ -364,9 +382,7 @@ export class TileManager {
             }
         }
     }
-    /* ================================================================
-       Обновление видимых тайлов
-       ================================================================ */
+    /* ---------- Обновление видимых тайлов ---------- */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
         if (!this._isVisible) {
             this.setVisible(false);
@@ -375,8 +391,11 @@ export class TileManager {
         this.frame++;
         const prevIdealZ = this._lastIdealZ;
         const idealZ = this._liveIdealZ();
-        this._lastIdealZ = idealZ;
-        const zoomOut = idealZ < prevIdealZ;
+        if (idealZ !== prevIdealZ) {
+            this._zoomOut = idealZ < prevIdealZ;
+            this._lastIdealZ = idealZ;
+        }
+        const zoomOut = !!this._zoomOut;
         const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
         const _layerOffset = this.layer?.zoomOffset ?? 0;
         const _minNZ = this.layer?.minNativeZoom ?? this.engine.MIN_ZOOM;
@@ -390,19 +409,18 @@ export class TileManager {
         const tileSizeX = (2 * halfX) / Math.pow(2, idealZ);
         const tileSizeY = (2 * halfY) / Math.pow(2, idealZ);
         const maxTile = (1 << idealZ) - 1;
+        // --- Frustum ---
         const dist = camera.position.distanceTo(controlsTarget);
         const margin = this.engine.TILE_MARGIN;
         const vFov = (camera.fov * Math.PI) / 180;
         const aspect = camera.aspect;
         const hh = dist * Math.tan(vFov / 2) * aspect + margin * tileSizeX;
         const hv = dist * Math.tan(vFov / 2) + margin * tileSizeY;
-        // ===== Расчёт вектора камеры для bearing и pitch =====
         const camDX = camera.position.x - controlsTarget.x;
         const camDY = camera.position.y - controlsTarget.y;
         const camDZ = camera.position.z - controlsTarget.z;
         const camLen2D = Math.sqrt(camDX * camDX + camDZ * camDZ);
         const camLen3D = Math.sqrt(camDX * camDX + camDY * camDY + camDZ * camDZ);
-        // ===== Поворот AABB под bearing (cos/sin без модуля — ориентация не важна) =====
         const cosB = camLen2D > 1e-6 ? camDZ / camLen2D : 1;
         const sinB = camLen2D > 1e-6 ? camDX / camLen2D : 0;
         const absCos = Math.abs(cosB);
@@ -411,28 +429,42 @@ export class TileManager {
         const hvRot = hh * absSin + hv * absCos;
         let minX = controlsTarget.x - hhRot, maxX = controlsTarget.x + hhRot;
         let minZ = controlsTarget.z - hvRot, maxZ = controlsTarget.z + hvRot;
-        // ===== Horizon extension (расширяем AABB в направлении взгляда) =====
-        if (MAX_HORIZON_TILES > 0 && camLen3D > 1e-3) {
+        // --- Детектор стабильности (нужен ДО горизонта) ---
+        const now = performance.now();
+        const zoomAnimating = Math.abs(continuousZoom - targetCont) > ZOOM_STABLE_EPSILON;
+        const txRound = Math.round(controlsTarget.x / tileSizeX);
+        const tzRound = Math.round(controlsTarget.z / tileSizeY);
+        const viewKey = `${idealZ}|${txRound}|${tzRound}`;
+        if (viewKey !== this._lastViewKey || zoomAnimating) {
+            this._lastViewKey = viewKey;
+            this._viewStableSince = now;
+        }
+        const engineIdle = this.engine?._idleFired;
+        const stable = !rapidZoom
+            && !zoomAnimating
+            && (now - this._viewStableSince) >= STABILITY_DELAY_MS
+            && (engineIdle === undefined ? true : engineIdle);
+        // --- Горизонт: ТОЛЬКО при стабильной камере ---
+        // При движении горизонтное расширение не нужно (пользователь всё равно
+        // не разглядит дальний край), зато катастрофически раздувает AABB.
+        if (stable && MAX_HORIZON_TILES > 0 && camLen3D > 1e-3) {
             const pitchDeg = Math.acos(Math.max(-1, Math.min(1, camDY / camLen3D))) * 180 / Math.PI;
             const t = Math.max(0, Math.min(1, (pitchDeg - 15) / 70));
-            if (t > 0) {
-                const viewX = -camDX, viewZ = -camDZ;
-                if (camLen2D > 1e-3) {
-                    const nx = viewX / camLen2D;
-                    const nz = viewZ / camLen2D;
-                    const ext = MAX_HORIZON_TILES * Math.max(tileSizeX, tileSizeY) * t;
-                    if (nx > 0)
-                        maxX += nx * ext;
-                    else
-                        minX += nx * ext;
-                    if (nz > 0)
-                        maxZ += nz * ext;
-                    else
-                        minZ += nz * ext;
-                }
+            if (t > 0 && camLen2D > 1e-3) {
+                const nx = -camDX / camLen2D;
+                const nz = -camDZ / camLen2D;
+                const ext = MAX_HORIZON_TILES * Math.max(tileSizeX, tileSizeY) * t;
+                if (nx > 0)
+                    maxX += nx * ext;
+                else
+                    minX += nx * ext;
+                if (nz > 0)
+                    maxZ += nz * ext;
+                else
+                    minZ += nz * ext;
             }
         }
-        // ===== Конвертация в tile-индексы =====
+        // --- Конвертация в tile-индексы ---
         let xMin, xMax, yMin, yMax;
         const off = worldGroupPos;
         if (isDeformed) {
@@ -519,7 +551,7 @@ export class TileManager {
             yMin = Math.max(0, Math.floor((minZ - off.z + halfY) / tileSizeY));
             yMax = Math.min(maxTile, Math.floor((maxZ - off.z + halfY) / tileSizeY));
         }
-        // ===== Strict bounds (near-only, повёрнутый AABB) =====
+        // --- Strict bounds (без горизонта) ---
         let sxMin, sxMax, syMin, syMax;
         if (isDeformed) {
             sxMin = xMin;
@@ -537,72 +569,92 @@ export class TileManager {
             syMin = Math.max(0, Math.floor((controlsTarget.z - strictHvRot - off.z + halfY) / tileSizeY));
             syMax = Math.min(maxTile, Math.floor((controlsTarget.z + strictHvRot - off.z + halfY) / tileSizeY));
         }
-        // ===== Fix D: детектор стабильности камеры =====
-        const now = performance.now();
-        const zoomAnimating = Math.abs(continuousZoom - targetCont) > ZOOM_STABLE_EPSILON;
-        const txRound = Math.round(controlsTarget.x / tileSizeX);
-        const tzRound = Math.round(controlsTarget.z / tileSizeY);
-        const viewKey = `${idealZ}|${txRound}|${tzRound}`;
-        if (viewKey !== this._lastViewKey || zoomAnimating) {
-            this._lastViewKey = viewKey;
-            this._viewStableSince = now;
+        // --- Центр экрана в tile-space ---
+        let cxTile = (xMin + xMax) * 0.5 + 0.5;
+        let cyTile = (yMin + yMax) * 0.5 + 0.5;
+        try {
+            const [tx, ty] = this.engine.worldToTileIndex(controlsTarget.x, controlsTarget.z, idealZ, layerCrs);
+            if (Number.isFinite(tx) && Number.isFinite(ty)) {
+                cxTile = tx;
+                cyTile = ty;
+            }
         }
-        const engineIdle = this.engine?._idleFired;
-        const stable = !rapidZoom
-            && !zoomAnimating
-            && (now - this._viewStableSince) >= STABILITY_DELAY_MS
-            && (engineIdle === undefined ? true : engineIdle);
-        // ===== Рендер + выборочная загрузка =====
-        const renderSet = new Set();
+        catch (e) { /* fallback */ }
+        // --- Список тайлов, отсортированный center-out ---
+        const tileOrder = [];
         for (let y = yMin; y <= yMax; y++) {
+            const dy = y + 0.5 - cyTile;
+            const dy2 = dy * dy;
             for (let vx = xMin; vx <= xMax; vx++) {
-                const k = getVirtKey(idealZ, vx, y);
-                const isStrict = vx >= sxMin && vx <= sxMax && y >= syMin && y <= syMax;
-                const allowLoad = !rapidZoom && (isStrict || stable);
-                let inst = this.tiles.get(k);
-                if (allowLoad) {
-                    inst = this.ensureTile(idealZ, vx, y);
+                const dx = vx + 0.5 - cxTile;
+                tileOrder.push({ vx, y, d: dx * dx + dy2 });
+            }
+        }
+        tileOrder.sort((a, b) => a.d - b.d);
+        // --- Рендер + выборочная загрузка ---
+        // Strict-тайлы грузим без ограничений (их немного).
+        // Тайлы вне strict (горизонт) — с бюджетом на кадр, чтобы не устроить лавину.
+        let loadBudget = stable ? STABLE_LOAD_BUDGET : 0;
+        const renderSet = new Set();
+        for (const { vx, y } of tileOrder) {
+            const k = getVirtKey(idealZ, vx, y);
+            const isStrict = vx >= sxMin && vx <= sxMax && y >= syMin && y <= syMax;
+            let inst = this.tiles.get(k);
+            if (!rapidZoom && !inst) {
+                if (isStrict) {
+                    inst = this.ensureTile(idealZ, vx, y, k);
                 }
-                else if (inst) {
-                    inst.lastUsed = this.frame;
+                else if (stable && loadBudget > 0) {
+                    loadBudget--;
+                    inst = this.ensureTile(idealZ, vx, y, k);
                 }
-                if (inst && inst.ready && inst.mesh) {
-                    renderSet.add(k);
-                    continue;
+            }
+            else if (inst && !rapidZoom) {
+                inst.lastUsed = this.frame;
+            }
+            if (inst && inst.ready && inst.mesh) {
+                renderSet.add(k);
+                continue;
+            }
+            if (zoomOut) {
+                if (!this._collectPartialChildren(idealZ, vx, y, renderSet)) {
+                    const anc = this.findReadyAncestor(idealZ, vx, y);
+                    if (anc)
+                        renderSet.add(this.key(anc.z, anc.virtX, anc.y));
                 }
-                // Fallback: направление зума определяет приоритет.
-                // zoom-out → сначала дети (старый чёткий контент, только что видели),
-                // zoom-in / pan → сначала ancestor (крупный тайл, тоже только что видели).
-                if (zoomOut) {
-                    if (!this._collectPartialChildren(idealZ, vx, y, renderSet)) {
-                        const anc = this.findReadyAncestor(idealZ, vx, y);
-                        if (anc)
-                            renderSet.add(this.key(anc.z, anc.virtX, anc.y));
-                    }
+            }
+            else {
+                const anc = this.findReadyAncestor(idealZ, vx, y);
+                if (anc) {
+                    renderSet.add(this.key(anc.z, anc.virtX, anc.y));
                 }
                 else {
-                    const anc = this.findReadyAncestor(idealZ, vx, y);
-                    if (anc) {
-                        renderSet.add(this.key(anc.z, anc.virtX, anc.y));
-                    }
-                    else {
-                        this._collectPartialChildren(idealZ, vx, y, renderSet);
-                    }
+                    this._collectPartialChildren(idealZ, vx, y, renderSet);
                 }
             }
         }
-        for (const [k, inst] of this.tiles) {
-            if (!inst.mesh)
+        // Показать актуальные + обновить lastUsed.
+        for (const k of renderSet) {
+            const inst = this.tiles.get(k);
+            if (!inst || !inst.mesh)
                 continue;
-            const show = renderSet.has(k);
-            if (inst.mesh.visible !== show)
-                inst.mesh.visible = show;
-            if (!show)
-                continue;
+            if (!inst.mesh.visible)
+                inst.mesh.visible = true;
             inst.lastUsed = this.frame;
         }
+        // Скрыть то, что было видимо в прошлом кадре, но пропало из renderSet.
+        if (this._visibleKeysPrev) {
+            for (const k of this._visibleKeysPrev) {
+                if (renderSet.has(k))
+                    continue;
+                const inst = this.tiles.get(k);
+                if (inst && inst.mesh && inst.mesh.visible)
+                    inst.mesh.visible = false;
+            }
+        }
+        this._visibleKeysPrev = renderSet;
         this.gc(renderSet);
-        // ===== Prefetch: только когда зум устоялся =====
+        // --- Prefetch следующего зума ---
         const viewZ = this.engine.currentDiscreteZoom;
         const zoomSettled = Math.abs(continuousZoom - targetCont) < ZOOM_STABLE_EPSILON;
         if (!rapidZoom && zoomSettled && continuousZoom > viewZ + 0.3 &&
@@ -614,15 +666,11 @@ export class TileManager {
         }
         return idealZ;
     }
-    /**
-     * Добавляет в renderSet всех ГОТОВЫХ детей (z+1) для (z, virtX, y).
-     * Возвращает true, если добавил хотя бы одного.
-     * Спасает zoom-out: z+1 был виден на предыдущем зуме и точно в кэше.
-     */
+    /** Добавляет готовых детей (z+1); true если все 4 готовы. */
     _collectPartialChildren(z, virtX, y, renderSet) {
         if (z + 1 > this._maxNativeZoom)
             return false;
-        let added = false;
+        let count = 0;
         const cz = z + 1;
         const cx = virtX * 2;
         const cy = y * 2;
@@ -632,11 +680,11 @@ export class TileManager {
                 const ci = this.tiles.get(ck);
                 if (ci && ci.ready && ci.mesh && !ci.unrenderable) {
                     renderSet.add(ck);
-                    added = true;
+                    count++;
                 }
             }
         }
-        return added;
+        return count === 4;
     }
     findReadyAncestor(z, virtX, y) {
         const minZ = Math.max(this.engine.MIN_ZOOM, this._minNativeZoom);
@@ -650,8 +698,8 @@ export class TileManager {
         }
         return null;
     }
-    ensureTile(z, virtX, y) {
-        const k = this.key(z, virtX, y);
+    ensureTile(z, virtX, y, k = null) {
+        k = k ?? this.key(z, virtX, y);
         if (this._deadKeys.has(k)) {
             const inst = {
                 z, virtX, y, mesh: null, geometry: null,
@@ -678,9 +726,7 @@ export class TileManager {
         this.loadTile(inst);
         return inst;
     }
-    /* ================================================================
-       Загрузка тайла
-       ================================================================ */
+    /* ---------- Загрузка тайла ---------- */
     async loadTile(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         let texUrl = null;
@@ -696,8 +742,11 @@ export class TileManager {
                     this.srcKeyToElevUrl.set(srcKey, elevUrl);
             }
             const texture = await this.loadTextureAsync(texUrl, inst);
-            if (this.tiles.get(k) !== inst) {
-                this.releaseTexture(texUrl);
+            if (!texture || this.tiles.get(k) !== inst || (this.frame - inst.lastUsed > 15 && inst.z !== this._lastIdealZ)) {
+                if (texture)
+                    this.releaseTexture(texUrl);
+                if (this.tiles.get(k) === inst)
+                    this.tiles.delete(k);
                 return;
             }
             const build = () => {
@@ -744,16 +793,6 @@ export class TileManager {
             inst.geometry = mesh.geometry;
             inst.texUrl = texUrl;
             inst.loading = false;
-            const provider = this._elevationProvider;
-            if (provider &&
-                typeof provider.getTileTexture === 'function' &&
-                provider.isElevationProvider?.()) {
-                const overlayTex = provider.getTileTexture(inst.z, srcX, inst.y, this.engine.TILE_PIXELS);
-                if (overlayTex) {
-                    this.setMeshOverlay(mesh, overlayTex, provider.getOpacity?.() ?? 1);
-                    inst.overlayTex = overlayTex;
-                }
-            }
             this.engine.worldGroup.add(mesh);
             if (this.hasElevation && this.shouldApplyElevation(inst)) {
                 inst.expectsElevation = true;
@@ -954,9 +993,7 @@ export class TileManager {
         mesh.renderOrder = -2;
         return mesh;
     }
-    /* ================================================================
-       Текстуры
-       ================================================================ */
+    /* ---------- Текстуры ---------- */
     async loadTextureAsync(url, inst = null) {
         if (!url)
             return null;
@@ -985,7 +1022,13 @@ export class TileManager {
         this._inFlightTextures.delete(url);
         if (!texture)
             return null;
-        this.textureCache.set(url, { texture, refs: 1 });
+        const existing = this.textureCache.get(url);
+        if (existing) {
+            existing.refs++;
+        }
+        else {
+            this.textureCache.set(url, { texture, refs: 1 });
+        }
         return texture;
     }
     _pumpTextureQueue() {
@@ -997,13 +1040,32 @@ export class TileManager {
         const _off = this.layer?.zoomOffset ?? 0;
         const _tc = this.engine.targetContinuousZoom;
         const iz = _tc != null ? Math.round(_tc + _off) : this._liveIdealZ();
-        q.sort((a, b) => {
-            const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
-            const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
-            if (az !== bz)
-                return az - bz;
-            return (b.inst?.lastUsed ?? 0) - (a.inst?.lastUsed ?? 0);
-        });
+        // Вычищаем устаревшие элементы.
+        for (let i = q.length - 1; i >= 0; i--) {
+            const inst = q[i].inst;
+            if (!inst)
+                continue;
+            const k = this.key(inst.z, inst.virtX, inst.y);
+            const isStale = this.tiles.get(k) !== inst
+                || (this.frame - inst.lastUsed > 2 && inst.z !== this._lastIdealZ && inst.z !== iz);
+            if (isStale) {
+                const job = q[i];
+                q.splice(i, 1);
+                this._inFlightTextures.delete(job.url);
+                if (this.tiles.get(k) === inst)
+                    this.tiles.delete(k);
+                job.resolve(null);
+            }
+        }
+        if (q.length >= 8) {
+            q.sort((a, b) => {
+                const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
+                const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
+                if (az !== bz)
+                    return az - bz;
+                return (b.inst?.lastUsed ?? 0) - (a.inst?.lastUsed ?? 0);
+            });
+        }
         while (this._activeTextureLoads < MAX_TEXTURE_LOADS && q.length > 0) {
             const job = q.shift();
             this._activeTextureLoads++;
@@ -1029,9 +1091,7 @@ export class TileManager {
             this.textureCache.delete(url);
         }
     }
-    /* ================================================================
-       Высоты
-       ================================================================ */
+    /* ---------- Высоты ---------- */
     async requestElevation(inst) {
         const k = this.key(inst.z, inst.virtX, inst.y);
         try {
@@ -1224,32 +1284,45 @@ export class TileManager {
         const posA = instA.geometry.attributes.position.array;
         const posB = instB.geometry.attributes.position.array;
         const seg = this.engine.SEGMENTS;
-        const pairs = [];
-        if (dx === 1 && dy === 0) {
-            for (let r = 0; r <= seg; r++)
-                pairs.push([r * (seg + 1) + seg, r * (seg + 1)]);
+        const stride = seg + 1;
+        let changed = false;
+        for (let i = 0; i <= seg; i++) {
+            let iA, iB;
+            if (dx === 1 && dy === 0) {
+                iA = i * stride + seg;
+                iB = i * stride;
+            }
+            else if (dx === -1 && dy === 0) {
+                iA = i * stride;
+                iB = i * stride + seg;
+            }
+            else if (dx === 0 && dy === -1) {
+                iA = i;
+                iB = seg * stride + i;
+            }
+            else if (dx === 0 && dy === 1) {
+                iA = seg * stride + i;
+                iB = i;
+            }
+            else
+                continue;
+            const idxA = iA * 3 + 1;
+            const idxB = iB * 3 + 1;
+            const hA = posA[idxA], hB = posB[idxB];
+            if (Math.abs(hA - hB) > 1e-4) {
+                const avg = (hA + hB) * 0.5;
+                posA[idxA] = avg;
+                posB[idxB] = avg;
+                changed = true;
+            }
         }
-        else if (dx === -1 && dy === 0) {
-            for (let r = 0; r <= seg; r++)
-                pairs.push([r * (seg + 1), r * (seg + 1) + seg]);
+        if (changed) {
+            instA.geometry.attributes.position.needsUpdate = true;
+            instB.geometry.attributes.position.needsUpdate = true;
+            if (this.tileLighting) {
+                instB.geometry.computeVertexNormals();
+            }
         }
-        else if (dx === 0 && dy === -1) {
-            for (let c = 0; c <= seg; c++)
-                pairs.push([c, seg * (seg + 1) + c]);
-        }
-        else if (dx === 0 && dy === 1) {
-            for (let c = 0; c <= seg; c++)
-                pairs.push([seg * (seg + 1) + c, c]);
-        }
-        for (const [iA, iB] of pairs) {
-            const avg = (posA[iA * 3 + 1] + posB[iB * 3 + 1]) / 2;
-            posA[iA * 3 + 1] = avg;
-            posB[iB * 3 + 1] = avg;
-        }
-        instA.geometry.attributes.position.needsUpdate = true;
-        instB.geometry.attributes.position.needsUpdate = true;
-        instA.geometry.computeVertexNormals();
-        instB.geometry.computeVertexNormals();
     }
     getElevationHeightScale() {
         return this.layer?.heightScale ?? DEFAULTS.HEIGHT_SCALE;
@@ -1406,11 +1479,10 @@ export class TileManager {
             }
         }
     }
-    /* ================================================================
-       LRU
-       ================================================================ */
+    /* ---------- LRU ---------- */
     gc(renderSet) {
-        if (this.tiles.size <= MAX_CACHED_TILES)
+        const overflow = this.tiles.size - MAX_CACHED_TILES;
+        if (overflow <= 0)
             return;
         const candidates = [];
         for (const [k, inst] of this.tiles) {
@@ -1418,12 +1490,15 @@ export class TileManager {
                 continue;
             candidates.push(inst);
         }
+        if (!candidates.length)
+            return;
         candidates.sort((a, b) => a.lastUsed - b.lastUsed);
-        let budget = this.tiles.size - MAX_CACHED_TILES;
-        for (const inst of candidates) {
-            if (budget-- <= 0)
-                break;
-            this.disposeTile(inst);
+        // Если переполнение большое — сбрасываем быстрее (жёсткий бюджет),
+        // иначе ограничиваемся мягким, чтобы не спамить WebGL dispose.
+        const hardOverflow = this.tiles.size - MAX_CACHED_TILES * 1.5;
+        const budget = Math.min(hardOverflow > 0 ? GC_HARD_BUDGET : GC_SOFT_BUDGET, candidates.length);
+        for (let i = 0; i < budget; i++) {
+            this.disposeTile(candidates[i]);
         }
     }
     disposeTile(inst) {
@@ -1454,9 +1529,7 @@ export class TileManager {
             this.releaseTexture(inst.texUrl);
         inst.overlayTex = null;
     }
-    /* ================================================================
-       Воркер
-       ================================================================ */
+    /* ---------- Воркер ---------- */
     initWorker() {
         const TILE_PIXELS = this.engine.TILE_PIXELS;
         const workerCode = `

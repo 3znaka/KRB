@@ -21,6 +21,8 @@ import { Polyline, } from './Polyline.js';
 import { Polygon, } from './Polygon.js';
 import { Vector3D, } from './Vector3D.js';
 import { Diagram } from './Diagram.js';
+import { calculateBreaks, getClassIndex } from './Classification.js';
+import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
 const POINT_ALIASES = {
     'icon': 'iconUrl',
 };
@@ -375,6 +377,9 @@ export class GeoJSONLayer extends Layer {
     data = null;
     crs = null;
     tooltipOnHover = false;
+    choropleth = null;
+    _choroplethBreaks = [];
+    _choroplethRamp = null;
     /**
      * Скомпилированный предикат. `null` — фильтра нет.
      * Для установки используйте `setFeatureFilter` — он корректно
@@ -451,6 +456,10 @@ export class GeoJSONLayer extends Layer {
         this.diagramToOptions = options.diagramToOptions ?? null;
         this.onEachDiagram = options.onEachDiagram ?? null;
         this.tooltipOnHover = options.tooltipOnHover ?? false;
+        this.choropleth = options.choropleth ?? null;
+        if (this.choropleth) {
+            this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
+        }
         this.url = options.url ?? null;
         this.data = options.data ?? null;
         this.crs = options.crs ?? null;
@@ -676,12 +685,34 @@ export class GeoJSONLayer extends Layer {
                 console.warn('GeoJSONLayer: no data or URL provided');
                 return;
             }
+            if (this.choropleth) {
+                this._calculateChoroplethBreaks(geojson);
+            }
             this._parse(geojson);
             this._loaded = true;
         }
         catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
         }
+    }
+    _calculateChoroplethBreaks(geojson) {
+        if (!this.choropleth)
+            return;
+        let values = [];
+        const processFeature = (f) => {
+            if (f.properties) {
+                const val = this._evaluateValueExpression(f.properties, this.choropleth.value);
+                if (isFinite(val))
+                    values.push(val);
+            }
+        };
+        if (geojson.type === 'FeatureCollection') {
+            geojson.features.forEach(processFeature);
+        }
+        else if (geojson.type === 'Feature') {
+            processFeature(geojson);
+        }
+        this._choroplethBreaks = calculateBreaks(values, this.choropleth.classification || 'jenks', this.choropleth.classes || 5);
     }
     // =================================================================
     // Style resolution
@@ -693,6 +724,35 @@ export class GeoJSONLayer extends Layer {
                 return String(v);
         }
         return props.title || props.name || '';
+    }
+    _evaluateValueExpression(props, exprOrFn) {
+        if (typeof exprOrFn === 'function') {
+            return exprOrFn(props);
+        }
+        try {
+            // Безопасный скоуп: переменные ищутся в props, а не в window
+            const fn = new Function('props', `
+                const __scope = new Proxy(
+                    Object.assign(Object.create(null), { props }),
+                    {
+                        has: (t, k) => typeof k === 'string' && (
+                            Object.prototype.hasOwnProperty.call(t, k) ||
+                            Object.prototype.hasOwnProperty.call(props, k)
+                        ),
+                        get: (t, k) => {
+                            if (typeof k !== 'string') return undefined;
+                            if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
+                            return props[k];
+                        },
+                    }
+                );
+                with (__scope) { return Number(${exprOrFn}); }
+            `);
+            return fn(props);
+        }
+        catch {
+            return NaN;
+        }
     }
     _getTooltip(props) {
         // 1. Явный tooltip: функция или шаблон.
@@ -1086,6 +1146,7 @@ export class GeoJSONLayer extends Layer {
             totalBg: cfg.totalBg,
             totalColor: cfg.totalColor,
             totalBorder: cfg.totalBorder,
+            projection: cfg.projection, // <--- Добавьте
             minZoom: cfg.minZoom,
             maxZoom: cfg.maxZoom,
             tooltip,
@@ -1094,10 +1155,27 @@ export class GeoJSONLayer extends Layer {
         };
     }
     _createPolygon(feature, props, rings, cb) {
+        // Вычисляем цвет, если включена картограмма
+        let choroplethColor;
+        if (this.choropleth && this._choroplethRamp) {
+            const val = this._evaluateValueExpression(props, this.choropleth.value);
+            if (isFinite(val)) {
+                const classIdx = getClassIndex(val, this._choroplethBreaks);
+                const t = this._choroplethBreaks.length > 0
+                    ? classIdx / this._choroplethBreaks.length
+                    : 0;
+                const rgba = sampleColorRamp(this._choroplethRamp, t);
+                // ВАЖНО: Three.js ожидает hex-строку для цвета, а не rgba()
+                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
+            }
+            else {
+                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
+            }
+        }
         const defaults = {
             rings,
             crs: this.crs ?? undefined,
-            fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
+            fillColor: choroplethColor || props.fill || props['fill-color'] || this.defaultFillColor,
             fillOpacity: this._asNumber(props['fill-opacity']) ?? this.defaultFillOpacity,
             strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
             strokeWidth: this._asNumber(props['stroke-width']) ?? this.defaultStrokeWidth,
@@ -1131,6 +1209,9 @@ export class GeoJSONLayer extends Layer {
             ...(normStyle ?? {}),
             ...(normCb ?? {}),
             rings,
+            // Гарантируем, что цвет картограммы не будет перезаписан стилями,
+            // если только пользователь явно не передал fillColor в callback
+            fillColor: choroplethColor || normCb?.fillColor || normStyle?.fillColor || defaults.fillColor
         };
         const polygon = new Polygon(merged);
         this.add(polygon);

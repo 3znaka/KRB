@@ -5,7 +5,7 @@
 <title>Diagram — простой пример</title>
 <link href="../KRB.css" rel="stylesheet">
 <style>
-    html, body { margin: 0; height: 100%; }
+    html, body { margin: 0; height: 100%; overflow:hidden; }
     #map { position: absolute; inset: 0; width: 100%; height: 100dvh; }
 </style>
 </head>
@@ -30,27 +30,29 @@ const map = new KRB.Map({
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
     tooltipOnHover: true,
-    tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}`,
+    tooltip: `<b>${p.name}</b><br>Score: ${p.score}`,
+    label: '',
+    style: { polygon: { default: { title: '' } }},
 
-  fillCOlor: 'score',
+choropleth: {
+        value: 'pop', 
+        colorRamp: 'terrain',          
+        classification: 'jenks',    
+        classes: 10,                 
+        noDataColor: '#cccccc'    
+    },
 
   diagram: {
-        type: 'bar',
-         fields: ['score', 'value'], 
-        colorMap: { 
-            score: '#2ecc71', 
-            value: '#3498db' // зададим цвет и для второго поля
-        },
-        colorMap: { score: '#2ecc71' },
-        
-        unitPx: 0.3,             // Масштаб: 1 единица score = 0.3 px высоты
-        barWidth: 16,            // Ширина столбика
-        segmentSizes: [100, 50, 10], // Разбиваем на номиналы: сотни, полтины, десятки
-        
-        orientation: 'vertical', // (по умолчанию) или 'horizontal'
+        type: 'vienna',
+         fields: ['score', 'value', 'count'], 
+
+        gap: -1,
+        unitPx: 10,      
+        unitValue: 100,   
+
         strokeColor: '#111',
         strokeWidth: 1,
-        minZoom: 2,
+        minZoom: 0,
     },
 }).addTo(map);
 

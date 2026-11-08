@@ -35,15 +35,14 @@ export interface DiagramOptions extends Omit<MarkerOptions, 'iconUrl' | 'iconSiz
     totalBg?: string;
     totalColor?: string;
     totalBorder?: string;
+    projection?: 'oblique' | 'isometric';
+
+    coins?: number[];
+    segmentSizes?: number[];
 
     parentPolygon?: Polygon | null;
     fitToPolygon?: boolean;
     minScreenScale?: number;
-    projection?: 'oblique' | 'isometric'
-
-     coins?: number[];
-
-       segmentSizes?: number[]; 
 }
 
 const DIAGRAM_PRIORITY_BASE = 1e6;
@@ -65,34 +64,35 @@ export class Diagram extends Marker {
     constructor(options: DiagramOptions) {
         const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
         const type = getDiagramType(options.type);
-       const params: DiagramRenderParams = {
-    data: options.data,
-    width: 0, height: 0, dpr,
-    unitPx: options.unitPx ?? 1,
-    orientation: options.orientation,
-    barWidth: options.barWidth,
-    gap: options.gap,
-    padding: options.padding,
-    strokeColor: options.strokeColor,
-    strokeWidth: options.strokeWidth,
-    label: options.label,
-    labelPosition: options.labelPosition,
-    labelFont: options.labelFont,
-    labelColor: options.labelColor,
+        
+        const params: DiagramRenderParams = {
+            data: options.data,
+            width: 0, height: 0, dpr,
+            unitPx: options.unitPx ?? 1,
+            orientation: options.orientation,
+            barWidth: options.barWidth,
+            gap: options.gap,
+            padding: options.padding,
+            strokeColor: options.strokeColor,
+            strokeWidth: options.strokeWidth,
+            label: options.label,
+            labelPosition: options.labelPosition,
+            labelFont: options.labelFont,
+            labelColor: options.labelColor,
+            coins: options.coins,
+            unitValue: options.unitValue,
+            maxCols: options.maxCols,
+            shape: options.shape,
+            showTotal: options.showTotal,
+            totalFormat: options.totalFormat,
+            totalFont: options.totalFont,
+            totalBg: options.totalBg,
+            totalColor: options.totalColor,
+            totalBorder: options.totalBorder,
+            projection: options.projection,
+            segmentSizes: options.segmentSizes,
+        };
 
-    coins: options.coins,
-    
-    unitValue: options.unitValue,
-    maxCols: options.maxCols,
-    shape: options.shape,
-    showTotal: options.showTotal,
-    totalFormat: options.totalFormat,
-    totalFont: options.totalFont,
-    totalBg: options.totalBg,
-    totalColor: options.totalColor,
-    totalBorder: options.totalBorder,
-segmentSizes: options.segmentSizes,
-};
         const size = type.computeSize(params);
         params.width  = size.width;
         params.height = size.height;
@@ -124,30 +124,44 @@ segmentSizes: options.segmentSizes,
         this._redraw();
     }
 
-override getIcon(): {
-    name: string;
-    anchor: [number, number];
-    cssStyle: Record<string, any>;
-} {
-    return {
-        name: 'diagram',
-        anchor: this.getAnchor(),          // уже [number, number]
-        cssStyle: {
-            _element: this._canvas,
-            display: 'block',
-            width:  `${this._width}px`,
-            height: `${this._height}px`,
-            pointerEvents: 'auto',
-            cursor: 'pointer',
-        },
-    };
-}
+    // ── Контракт TextManager ────────────────────────────────────────
+    override getIcon(): {
+        name: string;
+        anchor: [number, number];
+        cssStyle: Record<string, any>;
+    } {
+        return {
+            name: 'diagram',
+            anchor: this.getAnchor(),
+            cssStyle: {
+                _element: this._canvas,
+                display: 'block',
+                width:  `${this._width}px`,
+                height: `${this._height}px`,
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+            },
+        };
+    }
 
     override getPriority(): number {
         return DIAGRAM_PRIORITY_BASE + this.getIconPriority();
     }
 
-    // ── Мутация ─────────────────────────────────────────────────────
+    // =================================================================
+    // Геттеры и Сеттеры
+    // =================================================================
+
+    getType(): string { return this._typeName; }
+    setType(name: string): this {
+        if (this._typeName === name) return this;
+        this._typeName = name;
+        this._type = getDiagramType(name);
+        this._recompute();
+        return this;
+    }
+
+    getData(): DiagramData[] { return this._data.map(d => ({ ...d })); }
     setData(data: DiagramData[]): this {
         this._data = data;
         this._params.data = data;
@@ -155,20 +169,212 @@ override getIcon(): {
         return this;
     }
 
+    getUnitPx(): number { return this._params.unitPx; }
     setUnitPx(px: number): this {
-        if (!(px > 0)) return this;
+        if (!(px > 0) || this._params.unitPx === px) return this;
         this._params.unitPx = px;
         this._recompute();
         return this;
     }
 
-    setDiagramType(name: string): this {
-        this._typeName = name;
-        this._type = getDiagramType(name);
+    getOrientation(): DiagramOrientation | undefined { return this._params.orientation; }
+    setOrientation(o: DiagramOrientation): this {
+        if (this._params.orientation === o) return this;
+        this._params.orientation = o;
         this._recompute();
         return this;
     }
 
+    getBarWidth(): number | undefined { return this._params.barWidth; }
+    setBarWidth(w: number): this {
+        if (this._params.barWidth === w) return this;
+        this._params.barWidth = w;
+        this._recompute();
+        return this;
+    }
+
+    getGap(): number | undefined { return this._params.gap; }
+    setGap(g: number): this {
+        if (this._params.gap === g) return this;
+        this._params.gap = g;
+        this._recompute();
+        return this;
+    }
+
+    getPadding(): number | undefined { return this._params.padding; }
+    setPadding(p: number): this {
+        if (this._params.padding === p) return this;
+        this._params.padding = p;
+        this._recompute();
+        return this;
+    }
+
+    getStrokeColor(): string | undefined { return this._params.strokeColor; }
+    setStrokeColor(c: string): this {
+        if (this._params.strokeColor === c) return this;
+        this._params.strokeColor = c;
+        this._recompute();
+        return this;
+    }
+
+    getStrokeWidth(): number | undefined { return this._params.strokeWidth; }
+    setStrokeWidth(w: number): this {
+        if (this._params.strokeWidth === w) return this;
+        this._params.strokeWidth = w;
+        this._recompute();
+        return this;
+    }
+
+    // ── Подпись ──
+    getLabel(): string | undefined { return this._params.label; }
+    setLabel(l: string | undefined): this {
+        if (this._params.label === l) return this;
+        this._params.label = l;
+        this._recompute();
+        return this;
+    }
+
+    getDiagramLabelPosition(): LabelPosition | undefined { return this._params.labelPosition; }
+    setDiagramLabelPosition(p: LabelPosition | undefined): this {
+        if (this._params.labelPosition === p) return this;
+        this._params.labelPosition = p;
+        this._recompute();
+        return this;
+    }
+
+    getLabelFont(): string | undefined { return this._params.labelFont; }
+    setLabelFont(f: string | undefined): this {
+        if (this._params.labelFont === f) return this;
+        this._params.labelFont = f;
+        this._recompute();
+        return this;
+    }
+
+    getLabelColor(): string | undefined { return this._params.labelColor; }
+    setLabelColor(c: string | undefined): this {
+        if (this._params.labelColor === c) return this;
+        this._params.labelColor = c;
+        this._recompute();
+        return this;
+    }
+
+    // ── Венский способ ──
+    getUnitValue(): number | undefined { return this._params.unitValue; }
+    setUnitValue(u: number | undefined): this {
+        if (this._params.unitValue === u) return this;
+        this._params.unitValue = u;
+        this._recompute();
+        return this;
+    }
+
+    getMaxCols(): number | undefined { return this._params.maxCols; }
+    setMaxCols(m: number | undefined): this {
+        if (this._params.maxCols === m) return this;
+        this._params.maxCols = m;
+        this._recompute();
+        return this;
+    }
+
+    getShape(): 'square' | 'circle' | undefined { return this._params.shape; }
+    setShape(s: 'square' | 'circle' | undefined): this {
+        if (this._params.shape === s) return this;
+        this._params.shape = s;
+        this._recompute();
+        return this;
+    }
+
+    getShowTotal(): boolean | undefined { return this._params.showTotal; }
+    setShowTotal(s: boolean | undefined): this {
+        if (this._params.showTotal === s) return this;
+        this._params.showTotal = s;
+        this._recompute();
+        return this;
+    }
+
+    getTotalFormat(): ((total: number) => string) | undefined { return this._params.totalFormat; }
+    setTotalFormat(f: ((total: number) => string) | undefined): this {
+        this._params.totalFormat = f;
+        this._recompute();
+        return this;
+    }
+
+    getTotalFont(): string | undefined { return this._params.totalFont; }
+    setTotalFont(f: string | undefined): this {
+        if (this._params.totalFont === f) return this;
+        this._params.totalFont = f;
+        this._recompute();
+        return this;
+    }
+
+    getTotalBg(): string | undefined { return this._params.totalBg; }
+    setTotalBg(c: string | undefined): this {
+        if (this._params.totalBg === c) return this;
+        this._params.totalBg = c;
+        this._recompute();
+        return this;
+    }
+
+    getTotalColor(): string | undefined { return this._params.totalColor; }
+    setTotalColor(c: string | undefined): this {
+        if (this._params.totalColor === c) return this;
+        this._params.totalColor = c;
+        this._recompute();
+        return this;
+    }
+
+    getTotalBorder(): string | undefined { return this._params.totalBorder; }
+    setTotalBorder(c: string | undefined): this {
+        if (this._params.totalBorder === c) return this;
+        this._params.totalBorder = c;
+        this._recompute();
+        return this;
+    }
+
+    // ── Vienne Cubes & Bar Segments ──
+    getProjection(): 'oblique' | 'isometric' | undefined { return this._params.projection; }
+    setProjection(p: 'oblique' | 'isometric' | undefined): this {
+        if (this._params.projection === p) return this;
+        this._params.projection = p;
+        this._recompute();
+        return this;
+    }
+
+    getCoins(): number[] | undefined { return this._params.coins; }
+    setCoins(c: number[] | undefined): this {
+        this._params.coins = c;
+        this._recompute();
+        return this;
+    }
+
+    getSegmentSizes(): number[] | undefined { return this._params.segmentSizes; }
+    setSegmentSizes(s: number[] | undefined): this {
+        this._params.segmentSizes = s;
+        this._recompute();
+        return this;
+    }
+
+    // ── Полигон и Fit ──
+    getParentPolygon(): Polygon | null { return this._parentPolygon; }
+    setParentPolygon(p: Polygon | null): this {
+        this._parentPolygon = p;
+        return this;
+    }
+
+    getFitToPolygon(): boolean { return this._fitToPolygon; }
+    setFitToPolygon(f: boolean): this {
+        this._fitToPolygon = f;
+        return this;
+    }
+
+    getMinScreenScale(): number { return this._minScreenScale; }
+    setMinScreenScale(s: number): this {
+        this._minScreenScale = s;
+        return this;
+    }
+
+    getCanvas(): HTMLCanvasElement { return this._canvas; }
+
+    // ── Универсальный setStyle (для обратной совместимости) ──
     setStyle(patch: Partial<Pick<DiagramRenderParams,
         'barWidth'|'gap'|'padding'|'strokeColor'|'strokeWidth'>>): this {
         Object.assign(this._params, patch);
@@ -176,17 +382,15 @@ override getIcon(): {
         return this;
     }
 
-    getData(): DiagramData[] { return this._data.map(d => ({ ...d })); }
-    getCanvas(): HTMLCanvasElement { return this._canvas; }
+    // =================================================================
+    // Логика обновления
+    // =================================================================
 
-    // ── Fit-логика ──────────────────────────────────────────────────
     override _update(map?: any): void {
-        // 1. Если родительский полигон скрыт — скрываемся.
-if (this._parentPolygon && !this._parentPolygon.isVisible()) {
+        if (this._parentPolygon && !this._parentPolygon.isVisible()) {
             this._applyHidden();
             return;
         }
-        // 2. Если fitToPolygon — проверяем экранный bbox полигона.
         if (this._parentPolygon && this._fitToPolygon) {
             const bbox = (this._parentPolygon as any).getScreenBBox?.();
             if (!bbox || bbox.width < 1 || bbox.height < 1) {
@@ -202,7 +406,6 @@ if (this._parentPolygon && !this._parentPolygon.isVisible()) {
         super._update(map);
     }
 
-    // ── Внутреннее ──────────────────────────────────────────────────
     private _recompute(): void {
         const size = this._type.computeSize(this._params);
         if (size.width !== this._width || size.height !== this._height) {
@@ -215,7 +418,7 @@ if (this._parentPolygon && !this._parentPolygon.isVisible()) {
             if (size.anchor) this.setAnchor(size.anchor);
         }
         this._redraw();
-        this._refreshLabel(true);     // иконка (canvas) изменилась — просим TM обновить
+        this._refreshLabel(true);     
     }
 
     private _applyCanvasSize(): void {

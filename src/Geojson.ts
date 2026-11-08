@@ -50,6 +50,8 @@ import {
 import { Diagram, type DiagramOptions } from './Diagram.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
+import { calculateBreaks, getClassIndex } from './Classification.js';
+import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
 
 // =====================================================================
 // GeoJSON types
@@ -82,6 +84,19 @@ export interface GeoJSONFeature {
     geometry: GeoJSONGeometry;
     properties?: GeoJSONProperties | null;
     id?: string | number;
+}
+
+export interface ChoroplethConfig {
+    /** Формула или поле: 'population / area' или просто 'gdp' */
+    value: string | ((props: Props) => number);
+    /** Имя палитры ('viridis', 'terrain') или массив стопов */
+    colorRamp: string | any[];
+    /** Метод классификации (по умолчанию 'jenks') */
+    classification?: 'equal' | 'quantile' | 'jenks' | number[];
+    /** Количество классов (по умолчанию 5) */
+    classes?: number;
+    /** Цвет для нулевых/пустых значений (по умолчанию 'transparent') */
+    noDataColor?: string;
 }
 
 export interface GeoJSONFeatureCollection {
@@ -562,10 +577,10 @@ export interface DiagramLayerConfig {
     strokeColor?: string;
     strokeWidth?: number;
 
-segmentSizes?: number[];
+    segmentSizes?: number[];
 
     // Подпись
-    labelField?: string;          // уже было
+    labelField?: string; 
     labelPosition?: LabelPosition;
     labelFont?: string;
     labelColor?: string;
@@ -579,19 +594,21 @@ segmentSizes?: number[];
     totalBg?: string;
     totalColor?: string;
     totalBorder?: string;
+    
+    projection?: 'oblique' | 'isometric'; // <--- Добавьте, если нет
 
     fitToPolygon?: boolean;
     minScreenScale?: number;
     minZoom?: number;
     maxZoom?: number;
-
-     coins?: number[];
+    coins?: number[];
 }
 
 export interface GeoJSONLayerOptions {
     url?: string;
     data?: GeoJSONInput;
     crs?: string;
+    choropleth?: ChoroplethConfig;
 /**
  * Тултип feature-а.
  * - `string`   — HTML-шаблон; `{field}` подставляется из `properties`.
@@ -723,6 +740,11 @@ export class GeoJSONLayer extends Layer {
     public crs: string | null = null;
     public tooltipOnHover: boolean = false;
 
+    public choropleth: ChoroplethConfig | null = null;
+    private _choroplethBreaks: number[] = [];
+    private _choroplethRamp: any = null;
+
+
     /**
      * Скомпилированный предикат. `null` — фильтра нет.
      * Для установки используйте `setFeatureFilter` — он корректно
@@ -814,6 +836,11 @@ this.diagram = options.diagram ?? null;
 this.diagramToOptions = options.diagramToOptions ?? null;
 this.onEachDiagram = options.onEachDiagram ?? null;
 this.tooltipOnHover = options.tooltipOnHover ?? false;
+
+ this.choropleth = options.choropleth ?? null;
+        if (this.choropleth) {
+            this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
+        }
 
         this.url = options.url ?? null;
         this.data = options.data ?? null;
@@ -1050,11 +1077,38 @@ private _applyFilter(input: unknown): void {
                 console.warn('GeoJSONLayer: no data or URL provided');
                 return;
             }
+             if (this.choropleth) {
+            this._calculateChoroplethBreaks(geojson);
+        }
             this._parse(geojson);
             this._loaded = true;
         } catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
         }
+    }
+
+    private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
+        if (!this.choropleth) return;
+        
+        let values: number[] = [];
+        const processFeature = (f: GeoJSONFeature) => {
+            if (f.properties) {
+                const val = this._evaluateValueExpression(f.properties, this.choropleth!.value);
+                if (isFinite(val)) values.push(val);
+            }
+        };
+
+        if (geojson.type === 'FeatureCollection') {
+            geojson.features.forEach(processFeature);
+        } else if (geojson.type === 'Feature') {
+            processFeature(geojson);
+        }
+
+        this._choroplethBreaks = calculateBreaks(
+            values, 
+            this.choropleth.classification || 'jenks', 
+            this.choropleth.classes || 5
+        );
     }
 
     // =================================================================
@@ -1067,6 +1121,35 @@ private _applyFilter(input: unknown): void {
             if (v != null && v !== '') return String(v);
         }
         return props.title || props.name || '';
+    }
+
+        private _evaluateValueExpression(props: Props, exprOrFn: string | ((p: Props) => number)): number {
+        if (typeof exprOrFn === 'function') {
+            return exprOrFn(props);
+        }
+        try {
+            // Безопасный скоуп: переменные ищутся в props, а не в window
+            const fn = new Function('props', `
+                const __scope = new Proxy(
+                    Object.assign(Object.create(null), { props }),
+                    {
+                        has: (t, k) => typeof k === 'string' && (
+                            Object.prototype.hasOwnProperty.call(t, k) ||
+                            Object.prototype.hasOwnProperty.call(props, k)
+                        ),
+                        get: (t, k) => {
+                            if (typeof k !== 'string') return undefined;
+                            if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
+                            return props[k];
+                        },
+                    }
+                );
+                with (__scope) { return Number(${exprOrFn}); }
+            `);
+            return fn(props);
+        } catch {
+            return NaN;
+        }
     }
 
 private _getTooltip(props: Props): string {
@@ -1471,7 +1554,7 @@ private _diagramFromConfig(feature: GeoJSONFeature, props: Props): DiagramSpawnO
         ).join('<br>');
     }
 
- const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
+const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
 
 return {
     type: cfg.type ?? 'bar',
@@ -1483,10 +1566,12 @@ return {
     padding: cfg.padding,
     strokeColor: cfg.strokeColor,
     strokeWidth: cfg.strokeWidth,
+    
     label: label || undefined,
     labelPosition: cfg.labelPosition,
     labelFont: cfg.labelFont,
     labelColor: cfg.labelColor,
+    
     unitValue: cfg.unitValue,
     maxCols: cfg.maxCols,
     shape: cfg.shape,
@@ -1495,24 +1580,46 @@ return {
     totalBg: cfg.totalBg,
     totalColor: cfg.totalColor,
     totalBorder: cfg.totalBorder,
+    projection: cfg.projection, // <--- Добавьте
+    
     minZoom: cfg.minZoom,
     maxZoom: cfg.maxZoom,
     tooltip,
-     coins: cfg.coins,
-     segmentSizes: cfg.segmentSizes,
+    coins: cfg.coins,
+    segmentSizes: cfg.segmentSizes,
 };
 }
 
-private _createPolygon(
-    feature: GeoJSONFeature,
-    props: Props,
-    rings: GeoJSONPolygon,
-    cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null | undefined,
-): Polygon | null {
+ private _createPolygon(
+        feature: GeoJSONFeature,
+        props: Props,
+        rings: GeoJSONPolygon,
+        cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null | undefined,
+    ): Polygon | null {
+        
+        // Вычисляем цвет, если включена картограмма
+        let choroplethColor: string | undefined;
+        if (this.choropleth && this._choroplethRamp) {
+            const val = this._evaluateValueExpression(props, this.choropleth.value);
+
+            if (isFinite(val)) {
+                const classIdx = getClassIndex(val, this._choroplethBreaks);
+                const t = this._choroplethBreaks.length > 0 
+                    ? classIdx / this._choroplethBreaks.length 
+                    : 0;
+                
+                const rgba = sampleColorRamp(this._choroplethRamp, t);
+                // ВАЖНО: Three.js ожидает hex-строку для цвета, а не rgba()
+                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
+            } else {
+                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
+            }
+        }
+
         const defaults: PolygonOptions = {
             rings,
             crs: this.crs ?? undefined,
-            fillColor: props.fill || props['fill-color'] || this.defaultFillColor,
+            fillColor: choroplethColor || props.fill || props['fill-color'] || this.defaultFillColor,
             fillOpacity: this._asNumber(props['fill-opacity']) ?? this.defaultFillOpacity,
             strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
             strokeWidth: this._asNumber(props['stroke-width']) ?? this.defaultStrokeWidth,
@@ -1540,19 +1647,24 @@ private _createPolygon(
             tooltipOnHover: this.tooltipOnHover,
         };
 
-        const normStyle = this._normalizeStyle<PolygonOptions>(
+       const normStyle = this._normalizeStyle<PolygonOptions>(
             this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
         const normCb = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
+        
         const merged: PolygonOptions = {
             ...defaults,
             ...(normStyle ?? {}),
             ...(normCb ?? {}),
             rings,
+            // Гарантируем, что цвет картограммы не будет перезаписан стилями,
+            // если только пользователь явно не передал fillColor в callback
+            fillColor: choroplethColor || normCb?.fillColor || normStyle?.fillColor || defaults.fillColor
         };
- const polygon = new Polygon(merged);
-    this.add(polygon);
-    if (this.onEachFeature) this.onEachFeature(feature, polygon);
-    return polygon;
+        
+        const polygon = new Polygon(merged);
+        this.add(polygon);
+        if (this.onEachFeature) this.onEachFeature(feature, polygon);
+        return polygon;
     }
 
     private _createArea3D(

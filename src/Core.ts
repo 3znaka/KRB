@@ -574,9 +574,9 @@ for (const layer of objectsToAdd) {
 
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
-        if (this._rasterLayers.length > 0) {
-            this.createStaticBackgroundLayer();
-        }
+if (this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
+    this.createStaticBackgroundLayer();
+}
 
         this._calibrateBaseDistance();
 

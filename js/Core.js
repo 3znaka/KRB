@@ -412,7 +412,7 @@ export class KrbMap {
         }
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
-        if (this._rasterLayers.length > 0) {
+        if (this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
             this.createStaticBackgroundLayer();
         }
         this._calibrateBaseDistance();

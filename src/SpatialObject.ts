@@ -71,13 +71,24 @@ export abstract class SpatialObject {
     // Жизненный цикл
     // =================================================================
 
-    addTo(map: any): this {
-        if (this._map) this.remove();
-        const personalLayer = new Layer();
-        personalLayer.addTo(map);
-        (personalLayer as any).add(this);
-        return this;
+addTo(map: any): this {
+    if (this._map === map && this._layer) return this;  // уже там — no-op
+
+    if (this._map) {
+        // Отсоединяемся от старой карты: personal Layer тоже надо убрать,
+        // иначе он утечёт в map._dynamicLayers.
+        const oldLayer = this._layer;
+        this.remove();                                    // _layer → null
+        if (oldLayer && (oldLayer as any)._map && !(oldLayer as any)._objects.length) {
+            oldLayer.removeFromMap();
+        }
     }
+
+    const personalLayer = new Layer();
+    personalLayer.addTo(map);
+    (personalLayer as any).add(this);
+    return this;
+}
 
     _attach(map: any, layer: Layer): void {
         if (this._map === map && this._layer === layer) return;

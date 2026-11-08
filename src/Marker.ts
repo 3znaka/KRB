@@ -466,7 +466,7 @@ protected _teardown(): void {
      * `_iconSize`, `_anchor` или `_rotation` — они упакованы в
      * `getIcon().cssStyle`.
      */
-    private _refreshLabel(refreshIcon = false): void {
+protected _refreshLabel(refreshIcon = false): void { 
         const tm = this._map?.textManager;
         if (!tm || !this._textLabel) return;
         tm.updateLabel(this._textLabel, refreshIcon);

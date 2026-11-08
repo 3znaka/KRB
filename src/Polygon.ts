@@ -71,6 +71,7 @@ export interface PolygonOptions {
     properties?: Record<string, any>;
     userData?: Record<string, any>;
     zoomInterpolate?: ZoomInterpolation | null;
+    tooltipOnHover?: boolean;
 }
 
 export interface PolygonRenderOrder {
@@ -126,6 +127,9 @@ export class Polygon extends SpatialObject {
     private _strokeWidth: number;
     private _strokeOpacity: number;
     private _altitudeMode: AltitudeMode;
+    private _tooltipOnHover: boolean;
+
+    private _visualCenterCache: LonLat | null = null;
 
     private _extruded: boolean;
     private _height: number;
@@ -232,6 +236,7 @@ export class Polygon extends SpatialObject {
         this._strokeWidth = options.strokeWidth ?? 2;
         this._strokeOpacity = options.strokeOpacity ?? 1;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
+        this._tooltipOnHover = options.tooltipOnHover ?? false; 
 
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
 
@@ -523,45 +528,47 @@ getScreenPosition(): { x: number; y: number } | null {
     // Интерактив
     // =================================================================
 
-    private _registerInteraction(map: any): void {
-        if (!map.interaction || typeof map.interaction.register !== 'function') return;
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (this._invalidGeometry) return;
-        if (!this._onClick && !this._onHover && !this._tooltipText) return;
-
-        const callbacks: Record<string, any> = {
-            getMeshes: () => this._getRaycastMeshes(),
-            getBoundingSphere: () => {
-                if (this._boundingSphereRadius <= 0) return null;
-                const wgPos = map.worldGroup.position;
-                this._boundingSphereWorldCenter.set(
-                    this._group.position.x + wgPos.x,
-                    this._group.position.y + wgPos.y,
-                    this._group.position.z + wgPos.z
-                );
-                return {
-                    center: this._boundingSphereWorldCenter,
-                    radius: this._boundingSphereRadius,
-                };
-            },
-            isVisible: () => this._group.visible,
-        };
-
-        if (this._onHover) {
-            callbacks.onHover = (isHovered: boolean) => this._onHover!(isHovered);
-        } else if (this._tooltipText) {
-            callbacks.getTooltip = () => this._tooltipText;
-        }
-
-        if (this._onClick) {
-            callbacks.onClick = (event: MouseEvent) => this._onClick!(event, this);
-        }
-
-        this._unregisterInteraction = map.interaction.register(this, callbacks);
+private _registerInteraction(map: any): void {
+    if (!map.interaction || typeof map.interaction.register !== 'function') return;
+    if (this._unregisterInteraction) {
+        this._unregisterInteraction();
+        this._unregisterInteraction = null;
     }
+    if (this._invalidGeometry) return;
+
+    const wantTooltip = !!this._tooltipText && this._tooltipOnHover;
+    if (!this._onClick && !this._onHover && !wantTooltip) return;
+
+    const callbacks: Record<string, any> = {
+        getMeshes: () => this._getRaycastMeshes(),
+        getBoundingSphere: () => {
+            if (this._boundingSphereRadius <= 0) return null;
+            const wgPos = map.worldGroup.position;
+            this._boundingSphereWorldCenter.set(
+                this._group.position.x + wgPos.x,
+                this._group.position.y + wgPos.y,
+                this._group.position.z + wgPos.z
+            );
+            return {
+                center: this._boundingSphereWorldCenter,
+                radius: this._boundingSphereRadius,
+            };
+        },
+        isVisible: () => this._group.visible,
+    };
+
+    if (this._onHover) {
+        callbacks.onHover = (isHovered: boolean) => this._onHover!(isHovered);
+    } else if (wantTooltip) {
+        callbacks.getTooltip = () => this._tooltipText;
+    }
+
+    if (this._onClick) {
+        callbacks.onClick = (event: MouseEvent) => this._onClick!(event, this);
+    }
+
+    this._unregisterInteraction = map.interaction.register(this, callbacks);
+}
 
     private _getRaycastMeshes(): any[] {
         if (this._raycastMeshesCache) return this._raycastMeshesCache;
@@ -577,18 +584,19 @@ getScreenPosition(): { x: number; y: number } | null {
     // Кольца
     // =================================================================
 
-    setRings(rings: PolygonRing[]): this {
-        if (!rings || !rings.length || rings[0].length < 3) {
-            console.warn('Polygon.setRings: need at least one ring with 3+ points');
-            return this;
-        }
-        this._rings = rings;
-        this._boundsCache.clear();
-        if (!this._map) return this;
-        this._rebuildGeometry();
-        this._invalidateBatch();
+setRings(rings: PolygonRing[]): this {
+    if (!rings || !rings.length || rings[0].length < 3) {
+        console.warn('Polygon.setRings: need at least one ring with 3+ points');
         return this;
     }
+    this._rings = rings;
+    this._boundsCache.clear();
+    this._visualCenterCache = null;          // ← добавить
+    if (!this._map) return this;
+    this._rebuildGeometry();
+    this._invalidateBatch();
+    return this;
+}
 
     getRings(): PolygonRing[] {
         return this._rings.map(ring => ring.map(pt => [...pt] as PolygonCoord));
@@ -623,6 +631,8 @@ getScreenPosition(): { x: number; y: number } | null {
         this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
         this._lastCentroidHeightUpdateTime = 0;
+
+        this._visualCenterCache = null;
     }
 
     private _disposeMeshes(): void {
@@ -1705,6 +1715,8 @@ getScreenPosition(): { x: number; y: number } | null {
         return true;
     }
 
+
+
     private _updateStroke(): void {
         if (this._invalidGeometry) return;
         if (!this._strokeLine || !this._strokeGeometry) return;
@@ -1808,6 +1820,10 @@ getScreenPosition(): { x: number; y: number } | null {
         return result;
     }
 
+    
+
+    
+
     private _computeBounds(crs: string | any): [LonLat, LonLat] | null {
         if (!this._rings || !this._rings.length) return null;
 
@@ -1845,4 +1861,132 @@ getScreenPosition(): { x: number; y: number } | null {
         if (count === 0 || !isFinite(minX)) return null;
         return [[minX, minY], [maxX, maxY]];
     }
+
+
+
+// ── В классе Polygon ──────────────────────────────────────────────────
+/** Визуальный центр (pole of inaccessibility) в WGS84. */
+getVisualCenter(): LonLat | null {
+    if (this._visualCenterCache) return this._visualCenterCache;   // ← добавить
+    const rings = this._rings;
+    if (!rings || !rings.length) return null;
+    const src = this._crs
+        ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+    if (!src) return null;
+
+    const wgsRings: number[][][] = rings.map(r => r.map(pt => {
+        const [lon, lat] = src.toLonLat(pt);
+        return [lon, lat];
+    }));
+
+    const [lon, lat] = _polylabel(wgsRings, 0.001);
+    this._visualCenterCache = [lon, lat];                          // ← и это
+    return this._visualCenterCache;
 }
+
+/** Экранный bbox полигона в пикселях — для fit-проверки диаграмм. */
+getScreenBBox(): { minX: number; minY: number; maxX: number; maxY: number;
+                   width: number; height: number } | null {
+    const map = this._map;
+    if (!map || !this._worldCoords.length) return null;
+    const wgPos = map.worldGroup.position;
+    const canvas = map.renderer.domElement;
+    const W = canvas.clientWidth, H = canvas.clientHeight;
+    const v = map.getVec3?.() ?? new THREE.Vector3();
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < this._worldCoords.length; i++) {
+        const wc = this._worldCoords[i];
+        const y = this._cachedHeights[i] ?? this._altitude;
+        v.set(wc[0] + wgPos.x, y + wgPos.y, wc[1] + wgPos.z).project(map.camera);
+        if (v.z <= -1 || v.z >= 1) return null;  // вырождается
+        const px = (v.x * 0.5 + 0.5) * W;
+        const py = (-v.y * 0.5 + 0.5) * H;
+        if (px < minX) minX = px; if (py < minY) minY = py;
+        if (px > maxX) maxX = px; if (py > maxY) maxY = py;
+    }
+    if (!isFinite(minX)) return null;
+    return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+setTooltipOnHover(on: boolean): this {
+    const next = !!on;
+    if (this._tooltipOnHover === next) return this;
+    this._tooltipOnHover = next;
+    if (this._map) this._registerInteraction(this._map);
+    return this;
+}
+
+getTooltipOnHover(): boolean {
+    return this._tooltipOnHover;
+}
+
+
+    
+}
+
+interface _PoleCell { x: number; y: number; h: number; d: number; max: number; }
+
+function _pointToRingsDistSq(rings: number[][][], x: number, y: number): number {
+    let inside = false;
+    let minDSq = Infinity;
+    for (const ring of rings) {
+        const n = ring.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const a = ring[i], b = ring[j];
+            if ((a[1] > y) !== (b[1] > y) &&
+                x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
+            const dx = b[0] - a[0], dy = b[1] - a[1];
+            const l2 = dx*dx + dy*dy;
+            let t = 0;
+            if (l2 > 0) t = Math.max(0, Math.min(1, ((x-a[0])*dx + (y-a[1])*dy) / l2));
+            const px = a[0] + t*dx, py = a[1] + t*dy;
+            const ddx = x - px, ddy = y - py;
+            const dSq = ddx*ddx + ddy*ddy;
+            if (dSq < minDSq) minDSq = dSq;
+        }
+    }
+    return inside ? minDSq : -minDSq;
+}
+
+function _polylabel(rings: number[][][], precision = 1): [number, number] {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ring of rings) for (const [x, y] of ring) {
+        if (x < minX) minX = x; if (y < minY) minY = y;
+        if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+    }
+    const w = maxX - minX, h = maxY - minY;
+    const cellSize = Math.min(w, h);
+    if (cellSize === 0) return [minX, minY];
+
+    const queue: _PoleCell[] = [];
+    const makeCell = (x: number, y: number, hh: number): _PoleCell => {
+        const d = _pointToRingsDistSq(rings, x, y);
+        return { x, y, h: hh, d, max: d + hh * Math.SQRT2 };
+    };
+    for (let x = minX; x < maxX; x += cellSize) {
+        for (let y = minY; y < maxY; y += cellSize) {
+            queue.push(makeCell(x + cellSize / 2, y + cellSize / 2, cellSize / 2));
+        }
+    }
+    queue.sort((a, b) => b.max - a.max);
+    const bboxCell = makeCell(minX + w / 2, minY + h / 2, 0);
+    let best = bboxCell;
+
+    while (queue.length) {
+        const cell = queue.shift()!;
+        if (cell.d > best.d) best = cell;
+        if (cell.max - best.d <= precision) continue;
+        const hh = cell.h / 2;
+        queue.push(
+            makeCell(cell.x - hh, cell.y - hh, hh),
+            makeCell(cell.x + hh, cell.y - hh, hh),
+            makeCell(cell.x - hh, cell.y + hh, hh),
+            makeCell(cell.x + hh, cell.y + hh, hh),
+        );
+        queue.sort((a, b) => b.max - a.max);
+    }
+    return [best.x, best.y];
+}
+
+

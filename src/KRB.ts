@@ -26,4 +26,5 @@ export {
 } from './Vector3D.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
 export * from './styles/index.js';
+export { Diagram } from './Diagram.js';
 import './PolygonBatcher.js';

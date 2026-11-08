@@ -47,7 +47,9 @@ import {
     type Vector3DOptions,
     type Vector3DPosition,
 } from './Vector3D.js';
+import { Diagram, type DiagramOptions } from './Diagram.js';
 import type { SpatialObject } from './SpatialObject.js';
+import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
 
 // =====================================================================
 // GeoJSON types
@@ -56,6 +58,9 @@ import type { SpatialObject } from './SpatialObject.js';
 export type GeoJSONCoord = [number, number] | [number, number, number];
 export type GeoJSONLineString = GeoJSONCoord[];
 export type GeoJSONPolygon = GeoJSONCoord[][];
+export type DiagramSpawnOptions =
+    Omit<DiagramOptions, 'position' | 'crs' | 'parentPolygon'>;
+
 
 interface GeoJSONPointGeometry { type: 'Point'; coordinates: GeoJSONCoord; }
 interface GeoJSONLineStringGeometry { type: 'LineString'; coordinates: GeoJSONLineString; }
@@ -157,6 +162,8 @@ const NUMERIC_OPTION_KEYS = new Set<string>([
     'fillOpacity', 'strokeOpacity', 'strokeWidth',
     'width', 'opacity', 'arrowSize',
 ]);
+
+
 
 // =====================================================================
 // Declarative style types
@@ -278,6 +285,15 @@ function replaceEqualityOutsideStrings(expr: string): string {
         out += ch; i++;
     }
     return out;
+}
+
+function interpolate(template: string, props: Record<string, any>): string {
+    return template.replace(/\{([\w.]+)\}/g, (_m, key) => {
+        const v = key.includes('.')
+            ? key.split('.').reduce((o: any, k: string) => (o == null ? undefined : o[k]), props)
+            : props[key];
+        return v == null ? '' : String(v);
+    });
 }
 
 /**
@@ -533,11 +549,57 @@ export type OnEachFeatureCallback =
 // Layer options
 // =====================================================================
 
+
+export interface DiagramLayerConfig {
+    type?: string;
+    fields: string[];
+    unitPx?: number;
+    orientation?: DiagramOrientation;
+    colorMap?: Record<string, string>;
+    barWidth?: number;
+    gap?: number;
+    padding?: number;
+    strokeColor?: string;
+    strokeWidth?: number;
+
+segmentSizes?: number[];
+
+    // Подпись
+    labelField?: string;          // уже было
+    labelPosition?: LabelPosition;
+    labelFont?: string;
+    labelColor?: string;
+
+    // Венский способ
+    unitValue?: number;
+    maxCols?: number;
+    shape?: 'square' | 'circle';
+    showTotal?: boolean;
+    totalFont?: string;
+    totalBg?: string;
+    totalColor?: string;
+    totalBorder?: string;
+
+    fitToPolygon?: boolean;
+    minScreenScale?: number;
+    minZoom?: number;
+    maxZoom?: number;
+
+     coins?: number[];
+}
+
 export interface GeoJSONLayerOptions {
     url?: string;
     data?: GeoJSONInput;
     crs?: string;
-
+/**
+ * Тултип feature-а.
+ * - `string`   — HTML-шаблон; `{field}` подставляется из `properties`.
+ *                Без `{}` — одинаковый литеральный HTML для всех features.
+ * - `function` — escape hatch, `(props) => html | null`.
+ * - `null`/`undefined` — fallback на `tooltipField` → `props.tooltip`/`props.description`.
+ */
+tooltip?: string | ((props: Props) => string | null) | null;
     /** Фильтр на уровне feature (не путать с `Layer.filter` по объектам). */
     featureFilter?: FeatureFilterInput;
     /** @deprecated Используйте `featureFilter`. */
@@ -551,6 +613,7 @@ export interface GeoJSONLayerOptions {
     titleField?: string | null;
     /** Откуда брать `tooltip`: `props[tooltipField]` приоритетнее `props.tooltip`/`props.description`. */
     tooltipField?: string | null;
+    tooltipOnHover?: boolean;
 
     pointToOptions?: PointOptionsCallback;
     point3DToOptions?: Point3DOptionsCallback;
@@ -617,6 +680,11 @@ export interface GeoJSONLayerOptions {
     defaultPolygon3DModelUrl?: string | null;
     defaultPolygon3DDepthTest?: boolean;
     defaultPolygon3DDepthWrite?: boolean;
+
+diagram?: DiagramLayerConfig;
+   diagramToOptions?: (feature: GeoJSONFeature, props: Props) => DiagramSpawnOptions | null;
+    onEachDiagram?: (feature: GeoJSONFeature, diagram: Diagram) => void;
+
 }
 
 // =====================================================================
@@ -653,6 +721,7 @@ export class GeoJSONLayer extends Layer {
     public url: string | null = null;
     public data: GeoJSONInput | null = null;
     public crs: string | null = null;
+    public tooltipOnHover: boolean = false;
 
     /**
      * Скомпилированный предикат. `null` — фильтра нет.
@@ -669,7 +738,7 @@ export class GeoJSONLayer extends Layer {
 
     public style: StyleConfig | null = null;
     public titleField: string | null = null;
-    public tooltipField: string | null = null;
+
 
     public pointToOptions: PointOptionsCallback | null = null;
     public point3DToOptions: Point3DOptionsCallback | null = null;
@@ -677,6 +746,14 @@ export class GeoJSONLayer extends Layer {
     public polygonToOptions: PolygonOptionsCallback | null = null;
     public polygon3DToOptions: Polygon3DOptionsCallback | null = null;
     public vectorToOptions: VectorOptionsCallback | null = null;
+
+public tooltip: string | ((props: Props) => string | null) | null = null;
+/** @deprecated Используйте `tooltip: '{fieldName}'`. */
+public tooltipField: string | null = null;
+
+    public diagram: DiagramLayerConfig | null = null;
+public diagramToOptions: ((f: GeoJSONFeature, p: Props) => DiagramSpawnOptions | null) | null = null;
+public onEachDiagram: ((f, d) => void) | null = null;
 
     public defaultIconUrl: string = 'marker.png';
     public defaultIconSize: IconSize = [16, 16];
@@ -733,6 +810,11 @@ static fromMapboxFilter(arr: readonly unknown[]): string {
     constructor(options: GeoJSONLayerOptions = {}) {
         super();
 
+this.diagram = options.diagram ?? null;
+this.diagramToOptions = options.diagramToOptions ?? null;
+this.onEachDiagram = options.onEachDiagram ?? null;
+this.tooltipOnHover = options.tooltipOnHover ?? false;
+
         this.url = options.url ?? null;
         this.data = options.data ?? null;
         this.crs = options.crs ?? null;
@@ -742,7 +824,7 @@ static fromMapboxFilter(arr: readonly unknown[]): string {
 
         this.style = options.style ?? null;
         this.titleField = options.titleField ?? null;
-        this.tooltipField = options.tooltipField ?? null;
+
 
         this.pointToOptions = options.pointToOptions ?? null;
         this.point3DToOptions = options.point3DToOptions ?? null;
@@ -751,6 +833,8 @@ static fromMapboxFilter(arr: readonly unknown[]): string {
         this.polygon3DToOptions = options.polygon3DToOptions ?? null;
         this.vectorToOptions = options.vectorToOptions ?? null;
 
+this.tooltip = options.tooltip ?? null;
+this.tooltipField = options.tooltipField ?? null; 
         this.defaultIconUrl = options.defaultIconUrl ?? 'marker.png';
         this.defaultIconSize = options.defaultIconSize ?? [16, 16];
         this.defaultAnchor = options.defaultAnchor ?? [0.5, 1.0];
@@ -861,6 +945,12 @@ static fromMapboxFilter(arr: readonly unknown[]): string {
  */
 setFilter(input: FeatureFilterInput): this {
     return this.setFeatureFilter(input);
+}
+
+setDiagram(cfg: DiagramLayerConfig | null): this {
+    this.diagram = cfg;
+    if (this._map && this._loaded) this.reload();
+    return this;
 }
 
 /**
@@ -979,13 +1069,33 @@ private _applyFilter(input: unknown): void {
         return props.title || props.name || '';
     }
 
-    private _getTooltip(props: Props): string {
-        if (this.tooltipField) {
-            const v = props[this.tooltipField];
-            if (v != null && v !== '') return String(v);
+private _getTooltip(props: Props): string {
+    // 1. Явный tooltip: функция или шаблон.
+    const t = this.tooltip;
+    if (typeof t === 'function') {
+        try {
+            const out = t(props);
+            if (out != null) return String(out);
+        } catch (e) {
+            console.warn('GeoJSONLayer: tooltip callback threw', e);
         }
-        return props.tooltip || props.description || '';
+    } else if (typeof t === 'string' && t) {
+        // '{name}' — интерполяция; иначе literal HTML для всех features.
+        return t.includes('{') ? interpolate(t, props) : t;
     }
+
+    // 2. Deprecated fallback: одно поле из properties.
+    if (this.tooltipField) {
+        const raw = props[this.tooltipField];
+        if (raw != null && raw !== '' && String(raw).includes('{')) {
+            return interpolate(String(raw), props);
+        }
+        if (raw != null && raw !== '') return String(raw);
+    }
+
+    // 3. Дефолты: props.tooltip / props.description.
+    return props.tooltip || props.description || '';
+}
 
     /** shared (`style.cases`/`style.default`) ← per-type (`style[type].*`). */
     private _resolveStyle(props: Props, type: StyleTypeKey): StyleRule | null {
@@ -1281,38 +1391,124 @@ private _applyFilter(input: unknown): void {
     // Polygons
     // =================================================================
 
-    private _addPolygonFeature(feature: GeoJSONFeature): void {
-        const geom = feature.geometry;
-        if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') return;
-        const props = feature.properties ?? {};
+private _addPolygonFeature(feature: GeoJSONFeature): void {
+    const geom = feature.geometry;
+    if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') return;
+    const props = feature.properties ?? {};
 
-        const ringSets: GeoJSONPolygon[] =
-            geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+    const ringSets: GeoJSONPolygon[] =
+        geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
 
-        for (const rings of ringSets) {
-            if (!rings.length || !rings[0].length) continue;
+    for (const rings of ringSets) {
+        if (!rings.length || !rings[0].length) continue;
 
-            const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
-            const is3D = cb3D != null
-                || props['3d'] === true
-                || props.type === '3d'
-                || props.markerType === '3d';
+        const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
+        const is3D = cb3D != null
+            || props['3d'] === true
+            || props.type === '3d'
+            || props.markerType === '3d';
 
-            if (is3D) {
-                this._createArea3D(feature, props, rings as Area3DRing[], cb3D);
-            } else {
-                const cb = this.polygonToOptions ? this.polygonToOptions(feature, props) : null;
-                this._createPolygon(feature, props, rings, cb);
+        if (is3D) {
+            this._createArea3D(feature, props, rings as Area3DRing[], cb3D);
+            // Картодиаграмму на Area3D пока не навешиваем: другая геометрия,
+            // другой смысл fitToPolygon.
+        } else {
+            const cb = this.polygonToOptions ? this.polygonToOptions(feature, props) : null;
+            const polygon = this._createPolygon(feature, props, rings, cb);
+            if (polygon && (this.diagram || this.diagramToOptions)) {
+                this._addCartodiagram(feature, props, polygon);
             }
         }
     }
+}
 
-    private _createPolygon(
-        feature: GeoJSONFeature,
-        props: Props,
-        rings: GeoJSONPolygon,
-        cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null | undefined,
-    ): void {
+private _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon): void {
+    const baseOpts = this.diagramToOptions
+        ? this.diagramToOptions(feature, props)
+        : this._diagramFromConfig(feature, props);
+    if (!baseOpts) return;
+
+    const center = polygon.getVisualCenter();
+    if (!center) return;
+
+    const diagram = new Diagram({
+        ...baseOpts,
+        position: center,
+        crs: 'EPSG:4326',
+        parentPolygon: polygon,
+        fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
+        minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,
+        clusterable: false,
+    });
+    this.add(diagram);
+    if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
+}
+
+private _diagramFromConfig(feature: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
+    const cfg = this.diagram;
+    if (!cfg?.fields?.length) return null;
+
+    const data = cfg.fields
+        .map(key => {
+            const v = Number(props[key]);
+            if (!isFinite(v)) return null;
+            return {
+                label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
+                value: v,
+                color: cfg.colorMap?.[key],
+            };
+        })
+        .filter((d): d is NonNullable<typeof d> => d !== null);
+    if (!data.length) return null;
+
+    // ── Tooltip: сначала явный, иначе соберём из данных диаграммы. ──
+    let tooltip = this._getTooltip(props);
+    if (!tooltip) {
+        tooltip = data.map(d =>
+            `${d.color ? `<span style="display:inline-block;width:10px;height:10px;` +
+                          `background:${d.color};margin-right:6px;border-radius:2px;"></span>` : ''}` +
+            `${d.label}: <b>${d.value}</b>`
+        ).join('<br>');
+    }
+
+ const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
+
+return {
+    type: cfg.type ?? 'bar',
+    data,
+    unitPx: cfg.unitPx,
+    orientation: cfg.orientation,
+    barWidth: cfg.barWidth,
+    gap: cfg.gap,
+    padding: cfg.padding,
+    strokeColor: cfg.strokeColor,
+    strokeWidth: cfg.strokeWidth,
+    label: label || undefined,
+    labelPosition: cfg.labelPosition,
+    labelFont: cfg.labelFont,
+    labelColor: cfg.labelColor,
+    unitValue: cfg.unitValue,
+    maxCols: cfg.maxCols,
+    shape: cfg.shape,
+    showTotal: cfg.showTotal,
+    totalFont: cfg.totalFont,
+    totalBg: cfg.totalBg,
+    totalColor: cfg.totalColor,
+    totalBorder: cfg.totalBorder,
+    minZoom: cfg.minZoom,
+    maxZoom: cfg.maxZoom,
+    tooltip,
+     coins: cfg.coins,
+     segmentSizes: cfg.segmentSizes,
+};
+}
+
+private _createPolygon(
+    feature: GeoJSONFeature,
+    props: Props,
+    rings: GeoJSONPolygon,
+    cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null | undefined,
+): Polygon | null {
         const defaults: PolygonOptions = {
             rings,
             crs: this.crs ?? undefined,
@@ -1341,6 +1537,7 @@ private _applyFilter(input: unknown): void {
             titleAllowOverflow: props.titleAllowOverflow,
             titlePriority: this._asNumber(props.titlePriority),
             tooltip: this._getTooltip(props),
+            tooltipOnHover: this.tooltipOnHover,
         };
 
         const normStyle = this._normalizeStyle<PolygonOptions>(
@@ -1352,9 +1549,10 @@ private _applyFilter(input: unknown): void {
             ...(normCb ?? {}),
             rings,
         };
-        const polygon = new Polygon(merged);
-        this.add(polygon);
-        if (this.onEachFeature) this.onEachFeature(feature, polygon);
+ const polygon = new Polygon(merged);
+    this.add(polygon);
+    if (this.onEachFeature) this.onEachFeature(feature, polygon);
+    return polygon;
     }
 
     private _createArea3D(

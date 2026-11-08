@@ -13,7 +13,7 @@
  */
 
 import { THREE } from './js_TP/tpb.js';
-
+import { Projections } from './Projections.js';
 // =====================================================================
 // Типы
 // =====================================================================
@@ -138,17 +138,13 @@ export class PopupManager {
 
         this._activeObject = object;
 
-        if (this._lastHtml !== html) {
-            this._tooltipElement!.innerHTML = html;
-            this._lastHtml = html;
-
-            // Проверяем, есть ли видимое содержимое после установки innerHTML.
-            const text = this._tooltipElement!.textContent;
-            if (!text || text.trim() === '') {
-                this.hide();
-                return;
-            }
-        }
+if (this._lastHtml !== html) {
+    this._tooltipElement!.innerHTML = html;
+    this._lastHtml = html;
+}
+// Проверяем КАЖДЫЙ раз — дёшево (textContent уже распарсен).
+const text = this._tooltipElement!.textContent;
+if (!text || text.trim() === '') { this.hide(); return; }
 
         // Сброс кэша позиции — первый _updatePosition гарантированно
         // применит transform, даже если координаты совпали со «старыми».
@@ -160,18 +156,12 @@ export class PopupManager {
         this._startLoop();
     }
 
-    /**
-     * Показывает тултип в произвольной точке.
-     *
-     * `lonLat` — `[lon, lat]` или `[lon, lat, alt]` в WGS84 (или в СК,
-     * указанной в {@link PopupPoint#crs} через {@link showAtPoint}).
-     * На каждом кадре экранная позиция пересчитывается через `map.project`
-     * — при движении камеры попап «висит» в точке.
-     *
-     * @example
-     * map.popupManager.showAt([37.62, 55.75], '<b>Москва</b>');
-     * map.popupManager.showAt([37.62, 55.75, 200], '<b>На высоте 200 м</b>');
-     */
+/**
+ * Показывает тултип в произвольной точке.
+ *
+ * Координаты интерпретируются в `map.inputCRS`. Чтобы задать другую СК,
+ * используйте `showAtPoint({ lonLat, crs: 'EPSG:3857' })`.
+ */
     showAt(lonLat: LonLat | LonLatAlt, html: string): void {
         this.showAtPoint({ lonLat }, html);
     }
@@ -313,12 +303,19 @@ export class PopupManager {
         }
     }
 
-    private _updatePosition(): void {
-        if (!this._activeObject) {
-            this._hide();
-            return;
-        }
-        const screenPos = this._activeObject.getScreenPosition();
+private _nullFrames = 0;
+
+private _updatePosition(): void {
+    if (!this._activeObject) { this._hide(); return; }
+
+    const screenPos = this._activeObject.getScreenPosition();
+    if (!screenPos || typeof screenPos.x !== 'number' || typeof screenPos.y !== 'number') {
+        // 3 кадра подряд без позиции = объект «мёртв», закрываем окончательно.
+        if (++this._nullFrames >= 3) this.hide();
+        else this._hide();
+        return;
+    }
+    this._nullFrames = 0;
         if (!screenPos
             || typeof screenPos.x !== 'number'
             || typeof screenPos.y !== 'number') {
@@ -372,7 +369,10 @@ export class PopupManager {
         if (!map) return null;
 
         const alt = lonLat.length >= 3 ? lonLat[2] : (altitude ?? 0);
-const [absX, absZ] = map.project([lonLat[0], lonLat[1]], crs ?? map.inputCRS);
+const crsObj = crs
+    ? (typeof crs === 'string' ? Projections.get(crs) : crs)
+    : map.inputCRS;
+const [absX, absZ] = map.project([lonLat[0], lonLat[1]], crsObj);
         const wgPos = map.worldGroup.position;
 
         const vec = new THREE.Vector3(

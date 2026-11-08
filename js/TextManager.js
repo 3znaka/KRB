@@ -242,8 +242,23 @@ export class TextManager {
             el.insertBefore(iconEl, el.firstChild);
         }
         const off = (icon && icon.offset) || [0, 0];
+        if (iconStyle._element) {
+            // ── CUSTOM DOM (canvas, svg, ...) ──
+            while (iconEl.firstChild)
+                iconEl.removeChild(iconEl.firstChild);
+            iconEl.appendChild(iconStyle._element);
+            Object.assign(iconEl.style, {
+                display: iconStyle.display || 'block',
+                flex: '0 0 auto',
+                width: iconStyle.width || '',
+                height: iconStyle.height || '',
+                transform: (off[0] || off[1]) ? `translate(${off[0]}px, ${off[1]}px)` : '',
+                pointerEvents: iconStyle.pointerEvents || '',
+                cursor: iconStyle.cursor || '',
+            });
+            return; // ← важно: не проваливаемся в CSS-ветку
+        }
         if (iconStyle._inner) {
-            // ── SPRITE-BASED ── (вернуть оригинал)
             Object.assign(iconEl.style, {
                 display: iconStyle.display,
                 alignItems: iconStyle.alignItems,

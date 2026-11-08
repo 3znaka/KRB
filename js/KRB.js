@@ -20,4 +20,5 @@ export { GeoTiffLayer } from './GeoTiffLayer.js';
 export { Vector3D, ecefToGeodetic, enuToEcefDelta, isEcefCrs, ECEF_CODES, } from './Vector3D.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
 export * from './styles/index.js';
+export { Diagram } from './Diagram.js';
 import './PolygonBatcher.js';

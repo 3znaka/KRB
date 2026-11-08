@@ -37,7 +37,8 @@ crs: 'ADPKP:0057',
 window.map = map; 
  new KRB.GeoTiffLayer({
     source: 'bratkov.tif',
-
+asElevation: true,
+heightScale: 10000,
     colorRamp: 'terrain',
     opacity: 0.75,
     onLoad: (layer) => {

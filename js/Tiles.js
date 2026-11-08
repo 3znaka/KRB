@@ -541,10 +541,8 @@ export class TileManager {
             const az = z - dz;
             const ax = virtX >> dz;
             const ay = y >> dz;
-            const inst = this.ensureTile(az, ax, ay);
-            if (inst.unrenderable)
-                return null;
-            if (inst.ready && inst.mesh)
+            const inst = this.tiles.get(this.key(az, ax, ay));
+            if (inst && inst.ready && inst.mesh && !inst.unrenderable)
                 return inst;
         }
         return null;
@@ -603,11 +601,25 @@ export class TileManager {
                 if (this.tiles.get(k) !== inst)
                     return undefined;
                 const mesh = this.createTileMesh(inst, texture);
-                if (mesh && texture)
+                if (!mesh)
+                    return null;
+                if (texture)
                     this.engine.renderer?.initTexture?.(texture);
+                const provider = this._elevationProvider;
+                if (provider &&
+                    typeof provider.getTileTexture === 'function' &&
+                    provider.isElevationProvider?.()) {
+                    const overlayTex = provider.getTileTexture(inst.z, srcX, inst.y, this.engine.TILE_PIXELS);
+                    if (overlayTex) {
+                        this.setMeshOverlay(mesh, overlayTex, provider.getOpacity?.() ?? 1);
+                        inst.overlayTex = overlayTex;
+                        this.engine.renderer?.initTexture?.(overlayTex);
+                    }
+                }
                 return mesh;
             };
-            const mesh = this._isDeformed ? await this._enqueueBuild(inst, build) : build();
+            const useQueue = this._isDeformed || !!this._elevationProvider;
+            const mesh = useQueue ? await this._enqueueBuild(inst, build) : build();
             if (mesh === undefined || this.tiles.get(k) !== inst) {
                 if (mesh) {
                     mesh.geometry.dispose();
@@ -821,7 +833,7 @@ export class TileManager {
         const IndexArr = count > 65535 ? Uint32Array : Uint16Array;
         geom.setIndex(new THREE.BufferAttribute(new IndexArr(out), 1));
         geom.attributes.position.needsUpdate = true;
-        if (this.hasElevation || this.tileLighting)
+        if (this.tileLighting && !this.hasElevation)
             geom.computeVertexNormals();
         geom.computeBoundingSphere();
         const mesh = new THREE.Mesh(geom, this._createTileMaterial(texture));
@@ -908,6 +920,10 @@ export class TileManager {
                     provider.isElevationProvider() &&
                     typeof provider.getTileHeights === 'function') {
                     heights = provider.getTileHeights(inst.z, inst.virtX, inst.y, this.engine.SEGMENTS);
+                    if (!heights) {
+                        inst.ready = true;
+                        return;
+                    }
                 }
                 if (!heights) {
                     const elevUrl = this.srcKeyToElevUrl.get(srcKey);
@@ -1052,8 +1068,10 @@ export class TileManager {
         for (let i = 0; i < heights.length; i++)
             pos[i * 3 + 1] = heights[i];
         inst.geometry.attributes.position.needsUpdate = true;
-        inst.geometry.computeVertexNormals();
         this.syncTileWithNeighbors(inst);
+        if (this.tileLighting) {
+            inst.geometry.computeVertexNormals();
+        }
         inst.heightsApplied = true;
         inst.ready = true;
         for (const cb of this.onTileHeightAppliedCallbacks) {
@@ -1062,6 +1080,50 @@ export class TileManager {
             }
             catch (e) {
                 console.warn('Tile overlay callback error', e);
+            }
+        }
+    }
+    syncEdgesBetween(instA, instB, dx, dy) {
+        const posA = instA.geometry.attributes.position.array;
+        const posB = instB.geometry.attributes.position.array;
+        const seg = this.engine.SEGMENTS;
+        const stride = seg + 1;
+        let changedB = false;
+        for (let i = 0; i <= seg; i++) {
+            let iA, iB;
+            if (dx === 1 && dy === 0) {
+                iA = i * stride + seg;
+                iB = i * stride;
+            }
+            else if (dx === -1 && dy === 0) {
+                iA = i * stride;
+                iB = i * stride + seg;
+            }
+            else if (dx === 0 && dy === -1) {
+                iA = i;
+                iB = seg * stride + i;
+            }
+            else if (dx === 0 && dy === 1) {
+                iA = seg * stride + i;
+                iB = i;
+            }
+            else
+                continue;
+            const idxA = iA * 3 + 1;
+            const idxB = iB * 3 + 1;
+            const hA = posA[idxA], hB = posB[idxB];
+            if (Math.abs(hA - hB) > 1e-4) {
+                const avg = (hA + hB) * 0.5;
+                posA[idxA] = avg;
+                posB[idxB] = avg;
+                changedB = true;
+            }
+        }
+        if (changedB) {
+            instA.geometry.attributes.position.needsUpdate = true;
+            instB.geometry.attributes.position.needsUpdate = true;
+            if (this.tileLighting) {
+                instB.geometry.computeVertexNormals();
             }
         }
     }

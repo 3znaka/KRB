@@ -47,6 +47,12 @@ export class GeoTiffLayer extends SpatialObject {
         this._onProgress = options.onProgress || null;
         this._onLoad = options.onLoad || null;
         this._onError = options.onError || null;
+        // Merge-mode & elevation caches
+        this._tileTextureCache = new Map(); // key "z,srcX,y,size" -> THREE.Texture | null
+        this._tileHeightsCache = new Map(); // key "z,srcX,y,seg" -> { heights: Float32Array | null, max: number }
+        this._rampLut32 = null; // Uint32Array(1024) предрассчитанной цветовой шкалы
+        this._lonLatBounds = null; // [minLon, minLat, maxLon, maxLat]
+        this._mergedIntoMap = false;
         // SpatialObject state
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
@@ -200,11 +206,11 @@ export class GeoTiffLayer extends SpatialObject {
         if (!Number.isFinite(v) || this._elevationHeightScale === v)
             return this;
         this._elevationHeightScale = v;
+        this._tileHeightsCache.clear();
         if (this._loaded && this._mesh) {
             this._buildMesh();
         }
         else if (this._mergedIntoMap) {
-            // высоты в тайлах уже посчитаны — пересобираем их
             this._refreshTerrainTiles();
         }
         return this;
@@ -312,6 +318,7 @@ export class GeoTiffLayer extends SpatialObject {
     async setColorRamp(ramp) {
         this._colorRampInput = ramp;
         this._colorRampNormalized = null;
+        this._rampLut32 = null;
         if (this._loadPromise) {
             try {
                 await this._loadPromise;
@@ -346,27 +353,6 @@ export class GeoTiffLayer extends SpatialObject {
         return !!this._rawData && this._rawWidth > 0 && this._rawHeight > 0
             && !!this._geoOrigin && !!this._geoResolution;
     }
-    getTileHeights(z, virtX, y, segments) {
-        const grid = segments + 1;
-        const out = new Float32Array(grid * grid);
-        if (!this.isElevationProvider())
-            return out;
-        const n = 1 << z;
-        const nd = this._geoNoData;
-        const hs = this._elevationHeightScale;
-        for (let row = 0; row < grid; row++) {
-            const v = row / segments;
-            const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + v) / n))) * 180 / Math.PI;
-            for (let col = 0; col < grid; col++) {
-                const u = col / segments;
-                const lon = (virtX + u) / n * 360 - 180;
-                const value = this._sampleAtLonLat(lon, lat);
-                out[row * grid + col] = (value === null || value === nd || !Number.isFinite(value))
-                    ? 0 : value * hs;
-            }
-        }
-        return out;
-    }
     sampleAtWorld(worldX, worldZ, map) {
         if (!this.isElevationProvider())
             return null;
@@ -380,125 +366,8 @@ export class GeoTiffLayer extends SpatialObject {
             return null;
         return v * this._elevationHeightScale;
     }
-    getTileMaxHeight(z, x, y, segments) {
-        const heights = this.getTileHeights(z, x, y, segments);
-        let max = -Infinity;
-        for (let i = 0; i < heights.length; i++)
-            if (heights[i] > max)
-                max = heights[i];
-        return max === -Infinity ? 0 : max;
-    }
     get elevationMinZoom() { return 0; }
     get elevationMaxZoom() { return Infinity; }
-    /* ==== Merge-into-tiles: per-tile overlay texture ==== */
-    /**
-     * Возвращает RGBA-текстуру рампы GeoTIFF для тайла `{z}/{virtX}/{y}`.
-     * Кэшируется (LRU); null — тайл полностью вне растра / нет данных.
-     *
-     * Вызывается TileManager'ом на этапе загрузки тайла. Синхронно
-     * (bottleneck при быстром скроллинге; при необходимости вынести
-     * генерацию в worker).
-     */
-    getTileTexture(z, virtX, y, size = 256) {
-        if (!this.isElevationProvider())
-            return null;
-        if (this._effectiveMin === null || this._effectiveMax === null)
-            return null;
-        if (typeof document === 'undefined')
-            return null;
-        const key = `${z},${virtX},${y},${size}`;
-        if (this._tileTextureCache.has(key)) {
-            // touch для LRU
-            const tex = this._tileTextureCache.get(key);
-            this._tileTextureCache.delete(key);
-            this._tileTextureCache.set(key, tex);
-            return tex;
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        const imgData = ctx.createImageData(size, size);
-        const ramp = this._getColorRamp();
-        const minV = this._effectiveMin, maxV = this._effectiveMax;
-        const range = maxV - minV;
-        const nd = this._effectiveNoData;
-        const ndColor = this._parseNoDataColor(this._noDataColor);
-        const crs = this._crs;
-        const [ox, oy] = this._geoOrigin;
-        const [rx, ry] = this._geoResolution;
-        const W = this._rawWidth, H = this._rawHeight;
-        const n = 1 << z;
-        const denom = size - 1;
-        let hasPixels = false;
-        for (let py = 0; py < size; py++) {
-            // py = 0 → север (стандартная XYZ-конвенция). При использовании
-            // CanvasTexture (flipY=true) это совпадает с UV-конвенцией
-            // тайлового меша (UV(0,0) = юг).
-            const mercY = 1 - 2 * (y + py / denom) / n;
-            const lat = Math.atan(Math.sinh(Math.PI * mercY)) * 180 / Math.PI;
-            for (let px = 0; px < size; px++) {
-                const lon = ((virtX + px / denom) / n) * 360 - 180;
-                let xy;
-                if (crs.code === 'EPSG:4326' || crs.code === 'CRS:84')
-                    xy = [lon, lat];
-                else if (typeof crs.fromLonLatSafe === 'function')
-                    xy = crs.fromLonLatSafe([lon, lat]);
-                else {
-                    try {
-                        xy = crs.fromLonLat([lon, lat]);
-                    }
-                    catch {
-                        xy = null;
-                    }
-                }
-                const j = (py * size + px) * 4;
-                if (!xy || !Number.isFinite(xy[0]) || !Number.isFinite(xy[1]))
-                    continue;
-                const gpx = (xy[0] - ox) / rx;
-                const gpy = (xy[1] - oy) / ry;
-                if (gpx < 0 || gpy < 0 || gpx > W - 1 || gpy > H - 1)
-                    continue;
-                const val = this._bilinearSample(gpx, gpy);
-                if (val === null || !Number.isFinite(val) || (nd !== null && val === nd)) {
-                    if (ndColor) {
-                        imgData.data[j] = ndColor[0];
-                        imgData.data[j + 1] = ndColor[1];
-                        imgData.data[j + 2] = ndColor[2];
-                        imgData.data[j + 3] = ndColor[3];
-                        hasPixels = true;
-                    }
-                    continue;
-                }
-                let t = (val - minV) / range;
-                if (t < 0)
-                    t = 0;
-                else if (t > 1)
-                    t = 1;
-                const c = sampleColorRamp(ramp, t);
-                imgData.data[j] = c[0];
-                imgData.data[j + 1] = c[1];
-                imgData.data[j + 2] = c[2];
-                imgData.data[j + 3] = c[3];
-                hasPixels = true;
-            }
-        }
-        if (!hasPixels) {
-            this._tileTextureCache.set(key, null);
-            this._evictTileTextureCache();
-            return null;
-        }
-        ctx.putImageData(imgData, 0, 0);
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.flipY = true;
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-        this._tileTextureCache.set(key, tex);
-        this._evictTileTextureCache();
-        return tex;
-    }
     _evictTileTextureCache() {
         while (this._tileTextureCache.size > TILE_TEXTURE_CACHE_MAX) {
             const oldest = this._tileTextureCache.keys().next().value;
@@ -567,6 +436,9 @@ export class GeoTiffLayer extends SpatialObject {
         this._effectiveNoData = null;
         this._isHovered = false;
         this._isVisible = false;
+        this._tileHeightsCache.clear();
+        this._rampLut32 = null;
+        this._lonLatBounds = null;
     }
     _applyHidden() {
         if (this._group)
@@ -946,6 +818,11 @@ export class GeoTiffLayer extends SpatialObject {
         this._effectiveMin = minV;
         this._effectiveMax = maxV;
         this._effectiveNoData = noData;
+        this._rampLut32 = null;
+        this._computeLonLatBounds();
+        if (this._asElevation && this._mergeIntoTiles && this.isElevationProvider()) {
+            return { texture: null, width, height };
+        }
         const ramp = this._getColorRamp();
         const ndColor = this._parseNoDataColor(this._noDataColor);
         const range = maxV - minV;
@@ -1030,33 +907,413 @@ export class GeoTiffLayer extends SpatialObject {
             return null;
         return this._bilinearSample(px, py);
     }
+    /** Вычисляет Lon/Lat BBox растра по контуру для быстрого отсечения тайлов. */
+    _computeLonLatBounds() {
+        if (!this._geoOrigin || !this._geoResolution || !this._crs) {
+            this._lonLatBounds = null;
+            return;
+        }
+        const [ox, oy] = this._geoOrigin;
+        const [rx, ry] = this._geoResolution;
+        const W = this._rawWidth, H = this._rawHeight;
+        const crs = this._crs;
+        const isGeo = crs.code === 'EPSG:4326' || crs.code === 'CRS:84';
+        let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+        const steps = 8;
+        const samplePt = (u, v) => {
+            const x = ox + u * W * rx;
+            const y = oy + v * H * ry;
+            let ll;
+            if (isGeo)
+                ll = [x, y];
+            else if (typeof crs.toLonLat === 'function') {
+                try {
+                    ll = crs.toLonLat([x, y]);
+                }
+                catch {
+                    ll = null;
+                }
+            }
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                return;
+            if (ll[0] < minLon)
+                minLon = ll[0];
+            if (ll[0] > maxLon)
+                maxLon = ll[0];
+            if (ll[1] < minLat)
+                minLat = ll[1];
+            if (ll[1] > maxLat)
+                maxLat = ll[1];
+        };
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            samplePt(t, 0);
+            samplePt(t, 1);
+            samplePt(0, t);
+            samplePt(1, t);
+        }
+        if (Number.isFinite(minLon)) {
+            // Небольшой запас на кривизну проекции
+            const padLon = (maxLon - minLon) * 0.05 + 0.01;
+            const padLat = (maxLat - minLat) * 0.05 + 0.01;
+            this._lonLatBounds = [minLon - padLon, minLat - padLat, maxLon + padLon, maxLat + padLat];
+        }
+        else {
+            this._lonLatBounds = null;
+        }
+    }
+    /** Быстрая проверка пересечения тайла (z, srcX, y) с Lon/Lat BBox растра. */
+    _tileIntersectsRaster(z, srcX, y) {
+        const b = this._lonLatBounds;
+        if (!b)
+            return true;
+        // Если растр пересекает антимеридиан, не отсекаем по lon
+        const n = 1 << z;
+        const tileMinLon = (srcX / n) * 360 - 180;
+        const tileMaxLon = ((srcX + 1) / n) * 360 - 180;
+        const tileMaxLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+        const tileMinLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+        if (tileMaxLat < b[1] || tileMinLat > b[3])
+            return false;
+        if (b[2] - b[0] < 180) {
+            if (tileMaxLon < b[0] || tileMinLon > b[2])
+                return false;
+        }
+        return true;
+    }
+    /**
+     * Строит опорную сетку (gridSteps + 1) x (gridSteps + 1) в пиксельных координатах
+     * растра (gpx, gpy) для тайла (z, srcX, y).
+     */
+    _buildTilePixelGrid(z, srcX, y, gridSteps) {
+        const g = gridSteps + 1;
+        const count = g * g;
+        const gpxGrid = new Float64Array(count);
+        const gpyGrid = new Float64Array(count);
+        const n = 1 << z;
+        const crs = this._crs;
+        const isGeo = crs.code === 'EPSG:4326' || crs.code === 'CRS:84';
+        const hasSafe = typeof crs.fromLonLatSafe === 'function';
+        const [ox, oy] = this._geoOrigin;
+        const [rx, ry] = this._geoResolution;
+        const invRx = 1 / rx, invRy = 1 / ry;
+        const W = this._rawWidth, H = this._rawHeight;
+        const ll = [0, 0];
+        let minGpx = Infinity, maxGpx = -Infinity;
+        let minGpy = Infinity, maxGpy = -Infinity;
+        let validCount = 0;
+        for (let r = 0; r < g; r++) {
+            const v = r / gridSteps;
+            const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + v) / n))) * 180 / Math.PI;
+            const rowOff = r * g;
+            for (let c = 0; c < g; c++) {
+                const u = c / gridSteps;
+                const lon = ((srcX + u) / n) * 360 - 180;
+                let xy;
+                if (isGeo) {
+                    xy = ll;
+                    ll[0] = lon;
+                    ll[1] = lat;
+                }
+                else if (hasSafe) {
+                    ll[0] = lon;
+                    ll[1] = lat;
+                    xy = crs.fromLonLatSafe(ll);
+                }
+                else {
+                    try {
+                        ll[0] = lon;
+                        ll[1] = lat;
+                        xy = crs.fromLonLat(ll);
+                    }
+                    catch {
+                        xy = null;
+                    }
+                }
+                const idx = rowOff + c;
+                if (!xy || !Number.isFinite(xy[0]) || !Number.isFinite(xy[1])) {
+                    gpxGrid[idx] = NaN;
+                    gpyGrid[idx] = NaN;
+                    continue;
+                }
+                const gpx = (xy[0] - ox) * invRx;
+                const gpy = (xy[1] - oy) * invRy;
+                gpxGrid[idx] = gpx;
+                gpyGrid[idx] = gpy;
+                if (gpx < minGpx)
+                    minGpx = gpx;
+                if (gpx > maxGpx)
+                    maxGpx = gpx;
+                if (gpy < minGpy)
+                    minGpy = gpy;
+                if (gpy > maxGpy)
+                    maxGpy = gpy;
+                validCount++;
+            }
+        }
+        if (validCount === 0 || maxGpx < 0 || minGpx > W - 1 || maxGpy < 0 || minGpy > H - 1) {
+            return null;
+        }
+        return { gpxGrid, gpyGrid, gridSteps };
+    }
+    /** Предрассчитанная таблица 1024 цветов в формате ABGR (Uint32 для ImageData). */
+    _getRampLut32() {
+        if (this._rampLut32)
+            return this._rampLut32;
+        const ramp = this._getColorRamp();
+        const lut = new Uint32Array(1024);
+        for (let i = 0; i < 1024; i++) {
+            const c = sampleColorRamp(ramp, i / 1023);
+            lut[i] = ((c[3] & 255) << 24) | ((c[2] & 255) << 16) | ((c[1] & 255) << 8) | (c[0] & 255);
+        }
+        this._rampLut32 = lut;
+        return lut;
+    }
+    _computeTileHeightsEntry(z, virtX, y, segments) {
+        if (!this.isElevationProvider())
+            return { heights: null, max: 0 };
+        const n = 1 << z;
+        const srcX = ((virtX % n) + n) % n;
+        const key = `${z},${srcX},${y},${segments}`;
+        if (this._tileHeightsCache.has(key)) {
+            const entry = this._tileHeightsCache.get(key);
+            this._tileHeightsCache.delete(key);
+            this._tileHeightsCache.set(key, entry);
+            return entry;
+        }
+        if (!this._tileIntersectsRaster(z, srcX, y)) {
+            const empty = { heights: null, max: 0 };
+            this._tileHeightsCache.set(key, empty);
+            return empty;
+        }
+        const coarseSteps = Math.min(segments, 8);
+        const coarse = this._buildTilePixelGrid(z, srcX, y, coarseSteps);
+        if (!coarse) {
+            const empty = { heights: null, max: 0 };
+            this._tileHeightsCache.set(key, empty);
+            return empty;
+        }
+        const { gpxGrid, gpyGrid } = coarse;
+        const cg = coarseSteps + 1;
+        const grid = segments + 1;
+        const out = new Float32Array(grid * grid);
+        const hs = this._elevationHeightScale;
+        const W = this._rawWidth, H = this._rawHeight;
+        let max = -Infinity;
+        let hasAny = false;
+        for (let row = 0; row < grid; row++) {
+            const v = (row / segments) * coarseSteps;
+            const cy = Math.min(coarseSteps - 1, v | 0);
+            const fy = v - cy;
+            const rowOut = row * grid;
+            for (let col = 0; col < grid; col++) {
+                const u = (col / segments) * coarseSteps;
+                const cx = Math.min(coarseSteps - 1, u | 0);
+                const fx = u - cx;
+                const i00 = cy * cg + cx;
+                const i10 = i00 + 1;
+                const i01 = i00 + cg;
+                const i11 = i01 + 1;
+                const gpx = (gpxGrid[i00] + (gpxGrid[i10] - gpxGrid[i00]) * fx) * (1 - fy) +
+                    (gpxGrid[i01] + (gpxGrid[i11] - gpxGrid[i01]) * fx) * fy;
+                const gpy = (gpyGrid[i00] + (gpyGrid[i10] - gpyGrid[i00]) * fx) * (1 - fy) +
+                    (gpyGrid[i01] + (gpyGrid[i11] - gpyGrid[i01]) * fx) * fy;
+                if (gpx >= 0 && gpy >= 0 && gpx <= W - 1 && gpy <= H - 1) {
+                    const val = this._bilinearSample(gpx, gpy);
+                    if (val !== null && Number.isFinite(val)) {
+                        const h = val * hs;
+                        out[rowOut + col] = h;
+                        if (h > max)
+                            max = h;
+                        hasAny = true;
+                    }
+                }
+            }
+        }
+        const entry = hasAny
+            ? { heights: out, max: max === -Infinity ? 0 : max }
+            : { heights: null, max: 0 };
+        this._tileHeightsCache.set(key, entry);
+        while (this._tileHeightsCache.size > TILE_TEXTURE_CACHE_MAX) {
+            const oldest = this._tileHeightsCache.keys().next().value;
+            this._tileHeightsCache.delete(oldest);
+        }
+        return entry;
+    }
+    getTileHeights(z, virtX, y, segments) {
+        return this._computeTileHeightsEntry(z, virtX, y, segments).heights;
+    }
+    getTileMaxHeight(z, x, y, segments) {
+        return this._computeTileHeightsEntry(z, x, y, segments).max;
+    }
+    getTileTexture(z, virtX, y, size = 256) {
+        if (!this.isElevationProvider())
+            return null;
+        if (this._effectiveMin === null || this._effectiveMax === null)
+            return null;
+        if (typeof document === 'undefined')
+            return null;
+        const n = 1 << z;
+        const srcX = ((virtX % n) + n) % n;
+        // Ограничиваем 256px — линейная фильтрация GPU даёт тот же результат в 4 раза быстрее, чем 512px
+        const texSize = Math.min(256, size);
+        const key = `${z},${srcX},${y},${texSize}`;
+        if (this._tileTextureCache.has(key)) {
+            const tex = this._tileTextureCache.get(key);
+            this._tileTextureCache.delete(key);
+            this._tileTextureCache.set(key, tex);
+            return tex;
+        }
+        if (!this._tileIntersectsRaster(z, srcX, y)) {
+            this._tileTextureCache.set(key, null);
+            this._evictTileTextureCache();
+            return null;
+        }
+        const coarseSteps = 8;
+        const coarse = this._buildTilePixelGrid(z, srcX, y, coarseSteps);
+        if (!coarse) {
+            this._tileTextureCache.set(key, null);
+            this._evictTileTextureCache();
+            return null;
+        }
+        const { gpxGrid, gpyGrid } = coarse;
+        const cg = coarseSteps + 1;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = texSize;
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(texSize, texSize);
+        const out32 = new Uint32Array(imgData.data.buffer);
+        const lut32 = this._getRampLut32();
+        const minV = this._effectiveMin;
+        const invRange = 1023 / (this._effectiveMax - minV);
+        const nd = this._effectiveNoData;
+        const ndColor = this._parseNoDataColor(this._noDataColor);
+        const ndColor32 = ndColor
+            ? (((ndColor[3] & 255) << 24) | ((ndColor[2] & 255) << 16) | ((ndColor[1] & 255) << 8) | (ndColor[0] & 255))
+            : 0;
+        const hasNdColor = !!ndColor;
+        const W = this._rawWidth, H = this._rawHeight;
+        const maxW = W - 1, maxH = H - 1;
+        const d = this._rawData;
+        const denom = texSize - 1;
+        let hasPixels = false;
+        // Разбиваем тайл на полосы по ячейкам опорной сетки 8x8:
+        // внутри каждого сегмента (gpx, gpy) меняются линейно (простое сложение)
+        for (let py = 0; py < texSize; py++) {
+            const v = (py / denom) * coarseSteps;
+            const cy = Math.min(coarseSteps - 1, v | 0);
+            const fy = v - cy;
+            const rowOff = py * texSize;
+            for (let cx = 0; cx < coarseSteps; cx++) {
+                const pxStart = Math.ceil((cx / coarseSteps) * denom);
+                const pxEnd = cx === coarseSteps - 1 ? denom : Math.floor(((cx + 1) / coarseSteps) * denom);
+                if (pxStart > pxEnd)
+                    continue;
+                const i00 = cy * cg + cx;
+                const i10 = i00 + 1;
+                const i01 = i00 + cg;
+                const i11 = i01 + 1;
+                const gpxL = gpxGrid[i00] + (gpxGrid[i01] - gpxGrid[i00]) * fy;
+                const gpxR = gpxGrid[i10] + (gpxGrid[i11] - gpxGrid[i10]) * fy;
+                const gpyL = gpyGrid[i00] + (gpyGrid[i01] - gpyGrid[i00]) * fy;
+                const gpyR = gpyGrid[i10] + (gpyGrid[i11] - gpyGrid[i10]) * fy;
+                // Быстрый пропуск всего горизонтального сегмента, если он вне растра
+                if ((gpxL < 0 && gpxR < 0) || (gpxL > maxW && gpxR > maxW) ||
+                    (gpyL < 0 && gpyR < 0) || (gpyL > maxH && gpyR > maxH)) {
+                    continue;
+                }
+                const invSpan = coarseSteps / denom;
+                const fx0 = (pxStart / denom) * coarseSteps - cx;
+                const dgpx = (gpxR - gpxL) * invSpan;
+                const dgpy = (gpyR - gpyL) * invSpan;
+                let gpx = gpxL + (gpxR - gpxL) * fx0;
+                let gpy = gpyL + (gpyR - gpyL) * fx0;
+                for (let px = pxStart; px <= pxEnd; px++, gpx += dgpx, gpy += dgpy) {
+                    if (gpx < 0 || gpy < 0 || gpx > maxW || gpy > maxH)
+                        continue;
+                    const x0 = gpx | 0, y0 = gpy | 0;
+                    const x1 = x0 < maxW ? x0 + 1 : maxW;
+                    const y1 = y0 < maxH ? y0 + 1 : maxH;
+                    const fx = gpx - x0, fySample = gpy - y0;
+                    const r0 = y0 * W, r1 = y1 * W;
+                    const v00 = d[r0 + x0], v10 = d[r0 + x1];
+                    const v01 = d[r1 + x0], v11 = d[r1 + x1];
+                    let val;
+                    if (v00 !== nd && v10 !== nd && v01 !== nd && v11 !== nd) {
+                        val = (v00 + (v10 - v00) * fx) * (1 - fySample) +
+                            (v01 + (v11 - v01) * fx) * fySample;
+                        if (val !== val)
+                            val = this._bilinearSample(gpx, gpy); // fallback при NaN
+                    }
+                    else {
+                        val = this._bilinearSample(gpx, gpy);
+                    }
+                    if (val === null || val !== val || (nd !== null && val === nd)) {
+                        if (hasNdColor) {
+                            out32[rowOff + px] = ndColor32;
+                            hasPixels = true;
+                        }
+                        continue;
+                    }
+                    let idx = ((val - minV) * invRange + 0.5) | 0;
+                    if (idx < 0)
+                        idx = 0;
+                    else if (idx > 1023)
+                        idx = 1023;
+                    out32[rowOff + px] = lut32[idx];
+                    hasPixels = true;
+                }
+            }
+        }
+        if (!hasPixels) {
+            this._tileTextureCache.set(key, null);
+            this._evictTileTextureCache();
+            return null;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.flipY = true;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        this._tileTextureCache.set(key, tex);
+        this._evictTileTextureCache();
+        return tex;
+    }
     _bilinearSample(px, py) {
         const w = this._rawWidth, h = this._rawHeight, d = this._rawData, nd = this._geoNoData;
-        const x0 = Math.floor(px), y0 = Math.floor(py);
-        const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+        const x0 = px | 0, y0 = py | 0;
+        const x1 = x0 + 1 < w ? x0 + 1 : w - 1;
+        const y1 = y0 + 1 < h ? y0 + 1 : h - 1;
         const fx = px - x0, fy = py - y0;
-        const v00 = d[y0 * w + x0], v10 = d[y0 * w + x1];
-        const v01 = d[y1 * w + x0], v11 = d[y1 * w + x1];
-        const valid = (v) => Number.isFinite(v) && (nd === null || v !== nd);
-        if (valid(v00) && valid(v10) && valid(v01) && valid(v11)) {
-            const a = v00 * (1 - fx) + v10 * fx;
-            const b = v01 * (1 - fx) + v11 * fx;
-            return a * (1 - fy) + b * fy;
+        const r0 = y0 * w, r1 = y1 * w;
+        const v00 = d[r0 + x0], v10 = d[r0 + x1];
+        const v01 = d[r1 + x0], v11 = d[r1 + x1];
+        const ok00 = Number.isFinite(v00) && (nd === null || v00 !== nd);
+        const ok10 = Number.isFinite(v10) && (nd === null || v10 !== nd);
+        const ok01 = Number.isFinite(v01) && (nd === null || v01 !== nd);
+        const ok11 = Number.isFinite(v11) && (nd === null || v11 !== nd);
+        if (ok00 && ok10 && ok01 && ok11) {
+            const a = v00 + (v10 - v00) * fx;
+            const b = v01 + (v11 - v01) * fx;
+            return a + (b - a) * fy;
         }
         let sum = 0, cnt = 0;
-        if (valid(v00)) {
+        if (ok00) {
             sum += v00;
             cnt++;
         }
-        if (valid(v10)) {
+        if (ok10) {
             sum += v10;
             cnt++;
         }
-        if (valid(v01)) {
+        if (ok01) {
             sum += v01;
             cnt++;
         }
-        if (valid(v11)) {
+        if (ok11) {
             sum += v11;
             cnt++;
         }

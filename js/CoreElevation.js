@@ -119,7 +119,8 @@ export const CoreElevationMixin = {
             return 0;
         const provider = this._elevationProvider;
         if (provider && typeof provider.getTileMaxHeight === 'function') {
-            for (const mgr of this._tileManagers) {
+            for (let mi = 0; mi < this._tileManagers.length; mi++) {
+                const mgr = this._tileManagers[mi];
                 if (!mgr.hasElevation)
                     continue;
                 const elevLayer = mgr.layer;
@@ -128,9 +129,33 @@ export const CoreElevationMixin = {
                 const [tx, ty] = this.worldToTileIndex(worldX, worldZ, z, crs);
                 if (!Number.isFinite(tx) || !Number.isFinite(ty))
                     continue;
-                const h = provider.getTileMaxHeight(z, Math.floor(tx), Math.floor(ty), this.SEGMENTS);
-                if (Number.isFinite(h))
+                const virtX = Math.floor(tx);
+                const y = Math.floor(ty);
+                const tileKey = getVirtKey(z, virtX, y);
+                const vk = `prov,${mi},${tileKey}`;
+                const inst = mgr.tiles.get(tileKey);
+                if (inst && inst.heightsApplied && inst.mesh) {
+                    if (this._surfaceMaxHeightCache.has(vk)) {
+                        return this._surfaceMaxHeightCache.get(vk);
+                    }
+                    const pos = inst.geometry.attributes.position.array;
+                    let maxY = -Infinity;
+                    for (let i = 1; i < pos.length; i += 3) {
+                        if (pos[i] > maxY)
+                            maxY = pos[i];
+                    }
+                    const h = (maxY === -Infinity ? 0 : maxY) + inst.mesh.position.y;
+                    this._setSurfaceMaxHeight(vk, h);
                     return h;
+                }
+                if (this._surfaceMaxHeightCache.has(vk)) {
+                    return this._surfaceMaxHeightCache.get(vk);
+                }
+                const h = provider.getTileMaxHeight(z, virtX, y, this.SEGMENTS);
+                if (Number.isFinite(h)) {
+                    this._setSurfaceMaxHeight(vk, h);
+                    return h;
+                }
             }
         }
         let best = 0;

@@ -3,7 +3,7 @@ import { THREE } from './js_TP/tpb.js';
 import { DEFAULTS } from './Defaults.js';
 import { getVirtKey, getOriginZ } from './TileKey.js';
 import { Projections } from './Projections.js';
-const MAX_CACHED_TILES = 800;
+const MAX_CACHED_TILES = 500;
 const ANCESTOR_FALLBACK = 4;
 const MAX_COVER_DEPTH = 1;
 const DEFORM_SEGMENTS_FLAT = 8;
@@ -373,8 +373,10 @@ export class TileManager {
             return -1;
         }
         this.frame++;
+        const prevIdealZ = this._lastIdealZ;
         const idealZ = this._liveIdealZ();
         this._lastIdealZ = idealZ;
+        const zoomOut = idealZ < prevIdealZ;
         const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
         const _layerOffset = this.layer?.zoomOffset ?? 0;
         const _minNZ = this.layer?.minNativeZoom ?? this.engine.MIN_ZOOM;
@@ -545,9 +547,11 @@ export class TileManager {
             this._lastViewKey = viewKey;
             this._viewStableSince = now;
         }
-        const stable = !zoomAnimating
+        const engineIdle = this.engine?._idleFired;
+        const stable = !rapidZoom
+            && !zoomAnimating
             && (now - this._viewStableSince) >= STABILITY_DELAY_MS
-            && this._idleFired;
+            && (engineIdle === undefined ? true : engineIdle);
         // ===== Рендер + выборочная загрузка =====
         const renderSet = new Set();
         for (let y = yMin; y <= yMax; y++) {
@@ -566,15 +570,24 @@ export class TileManager {
                     renderSet.add(k);
                     continue;
                 }
-                const cover = this._findFullCover(idealZ, vx, y);
-                if (cover) {
-                    for (const kk of cover)
-                        renderSet.add(kk);
+                // Fallback: направление зума определяет приоритет.
+                // zoom-out → сначала дети (старый чёткий контент, только что видели),
+                // zoom-in / pan → сначала ancestor (крупный тайл, тоже только что видели).
+                if (zoomOut) {
+                    if (!this._collectPartialChildren(idealZ, vx, y, renderSet)) {
+                        const anc = this.findReadyAncestor(idealZ, vx, y);
+                        if (anc)
+                            renderSet.add(this.key(anc.z, anc.virtX, anc.y));
+                    }
                 }
                 else {
                     const anc = this.findReadyAncestor(idealZ, vx, y);
-                    if (anc)
+                    if (anc) {
                         renderSet.add(this.key(anc.z, anc.virtX, anc.y));
+                    }
+                    else {
+                        this._collectPartialChildren(idealZ, vx, y, renderSet);
+                    }
                 }
             }
         }
@@ -601,31 +614,29 @@ export class TileManager {
         }
         return idealZ;
     }
-    _findFullCover(z, virtX, y, maxDepth = MAX_COVER_DEPTH) {
-        const out = [];
-        const recurse = (cz, cx, cy, depth) => {
-            if (cz > this._maxNativeZoom)
-                return false;
-            const k = this.key(cz, cx, cy);
-            const inst = this.tiles.get(k);
-            if (inst && inst.ready && inst.mesh) {
-                out.push(k);
-                return true;
-            }
-            if (depth >= maxDepth)
-                return false;
-            const save = out.length;
-            for (let dx = 0; dx < 2; dx++) {
-                for (let dy = 0; dy < 2; dy++) {
-                    if (!recurse(cz + 1, cx * 2 + dx, cy * 2 + dy, depth + 1)) {
-                        out.length = save;
-                        return false;
-                    }
+    /**
+     * Добавляет в renderSet всех ГОТОВЫХ детей (z+1) для (z, virtX, y).
+     * Возвращает true, если добавил хотя бы одного.
+     * Спасает zoom-out: z+1 был виден на предыдущем зуме и точно в кэше.
+     */
+    _collectPartialChildren(z, virtX, y, renderSet) {
+        if (z + 1 > this._maxNativeZoom)
+            return false;
+        let added = false;
+        const cz = z + 1;
+        const cx = virtX * 2;
+        const cy = y * 2;
+        for (let dx = 0; dx < 2; dx++) {
+            for (let dy = 0; dy < 2; dy++) {
+                const ck = this.key(cz, cx + dx, cy + dy);
+                const ci = this.tiles.get(ck);
+                if (ci && ci.ready && ci.mesh && !ci.unrenderable) {
+                    renderSet.add(ck);
+                    added = true;
                 }
             }
-            return true;
-        };
-        return recurse(z, virtX, y, 0) ? out : null;
+        }
+        return added;
     }
     findReadyAncestor(z, virtX, y) {
         const minZ = Math.max(this.engine.MIN_ZOOM, this._minNativeZoom);
@@ -979,19 +990,21 @@ export class TileManager {
     }
     _pumpTextureQueue() {
         const q = this._textureQueue;
+        if (q.length === 0)
+            return;
+        if (this._activeTextureLoads >= MAX_TEXTURE_LOADS)
+            return;
+        const _off = this.layer?.zoomOffset ?? 0;
+        const _tc = this.engine.targetContinuousZoom;
+        const iz = _tc != null ? Math.round(_tc + _off) : this._liveIdealZ();
+        q.sort((a, b) => {
+            const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
+            const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
+            if (az !== bz)
+                return az - bz;
+            return (b.inst?.lastUsed ?? 0) - (a.inst?.lastUsed ?? 0);
+        });
         while (this._activeTextureLoads < MAX_TEXTURE_LOADS && q.length > 0) {
-            const _off = this.layer?.zoomOffset ?? 0;
-            const _tc = this.engine.targetContinuousZoom;
-            const iz = _tc != null
-                ? Math.round(_tc + _off)
-                : this._liveIdealZ();
-            q.sort((a, b) => {
-                const az = a.inst ? Math.abs(a.inst.z - iz) : Infinity;
-                const bz = b.inst ? Math.abs(b.inst.z - iz) : Infinity;
-                if (az !== bz)
-                    return az - bz;
-                return (b.inst?.lastUsed ?? 0) - (a.inst?.lastUsed ?? 0);
-            });
             const job = q.shift();
             this._activeTextureLoads++;
             const done = (tex) => {

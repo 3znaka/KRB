@@ -2,6 +2,26 @@
 import { THREE, OrbitControls } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 export const CoreCameraMixin = {
+    setAllowPitch(v) {
+        this.allowPitch = v;
+        if (!this.controls)
+            return;
+        if (!v) {
+            const cam = this.camera.position, tgt = this.controls.target;
+            const dx = cam.x - tgt.x, dy = cam.y - tgt.y, dz = cam.z - tgt.z;
+            const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            const cur = d > 1e-6
+                ? Math.acos(Math.max(-1, Math.min(1, dy / d)))
+                : 0.001;
+            this.controls.minPolarAngle = cur;
+            this.controls.maxPolarAngle = cur;
+        }
+        else {
+            this.controls.minPolarAngle = 0.001;
+            this.controls.maxPolarAngle = (85 * Math.PI) / 180;
+        }
+    },
+    setAllowRotate(v) { this.allowRotate = v; },
     initControls() {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableZoom = false;
@@ -14,6 +34,12 @@ export const CoreCameraMixin = {
         this.controls.touches = { ONE: null, TWO: null };
         this.controls.maxPolarAngle = (85 * Math.PI) / 180;
         this.controls.minPolarAngle = 0.001;
+        if (!this.allowPitch) {
+            const vp = this.view.pitch ?? 0;
+            const lockedPitchRad = Math.max(0.001, (vp * Math.PI) / 180);
+            this.controls.minPolarAngle = lockedPitchRad;
+            this.controls.maxPolarAngle = lockedPitchRad;
+        }
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.6;
         this.controls.rotateSpeed = 1;
@@ -69,7 +95,7 @@ export const CoreCameraMixin = {
         const endPitch = pitch !== undefined
             ? (pitch * Math.PI) / 180
             : startPitch;
-        let endBearing = bearing !== undefined
+        let endBearing = (bearing !== undefined && this.allowRotate)
             ? (bearing * Math.PI) / 180
             : startBearing;
         // кратчайший путь по азимуту
@@ -396,6 +422,8 @@ export const CoreCameraMixin = {
         this._startCameraAnimationLoopIfNeeded();
     },
     setBearing(bearingDeg, duration = 0.3) {
+        if (!this.allowRotate)
+            return;
         const bearingRad = bearingDeg * Math.PI / 180;
         const target = this._tempVec3a.copy(this.controls.target);
         const currentPos = this._tempVec3b.copy(this.camera.position);
@@ -525,6 +553,8 @@ export const CoreCameraMixin = {
     },
     rotateToNorth(duration = 0.3, resetPitch = true) {
         if (this._disposed || this._cameraAnimation)
+            return;
+        if (!this.allowRotate)
             return;
         const startTarget = new THREE.Vector3().copy(this.controls.target);
         const startPos = new THREE.Vector3().copy(this.camera.position);

@@ -12,6 +12,8 @@ export interface ViewOptions {
     pitch?: number;
     bearing?: number;
     maxBounds?: [[number, number], [number, number]];  
+    allowRotate?: boolean;  
+    allowPitch?: boolean;   
 }
 
 export class View {
@@ -25,6 +27,8 @@ export class View {
     pitch: number;
     bearing: number;
      maxBounds: [[number, number], [number, number]] | null;
+     allowRotate: boolean;
+    allowPitch: boolean;
 
     constructor(options: ViewOptions) {
         if (!options) throw new Error('View: options object is required');
@@ -60,5 +64,8 @@ export class View {
                  Math.max(options.maxBounds[0][1], options.maxBounds[1][1])],
               ]
             : null;
+
+        this.allowRotate = options.allowRotate ?? true;
+        this.allowPitch  = options.allowPitch  ?? true;
     }
 }

@@ -10,6 +10,8 @@ export class View {
     pitch;
     bearing;
     maxBounds;
+    allowRotate;
+    allowPitch;
     constructor(options) {
         if (!options)
             throw new Error('View: options object is required');
@@ -39,5 +41,7 @@ export class View {
                     Math.max(options.maxBounds[0][1], options.maxBounds[1][1])],
             ]
             : null;
+        this.allowRotate = options.allowRotate ?? true;
+        this.allowPitch = options.allowPitch ?? true;
     }
 }

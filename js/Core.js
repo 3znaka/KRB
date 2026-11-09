@@ -74,6 +74,8 @@ export class KrbMap {
     currentDiscreteZoom;
     tileCRS;
     deformedTiles;
+    allowRotate;
+    allowPitch;
     globalElevCache;
     // --- Инерция ---
     panInertia;
@@ -204,6 +206,8 @@ export class KrbMap {
         this.view = options.view;
         this.hasTileLayers = this.layers.some((layer) => !!(layer.texture || layer.elevation) ||
             (typeof layer?.addTo === 'function' && (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile'))));
+        this.allowRotate = this.view.allowRotate ?? true;
+        this.allowPitch = this.view.allowPitch ?? true;
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(`KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`);
         }

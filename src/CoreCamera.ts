@@ -4,6 +4,8 @@ import type { KrbMap } from './Core.js';
 import { Projections } from './Projections.js';
 
 export interface CoreCameraMethods {
+    setAllowPitch(v: boolean): void;
+setAllowRotate(v: boolean): void;
     initControls(): void;
     getTargetDistanceForZoom(z: number): number;
     getZoomForDistance(d: number): number;
@@ -54,6 +56,27 @@ export interface CoreCameraMethods {
 }
 
 export const CoreCameraMixin: CoreCameraMethods & ThisType<KrbMap> = {
+
+setAllowPitch(v) {
+    this.allowPitch = v;
+    if (!this.controls) return;
+    if (!v) {
+        const cam = this.camera.position, tgt = this.controls.target;
+        const dx = cam.x - tgt.x, dy = cam.y - tgt.y, dz = cam.z - tgt.z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const cur = d > 1e-6
+            ? Math.acos(Math.max(-1, Math.min(1, dy / d)))
+            : 0.001;
+        this.controls.minPolarAngle = cur;
+        this.controls.maxPolarAngle = cur;
+    } else {
+        this.controls.minPolarAngle = 0.001;
+        this.controls.maxPolarAngle = (85 * Math.PI) / 180;
+    }
+},
+
+setAllowRotate(v) { this.allowRotate = v; },
+    
 initControls() {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableZoom = false;
@@ -66,6 +89,12 @@ initControls() {
     this.controls.touches = { ONE: null, TWO: null };
     this.controls.maxPolarAngle = (85 * Math.PI) / 180;
     this.controls.minPolarAngle = 0.001;
+    if (!this.allowPitch) {
+    const vp = this.view.pitch ?? 0;
+    const lockedPitchRad = Math.max(0.001, (vp * Math.PI) / 180);
+    this.controls.minPolarAngle = lockedPitchRad;
+    this.controls.maxPolarAngle = lockedPitchRad;
+}
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.6;
     this.controls.rotateSpeed = 1;
@@ -123,9 +152,9 @@ easeTo(options) {
     const endPitch = pitch !== undefined
         ? (pitch * Math.PI) / 180
         : startPitch;
-    let endBearing = bearing !== undefined
-        ? (bearing * Math.PI) / 180
-        : startBearing;
+    let endBearing = (bearing !== undefined && this.allowRotate)
+    ? (bearing * Math.PI) / 180
+    : startBearing;
     // кратчайший путь по азимуту
     let dB = endBearing - startBearing;
     while (dB >  Math.PI) dB -= 2 * Math.PI;
@@ -490,6 +519,7 @@ setPitch(pitchDeg, duration = 0.3) {
 },
 
 setBearing(bearingDeg, duration = 0.3) {
+    if (!this.allowRotate) return;
     const bearingRad = bearingDeg * Math.PI / 180;
     const target = this._tempVec3a.copy(this.controls.target);
     const currentPos = this._tempVec3b.copy(this.camera.position);
@@ -608,6 +638,7 @@ moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
 
 rotateToNorth(duration = 0.3, resetPitch = true) {
     if (this._disposed || this._cameraAnimation) return;
+    if (!this.allowRotate) return; 
     const startTarget = new THREE.Vector3().copy(this.controls.target);
     const startPos = new THREE.Vector3().copy(this.camera.position);
     const dir = new THREE.Vector3().subVectors(startPos, startTarget);

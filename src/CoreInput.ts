@@ -127,10 +127,11 @@ onMouseDown(e) {
     this._panVelX = 0;
     this._panVelZ = 0;
 
-    // NEW: right-click → rotate around pivot at cursor
-    if (e.button === 2) {
+if (e.button === 2) {
+    if (!this.allowRotate) return;
+    this._rotatePivotActive = true;
 
-        this._rotatePivotActive = true;
+
         this._rotatePivotX = e.clientX;
         this._rotatePivotY = e.clientY;
         this._rotateLastX  = e.clientX;
@@ -548,8 +549,8 @@ onTouchMove(e: TouchEvent) {
         while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
 
         const dDist   = Math.abs(curDist - ts.prevDist);
-        const dRotate = Math.abs(angleDelta) * curDist * 0.5;
-        const dMidY   = Math.abs(midY - ts.prevMidY);
+const dRotate = this.allowRotate ? Math.abs(angleDelta) * curDist * 0.5 : 0;
+const dMidY   = this.allowPitch  ? Math.abs(midY - ts.prevMidY)         : 0;
 
         // ─────────────────────────────────────────────────────────────
         // EMA-сглаживание (α = 0.3)
@@ -590,8 +591,8 @@ onTouchMove(e: TouchEvent) {
 
         const tiltWeighted = ts.smoothTilt / TILT_BIAS;
         const otherMax     = Math.max(ts.smoothZoom, ts.smoothRotate);
-        const winner: 'tilt' | 'zoomRotate' =
-            (tiltWeighted > otherMax) ? 'tilt' : 'zoomRotate';
+const winner: 'tilt' | 'zoomRotate' =
+    (this.allowPitch && tiltWeighted > otherMax) ? 'tilt' : 'zoomRotate';
 
         if (winner !== ts.activeGesture) {
             if (winner === ts.candidateGesture) {
@@ -708,7 +709,9 @@ onTouchMove(e: TouchEvent) {
         const target = this.controls.target;
         const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
         const newCameraDist  = prevCameraDist * Math.pow(0.5, zoomDelta);
-        const newAzimuth     = ts.prevAzimuth - angleDelta2;
+const newAzimuth = this.allowRotate
+    ? ts.prevAzimuth - angleDelta2
+    : ts.prevAzimuth;
         const newPitch       = ts.prevPitch;          // pitch не меняем
 
         const placement = this._resolveCameraPlacement(

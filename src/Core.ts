@@ -167,6 +167,9 @@ export class KrbMap {
     tileCRS: any;
     deformedTiles: boolean;
 
+    allowRotate: boolean;
+    allowPitch: boolean;
+
     globalElevCache: Map<any, any>;
 
     // --- Инерция ---
@@ -321,6 +324,9 @@ this.debug = options.debug ?? false;
     !!(layer.texture || layer.elevation) ||
     (typeof layer?.addTo === 'function' && (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile')))
 );
+
+this.allowRotate = this.view.allowRotate ?? true;
+this.allowPitch  = this.view.allowPitch  ?? true;
 
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(

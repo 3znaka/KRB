@@ -903,6 +903,16 @@ export class GeoJSONLayer extends Layer {
         const coords = geom.coordinates;
         const lonLat = [coords[0], coords[1]];
         const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
+        // --- НОВОЕ: Если задан diagram, рисуем диаграмму вместо маркера ---
+        if (this.diagram || this.diagramToOptions) {
+            // Можно добавить проверку на props.diagram === false, 
+            // чтобы иметь возможность отключить диаграмму для конкретной точки
+            if (props.diagram !== false) {
+                this._addPointDiagram(feature, props, lonLat);
+                return; // Выходим, чтобы не рисовать обычный маркер
+            }
+        }
+        // ----------------------------------------------------------------
         const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
         const is3D = cb3D != null
             || props['3d'] === true
@@ -1076,6 +1086,24 @@ export class GeoJSONLayer extends Layer {
             }
         }
     }
+    _addPointDiagram(feature, props, lonLat) {
+        const baseOpts = this.diagramToOptions
+            ? this.diagramToOptions(feature, props)
+            : this._diagramFromConfig(feature, props);
+        if (!baseOpts)
+            return;
+        const diagram = new Diagram({
+            ...baseOpts,
+            position: lonLat,
+            crs: this.crs ?? undefined,
+            parentPolygon: null, // Нет полигона-родителя
+            fitToPolygon: false, // Отключаем fit-логику
+            clusterable: false,
+        });
+        this.add(diagram);
+        if (this.onEachDiagram)
+            this.onEachDiagram(feature, diagram);
+    }
     _addCartodiagram(feature, props, polygon) {
         const baseOpts = this.diagramToOptions
             ? this.diagramToOptions(feature, props)
@@ -1088,7 +1116,7 @@ export class GeoJSONLayer extends Layer {
         const diagram = new Diagram({
             ...baseOpts,
             position: center,
-            crs: 'EPSG:4326',
+            crs: this.crs,
             parentPolygon: polygon,
             fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
             minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,

@@ -1296,28 +1296,39 @@ private _getTooltip(props: Props): string {
     // Points
     // =================================================================
 
-    private _addPointFeature(feature: GeoJSONFeature): void {
-        const geom = feature.geometry;
-        if (geom.type !== 'Point') return;
-        const props = feature.properties ?? {};
+   private _addPointFeature(feature: GeoJSONFeature): void {
+    const geom = feature.geometry;
+    if (geom.type !== 'Point') return;
+    const props = feature.properties ?? {};
 
-        const coords = geom.coordinates;
-        const lonLat: LonLat = [coords[0], coords[1]];
-        const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
+    const coords = geom.coordinates;
+    const lonLat: LonLat = [coords[0], coords[1]];
+    const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
 
-        const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
-        const is3D = cb3D != null
-            || props['3d'] === true
-            || props.type === '3d'
-            || props.markerType === '3d';
-
-        if (is3D) {
-            this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
-        } else {
-            const cb = this.pointToOptions ? this.pointToOptions(feature, props) : null;
-            this._createMarker(feature, props, lonLat, altFromCoords, cb);
+    // --- НОВОЕ: Если задан diagram, рисуем диаграмму вместо маркера ---
+    if (this.diagram || this.diagramToOptions) {
+        // Можно добавить проверку на props.diagram === false, 
+        // чтобы иметь возможность отключить диаграмму для конкретной точки
+        if (props.diagram !== false) {
+            this._addPointDiagram(feature, props, lonLat);
+            return; // Выходим, чтобы не рисовать обычный маркер
         }
     }
+    // ----------------------------------------------------------------
+
+    const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
+    const is3D = cb3D != null
+        || props['3d'] === true
+        || props.type === '3d'
+        || props.markerType === '3d';
+
+    if (is3D) {
+        this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
+    } else {
+        const cb = this.pointToOptions ? this.pointToOptions(feature, props) : null;
+        this._createMarker(feature, props, lonLat, altFromCoords, cb);
+    }
+}
 
     private _createMarker(
         feature: GeoJSONFeature,
@@ -1505,6 +1516,25 @@ private _addPolygonFeature(feature: GeoJSONFeature): void {
     }
 }
 
+
+private _addPointDiagram(feature: GeoJSONFeature, props: Props, lonLat: LonLat): void {
+    const baseOpts = this.diagramToOptions
+        ? this.diagramToOptions(feature, props)
+        : this._diagramFromConfig(feature, props);
+    if (!baseOpts) return;
+
+    const diagram = new Diagram({
+        ...baseOpts,
+        position: lonLat,
+        crs: this.crs ?? undefined,
+        parentPolygon: null,      // Нет полигона-родителя
+        fitToPolygon: false,      // Отключаем fit-логику
+        clusterable: false,
+    });
+    this.add(diagram);
+    if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
+}
+
 private _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon): void {
     const baseOpts = this.diagramToOptions
         ? this.diagramToOptions(feature, props)
@@ -1517,7 +1547,7 @@ private _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon
     const diagram = new Diagram({
         ...baseOpts,
         position: center,
-        crs: 'EPSG:4326',
+        crs: this.crs,
         parentPolygon: polygon,
         fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
         minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,

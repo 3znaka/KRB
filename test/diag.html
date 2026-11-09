@@ -30,7 +30,7 @@ const map = new KRB.Map({
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
     tooltipOnHover: true,
-    tooltip: `<b>${p.name}</b><br>Score: ${p.score}`,
+    tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}`,
     label: '',
     style: { polygon: { default: { title: '' } }},
 

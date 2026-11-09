@@ -91,7 +91,7 @@ class GridLabelSource {
     getTitleVariableAnchor() {
         if (!this._anchor)
             return null;
-        return [INWARD_ANCHOR[this._anchor.side]];
+        return [INWARD_ANCHOR[this._anchor.renderSide]];
     }
     getTitleAlign() { return 'center'; }
     getTitleVerticalAlign() { return 'center'; }
@@ -130,12 +130,14 @@ export class Graticule {
     _needsRebuild = true;
     _genMode = 'full-world';
     _lastCamMatrix = new Float32Array(16);
+    _lastProjMatrix = new Float32Array(16);
     _lastWgMatrix = new Float32Array(16);
     _lastActiveLabelIds = null;
-    _scratchSx = new Float32Array(SAMPLE_COUNT + 2);
-    _scratchSy = new Float32Array(SAMPLE_COUNT + 2);
-    _scratchVis = new Uint8Array(SAMPLE_COUNT + 2);
+    _scratchVx = new Float64Array(SAMPLE_COUNT + 2);
+    _scratchVy = new Float64Array(SAMPLE_COUNT + 2);
+    _scratchVz = new Float64Array(SAMPLE_COUNT + 2);
     _tmpVec = new THREE.Vector3();
+    _mvMatrix = new THREE.Matrix4();
     constructor(options = {}) {
         this._crsCode = options.crs ?? 'EPSG:4326';
         this._stepOption = options.step ?? null;
@@ -324,6 +326,7 @@ export class Graticule {
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         this._lastCamMatrix.fill(0);
+        this._lastProjMatrix.fill(0);
         this._lastWgMatrix.fill(0);
         return this;
     }
@@ -352,6 +355,7 @@ export class Graticule {
         this._map = null;
         this._lastActiveLabelIds = null;
         this._lastCamMatrix.fill(0);
+        this._lastProjMatrix.fill(0);
         this._lastWgMatrix.fill(0);
     }
     _dispose() { this.removeFromMap(); }
@@ -407,10 +411,15 @@ export class Graticule {
         if (!map.camera || !map.worldGroup)
             return false;
         const camE = map.camera.matrixWorld.elements;
+        const projE = map.camera.projectionMatrix.elements;
         const wgE = map.worldGroup.matrixWorld.elements;
         let changed = false;
         for (let i = 0; i < 16; i++) {
             if (Math.abs(camE[i] - this._lastCamMatrix[i]) > 1e-9) {
+                changed = true;
+                break;
+            }
+            if (Math.abs(projE[i] - this._lastProjMatrix[i]) > 1e-9) {
                 changed = true;
                 break;
             }
@@ -421,6 +430,7 @@ export class Graticule {
         }
         if (changed) {
             this._lastCamMatrix.set(camE);
+            this._lastProjMatrix.set(projE);
             this._lastWgMatrix.set(wgE);
         }
         return changed;
@@ -465,16 +475,19 @@ export class Graticule {
         const b = this._map.getBounds();
         if (b) {
             const [[a, c], [d, e]] = b;
-            if (isFinite(a) && isFinite(c) && isFinite(d) && isFinite(e)
-                && d > a && e > c) {
-                minLon = Math.max(-180, a);
-                maxLon = Math.min(180, d);
-                minLat = Math.max(-90, c);
-                maxLat = Math.min(90, e);
+            if (isFinite(a) && isFinite(c) && isFinite(d) && isFinite(e)) {
+                const loLon = Math.min(a, d), hiLon = Math.max(a, d);
+                const loLat = Math.min(c, e), hiLat = Math.max(c, e);
+                if (hiLon > loLon && hiLat > loLat) {
+                    minLon = Math.max(-180, loLon);
+                    maxLon = Math.min(180, hiLon);
+                    minLat = Math.max(-90, loLat);
+                    maxLat = Math.min(90, hiLat);
+                }
             }
         }
-        const dLon = (maxLon - minLon) * 0.3;
-        const dLat = (maxLat - minLat) * 0.3;
+        const dLon = (maxLon - minLon) * 0.5;
+        const dLat = (maxLat - minLat) * 0.5;
         return {
             minLon: Math.max(-180, minLon - dLon),
             maxLon: Math.min(180, maxLon + dLon),
@@ -508,6 +521,12 @@ export class Graticule {
     // Генерация линий
     // ─────────────────────────────────────────────────────────────────
     _clearAllLines() {
+        if (this._map?.textManager) {
+            try {
+                this._map.textManager.pruneStaleLabels(new Set(), this, { fade: false });
+            }
+            catch { }
+        }
         for (const info of this._lineInfos)
             this._destroyLine(info);
         this._lineInfos = [];
@@ -542,8 +561,8 @@ export class Graticule {
                 return;
             const cx = (p1[0] + p2[0]) * 0.5;
             const cy = (p1[1] + p2[1]) * 0.5;
-            const hx = Math.abs(p2[0] - p1[0]) * 0.75;
-            const hy = Math.abs(p2[1] - p1[1]) * 0.75;
+            const hx = Math.abs(p2[0] - p1[0]);
+            const hy = Math.abs(p2[1] - p1[1]);
             genMinX = cx - hx;
             genMaxX = cx + hx;
             genMinY = cy - hy;
@@ -573,7 +592,7 @@ export class Graticule {
                 line2: this._buildLine2(sampled.pts),
                 points3D: sampled.pts,
                 crsSamples: sampled.crs,
-                labels: this._buildLabelAnchors(id, text, value, step, isGeo),
+                labels: this._buildLabelAnchors(id, 'meridian', text, value, step, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
@@ -598,7 +617,7 @@ export class Graticule {
                 line2: this._buildLine2(sampled.pts),
                 points3D: sampled.pts,
                 crsSamples: sampled.crs,
-                labels: this._buildLabelAnchors(id, text, value, step, isGeo),
+                labels: this._buildLabelAnchors(id, 'parallel', text, value, step, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
@@ -614,14 +633,17 @@ export class Graticule {
             this._pruneFarLines(viewport, mode);
         }
     }
-    _buildLabelAnchors(lineId, text, value, step, isGeo) {
+    _buildLabelAnchors(lineId, kind, text, value, step, isGeo) {
         const roundness = computeRoundness(value, step, isGeo);
-        const result = [];
-        for (const side of this._labelSides) {
+        const startSide = kind === 'meridian' ? 'bottom' : 'left';
+        const endSide = kind === 'meridian' ? 'top' : 'right';
+        const makeAnchor = (isStart, side) => {
             const stableId = `${lineId}:${side}`;
             const source = new GridLabelSource(this, text);
             const anchor = {
+                isStart,
                 side,
+                renderSide: side,
                 stableId,
                 source,
                 screenPos: null,
@@ -629,9 +651,12 @@ export class Graticule {
                 roundness,
             };
             source._anchor = anchor;
-            result.push(anchor);
-        }
-        return result;
+            return anchor;
+        };
+        return [
+            makeAnchor(true, startSide),
+            makeAnchor(false, endSide),
+        ];
     }
     _pruneFarLines(viewport, mode) {
         if (mode === 'full-world')
@@ -752,75 +777,173 @@ export class Graticule {
         catch { }
         info.line2 = null;
     }
-    // ── Подписи ──
-    _findEdgeAnchor(side, kind, sx, sy, vis, n, W, H) {
+    // ─────────────────────────────────────────────────────────────────
+    // Позиционирование подписей строго по 5 правилам
+    // ─────────────────────────────────────────────────────────────────
+    _findLineEndLabel(isStart, defaultSide, vx, vy, vz, n, W, H, nearZ, projMatrix) {
         const M = LABEL_MARGIN;
         const clampX = (x) => Math.max(M, Math.min(W - M, x));
         const clampY = (y) => Math.max(M, Math.min(H - M, y));
-        for (let i = 0; i < n - 1; i++) {
-            if (!vis[i] || !vis[i + 1])
-                continue;
-            const x1 = sx[i], y1 = sy[i];
-            const x2 = sx[i + 1], y2 = sy[i + 1];
-            if (side === 'top' || side === 'bottom') {
-                const edgeY = side === 'top' ? 0 : H;
-                const crosses = (y1 >= edgeY && y2 < edgeY)
-                    || (y1 < edgeY && y2 >= edgeY);
-                if (!crosses)
-                    continue;
-                const t = (edgeY - y1) / (y2 - y1);
-                const x = x1 + (x2 - x1) * t;
-                if (x < 0 || x > W)
-                    continue;
-                return { x: clampX(x), y: side === 'top' ? M : H - M };
+        const tmp = this._tmpVec;
+        const projectViewPoint = (x, y, z) => {
+            tmp.set(x, y, z).applyMatrix4(projMatrix);
+            const sx = (tmp.x * 0.5 + 0.5) * W;
+            const sy = (-tmp.y * 0.5 + 0.5) * H;
+            if (!Number.isFinite(sx) || !Number.isFinite(sy))
+                return null;
+            return { x: sx, y: sy };
+        };
+        const isEndpointVisible = (idx) => {
+            if (vz[idx] > nearZ)
+                return null;
+            const p = projectViewPoint(vx[idx], vy[idx], vz[idx]);
+            if (!p)
+                return null;
+            if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) {
+                return p;
             }
-            else {
-                const edgeX = side === 'left' ? 0 : W;
-                const crosses = (x1 >= edgeX && x2 < edgeX)
-                    || (x1 < edgeX && x2 >= edgeX);
-                if (!crosses)
-                    continue;
-                const t = (edgeX - x1) / (x2 - x1);
-                const y = y1 + (y2 - y1) * t;
-                if (y < 0 || y > H)
-                    continue;
-                return { x: side === 'left' ? M : W - M, y: clampY(y) };
+            return null;
+        };
+        if (isStart) {
+            // ПРАВИЛО 1: виден ли её начальный конец? Если ВИДЕН — рисуем на нём
+            const startPt = isEndpointVisible(0);
+            if (startPt) {
+                return {
+                    x: clampX(startPt.x),
+                    y: clampY(startPt.y),
+                    side: defaultSide,
+                    isEdge: false,
+                };
             }
-        }
-        const isNaturalSide = kind === 'meridian'
-            ? (side === 'top' || side === 'bottom')
-            : (side === 'left' || side === 'right');
-        if (!isNaturalSide)
-            return null;
-        if (n < 2)
-            return null;
-        const lastI = n - 1;
-        const isPositiveSide = kind === 'meridian'
-            ? (side === 'top')
-            : (side === 'right');
-        if (isPositiveSide) {
-            const endI = Math.ceil(lastI * 0.51);
-            for (let i = lastI; i >= endI; i--) {
-                if (!vis[i])
-                    continue;
-                const x = sx[i], y = sy[i];
-                if (x < 0 || x > W || y < 0 || y > H)
-                    continue;
-                return { x: clampX(x), y: clampY(y) };
+            // ПРАВИЛО 3: если начальный конец НЕ виден — ищем пересечение с экраном, ближайшее к НАЧАЛУ линии
+            for (let i = 0; i < n - 1; i++) {
+                const hit = this._getClippedSegmentScreenIntersection(vx[i], vy[i], vz[i], vx[i + 1], vy[i + 1], vz[i + 1], W, H, nearZ, projMatrix);
+                if (hit) {
+                    return {
+                        x: clampX(hit.x),
+                        y: clampY(hit.y),
+                        side: hit.edge,
+                        isEdge: true,
+                    };
+                }
             }
         }
         else {
-            const endI = Math.floor(lastI * 0.49);
-            for (let i = 0; i <= endI; i++) {
-                if (!vis[i])
-                    continue;
-                const x = sx[i], y = sy[i];
-                if (x < 0 || x > W || y < 0 || y > H)
-                    continue;
-                return { x: clampX(x), y: clampY(y) };
+            // ПРАВИЛО 2: виден ли её конечный конец? Если ВИДЕН — рисуем на нём
+            const endPt = isEndpointVisible(n - 1);
+            if (endPt) {
+                return {
+                    x: clampX(endPt.x),
+                    y: clampY(endPt.y),
+                    side: defaultSide,
+                    isEdge: false,
+                };
+            }
+            // ПРАВИЛО 4: если конечный конец НЕ виден — ищем пересечение с экраном, ближайшее к КОНЦУ линии
+            // Важно: передаём отрезок в обратном направлении (от i + 1 к i), чтобы minT искал точку ближе к концу!
+            for (let i = n - 2; i >= 0; i--) {
+                const hit = this._getClippedSegmentScreenIntersection(vx[i + 1], vy[i + 1], vz[i + 1], vx[i], vy[i], vz[i], W, H, nearZ, projMatrix);
+                if (hit) {
+                    return {
+                        x: clampX(hit.x),
+                        y: clampY(hit.y),
+                        side: hit.edge,
+                        isEdge: true,
+                    };
+                }
             }
         }
+        // ПРАВИЛО 5: ни конец не виден, ни пересечений с экраном нет — подпись не рисуется
         return null;
+    }
+    /**
+     * Отсекает направленный 3D-отрезок A -> B в пространстве камеры по ближней плоскости (z <= nearZ),
+     * проецирует на экран и возвращает ближайшее к началу A пересечение с границей экрана [0, W] x [0, H].
+     */
+    _getClippedSegmentScreenIntersection(vx1, vy1, vz1, vx2, vy2, vz2, W, H, nearZ, projMatrix) {
+        if (vz1 > nearZ && vz2 > nearZ)
+            return null;
+        let ax = vx1, ay = vy1, az = vz1;
+        let bx = vx2, by = vy2, bz = vz2;
+        if (az > nearZ) {
+            const tNear = (nearZ - az) / (bz - az);
+            ax += (bx - ax) * tNear;
+            ay += (by - ay) * tNear;
+            az = nearZ;
+        }
+        else if (bz > nearZ) {
+            const tNear = (nearZ - az) / (bz - az);
+            bx = ax + (bx - ax) * tNear;
+            by = ay + (by - ay) * tNear;
+            bz = nearZ;
+        }
+        const tmp = this._tmpVec;
+        tmp.set(ax, ay, az).applyMatrix4(projMatrix);
+        const x1 = (tmp.x * 0.5 + 0.5) * W;
+        const y1 = (-tmp.y * 0.5 + 0.5) * H;
+        tmp.set(bx, by, bz).applyMatrix4(projMatrix);
+        const x2 = (tmp.x * 0.5 + 0.5) * W;
+        const y2 = (-tmp.y * 0.5 + 0.5) * H;
+        if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
+            return null;
+        }
+        let minT = Infinity;
+        let bestHit = null;
+        const epsT = 1e-7;
+        const epsPos = 1e-4;
+        const checkHit = (t, x, y, edge) => {
+            if (t >= -epsT && t <= 1 + epsT && x >= -epsPos && x <= W + epsPos && y >= -epsPos && y <= H + epsPos) {
+                const clampedT = Math.max(0, Math.min(1, t));
+                if (clampedT < minT) {
+                    minT = clampedT;
+                    bestHit = {
+                        x: Math.max(0, Math.min(W, x)),
+                        y: Math.max(0, Math.min(H, y)),
+                        edge,
+                        t: clampedT,
+                    };
+                }
+            }
+        };
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        // Левый край (x = 0)
+        if ((x1 <= 0 && x2 >= 0) || (x1 >= 0 && x2 <= 0)) {
+            if (Math.abs(dx) > 1e-12) {
+                const t = (0 - x1) / dx;
+                checkHit(t, 0, y1 + dy * t, 'left');
+            }
+        }
+        // Правый край (x = W)
+        if ((x1 <= W && x2 >= W) || (x1 >= W && x2 <= W)) {
+            if (Math.abs(dx) > 1e-12) {
+                const t = (W - x1) / dx;
+                checkHit(t, W, y1 + dy * t, 'right');
+            }
+        }
+        // Верхний край (y = 0)
+        if ((y1 <= 0 && y2 >= 0) || (y1 >= 0 && y2 <= 0)) {
+            if (Math.abs(dy) > 1e-12) {
+                const t = (0 - y1) / dy;
+                checkHit(t, x1 + dx * t, 0, 'top');
+            }
+        }
+        // Нижний край (y = H)
+        if ((y1 <= H && y2 >= H) || (y1 >= H && y2 <= H)) {
+            if (Math.abs(dy) > 1e-12) {
+                const t = (H - y1) / dy;
+                checkHit(t, x1 + dx * t, H, 'bottom');
+            }
+        }
+        return bestHit;
+    }
+    _ensureScratchCapacity(n) {
+        if (this._scratchVx.length < n) {
+            const size = Math.max(n, this._scratchVx.length * 2);
+            this._scratchVx = new Float64Array(size);
+            this._scratchVy = new Float64Array(size);
+            this._scratchVz = new Float64Array(size);
+        }
     }
     _updateLabelPositions(_viewport) {
         const map = this._map;
@@ -828,11 +951,12 @@ export class Graticule {
         const canvas = map.renderer.domElement;
         const W = canvas.clientWidth;
         const H = canvas.clientHeight;
-        const wgPos = map.worldGroup.position;
         const tmp = this._tmpVec;
-        const sx = this._scratchSx;
-        const sy = this._scratchSy;
-        const vis = this._scratchVis;
+        // Полная матрица перевода из локальных координат worldGroup в пространство камеры
+        const mvMatrix = this._mvMatrix.multiplyMatrices(camera.matrixWorldInverse, map.worldGroup.matrixWorld);
+        const projMatrix = camera.projectionMatrix;
+        const isOrtho = !!camera.isOrthographicCamera;
+        const nearZ = isOrtho ? Infinity : -Math.max(1e-4, camera.near || 0.1);
         for (const info of this._lineInfos) {
             const pts = info.points3D;
             if (pts.length < 2) {
@@ -843,18 +967,22 @@ export class Graticule {
                 continue;
             }
             const n = pts.length;
+            this._ensureScratchCapacity(n);
+            const vx = this._scratchVx;
+            const vy = this._scratchVy;
+            const vz = this._scratchVz;
             for (let i = 0; i < n; i++) {
                 const [px, py, pz] = pts[i];
-                tmp.set(px + wgPos.x, py + wgPos.y, pz + wgPos.z);
-                tmp.project(camera);
-                vis[i] = (tmp.z > -1 && tmp.z < 1) ? 1 : 0;
-                sx[i] = (tmp.x * 0.5 + 0.5) * W;
-                sy[i] = (-tmp.y * 0.5 + 0.5) * H;
+                tmp.set(px, py, pz).applyMatrix4(mvMatrix);
+                vx[i] = tmp.x;
+                vy[i] = tmp.y;
+                vz[i] = tmp.z;
             }
             for (const lbl of info.labels) {
-                const anchor = this._findEdgeAnchor(lbl.side, info.kind, sx, sy, vis, n, W, H);
-                if (anchor) {
-                    lbl.screenPos = anchor;
+                const res = this._findLineEndLabel(lbl.isStart, lbl.side, vx, vy, vz, n, W, H, nearZ, projMatrix);
+                if (res && (!res.isEdge || this._labelSides.has(res.side))) {
+                    lbl.screenPos = { x: res.x, y: res.y };
+                    lbl.renderSide = res.side;
                     lbl.visibleOnScreen = true;
                 }
                 else {
@@ -873,7 +1001,7 @@ export class Graticule {
         if (!show) {
             if (this._lastActiveLabelIds !== null) {
                 try {
-                    tm.pruneStaleLabels(new Set(), this, { fade: true });
+                    tm.pruneStaleLabels(new Set(), this, { fade: false });
                 }
                 catch { }
                 this._lastActiveLabelIds = null;
@@ -892,14 +1020,26 @@ export class Graticule {
             return;
         }
         try {
-            tm.pruneStaleLabels(activeIds, this, { fade: true, graceMs: 200 });
+            tm.pruneStaleLabels(activeIds, this, { fade: false });
         }
         catch (e) {
             console.warn(e);
         }
         for (const { id, source } of sources) {
-            if (tm._labelsById && tm._labelsById.has(id))
-                continue;
+            const existing = tm._labelsById ? tm._labelsById.get(id) : null;
+            if (existing) {
+                if (existing.source === source && !existing.removing && !existing.fadingOut) {
+                    continue;
+                }
+                try {
+                    tm.removeLabel?.(id);
+                }
+                catch { }
+                try {
+                    tm._labelsById.delete(id);
+                }
+                catch { }
+            }
             try {
                 tm.addLabel(source, id, this);
             }
@@ -943,13 +1083,17 @@ export class Graticule {
         const canvas = map.renderer.domElement;
         const W = canvas.clientWidth;
         const H = canvas.clientHeight;
-        const wgPos = map.worldGroup.position;
+        const wgMatrix = map.worldGroup.matrixWorld;
+        const mvMatrix = this._mvMatrix.multiplyMatrices(camera.matrixWorldInverse, wgMatrix);
+        const projMatrix = camera.projectionMatrix;
+        const isOrtho = !!camera.isOrthographicCamera;
+        const nearZ = isOrtho ? Infinity : -Math.max(1e-4, camera.near || 0.1);
         const tmp = new THREE.Vector3();
         const onScreen = (x, y, z) => {
-            tmp.set(x + wgPos.x, y + wgPos.y, z + wgPos.z);
-            tmp.project(camera);
-            if (tmp.z <= -1 || tmp.z >= 1)
+            tmp.set(x, y, z).applyMatrix4(mvMatrix);
+            if (tmp.z > nearZ)
                 return false;
+            tmp.applyMatrix4(projMatrix);
             const px = (tmp.x * 0.5 + 0.5) * W;
             const py = (-tmp.y * 0.5 + 0.5) * H;
             return px >= -1 && px <= W + 1 && py >= -1 && py <= H + 1;
@@ -982,8 +1126,8 @@ export class Graticule {
         }
         // ── 2. Точки на краях ──
         if (includeEdges) {
-            const sx = new Float32Array(SAMPLE_COUNT + 2);
-            const sy = new Float32Array(SAMPLE_COUNT + 2);
+            const sx = new Float64Array(SAMPLE_COUNT + 2);
+            const sy = new Float64Array(SAMPLE_COUNT + 2);
             const vis = new Uint8Array(SAMPLE_COUNT + 2);
             for (const info of this._lineInfos) {
                 const pts = info.points3D;
@@ -993,9 +1137,9 @@ export class Graticule {
                 const n = pts.length;
                 for (let i = 0; i < n; i++) {
                     const [px, py, pz] = pts[i];
-                    tmp.set(px + wgPos.x, py + wgPos.y, pz + wgPos.z);
-                    tmp.project(camera);
-                    vis[i] = (tmp.z > -1 && tmp.z < 1) ? 1 : 0;
+                    tmp.set(px, py, pz).applyMatrix4(mvMatrix);
+                    vis[i] = tmp.z <= nearZ ? 1 : 0;
+                    tmp.applyMatrix4(projMatrix);
                     sx[i] = (tmp.x * 0.5 + 0.5) * W;
                     sy[i] = (-tmp.y * 0.5 + 0.5) * H;
                 }

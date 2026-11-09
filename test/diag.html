@@ -2,6 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8" />
+   <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no">
+    
 <title>Diagram — простой пример</title>
 <link href="../KRB.css" rel="stylesheet">
 <style>
@@ -17,10 +19,19 @@ import * as KRB from '../js/KRB.js';
 
 await KRB.addCrs(['ADPKP:0057']);
 
+// 1. Создаем сетку явно
+const graticule = new KRB.Graticule({ 
+    crs: 'EPSG:4326', 
+    step: 15, 
+    color: '#888', 
+    width: 1 
+});
+
+// 2. Передаем её в карту
 const map = new KRB.Map({
     target: 'map',
     crs: 'ADPKP:0057',
-    graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
+    graticule: graticule, // передаем экземпляр
     view: new KRB.View({
         centerLonLat: [10, 20],
         zoom: 2, minZoom: 0, maxZoom: 8,
@@ -33,33 +44,30 @@ new KRB.GeoJSONLayer({
     tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}`,
     label: '',
     style: { polygon: { default: { title: '' } }},
-
-choropleth: {
+    choropleth: {
         value: 'pop', 
         colorRamp: 'terrain',          
         classification: 'jenks',    
         classes: 10,                 
         noDataColor: '#cccccc'    
     },
-
-  diagram: {
+    diagram: {
         type: 'vienna',
-         fields: ['score'], 
-
-         colorMap: { score: [{ max: 300, color: '#e74c3c' }, { color: '#2ecc71' }] },
-
+        fields: ['score'], 
+        colorMap: { score: [{ max: 300, color: '#e74c3c' }, { color: '#2ecc71' }] },
         gap: -1,
         unitPx: 5,      
         unitValue: 50,   
-
         strokeColor: '#111',
         strokeWidth: 1,
         minZoom: 0,
     },
 }).addTo(map);
 
-
-      
+// 3. Сохраняем для консоли
+window.map = map;
+window.graticule = graticule;
+console.log("Готово! Экземпляры в window.map и window.graticule");
 </script>
 </body>
 </html>

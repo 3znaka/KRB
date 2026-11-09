@@ -8,6 +8,8 @@
  * @module Defaults
  */
 
+const _MODULE_DIR = new URL('.', import.meta.url).href;
+
 export const DEFAULTS = {
     /**
      * Множитель высот DEM (1 = метры, world-единицы ≈ метры по
@@ -48,27 +50,17 @@ export const DEFAULTS = {
     /** Размер тайла в пикселях (информативное значение). */
     TILE_PIXELS: 256,
 
-    DRACO_DECODER_PATH: './js_TP/draco/',
+   DRACO_DECODER_PATH: new URL('./js_TP/draco/', _MODULE_DIR).href,
 } as const;
 
 export type Defaults = typeof DEFAULTS;
 
 let _dracoDecoderPath: string = DEFAULTS.DRACO_DECODER_PATH;
 
-/**
- * Задаёт путь к каталогу с DRACO-декодером. Вызывать один раз при
- * инициализации приложения — до создания `Marker3D` / `Area3D`
- * с `modelUrl`.
- *
- * @example
- * import * as KRB from '../js/KRB.js';
- * KRB.setDracoDecoderPath('../js/js_TP/draco/');
- */
 export function setDracoDecoderPath(path: string): void {
     _dracoDecoderPath = path;
 }
 
-/** Текущий путь к DRACO-декодеру (default или переопределённый). */
 export function getDracoDecoderPath(): string {
     return _dracoDecoderPath;
 }

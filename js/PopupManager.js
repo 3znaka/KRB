@@ -54,6 +54,7 @@ export class PopupManager {
     _pointerDownY = 0;
     _pointerDownId = null;
     _pointerStartedInside = false;
+    _pointerDownActiveObject = null;
     _pointerMultiTouch = false;
     constructor(map, options = {}) {
         this._map = map;
@@ -80,7 +81,18 @@ export class PopupManager {
             this.hide();
             return;
         }
+        // Уведомляем предыдущий объект при замене.
+        if (this._activeObject && this._activeObject !== object
+            && typeof this._activeObject._onPopupHide === 'function') {
+            try {
+                this._activeObject._onPopupHide();
+            }
+            catch (e) {
+                console.warn('[PopupManager] _onPopupHide threw:', e);
+            }
+        }
         const wasHidden = this._tooltipElement.style.visibility !== 'visible';
+        const anchorChanged = this._activeObject !== object; // ← новое
         this._activeObject = object;
         if (this._lastHtml !== html) {
             this._contentElement.innerHTML = html;
@@ -95,7 +107,7 @@ export class PopupManager {
         this._nullFrames = 0;
         this._updatePosition();
         this._startLoop();
-        if (wasHidden)
+        if (wasHidden || anchorChanged)
             this._playShowAnimation();
     }
     showAt(lonLat, html) {
@@ -191,12 +203,6 @@ export class PopupManager {
     // =================================================================
     // Внутреннее: анимация появления
     // =================================================================
-    /**
-     * Анимирует `transform: translate3d(...) scale(s)` целиком (не трогая
-     * standalone `scale` — в некоторых браузерах он конфликтует с translate).
-     * Координаты translate подбираются так, чтобы остриё хвостика
-     * `(tipX, tipY)` оставалось неподвижным: `x' = x + tipX*(1-s)`.
-     */
     _playShowAnimation() {
         if (!this._shouldAnimate())
             return;
@@ -211,6 +217,7 @@ export class PopupManager {
         if (!isFinite(x) || !isFinite(y))
             return;
         this._cancelShowAnimation();
+        el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
         const s0 = 0.9;
         const s1 = 1;
         const tipX = this._lastTipX;
@@ -266,6 +273,8 @@ export class PopupManager {
         document.addEventListener('pointercancel', this._onDocPointerCancel);
     }
     _handlePointerDown(e) {
+        if (e.button !== 0)
+            return;
         if (!this._activeObject)
             return;
         if (this._pointerDownId !== null && this._pointerDownId !== e.pointerId) {
@@ -275,6 +284,7 @@ export class PopupManager {
         this._pointerDownX = e.clientX;
         this._pointerDownY = e.clientY;
         this._pointerDownId = e.pointerId;
+        this._pointerDownActiveObject = this._activeObject;
         this._pointerStartedInside = this._isPointerInsidePopup(e.clientX, e.clientY);
         this._pointerMultiTouch = false;
     }
@@ -283,20 +293,26 @@ export class PopupManager {
             return;
         const startedInside = this._pointerStartedInside;
         const multiTouch = this._pointerMultiTouch;
+        const downActive = this._pointerDownActiveObject;
+        const button = e.button;
         const dx = e.clientX - this._pointerDownX;
         const dy = e.clientY - this._pointerDownY;
         this._resetPointerState();
+        if (button !== 0)
+            return;
         if (startedInside)
             return;
         if (multiTouch)
             return;
         if (Math.hypot(dx, dy) > this._clickDragThreshold)
             return;
-        if (this._activeObject)
+        if (this._activeObject && this._activeObject === downActive) {
             this.hide();
+        }
     }
     _resetPointerState() {
         this._pointerDownId = null;
+        this._pointerDownActiveObject = null;
         this._pointerStartedInside = false;
         this._pointerMultiTouch = false;
     }

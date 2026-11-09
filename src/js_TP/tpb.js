@@ -38350,13 +38350,12 @@ var export_Protobuf = import_pbf.default;
 var export_VectorTile = import_vector_tile.VectorTile;
 export {
   DRACOLoader,
+  EdgesGeometry,
   GLTFExporter,
   GLTFLoader,
   Line2,
   LineGeometry,
   LineMaterial,
-  LineSegments2,
-  LineSegmentsGeometry,
   OrbitControls,
   export_Protobuf as Protobuf,
   three_module_exports as THREE,

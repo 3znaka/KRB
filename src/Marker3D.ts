@@ -103,7 +103,7 @@ export class Marker3D extends SpatialObject {
     private _unregisterInteraction: (() => void) | null = null;
 
     // ── 3D-объекты ──
-    private _object3D: any = null;
+    protected _object3D: any = null;
     private _modelRoot: any = null;
     private _geometry: any = null;
     private _material: any = null;
@@ -114,16 +114,16 @@ export class Marker3D extends SpatialObject {
     private _modelPromise: Promise<void> | null = null;
 
     private _worldPosition: any;
-    private _localBox: any = null;
+protected _localBox: any = null;
     private _originalModelSize: any = null;
     private _originalModelScale: any = null;
     private _originalModelPosition: any = null;
     private _isModel: boolean;
     private _sizeAnimation: SizeAnimation | null = null;
-    private _boundingRadius = 0;
-    private _boundingSphereOffset: any = null;
-    private _raycastMeshesCache: any[] | null = null;
-    private _height = 0;
+protected _boundingRadius = 0;
+ protected _boundingSphereOffset: any = null;
+protected _raycastMeshesCache: any[] | null = null;
+   protected _height = 0;
 
     // ── Анимации GLB ──
     private _mixer: any = null;
@@ -323,7 +323,7 @@ this._userData = options.userData ?? {};
         });
     }
 
-    private _getRaycastMeshes(): any[] {
+    protected _getRaycastMeshes(): any[] {
         if (this._raycastMeshesCache) return this._raycastMeshesCache;
         if (!this._object3D) return [];
         const meshes: any[] = [];
@@ -342,7 +342,7 @@ this._userData = options.userData ?? {};
     // Построение примитива / GLB
     // =================================================================
 
-    private _createPrimitive(): void {
+     protected _createPrimitive(): void {
         const [w, h, d] = this._normalizePrimitiveSize(this._size);
         this._height = h;
 
@@ -367,12 +367,13 @@ case 'cone': {
             default:         geometry = new THREE.BoxGeometry(w, h, d); break;
         }
 
-        const material = new THREE.MeshStandardMaterial({
-            color: this._color,
-            roughness: 0.5,
-            depthTest: this._depthTest,
-            depthWrite: this._depthWrite,
-        });
+      const material = new THREE.MeshStandardMaterial({
+    color: this._color,
+    roughness: 0.5,
+    transparent: true,  
+    depthTest: this._depthTest,
+    depthWrite: this._depthWrite,
+});
         const mesh = new THREE.Mesh(geometry, material);
 
         const offset = new THREE.Vector3(
@@ -413,7 +414,7 @@ case 'cone': {
         throw new Error('Marker3D: invalid size type');
     }
 
-    private _rebuildPrimitiveInPlace(): void {
+protected _rebuildPrimitiveInPlace(): void {
         if (!this._object3D) return;
         const parent = this._object3D.parent;
         const oldPosition = this._object3D.position.clone();
@@ -460,21 +461,25 @@ case 'cone': {
 
                 this._applyModelSizeAndAnchor(model);
 
-                model.traverse((child: any) => {
-                    if (!child.isMesh) return;
-                    child.renderOrder = MARKER_RENDER_ORDER;
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                    if (child.material) {
-                        const mats = Array.isArray(child.material) ? child.material : [child.material];
-                        for (const m of mats) {
-                            m.depthTest = this._depthTest;
-                            m.depthWrite = this._depthWrite;
-                            m.needsUpdate = true;
-                        }
-                    }
-                });
+               model.traverse((child: any) => {
+    if (!child.isMesh) return;
+    child.renderOrder = MARKER_RENDER_ORDER;
+    child.castShadow = true;
+    child.receiveShadow = true;
 
+    if (child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const m of mats) {
+            m.depthTest  = this._depthTest;
+            m.depthWrite = this._depthWrite;
+            if (!m.transparent) {
+                m.transparent = true;
+            }
+
+            m.needsUpdate = true;
+        }
+    }
+});
                 this._modelRoot = model;
                 if (this._object3D) this._object3D.add(model);
                 this._isModelLoading = false;

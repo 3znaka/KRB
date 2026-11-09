@@ -6,52 +6,28 @@
  * ключи `*Options` и CSS-подобные алиасы (`fill`, `stroke`, `stroke-width`,
  * `icon`, `model`).
  *
- * Фильтрация: JS-выражение строкой (`"type = 'city'"`), объект-спецификация
- * (`{ type: 'city' }`) или предикат. Строковая форма исполняется через
- * `new Function` и видит глобальный scope — не передавайте в неё
- * пользовательский ввод без валидации.
+ * Фильтрация: JS-выражение строкой, объект-спецификация или предикат.
+ * Строковая форма исполняется через `new Function` и видит глобальный
+ * scope — не передавайте туда пользовательский ввод без валидации.
  *
  * @module Geojson
  */
 
 import { Layer } from './Layers.js';
+import { Marker, type MarkerOptions, type LonLat, type IconSize } from './Marker.js';
 import {
-    Marker,
-    type MarkerOptions,
-    type LonLat,
-    type IconSize,
-} from './Marker.js';
-import {
-    Marker3D,
-    type Marker3DOptions,
-    type Vec3,
-    type SizeSpec,
-    type PrimitiveType,
+    Marker3D, type Marker3DOptions, type Vec3, type SizeSpec, type PrimitiveType,
 } from './Marker3D.js';
-import {
-    Area3D,
-    type Area3DOptions,
-    type Area3DRing,
-    type Area3DFit,
-} from './Area3D.js';
-import {
-    Polyline,
-    type PolylineOptions,
-} from './Polyline.js';
-import {
-    Polygon,
-    type PolygonOptions,
-} from './Polygon.js';
-import {
-    Vector3D,
-    type Vector3DOptions,
-    type Vector3DPosition,
-} from './Vector3D.js';
+import { Area3D, type Area3DOptions, type Area3DRing, type Area3DFit } from './Area3D.js';
+import { Polyline, type PolylineOptions } from './Polyline.js';
+import { Polygon, type PolygonOptions } from './Polygon.js';
+import { Vector3D, type Vector3DOptions, type Vector3DPosition } from './Vector3D.js';
 import { Diagram, type DiagramOptions } from './Diagram.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
 import { calculateBreaks, getClassIndex } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
+import { Diagram3D, type Diagram3DSpawnOptions } from './Diagram3D.js';
 
 // =====================================================================
 // GeoJSON types
@@ -60,9 +36,7 @@ import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
 export type GeoJSONCoord = [number, number] | [number, number, number];
 export type GeoJSONLineString = GeoJSONCoord[];
 export type GeoJSONPolygon = GeoJSONCoord[][];
-export type DiagramSpawnOptions =
-    Omit<DiagramOptions, 'position' | 'crs' | 'parentPolygon'>;
-
+export type DiagramSpawnOptions = Omit<DiagramOptions, 'position' | 'crs' | 'parentPolygon'>;
 
 interface GeoJSONPointGeometry { type: 'Point'; coordinates: GeoJSONCoord; }
 interface GeoJSONLineStringGeometry { type: 'LineString'; coordinates: GeoJSONLineString; }
@@ -87,16 +61,33 @@ export interface GeoJSONFeature {
 }
 
 export interface ChoroplethConfig {
-    /** Формула или поле: 'population / area' или просто 'gdp' */
+    /** Формула или поле: 'population / area' или просто 'gdp'. */
     value: string | ((props: Props) => number);
-    /** Имя палитры ('viridis', 'terrain') или массив стопов */
+    /** Имя палитры или массив стопов. */
     colorRamp: string | any[];
-    /** Метод классификации (по умолчанию 'jenks') */
     classification?: 'equal' | 'quantile' | 'jenks' | number[];
-    /** Количество классов (по умолчанию 5) */
     classes?: number;
-    /** Цвет для нулевых/пустых значений (по умолчанию 'transparent') */
     noDataColor?: string;
+}
+
+export interface Diagram3DLayerConfig {
+    type?: string;
+    fields: string[];
+    unitM?: number;
+    /** Толщина столбца (м). Если не задана — подбирается по слою (≈ 0.8·maxH / n). */
+    barWidthM?: number;
+    /** Глубина столбца (м). Если не задана — равна barWidthM. */
+    barDepthM?: number;
+    gapM?: number;
+    colorMap?: Record<string, string>;
+    strokeColor?: string | number;
+    strokeWidthM?: number;
+    minZoom?: number;
+    maxZoom?: number;
+    altitude?: number;
+    altitudeMode?: 'clampToGround' | 'absolute';
+    unitValue?: number;
+    maxCols?: number;
 }
 
 export interface GeoJSONFeatureCollection {
@@ -142,43 +133,26 @@ export interface VectorStyleAliases {
     'stroke-opacity'?: number;
 }
 
-const POINT_ALIASES: Record<string, string> = {
-    'icon': 'iconUrl',
-};
-const MARKER3D_ALIASES: Record<string, string> = {
-    'model': 'modelUrl',
-};
+const POINT_ALIASES: Record<string, string> = { icon: 'iconUrl' };
+const MARKER3D_ALIASES: Record<string, string> = { model: 'modelUrl' };
 const LINE_ALIASES: Record<string, string> = {
-    'stroke': 'color',
-    'stroke-color': 'color',
-    'stroke-width': 'width',
-    'stroke-opacity': 'opacity',
+    stroke: 'color', 'stroke-color': 'color',
+    'stroke-width': 'width', 'stroke-opacity': 'opacity',
 };
 const POLYGON_ALIASES: Record<string, string> = {
-    'fill': 'fillColor',
-    'fill-color': 'fillColor',
-    'fill-opacity': 'fillOpacity',
-    'stroke': 'strokeColor',
-    'stroke-color': 'strokeColor',
-    'stroke-width': 'strokeWidth',
-    'stroke-opacity': 'strokeOpacity',
+    fill: 'fillColor', 'fill-color': 'fillColor', 'fill-opacity': 'fillOpacity',
+    stroke: 'strokeColor', 'stroke-color': 'strokeColor',
+    'stroke-width': 'strokeWidth', 'stroke-opacity': 'strokeOpacity',
 };
-const AREA3D_ALIASES: Record<string, string> = {
-    'model': 'modelUrl',
-};
+const AREA3D_ALIASES: Record<string, string> = { model: 'modelUrl' };
 const VECTOR_ALIASES: Record<string, string> = {
-    'stroke': 'color',
-    'stroke-color': 'color',
-    'stroke-width': 'width',
-    'stroke-opacity': 'opacity',
+    stroke: 'color', 'stroke-color': 'color',
+    'stroke-width': 'width', 'stroke-opacity': 'opacity',
 };
 
 const NUMERIC_OPTION_KEYS = new Set<string>([
-    'fillOpacity', 'strokeOpacity', 'strokeWidth',
-    'width', 'opacity', 'arrowSize',
+    'fillOpacity', 'strokeOpacity', 'strokeWidth', 'width', 'opacity', 'arrowSize',
 ]);
-
-
 
 // =====================================================================
 // Declarative style types
@@ -239,26 +213,14 @@ export interface StyleConfig extends StyleTypeConfig {
 // Feature filter types
 // =====================================================================
 
-/**
- * Объектная спецификация. Поддерживает:
- *   - равенство:       `{ type: 'city' }`
- *   - OR по значениям: `{ category: ['park', 'reserve'] }`
- *   - вложенные пути:  `{ 'address.city': 'Москва' }`
- *   - всё вместе = AND.
- */
+/** Объектная спецификация: `{ field: value | [v1, v2], 'a.b': x }`. AND по полям. */
 export type FeatureFilterSpec = Record<
     string,
     string | number | boolean | null
     | readonly (string | number | boolean | null)[]
 >;
 
-/**
- * Что принимает `featureFilter` / `setFeatureFilter`:
- *   - строка-выражение (`"type = 'city'"`, `"pop > 100"`);
- *   - объект-спецификация (безопасно для UI);
- *   - предикат (escape hatch);
- *   - `null` — снять.
- */
+/** Строка-выражение, объект-спецификация, предикат или `null`. */
 export type FeatureFilterInput =
     | string
     | FeatureFilterSpec
@@ -270,10 +232,7 @@ export type FeatureFilterInput =
 // Expression compiler
 // =====================================================================
 
-/**
- * Заменяет одиночный `=` на `===`, не трогая `==`, `===`, `!=`, `!==`,
- * `<=`, `>=`, `=>` и содержимое строк.
- */
+/** Одиночный `=` → `===`, не трогая `==/===/!=/!==/<=/>=/=>` и строки. */
 function replaceEqualityOutsideStrings(expr: string): string {
     let out = '';
     let i = 0;
@@ -292,9 +251,7 @@ function replaceEqualityOutsideStrings(expr: string): string {
             const prev = out[out.length - 1];
             const next = expr[i + 1];
             if (prev === '<' || prev === '>' || prev === '!' || prev === '='
-                || next === '=' || next === '>') {
-                out += ch; i++; continue;
-            }
+                || next === '=' || next === '>') { out += ch; i++; continue; }
             out += '==='; i++; continue;
         }
         out += ch; i++;
@@ -311,16 +268,11 @@ function interpolate(template: string, props: Record<string, any>): string {
     });
 }
 
-/**
- * `field === 'a' || 'b'` → `field === 'a' || field === 'b'`.
- * Трогает только цепочки, целиком состоящие из литералов.
- */
+/** `f === 'a' || 'b'` → `f === 'a' || f === 'b'` (только цепочки литералов). */
 function expandOrChains(expr: string): string {
     const LIT = String.raw`(?:'[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*"|\d+(?:\.\d+)?|true|false|null)`;
     const FIELD = String.raw`[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*`;
-    const chainRe = new RegExp(
-        `(${FIELD})\\s*===\\s*(${LIT}(?:\\s*\\|\\|\\s*${LIT})+)`, 'g',
-    );
+    const chainRe = new RegExp(`(${FIELD})\\s*===\\s*(${LIT}(?:\\s*\\|\\|\\s*${LIT})+)`, 'g');
     const litRe = new RegExp(LIT, 'g');
     return expr.replace(chainRe, (_m, field: string, chain: string) => {
         const lits = chain.match(litRe);
@@ -333,7 +285,6 @@ function expandOrChains(expr: string): string {
 // Mapbox filter → JS expression
 // =====================================================================
 
-/** Top-level: `['==', key, value]` → `(key === value)`. */
 function mapboxToJsExpr(node: unknown): string {
     if (!Array.isArray(node) || node.length === 0) {
         throw new Error('Invalid Mapbox filter (expected non-empty array)');
@@ -350,42 +301,27 @@ function mapboxToJsExpr(node: unknown): string {
         case 'in': case '!in': {
             if (rest.length < 2) throw new Error(`Mapbox "${op}" needs key + values`);
             const key = mapboxField(rest[0]);
-            // New-style: ['in', ['get', 'x'], ['literal', ['a','b']]]
-            // Legacy:    ['in', 'x', 'a', 'b']
             const rawValues = (rest.length === 2
                 && Array.isArray(rest[1]) && (rest[1] as any[])[0] === 'literal')
                 ? (rest[1] as any[])[1]
                 : rest.slice(1);
-            const ors = (rawValues as unknown[])
-                .map(v => `${key} === ${mapboxLiteral(v)}`).join(' || ');
+            const ors = (rawValues as unknown[]).map(v => `${key} === ${mapboxLiteral(v)}`).join(' || ');
             return op === 'in' ? `(${ors})` : `!(${ors})`;
         }
-        case 'has': {
-            if (rest.length !== 1) throw new Error('Mapbox "has" needs 1 arg');
-            return `(${mapboxField(rest[0])} !== undefined)`;
-        }
-        case '!has': {
-            if (rest.length !== 1) throw new Error('Mapbox "!has" needs 1 arg');
-            return `(${mapboxField(rest[0])} === undefined)`;
-        }
-        case 'all': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' && ')})` : 'true';
-        case 'any': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' || ')})` : 'false';
+        case 'has':  { if (rest.length !== 1) throw new Error('Mapbox "has" needs 1 arg');  return `(${mapboxField(rest[0])} !== undefined)`; }
+        case '!has': { if (rest.length !== 1) throw new Error('Mapbox "!has" needs 1 arg'); return `(${mapboxField(rest[0])} === undefined)`; }
+        case 'all':  return rest.length ? `(${rest.map(mapboxToJsExpr).join(' && ')})` : 'true';
+        case 'any':  return rest.length ? `(${rest.map(mapboxToJsExpr).join(' || ')})` : 'false';
         case 'none': return rest.length ? `!(${rest.map(mapboxToJsExpr).join(' || ')})` : 'true';
-        case '!': {
-            if (rest.length !== 1) throw new Error('Mapbox "!" needs 1 arg');
-            return `!(${mapboxToJsExpr(rest[0])})`;
-        }
-        default:
-            throw new Error(`Unsupported Mapbox operator: "${op}"`);
+        case '!':    { if (rest.length !== 1) throw new Error('Mapbox "!" needs 1 arg'); return `!(${mapboxToJsExpr(rest[0])})`; }
+        default:     throw new Error(`Unsupported Mapbox operator: "${op}"`);
     }
 }
 
-/** Операнд в позиции КЛЮЧА (левая часть сравнения). */
 function mapboxField(node: unknown): string {
     if (typeof node === 'string') {
         if (node === '$type') return 'geometry';
         if (node === '$id')   return 'feature.id';
-        // Любой другой ключ — bracket access, безопасно для `foo-bar`, `a.b` и т.п.
         return `props[${JSON.stringify(node)}]`;
     }
     if (Array.isArray(node)) {
@@ -400,14 +336,12 @@ function mapboxField(node: unknown): string {
     throw new Error(`Unsupported Mapbox field operand: ${JSON.stringify(node)}`);
 }
 
-/** Операнд в позиции ЗНАЧЕНИЯ (правая часть сравнения). */
 function mapboxLiteral(node: unknown): string {
     if (typeof node === 'string')  return JSON.stringify(node);
     if (typeof node === 'number')  return Number.isFinite(node) ? String(node) : 'null';
     if (typeof node === 'boolean') return String(node);
     if (node === null)             return 'null';
     if (Array.isArray(node)) {
-        // ['literal', x] → JSON x; ['get', x] → поле; иначе литеральный массив.
         if (node[0] === 'literal') return JSON.stringify(node[1]);
         if (node[0] === 'get')     return mapboxField(node[1]);
         return JSON.stringify(node);
@@ -417,35 +351,20 @@ function mapboxLiteral(node: unknown): string {
 
 /**
  * Компилирует строку-выражение в предикат.
- * Идентификаторы резолвятся через `props`; глобалы (`Math`, `Number`) —
- * снаружи.
+ * `feature`/`props`/`geometry`/`geometryType` — reserved; остальные имена
+ * резолвятся в `props`, а при их отсутствии — в глобальный scope.
  */
 function compileExpressionFilter(expr: string): (feature: GeoJSONFeature) => boolean {
     const processed = expandOrChains(replaceEqualityOutsideStrings(expr));
-
-    // Резолвер: reserved names → feature-level, иначе → props.
-    //   feature      — весь GeoJSONFeature
-    //   props        — properties как объект (для явного доступа)
-    //   geometry     — feature.geometry.type  (строка!)
-    //   geometryType — alias для `geometry`
-    //
-    // Если имя НЕ зарезервировано и есть в props — берётся из props.
-    // Если нет ни там, ни там — уходит в глобальный scope (`Math`, `Number`, …).
     const src = `
         const props = feature.properties ?? {};
         const geometryType = feature.geometry?.type ?? null;
         const __scope = new Proxy(
-            Object.assign(Object.create(null), {
-                feature,
-                props,
-                geometry: geometryType,
-                geometryType,
-            }),
+            Object.assign(Object.create(null), { feature, props, geometry: geometryType, geometryType }),
             {
                 has: (t, k) => typeof k === 'string' && (
                     Object.prototype.hasOwnProperty.call(t, k) ||
-                    Object.prototype.hasOwnProperty.call(props, k)
-                ),
+                    Object.prototype.hasOwnProperty.call(props, k)),
                 get: (t, k) => {
                     if (typeof k !== 'string') return undefined;
                     if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
@@ -463,11 +382,9 @@ function compileExpressionFilter(expr: string): (feature: GeoJSONFeature) => boo
         console.warn('GeoJSONLayer: invalid filter expression', expr, err);
         return () => false;
     }
-
     return (feature) => {
-        try {
-            return fn(feature);
-        } catch (err) {
+        try { return fn(feature); }
+        catch (err) {
             console.warn('GeoJSONLayer: filter expression threw, treating as false', err);
             return false;
         }
@@ -484,36 +401,20 @@ function getPath(obj: any, path: string): any {
     return cur;
 }
 
-function matchFilterValue(
-    actual: any,
-    expected: FeatureFilterSpec[string],
-): boolean {
+function matchFilterValue(actual: any, expected: FeatureFilterSpec[string]): boolean {
     if (Array.isArray(expected)) return expected.some(v => v === actual);
     if (expected === null) return actual == null;
     return actual === expected;
 }
 
-/**
- * Разрешает путь в объектной форме. Симметрично строковой:
- *   - `geometry` / `geometryType` → feature.geometry.type
- *   - `feature`, `feature.type`, `feature.id`, `feature.geometry.*` → из feature
- *   - `props`, `props.category` → из properties
- *   - иначе → путь в properties (с точками).
- */
 function resolveFilterPath(feature: GeoJSONFeature, path: string): any {
     const props = feature.properties ?? {};
     const geometryType = feature.geometry?.type ?? null;
-
     if (path === 'geometry' || path === 'geometryType') return geometryType;
     if (path === 'feature') return feature;
     if (path === 'props')   return props;
-
-    if (path.startsWith('feature.')) {
-        return getPath(feature, path.slice('feature.'.length));
-    }
-    if (path.startsWith('props.')) {
-        return getPath(props, path.slice('props.'.length));
-    }
+    if (path.startsWith('feature.')) return getPath(feature, path.slice('feature.'.length));
+    if (path.startsWith('props.'))   return getPath(props,   path.slice('props.'.length));
     return getPath(props, path);
 }
 
@@ -521,12 +422,12 @@ function compileObjectFilter(spec: FeatureFilterSpec): (feature: GeoJSONFeature)
     const entries = Object.entries(spec);
     return (feature) => {
         for (const [path, expected] of entries) {
-            const actual = resolveFilterPath(feature, path);
-            if (!matchFilterValue(actual, expected)) return false;
+            if (!matchFilterValue(resolveFilterPath(feature, path), expected)) return false;
         }
         return true;
     };
 }
+
 // =====================================================================
 // Callback types
 // =====================================================================
@@ -564,7 +465,6 @@ export type OnEachFeatureCallback =
 // Layer options
 // =====================================================================
 
-
 export interface DiagramLayerConfig {
     type?: string;
     fields: string[];
@@ -576,16 +476,13 @@ export interface DiagramLayerConfig {
     padding?: number;
     strokeColor?: string;
     strokeWidth?: number;
-
     segmentSizes?: number[];
 
-    // Подпись
-    labelField?: string; 
+    labelField?: string;
     labelPosition?: LabelPosition;
     labelFont?: string;
     labelColor?: string;
 
-    // Венский способ
     unitValue?: number;
     maxCols?: number;
     shape?: 'square' | 'circle';
@@ -594,8 +491,8 @@ export interface DiagramLayerConfig {
     totalBg?: string;
     totalColor?: string;
     totalBorder?: string;
-    
-    projection?: 'oblique' | 'isometric'; // <--- Добавьте, если нет
+
+    projection?: 'oblique' | 'isometric';
 
     fitToPolygon?: boolean;
     minScreenScale?: number;
@@ -609,26 +506,21 @@ export interface GeoJSONLayerOptions {
     data?: GeoJSONInput;
     crs?: string;
     choropleth?: ChoroplethConfig;
-/**
- * Тултип feature-а.
- * - `string`   — HTML-шаблон; `{field}` подставляется из `properties`.
- *                Без `{}` — одинаковый литеральный HTML для всех features.
- * - `function` — escape hatch, `(props) => html | null`.
- * - `null`/`undefined` — fallback на `tooltipField` → `props.tooltip`/`props.description`.
- */
-tooltip?: string | ((props: Props) => string | null) | null;
-    /** Фильтр на уровне feature (не путать с `Layer.filter` по объектам). */
+
+    /**
+     * Тултип feature-а.
+     * - `string` — HTML-шаблон с `{field}` (без `{}` — литерал для всех).
+     * - `function` — `(props) => html | null`.
+     * - `null`/`undefined` — fallback на `tooltipField` → `props.tooltip`/`props.description`.
+     */
+    tooltip?: string | ((props: Props) => string | null) | null;
     featureFilter?: FeatureFilterInput;
     /** @deprecated Используйте `featureFilter`. */
     filter?: FeatureFilterInput;
     onEachFeature?: OnEachFeatureCallback;
 
-    /** Декларативная таблица стилей. См. {@link StyleConfig}. */
     style?: StyleConfig;
-
-    /** Откуда брать `title`: `props[titleField]` приоритетнее `props.title`/`props.name`. */
     titleField?: string | null;
-    /** Откуда брать `tooltip`: `props[tooltipField]` приоритетнее `props.tooltip`/`props.description`. */
     tooltipField?: string | null;
     tooltipOnHover?: boolean;
 
@@ -638,6 +530,10 @@ tooltip?: string | ((props: Props) => string | null) | null;
     polygonToOptions?: PolygonOptionsCallback;
     polygon3DToOptions?: Polygon3DOptionsCallback;
     vectorToOptions?: VectorOptionsCallback;
+
+    diagram3D?: Diagram3DLayerConfig;
+    diagram3DToOptions?: (feature: GeoJSONFeature, props: Props) => Diagram3DSpawnOptions | null;
+    onEachDiagram3D?: (feature: GeoJSONFeature, diagram: Diagram3D) => void;
 
     // ── Marker ──
     defaultIconUrl?: string;
@@ -655,11 +551,9 @@ tooltip?: string | ((props: Props) => string | null) | null;
     defaultLineColor?: string | number;
     defaultLineWidth?: number;
     defaultLineOpacity?: number;
-    /** @default 'absolute' */
     defaultLineAltitudeMode?: 'clampToGround' | 'absolute';
-    /** @default 10 */
     defaultLineAltitude?: number;
-    /** @deprecated Используйте `defaultLineAltitude`. */
+    /** @deprecated */
     defaultLineAltitudeOffset?: number;
     defaultLineDepthTest?: boolean;
     defaultLineDepthWrite?: boolean;
@@ -672,11 +566,9 @@ tooltip?: string | ((props: Props) => string | null) | null;
     defaultStrokeColor?: string | number;
     defaultStrokeWidth?: number;
     defaultStrokeOpacity?: number;
-    /** @default 'absolute' */
     defaultPolygonAltitudeMode?: 'clampToGround' | 'absolute';
-    /** @default 10 */
     defaultPolygonAltitude?: number;
-    /** @deprecated Используйте `defaultPolygonAltitude`. */
+    /** @deprecated */
     defaultPolygonAltitudeOffset?: number;
     defaultPolygonDepthTest?: boolean;
     defaultPolygonDepthWrite?: boolean;
@@ -698,10 +590,9 @@ tooltip?: string | ((props: Props) => string | null) | null;
     defaultPolygon3DDepthTest?: boolean;
     defaultPolygon3DDepthWrite?: boolean;
 
-diagram?: DiagramLayerConfig;
-   diagramToOptions?: (feature: GeoJSONFeature, props: Props) => DiagramSpawnOptions | null;
+    diagram?: DiagramLayerConfig;
+    diagramToOptions?: (feature: GeoJSONFeature, props: Props) => DiagramSpawnOptions | null;
     onEachDiagram?: (feature: GeoJSONFeature, diagram: Diagram) => void;
-
 }
 
 // =====================================================================
@@ -709,30 +600,14 @@ diagram?: DiagramLayerConfig;
 // =====================================================================
 
 /**
- * Слой GeoJSON: создаёт маркеры, линии, полигоны и векторные объекты из
- * FeatureCollection / Feature / Geometry.
+ * Слой GeoJSON: маркеры / линии / полигоны / векторные объекты / 3D-диаграммы.
  *
- * Порядок merge для каждого объекта:
- *   `defaults → style → callback → enforced (rings/positions/position)`.
+ * Порядок merge: `defaults → style → callback → enforced`.
  *
- * @example Декларативный style
- * new GeoJSONLayer({
- *     data,
- *     titleField: 'name',
- *     style: {
- *         by: 'category',
- *         cases: { park: { fill: '#7ed321', stroke: '#3d8b00' } },
- *         default: { fill: '#cccccc' },
- *         line:  { default: { 'stroke-width': 4 } },
- *         point: { default: { icon: 'pin.png', iconSize: [32, 32] } },
- *     },
- * }).addTo(map);
- *
- * @example Коллбэки (escape hatch, мержатся поверх style)
- * new GeoJSONLayer({
- *     data,
- *     polygonToOptions: (f, p) => ({ title: p.name, fill: '#ff0000' }),
- * });
+ * bar3d автосайзинг: если пользователь не задал `barWidthM`/`barDepthM` в
+ * `diagram3D`, толщина столбцов подбирается один раз на слой так, чтобы
+ * общая ширина диаграммы была ≈ 80 % от максимальной высоты в слое.
+ * Пересчёт выполняется при `reload`/`setData`/`setFeatureFilter`.
  */
 export class GeoJSONLayer extends Layer {
     public url: string | null = null;
@@ -744,23 +619,20 @@ export class GeoJSONLayer extends Layer {
     private _choroplethBreaks: number[] = [];
     private _choroplethRamp: any = null;
 
+    public diagram3D: Diagram3DLayerConfig | null = null;
+    public diagram3DToOptions: ((f: GeoJSONFeature, p: Props) => Diagram3DSpawnOptions | null) | null = null;
+    public onEachDiagram3D: ((f: GeoJSONFeature, d: Diagram3D) => void) | null = null;
 
-    /**
-     * Скомпилированный предикат. `null` — фильтра нет.
-     * Для установки используйте `setFeatureFilter` — он корректно
-     * обновляет `filterSpec` / `filterExpression` и делает `reload()`.
-     */
+    /** Авторазмер bar3d, вычисленный один раз на слой. */
+    private _diagram3DAutoSizing: { barWidthM: number; barDepthM: number } | null = null;
+
     public featureFilter: ((feature: GeoJSONFeature) => boolean) | null = null;
-    /** Исходная объектная спецификация (для UI). */
     public filterSpec: FeatureFilterSpec | null = null;
-    /** Исходное строковое выражение (для UI). */
     public filterExpression: string | null = null;
 
     public onEachFeature: OnEachFeatureCallback | null = null;
-
     public style: StyleConfig | null = null;
     public titleField: string | null = null;
-
 
     public pointToOptions: PointOptionsCallback | null = null;
     public point3DToOptions: Point3DOptionsCallback | null = null;
@@ -769,13 +641,13 @@ export class GeoJSONLayer extends Layer {
     public polygon3DToOptions: Polygon3DOptionsCallback | null = null;
     public vectorToOptions: VectorOptionsCallback | null = null;
 
-public tooltip: string | ((props: Props) => string | null) | null = null;
-/** @deprecated Используйте `tooltip: '{fieldName}'`. */
-public tooltipField: string | null = null;
+    public tooltip: string | ((props: Props) => string | null) | null = null;
+    /** @deprecated Используйте `tooltip: '{fieldName}'`. */
+    public tooltipField: string | null = null;
 
     public diagram: DiagramLayerConfig | null = null;
-public diagramToOptions: ((f: GeoJSONFeature, p: Props) => DiagramSpawnOptions | null) | null = null;
-public onEachDiagram: ((f, d) => void) | null = null;
+    public diagramToOptions: ((f: GeoJSONFeature, p: Props) => DiagramSpawnOptions | null) | null = null;
+    public onEachDiagram: ((f, d) => void) | null = null;
 
     public defaultIconUrl: string = 'marker.png';
     public defaultIconSize: IconSize = [16, 16];
@@ -825,22 +697,24 @@ public onEachDiagram: ((f, d) => void) | null = null;
 
     private _loaded = false;
 
-static fromMapboxFilter(arr: readonly unknown[]): string {
-    return mapboxToJsExpr(arr);
-}
+    static fromMapboxFilter(arr: readonly unknown[]): string {
+        return mapboxToJsExpr(arr);
+    }
 
     constructor(options: GeoJSONLayerOptions = {}) {
         super();
 
-this.diagram = options.diagram ?? null;
-this.diagramToOptions = options.diagramToOptions ?? null;
-this.onEachDiagram = options.onEachDiagram ?? null;
-this.tooltipOnHover = options.tooltipOnHover ?? false;
+        this.diagram = options.diagram ?? null;
+        this.diagramToOptions = options.diagramToOptions ?? null;
+        this.onEachDiagram = options.onEachDiagram ?? null;
+        this.tooltipOnHover = options.tooltipOnHover ?? false;
 
- this.choropleth = options.choropleth ?? null;
-        if (this.choropleth) {
-            this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
-        }
+        this.choropleth = options.choropleth ?? null;
+        if (this.choropleth) this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
+
+        this.diagram3D = options.diagram3D ?? null;
+        this.diagram3DToOptions = options.diagram3DToOptions ?? null;
+        this.onEachDiagram3D = options.onEachDiagram3D ?? null;
 
         this.url = options.url ?? null;
         this.data = options.data ?? null;
@@ -852,7 +726,6 @@ this.tooltipOnHover = options.tooltipOnHover ?? false;
         this.style = options.style ?? null;
         this.titleField = options.titleField ?? null;
 
-
         this.pointToOptions = options.pointToOptions ?? null;
         this.point3DToOptions = options.point3DToOptions ?? null;
         this.lineToOptions = options.lineToOptions ?? null;
@@ -860,8 +733,9 @@ this.tooltipOnHover = options.tooltipOnHover ?? false;
         this.polygon3DToOptions = options.polygon3DToOptions ?? null;
         this.vectorToOptions = options.vectorToOptions ?? null;
 
-this.tooltip = options.tooltip ?? null;
-this.tooltipField = options.tooltipField ?? null; 
+        this.tooltip = options.tooltip ?? null;
+        this.tooltipField = options.tooltipField ?? null;
+
         this.defaultIconUrl = options.defaultIconUrl ?? 'marker.png';
         this.defaultIconSize = options.defaultIconSize ?? [16, 16];
         this.defaultAnchor = options.defaultAnchor ?? [0.5, 1.0];
@@ -876,8 +750,7 @@ this.tooltipField = options.tooltipField ?? null;
         this.defaultLineWidth = options.defaultLineWidth ?? 2;
         this.defaultLineOpacity = options.defaultLineOpacity ?? 1;
         this.defaultLineAltitudeMode = options.defaultLineAltitudeMode ?? 'absolute';
-        this.defaultLineAltitude = options.defaultLineAltitude
-            ?? options.defaultLineAltitudeOffset ?? 10;
+        this.defaultLineAltitude = options.defaultLineAltitude ?? options.defaultLineAltitudeOffset ?? 10;
         this.defaultLineDepthTest = options.defaultLineDepthTest ?? false;
         this.defaultLineDepthWrite = options.defaultLineDepthWrite ?? false;
         this.defaultLineMinZoom = options.defaultLineMinZoom ?? -Infinity;
@@ -889,8 +762,7 @@ this.tooltipField = options.tooltipField ?? null;
         this.defaultStrokeWidth = options.defaultStrokeWidth ?? 2;
         this.defaultStrokeOpacity = options.defaultStrokeOpacity ?? 1;
         this.defaultPolygonAltitudeMode = options.defaultPolygonAltitudeMode ?? 'absolute';
-        this.defaultPolygonAltitude = options.defaultPolygonAltitude
-            ?? options.defaultPolygonAltitudeOffset ?? 10;
+        this.defaultPolygonAltitude = options.defaultPolygonAltitude ?? options.defaultPolygonAltitudeOffset ?? 10;
         this.defaultPolygonDepthTest = options.defaultPolygonDepthTest ?? false;
         this.defaultPolygonDepthWrite = options.defaultPolygonDepthWrite ?? false;
         this.defaultPolygonMinZoom = options.defaultPolygonMinZoom ?? -Infinity;
@@ -931,155 +803,97 @@ this.tooltipField = options.tooltipField ?? null;
         if (layer._map) this._load();
     }
 
-    /**
-     * Меняет feature-фильтр. При активной карте автоматически `reload()`.
-     *
-     * @example
-     * layer.setFeatureFilter("type = 'city'");
-     * layer.setFeatureFilter("type = 'city' || 'village'");
-     * layer.setFeatureFilter("population > 100000");
-     * layer.setFeatureFilter({ type: 'city' });
-     * layer.setFeatureFilter(f => f.properties?.max > f.properties?.min);
-     * layer.setFeatureFilter(null);   // снять
-     */
+    /** Меняет feature-фильтр. При активной карте автоматически `reload()`. */
     setFeatureFilter(input: FeatureFilterInput): this {
         this._applyFilter(input);
         if (this._map && this._loaded) this.reload();
         return this;
     }
 
-    /** Меняет декларативный style. При активной карте — `reload()`. */
     setStyle(style: StyleConfig | null): this {
         this.style = style;
         if (this._map && this._loaded) this.reload();
         return this;
     }
 
-    /** Заменяет данные. `null` — очистить. При активной карте — `reload()`. */
     setData(data: GeoJSONInput | null): this {
         this.data = data;
         if (this._map) this.reload(); else this._loaded = false;
         return this;
     }
 
-    /**
- * Alias для {@link setFeatureFilter} — удобен при переходе с Mapbox GL JS.
- *
- * НЕ путать с унаследованным {@link Layer#filter}(predicate): тот работает
- * по уже созданным объектам и лишь скрывает их. `setFilter` /
- * `setFeatureFilter` пересобирает слой — отфильтрованные feature
- * вообще не попадают в `_objects` и не влияют на `getBounds()`.
- */
-setFilter(input: FeatureFilterInput): this {
-    return this.setFeatureFilter(input);
-}
+    /** Alias для {@link setFeatureFilter}. */
+    setFilter(input: FeatureFilterInput): this {
+        return this.setFeatureFilter(input);
+    }
 
-setDiagram(cfg: DiagramLayerConfig | null): this {
-    this.diagram = cfg;
-    if (this._map && this._loaded) this.reload();
-    return this;
-}
+    setDiagram(cfg: DiagramLayerConfig | null): this {
+        this.diagram = cfg;
+        if (this._map && this._loaded) this.reload();
+        return this;
+    }
 
-/**
- * Возвращает текущий фильтр в исходной форме:
- * строковое выражение, объект-спецификация, предикат или `null`.
- */
-getFilter(): FeatureFilterInput {
-    if (this.filterExpression != null) return this.filterExpression;
-    if (this.filterSpec != null) return this.filterSpec;
-    return this.featureFilter;
-}
+    getFilter(): FeatureFilterInput {
+        if (this.filterExpression != null) return this.filterExpression;
+        if (this.filterSpec != null) return this.filterSpec;
+        return this.featureFilter;
+    }
 
-    /** Заменяет url. При активной карте — `reload()`. */
     setUrl(url: string | null): this {
         this.url = url;
         if (this._map) this.reload(); else this._loaded = false;
         return this;
     }
 
-    /** Добавляет объекты к уже загруженным, не удаляя существующие. */
+    /** Добавляет объекты к уже загруженным (без пересчёта авто-размеров bar3d). */
     addData(data: GeoJSONInput): this {
         this._parse(data);
         return this;
     }
 
-private _applyFilter(input: unknown): void {
-    // ── Mapbox-style array → JS expression string ──────────────────
-    if (Array.isArray(input)) {
-        try {
-            const converted = GeoJSONLayer.fromMapboxFilter(input);
-            console.debug('GeoJSONLayer: Mapbox filter converted', input, '→', converted);
-            input = converted;   // теперь строка, дальше обычный путь
-        } catch (err) {
-            console.warn(
-                'GeoJSONLayer: cannot convert Mapbox filter. ' +
-                "Use a JS expression string (e.g. \"type = 'city'\") " +
-                'or an object spec (e.g. { type: \'city\' }).',
-                err, input,
-            );
-            this.featureFilter = null;
-            this.filterSpec = null;
-            this.filterExpression = null;
-            return;
+    private _applyFilter(input: unknown): void {
+        if (Array.isArray(input)) {
+            try {
+                input = GeoJSONLayer.fromMapboxFilter(input);
+            } catch (err) {
+                console.warn('GeoJSONLayer: cannot convert Mapbox filter.', err, input);
+                this.featureFilter = null; this.filterSpec = null; this.filterExpression = null;
+                return;
+            }
         }
-    }
-
-    if (!input) {
-        this.featureFilter = null;
-        this.filterSpec = null;
-        this.filterExpression = null;
-        return;
-    }
-    if (typeof input === 'function') {
-        this.featureFilter = input as (feature: GeoJSONFeature) => boolean;
-        this.filterSpec = null;
-        this.filterExpression = null;
-        return;
-    }
-    if (typeof input === 'string') {
-        const trimmed = input.trim();
-        if (!trimmed) {
-            this.featureFilter = null;
-            this.filterSpec = null;
-            this.filterExpression = null;
-            return;
+        if (!input) {
+            this.featureFilter = null; this.filterSpec = null; this.filterExpression = null; return;
         }
-        this.featureFilter = compileExpressionFilter(trimmed);
-        this.filterSpec = null;
-        this.filterExpression = trimmed;
-        return;
+        if (typeof input === 'function') {
+            this.featureFilter = input as (feature: GeoJSONFeature) => boolean;
+            this.filterSpec = null; this.filterExpression = null; return;
+        }
+        if (typeof input === 'string') {
+            const trimmed = input.trim();
+            if (!trimmed) { this.featureFilter = null; this.filterSpec = null; this.filterExpression = null; return; }
+            this.featureFilter = compileExpressionFilter(trimmed);
+            this.filterSpec = null; this.filterExpression = trimmed; return;
+        }
+        const spec = input as FeatureFilterSpec;
+        if (!Object.keys(spec).length) {
+            this.featureFilter = null; this.filterSpec = null; this.filterExpression = null; return;
+        }
+        this.featureFilter = compileObjectFilter(spec);
+        this.filterSpec = spec; this.filterExpression = null;
     }
-
-    // После всех проверок input — объект-спецификация.
-    const spec = input as FeatureFilterSpec;
-    if (!Object.keys(spec).length) {
-        this.featureFilter = null;
-        this.filterSpec = null;
-        this.filterExpression = null;
-        return;
-    }
-    this.featureFilter = compileObjectFilter(spec);
-    this.filterSpec = spec;
-    this.filterExpression = null;
-}
 
     private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
         try {
-            if (this.data) {
-                geojson = this.data;
-            } else if (this.url) {
+            if (this.data) geojson = this.data;
+            else if (this.url) {
                 const resp = await fetch(this.url);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 geojson = await resp.json() as GeoJSONInput;
             }
-            if (!geojson) {
-                console.warn('GeoJSONLayer: no data or URL provided');
-                return;
-            }
-             if (this.choropleth) {
-            this._calculateChoroplethBreaks(geojson);
-        }
+            if (!geojson) { console.warn('GeoJSONLayer: no data or URL provided'); return; }
+            if (this.choropleth) this._calculateChoroplethBreaks(geojson);
+            this._computeDiagram3DAutoSizing(geojson);
             this._parse(geojson);
             this._loaded = true;
         } catch (err) {
@@ -1087,27 +901,100 @@ private _applyFilter(input: unknown): void {
         }
     }
 
-    private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
-        if (!this.choropleth) return;
-        
-        let values: number[] = [];
-        const processFeature = (f: GeoJSONFeature) => {
-            if (f.properties) {
-                const val = this._evaluateValueExpression(f.properties, this.choropleth!.value);
-                if (isFinite(val)) values.push(val);
-            }
-        };
+    // ── Auto-sizing bar3d ───────────────────────────────────────────
 
-        if (geojson.type === 'FeatureCollection') {
-            geojson.features.forEach(processFeature);
-        } else if (geojson.type === 'Feature') {
-            processFeature(geojson);
+    /**
+     * Один раз на слой: определяет толщину/глубину bar3d-столбцов.
+     *
+     * - `cfg.barWidthM` и `cfg.barDepthM` заданы — берём их.
+     * - Задан только один — второй зеркалим.
+     * - Не заданы оба — считаем по `maxHeight` всех features (после фильтра):
+     *   `targetW = maxH * 0.8`, `barW = (targetW − gap·(n−1)) / n`,
+     *   но не тоньше `maxH * 0.05`.
+     *
+     * Значение «n» — максимум количества столбцов в одной feature, чтобы
+     * все диаграммы слоя имели одинаковую толщину столбцов.
+     */
+    private _computeDiagram3DAutoSizing(geojson: GeoJSONInput): void {
+        this._diagram3DAutoSizing = null;
+        const cfg = this.diagram3D;
+        if (!cfg?.fields?.length) return;
+        if ((cfg.type ?? 'bar3d') !== 'bar3d') return;
+
+        if (cfg.barWidthM != null && cfg.barDepthM != null) {
+            this._diagram3DAutoSizing = { barWidthM: cfg.barWidthM, barDepthM: cfg.barDepthM };
+            return;
+        }
+        if (cfg.barWidthM != null) {
+            this._diagram3DAutoSizing = { barWidthM: cfg.barWidthM, barDepthM: cfg.barWidthM };
+            return;
+        }
+        if (cfg.barDepthM != null) {
+            this._diagram3DAutoSizing = { barWidthM: cfg.barDepthM, barDepthM: cfg.barDepthM };
+            return;
         }
 
+        let maxH = 0;
+        let maxBars = 1;
+        const scan = (f: GeoJSONFeature) => {
+            if (this.featureFilter && !this.featureFilter(f)) return;
+            const p = f.properties ?? {};
+            let localMax = 0; let cnt = 0;
+            for (const k of cfg.fields) {
+                const v = Number(p[k]);
+                if (isFinite(v) && v > 0) { if (v > localMax) localMax = v; cnt++; }
+            }
+            if (cnt === 0) return;
+            const h = localMax * (cfg.unitM ?? 1);
+            if (h > maxH) maxH = h;
+            if (cnt > maxBars) maxBars = cnt;
+        };
+        if (geojson.type === 'FeatureCollection') for (const f of geojson.features) scan(f);
+        else if (geojson.type === 'Feature') scan(geojson);
+
+        if (maxH <= 0) return;
+        const gap = cfg.gapM ?? 0;
+        const targetW = maxH * 0.3;
+        const derived = Math.max(
+            maxH * 0.05,
+            (targetW - gap * Math.max(0, maxBars - 1)) / maxBars,
+        );
+        this._diagram3DAutoSizing = { barWidthM: derived, barDepthM: derived };
+    }
+
+    /**
+     * Дополняет bar3d-опции авто-размерами:
+     * - оба в opts заданы — не трогаем;
+     * - один задан — зеркалим второй;
+     * - ни один — берём из `_diagram3DAutoSizing`.
+     */
+    private _withDiagram3DAutoSizing(opts: Diagram3DSpawnOptions): Diagram3DSpawnOptions {
+        if ((opts.type ?? 'bar3d') !== 'bar3d') return opts;
+        if (opts.barWidthM != null && opts.barDepthM != null) return opts;
+        if (opts.barWidthM != null) return { ...opts, barDepthM: opts.barWidthM };
+        if (opts.barDepthM != null) return { ...opts, barWidthM: opts.barDepthM };
+        const auto = this._diagram3DAutoSizing;
+        if (!auto) return opts;
+        return { ...opts, barWidthM: auto.barWidthM, barDepthM: auto.barDepthM };
+    }
+
+    // ── Choropleth ──────────────────────────────────────────────────
+
+    private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
+        if (!this.choropleth) return;
+        const values: number[] = [];
+        const processFeature = (f: GeoJSONFeature) => {
+            if (!f.properties) return;
+            const val = this._evaluateValueExpression(f.properties, this.choropleth!.value);
+            if (isFinite(val)) values.push(val);
+        };
+        if (geojson.type === 'FeatureCollection') geojson.features.forEach(processFeature);
+        else if (geojson.type === 'Feature') processFeature(geojson);
+
         this._choroplethBreaks = calculateBreaks(
-            values, 
-            this.choropleth.classification || 'jenks', 
-            this.choropleth.classes || 5
+            values,
+            this.choropleth.classification || 'jenks',
+            this.choropleth.classes || 5,
         );
     }
 
@@ -1123,20 +1010,19 @@ private _applyFilter(input: unknown): void {
         return props.title || props.name || '';
     }
 
-        private _evaluateValueExpression(props: Props, exprOrFn: string | ((p: Props) => number)): number {
-        if (typeof exprOrFn === 'function') {
-            return exprOrFn(props);
-        }
+    private _evaluateValueExpression(
+        props: Props,
+        exprOrFn: string | ((p: Props) => number),
+    ): number {
+        if (typeof exprOrFn === 'function') return exprOrFn(props);
         try {
-            // Безопасный скоуп: переменные ищутся в props, а не в window
             const fn = new Function('props', `
                 const __scope = new Proxy(
                     Object.assign(Object.create(null), { props }),
                     {
                         has: (t, k) => typeof k === 'string' && (
                             Object.prototype.hasOwnProperty.call(t, k) ||
-                            Object.prototype.hasOwnProperty.call(props, k)
-                        ),
+                            Object.prototype.hasOwnProperty.call(props, k)),
                         get: (t, k) => {
                             if (typeof k !== 'string') return undefined;
                             if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
@@ -1147,40 +1033,29 @@ private _applyFilter(input: unknown): void {
                 with (__scope) { return Number(${exprOrFn}); }
             `);
             return fn(props);
-        } catch {
-            return NaN;
-        }
+        } catch { return NaN; }
     }
 
-private _getTooltip(props: Props): string {
-    // 1. Явный tooltip: функция или шаблон.
-    const t = this.tooltip;
-    if (typeof t === 'function') {
-        try {
-            const out = t(props);
-            if (out != null) return String(out);
-        } catch (e) {
-            console.warn('GeoJSONLayer: tooltip callback threw', e);
+    private _getTooltip(props: Props): string {
+        const t = this.tooltip;
+        if (typeof t === 'function') {
+            try {
+                const out = t(props);
+                if (out != null) return String(out);
+            } catch (e) {
+                console.warn('GeoJSONLayer: tooltip callback threw', e);
+            }
+        } else if (typeof t === 'string' && t) {
+            return t.includes('{') ? interpolate(t, props) : t;
         }
-    } else if (typeof t === 'string' && t) {
-        // '{name}' — интерполяция; иначе literal HTML для всех features.
-        return t.includes('{') ? interpolate(t, props) : t;
+        if (this.tooltipField) {
+            const raw = props[this.tooltipField];
+            if (raw != null && raw !== '' && String(raw).includes('{')) return interpolate(String(raw), props);
+            if (raw != null && raw !== '') return String(raw);
+        }
+        return props.tooltip || props.description || '';
     }
 
-    // 2. Deprecated fallback: одно поле из properties.
-    if (this.tooltipField) {
-        const raw = props[this.tooltipField];
-        if (raw != null && raw !== '' && String(raw).includes('{')) {
-            return interpolate(String(raw), props);
-        }
-        if (raw != null && raw !== '') return String(raw);
-    }
-
-    // 3. Дефолты: props.tooltip / props.description.
-    return props.tooltip || props.description || '';
-}
-
-    /** shared (`style.cases`/`style.default`) ← per-type (`style[type].*`). */
     private _resolveStyle(props: Props, type: StyleTypeKey): StyleRule | null {
         const style = this.style;
         if (!style) return null;
@@ -1194,10 +1069,7 @@ private _getTooltip(props: Props): string {
         return { ...shared, ...perType };
     }
 
-    private _pickStyleLevel(
-        cfg: StyleTypeConfig | undefined,
-        value: any,
-    ): StyleRule | null {
+    private _pickStyleLevel(cfg: StyleTypeConfig | undefined, value: any): StyleRule | null {
         if (!cfg) return null;
         if (value != null && cfg.cases) {
             const c = cfg.cases[value];
@@ -1206,11 +1078,7 @@ private _getTooltip(props: Props): string {
         return cfg.default ?? null;
     }
 
-    /**
-     * Нормализует alias'ы (`fill` → `fillColor`, `stroke-width` → `width`/…)
-     * и приводит числовые канонические ключи к `number`. Canonical побеждает
-     * alias; alias удаляется из результата.
-     */
+    /** Alias → canonical; canonical побеждает; числовые ключи приводятся к number. */
     private _normalizeStyle<T extends Record<string, any>>(
         src: Record<string, any> | null | undefined,
         aliases: Record<string, string>,
@@ -1238,20 +1106,14 @@ private _getTooltip(props: Props): string {
     private _parse(geojson: GeoJSONInput): void {
         const type = (geojson as { type: string }).type;
         if (type === 'FeatureCollection') {
-            for (const feature of (geojson as GeoJSONFeatureCollection).features) {
-                this._addFeature(feature);
-            }
+            for (const feature of (geojson as GeoJSONFeatureCollection).features) this._addFeature(feature);
         } else if (type === 'Feature') {
             this._addFeature(geojson as GeoJSONFeature);
         } else if (
             type === 'Point' || type === 'LineString' || type === 'MultiLineString'
             || type === 'Polygon' || type === 'MultiPolygon'
         ) {
-            this._addFeature({
-                type: 'Feature',
-                geometry: geojson as GeoJSONGeometry,
-                properties: {},
-            });
+            this._addFeature({ type: 'Feature', geometry: geojson as GeoJSONGeometry, properties: {} });
         } else {
             console.debug(`GeoJSONLayer: type "${type}" not supported`);
         }
@@ -1260,33 +1122,23 @@ private _getTooltip(props: Props): string {
     private _addFeature(feature: GeoJSONFeature): void {
         const props = feature.properties ?? {};
         if (this.featureFilter && !this.featureFilter(feature)) return;
-
         const geom = feature.geometry;
         if (!geom) return;
 
         switch (geom.type) {
             case 'Point':
-                if (this.vectorToOptions && props.vector === true) {
-                    this._addVectorFeature(feature);
-                } else {
-                    this._addPointFeature(feature);
-                }
+                if (this.vectorToOptions && props.vector === true) this._addVectorFeature(feature);
+                else this._addPointFeature(feature);
                 break;
-
             case 'LineString':
             case 'MultiLineString':
-                if (this.vectorToOptions || props.vector === true) {
-                    this._addVectorFeature(feature);
-                } else {
-                    this._addLineFeature(feature);
-                }
+                if (this.vectorToOptions || props.vector === true) this._addVectorFeature(feature);
+                else this._addLineFeature(feature);
                 break;
-
             case 'Polygon':
             case 'MultiPolygon':
                 this._addPolygonFeature(feature);
                 break;
-
             default:
                 console.debug(`GeoJSONLayer: type "${(geom as any).type}" not supported`);
         }
@@ -1296,44 +1148,113 @@ private _getTooltip(props: Props): string {
     // Points
     // =================================================================
 
-   private _addPointFeature(feature: GeoJSONFeature): void {
-    const geom = feature.geometry;
-    if (geom.type !== 'Point') return;
-    const props = feature.properties ?? {};
+    private _addPointDiagram3D(
+        feature: GeoJSONFeature, props: Props, lonLat: LonLat, _altFromCoords?: number,
+    ): void {
+        const raw = this.diagram3DToOptions
+            ? this.diagram3DToOptions(feature, props)
+            : this._diagram3DFromConfig(feature, props);
+        if (!raw) return;
+        const baseOpts = this._withDiagram3DAutoSizing(raw);
 
-    const coords = geom.coordinates;
-    const lonLat: LonLat = [coords[0], coords[1]];
-    const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
+        const diagram = new Diagram3D({
+            ...baseOpts,
+            position: lonLat,
+            crs: this.crs ?? undefined,
+            altitude: (baseOpts.altitude ?? this.defaultPolygonAltitude) + 5,
+            altitudeMode: baseOpts.altitudeMode ?? this.defaultPolygonAltitudeMode,
+            clusterable: false,
+        });
+        this.add(diagram);
+        if (this.onEachDiagram3D) this.onEachDiagram3D(feature, diagram);
+    }
 
-    // --- НОВОЕ: Если задан diagram, рисуем диаграмму вместо маркера ---
-    if (this.diagram || this.diagramToOptions) {
-        // Можно добавить проверку на props.diagram === false, 
-        // чтобы иметь возможность отключить диаграмму для конкретной точки
-        if (props.diagram !== false) {
-            this._addPointDiagram(feature, props, lonLat);
-            return; // Выходим, чтобы не рисовать обычный маркер
+    private _addCartodiagram3D(feature: GeoJSONFeature, props: Props, polygon: Polygon): void {
+        const raw = this.diagram3DToOptions
+            ? this.diagram3DToOptions(feature, props)
+            : this._diagram3DFromConfig(feature, props);
+        if (!raw) return;
+        const baseOpts = this._withDiagram3DAutoSizing(raw);
+
+        const center = polygon.getVisualCenter();
+        if (!center) return;
+
+        const diagram = new Diagram3D({
+            ...baseOpts,
+            position: center,
+            crs: 'EPSG:4326',
+            altitude: baseOpts.altitude ?? this.defaultPolygonAltitude,
+            altitudeMode: baseOpts.altitudeMode ?? this.defaultPolygonAltitudeMode,
+            clusterable: false,
+        });
+        this.add(diagram);
+        if (this.onEachDiagram3D) this.onEachDiagram3D(feature, diagram);
+    }
+
+    private _diagram3DFromConfig(feature: GeoJSONFeature, props: Props): Diagram3DSpawnOptions | null {
+        const cfg = this.diagram3D;
+        if (!cfg?.fields?.length) return null;
+
+        const data = cfg.fields
+            .map(key => {
+                const v = Number(props[key]);
+                if (!isFinite(v)) return null;
+                return { label: key, value: v, color: cfg.colorMap?.[key] };
+            })
+            .filter((d): d is NonNullable<typeof d> => d !== null);
+        if (!data.length) return null;
+
+        let tooltip = this._getTooltip(props);
+        if (!tooltip) tooltip = data.map(d => `${d.label}: <b>${d.value}</b>`).join('<br>');
+
+        return {
+            type: cfg.type ?? 'bar3d',
+            data,
+            unitM: cfg.unitM,
+            barWidthM: cfg.barWidthM,
+            barDepthM: cfg.barDepthM,
+            gapM: cfg.gapM,
+            strokeColor: cfg.strokeColor,
+            strokeWidthM: cfg.strokeWidthM,
+            minZoom: cfg.minZoom,
+            maxZoom: cfg.maxZoom,
+            tooltip,
+            altitude: cfg.altitude,
+            altitudeMode: cfg.altitudeMode,
+            unitValue: cfg.unitValue,
+            maxCols: cfg.maxCols,
+        };
+    }
+
+    private _addPointFeature(feature: GeoJSONFeature): void {
+        const geom = feature.geometry;
+        if (geom.type !== 'Point') return;
+        const props = feature.properties ?? {};
+
+        const coords = geom.coordinates;
+        const lonLat: LonLat = [coords[0], coords[1]];
+        const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
+
+        if (this.diagram3D || this.diagram3DToOptions) {
+            if (props.diagram3D !== false) { this._addPointDiagram3D(feature, props, lonLat, altFromCoords); return; }
+        }
+        if (this.diagram || this.diagramToOptions) {
+            if (props.diagram !== false) { this._addPointDiagram(feature, props, lonLat); return; }
+        }
+
+        const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
+        const is3D = cb3D != null
+            || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
+
+        if (is3D) this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
+        else {
+            const cb = this.pointToOptions ? this.pointToOptions(feature, props) : null;
+            this._createMarker(feature, props, lonLat, altFromCoords, cb);
         }
     }
-    // ----------------------------------------------------------------
-
-    const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
-    const is3D = cb3D != null
-        || props['3d'] === true
-        || props.type === '3d'
-        || props.markerType === '3d';
-
-    if (is3D) {
-        this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
-    } else {
-        const cb = this.pointToOptions ? this.pointToOptions(feature, props) : null;
-        this._createMarker(feature, props, lonLat, altFromCoords, cb);
-    }
-}
 
     private _createMarker(
-        feature: GeoJSONFeature,
-        props: Props,
-        lonLat: LonLat,
+        feature: GeoJSONFeature, props: Props, lonLat: LonLat,
         altFromCoords: number | undefined,
         cb: (Partial<MarkerOptions> & PointStyleAliases) | null | undefined,
     ): void {
@@ -1359,24 +1280,16 @@ private _getTooltip(props: Props): string {
             titlePriority: this._asNumber(props.titlePriority),
         };
 
-        const normStyle = this._normalizeStyle<MarkerOptions>(
-            this._resolveStyle(props, 'point'), POINT_ALIASES);
+        const normStyle = this._normalizeStyle<MarkerOptions>(this._resolveStyle(props, 'point'), POINT_ALIASES);
         const normCb = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
-        const merged: MarkerOptions = {
-            ...defaults,
-            ...(normStyle ?? {}),
-            ...(normCb ?? {}),
-            position: lonLat,
-        };
+        const merged: MarkerOptions = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), position: lonLat };
         const marker = new Marker(merged);
         this.add(marker);
         if (this.onEachFeature) this.onEachFeature(feature, marker);
     }
 
     private _createMarker3D(
-        feature: GeoJSONFeature,
-        props: Props,
-        lonLat: LonLat,
+        feature: GeoJSONFeature, props: Props, lonLat: LonLat,
         altFromCoords: number | undefined,
         cb: (Partial<Marker3DOptions> & Marker3DStyleAliases) | null | undefined,
     ): void {
@@ -1407,15 +1320,9 @@ private _getTooltip(props: Props): string {
             playAnimation: props.playAnimation,
         };
 
-        const normStyle = this._normalizeStyle<Marker3DOptions>(
-            this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
+        const normStyle = this._normalizeStyle<Marker3DOptions>(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
         const normCb = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
-        const merged: Marker3DOptions = {
-            ...defaults,
-            ...(normStyle ?? {}),
-            ...(normCb ?? {}),
-            position: lonLat,
-        };
+        const merged: Marker3DOptions = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), position: lonLat };
         const marker = new Marker3D(merged);
         this.add(marker);
         if (this.onEachFeature) this.onEachFeature(feature, marker);
@@ -1429,23 +1336,19 @@ private _getTooltip(props: Props): string {
         const geom = feature.geometry;
         if (geom.type !== 'LineString' && geom.type !== 'MultiLineString') return;
         const props = feature.properties ?? {};
-
         const coordSets: GeoJSONLineString[] =
             geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
 
         for (const coords of coordSets) {
             if (coords.length < 2) continue;
-
             const cb = this.lineToOptions ? this.lineToOptions(feature, props) : null;
 
             const defaults: PolylineOptions = {
                 positions: coords,
                 crs: this.crs ?? undefined,
                 color: props.stroke || props.color || this.defaultLineColor,
-                opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity)
-                    ?? this.defaultLineOpacity,
-                width: this._asNumber(props['stroke-width'] ?? props.width)
-                    ?? this.defaultLineWidth,
+                opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? this.defaultLineOpacity,
+                width: this._asNumber(props['stroke-width'] ?? props.width) ?? this.defaultLineWidth,
                 altitudeMode: props.altitudeMode || this.defaultLineAltitudeMode,
                 altitude: this._asNumber(props.altitude)
                     ?? this._asNumber(props.altitudeOffset)
@@ -1466,15 +1369,9 @@ private _getTooltip(props: Props): string {
                 titlePriority: this._asNumber(props.titlePriority),
             };
 
-            const normStyle = this._normalizeStyle<PolylineOptions>(
-                this._resolveStyle(props, 'line'), LINE_ALIASES);
+            const normStyle = this._normalizeStyle<PolylineOptions>(this._resolveStyle(props, 'line'), LINE_ALIASES);
             const normCb = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
-            const merged: PolylineOptions = {
-                ...defaults,
-                ...(normStyle ?? {}),
-                ...(normCb ?? {}),
-                positions: coords,
-            };
+            const merged: PolylineOptions = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), positions: coords };
             const polyline = new Polyline(merged);
             this.add(polyline);
             if (this.onEachFeature) this.onEachFeature(feature, polyline);
@@ -1485,161 +1382,145 @@ private _getTooltip(props: Props): string {
     // Polygons
     // =================================================================
 
-private _addPolygonFeature(feature: GeoJSONFeature): void {
-    const geom = feature.geometry;
-    if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') return;
-    const props = feature.properties ?? {};
+    private _addPolygonFeature(feature: GeoJSONFeature): void {
+        const geom = feature.geometry;
+        if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') return;
+        const props = feature.properties ?? {};
+        const ringSets: GeoJSONPolygon[] =
+            geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
 
-    const ringSets: GeoJSONPolygon[] =
-        geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+        for (const rings of ringSets) {
+            if (!rings.length || !rings[0].length) continue;
 
-    for (const rings of ringSets) {
-        if (!rings.length || !rings[0].length) continue;
+            const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
+            const is3D = cb3D != null
+                || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
 
-        const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
-        const is3D = cb3D != null
-            || props['3d'] === true
-            || props.type === '3d'
-            || props.markerType === '3d';
-
-        if (is3D) {
-            this._createArea3D(feature, props, rings as Area3DRing[], cb3D);
-            // Картодиаграмму на Area3D пока не навешиваем: другая геометрия,
-            // другой смысл fitToPolygon.
-        } else {
-            const cb = this.polygonToOptions ? this.polygonToOptions(feature, props) : null;
-            const polygon = this._createPolygon(feature, props, rings, cb);
-            if (polygon && (this.diagram || this.diagramToOptions)) {
-                this._addCartodiagram(feature, props, polygon);
+            if (is3D) {
+                this._createArea3D(feature, props, rings as Area3DRing[], cb3D);
+            } else {
+                const cb = this.polygonToOptions ? this.polygonToOptions(feature, props) : null;
+                const polygon = this._createPolygon(feature, props, rings, cb);
+                if (polygon) {
+                    if (this.diagram3D || this.diagram3DToOptions) this._addCartodiagram3D(feature, props, polygon);
+                    else if (this.diagram || this.diagramToOptions) this._addCartodiagram(feature, props, polygon);
+                }
             }
         }
     }
-}
 
+    private _addPointDiagram(feature: GeoJSONFeature, props: Props, lonLat: LonLat): void {
+        const baseOpts = this.diagramToOptions
+            ? this.diagramToOptions(feature, props)
+            : this._diagramFromConfig(feature, props);
+        if (!baseOpts) return;
 
-private _addPointDiagram(feature: GeoJSONFeature, props: Props, lonLat: LonLat): void {
-    const baseOpts = this.diagramToOptions
-        ? this.diagramToOptions(feature, props)
-        : this._diagramFromConfig(feature, props);
-    if (!baseOpts) return;
-
-    const diagram = new Diagram({
-        ...baseOpts,
-        position: lonLat,
-        crs: this.crs ?? undefined,
-        parentPolygon: null,      // Нет полигона-родителя
-        fitToPolygon: false,      // Отключаем fit-логику
-        clusterable: false,
-    });
-    this.add(diagram);
-    if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
-}
-
-private _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon): void {
-    const baseOpts = this.diagramToOptions
-        ? this.diagramToOptions(feature, props)
-        : this._diagramFromConfig(feature, props);
-    if (!baseOpts) return;
-
-    const center = polygon.getVisualCenter();
-    if (!center) return;
-
-    const diagram = new Diagram({
-        ...baseOpts,
-        position: center,
-        crs: this.crs,
-        parentPolygon: polygon,
-        fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
-        minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,
-        clusterable: false,
-    });
-    this.add(diagram);
-    if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
-}
-
-private _diagramFromConfig(feature: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
-    const cfg = this.diagram;
-    if (!cfg?.fields?.length) return null;
-
-    const data = cfg.fields
-        .map(key => {
-            const v = Number(props[key]);
-            if (!isFinite(v)) return null;
-            return {
-                label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
-                value: v,
-                color: cfg.colorMap?.[key],
-            };
-        })
-        .filter((d): d is NonNullable<typeof d> => d !== null);
-    if (!data.length) return null;
-
-    // ── Tooltip: сначала явный, иначе соберём из данных диаграммы. ──
-    let tooltip = this._getTooltip(props);
-    if (!tooltip) {
-        tooltip = data.map(d =>
-            `${d.color ? `<span style="display:inline-block;width:10px;height:10px;` +
-                          `background:${d.color};margin-right:6px;border-radius:2px;"></span>` : ''}` +
-            `${d.label}: <b>${d.value}</b>`
-        ).join('<br>');
+        const diagram = new Diagram({
+            ...baseOpts,
+            position: lonLat,
+            crs: this.crs ?? undefined,
+            parentPolygon: null,
+            fitToPolygon: false,
+            clusterable: false,
+        });
+        this.add(diagram);
+        if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
     }
 
-const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
+    private _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon): void {
+        const baseOpts = this.diagramToOptions
+            ? this.diagramToOptions(feature, props)
+            : this._diagramFromConfig(feature, props);
+        if (!baseOpts) return;
 
-return {
-    type: cfg.type ?? 'bar',
-    data,
-    unitPx: cfg.unitPx,
-    orientation: cfg.orientation,
-    barWidth: cfg.barWidth,
-    gap: cfg.gap,
-    padding: cfg.padding,
-    strokeColor: cfg.strokeColor,
-    strokeWidth: cfg.strokeWidth,
-    
-    label: label || undefined,
-    labelPosition: cfg.labelPosition,
-    labelFont: cfg.labelFont,
-    labelColor: cfg.labelColor,
-    
-    unitValue: cfg.unitValue,
-    maxCols: cfg.maxCols,
-    shape: cfg.shape,
-    showTotal: cfg.showTotal,
-    totalFont: cfg.totalFont,
-    totalBg: cfg.totalBg,
-    totalColor: cfg.totalColor,
-    totalBorder: cfg.totalBorder,
-    projection: cfg.projection, // <--- Добавьте
-    
-    minZoom: cfg.minZoom,
-    maxZoom: cfg.maxZoom,
-    tooltip,
-    coins: cfg.coins,
-    segmentSizes: cfg.segmentSizes,
-};
-}
+        const center = polygon.getVisualCenter();
+        if (!center) return;
 
- private _createPolygon(
-        feature: GeoJSONFeature,
-        props: Props,
-        rings: GeoJSONPolygon,
+        const diagram = new Diagram({
+            ...baseOpts,
+            position: center,
+            crs: this.crs,
+            parentPolygon: polygon,
+            fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
+            minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,
+            clusterable: false,
+        });
+        this.add(diagram);
+        if (this.onEachDiagram) this.onEachDiagram(feature, diagram);
+    }
+
+    private _diagramFromConfig(feature: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
+        const cfg = this.diagram;
+        if (!cfg?.fields?.length) return null;
+
+        const data = cfg.fields
+            .map(key => {
+                const v = Number(props[key]);
+                if (!isFinite(v)) return null;
+                return {
+                    label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
+                    value: v,
+                    color: cfg.colorMap?.[key],
+                };
+            })
+            .filter((d): d is NonNullable<typeof d> => d !== null);
+        if (!data.length) return null;
+
+        let tooltip = this._getTooltip(props);
+        if (!tooltip) {
+            tooltip = data.map(d =>
+                (d.color
+                    ? `<span style="display:inline-block;width:10px;height:10px;background:${d.color};margin-right:6px;border-radius:2px;"></span>`
+                    : '') + `${d.label}: <b>${d.value}</b>`
+            ).join('<br>');
+        }
+
+        const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
+
+        return {
+            type: cfg.type ?? 'bar',
+            data,
+            unitPx: cfg.unitPx,
+            orientation: cfg.orientation,
+            barWidth: cfg.barWidth,
+            gap: cfg.gap,
+            padding: cfg.padding,
+            strokeColor: cfg.strokeColor,
+            strokeWidth: cfg.strokeWidth,
+            label: label || undefined,
+            labelPosition: cfg.labelPosition,
+            labelFont: cfg.labelFont,
+            labelColor: cfg.labelColor,
+            unitValue: cfg.unitValue,
+            maxCols: cfg.maxCols,
+            shape: cfg.shape,
+            showTotal: cfg.showTotal,
+            totalFont: cfg.totalFont,
+            totalBg: cfg.totalBg,
+            totalColor: cfg.totalColor,
+            totalBorder: cfg.totalBorder,
+            projection: cfg.projection,
+            minZoom: cfg.minZoom,
+            maxZoom: cfg.maxZoom,
+            tooltip,
+            coins: cfg.coins,
+            segmentSizes: cfg.segmentSizes,
+        };
+    }
+
+    private _createPolygon(
+        feature: GeoJSONFeature, props: Props, rings: GeoJSONPolygon,
         cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null | undefined,
     ): Polygon | null {
-        
-        // Вычисляем цвет, если включена картограмма
         let choroplethColor: string | undefined;
         if (this.choropleth && this._choroplethRamp) {
             const val = this._evaluateValueExpression(props, this.choropleth.value);
-
             if (isFinite(val)) {
                 const classIdx = getClassIndex(val, this._choroplethBreaks);
-                const t = this._choroplethBreaks.length > 0 
-                    ? classIdx / this._choroplethBreaks.length 
+                const t = this._choroplethBreaks.length > 0
+                    ? classIdx / this._choroplethBreaks.length
                     : 0;
-                
                 const rgba = sampleColorRamp(this._choroplethRamp, t);
-                // ВАЖНО: Three.js ожидает hex-строку для цвета, а не rgba()
                 choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
             } else {
                 choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
@@ -1677,20 +1558,17 @@ return {
             tooltipOnHover: this.tooltipOnHover,
         };
 
-       const normStyle = this._normalizeStyle<PolygonOptions>(
-            this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
+        const normStyle = this._normalizeStyle<PolygonOptions>(this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
         const normCb = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
-        
+
         const merged: PolygonOptions = {
             ...defaults,
             ...(normStyle ?? {}),
             ...(normCb ?? {}),
             rings,
-            // Гарантируем, что цвет картограммы не будет перезаписан стилями,
-            // если только пользователь явно не передал fillColor в callback
-            fillColor: choroplethColor || normCb?.fillColor || normStyle?.fillColor || defaults.fillColor
+            fillColor: choroplethColor || normCb?.fillColor || normStyle?.fillColor || defaults.fillColor,
         };
-        
+
         const polygon = new Polygon(merged);
         this.add(polygon);
         if (this.onEachFeature) this.onEachFeature(feature, polygon);
@@ -1698,9 +1576,7 @@ return {
     }
 
     private _createArea3D(
-        feature: GeoJSONFeature,
-        props: Props,
-        rings: Area3DRing[],
+        feature: GeoJSONFeature, props: Props, rings: Area3DRing[],
         cb: (Partial<Area3DOptions> & Area3DStyleAliases) | null | undefined,
     ): void {
         const defaults: Area3DOptions = {
@@ -1729,15 +1605,9 @@ return {
             tooltip: this._getTooltip(props),
         };
 
-        const normStyle = this._normalizeStyle<Area3DOptions>(
-            this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
+        const normStyle = this._normalizeStyle<Area3DOptions>(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
         const normCb = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
-        const merged: Area3DOptions = {
-            ...defaults,
-            ...(normStyle ?? {}),
-            ...(normCb ?? {}),
-            rings,
-        };
+        const merged: Area3DOptions = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), rings };
         const area = new Area3D(merged);
         this.add(area);
         if (this.onEachFeature) this.onEachFeature(feature, area);
@@ -1752,9 +1622,9 @@ return {
         const props = feature.properties ?? {};
 
         let coordSets: (GeoJSONLineString | null)[];
-        if (geom.type === 'LineString')           coordSets = [geom.coordinates];
+        if (geom.type === 'LineString') coordSets = [geom.coordinates];
         else if (geom.type === 'MultiLineString') coordSets = geom.coordinates;
-        else                                      coordSets = [null];
+        else coordSets = [null];
 
         for (const coords of coordSets) {
             const cb = this.vectorToOptions ? this.vectorToOptions(feature, props) : null;
@@ -1782,15 +1652,9 @@ return {
                 opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? 1,
             };
 
-            const normStyle = this._normalizeStyle<Vector3DOptions>(
-                this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
+            const normStyle = this._normalizeStyle<Vector3DOptions>(this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
             const normCb = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
-            const merged: Vector3DOptions = {
-                ...defaults,
-                ...(normStyle ?? {}),
-                ...(normCb ?? {}),
-                positions,
-            };
+            const merged: Vector3DOptions = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), positions };
             const vector = new Vector3D(merged);
             this.add(vector);
             if (this.onEachFeature) this.onEachFeature(feature, vector);
@@ -1798,7 +1662,7 @@ return {
     }
 
     // =================================================================
-    // Внутренние парсеры / утилиты
+    // Internal parsers / utils
     // =================================================================
 
     private _toVectorPositions(coords: GeoJSONLineString): Vector3DPosition[] {
@@ -1810,9 +1674,7 @@ return {
         if (Array.isArray(raw)) return raw as number[];
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length >= 1 && parts.length <= 3 && parts.every(v => !isNaN(v))) {
-                return parts;
-            }
+            if (parts.length >= 1 && parts.length <= 3 && parts.every(v => !isNaN(v))) return parts;
         }
         return null;
     }
@@ -1833,15 +1695,11 @@ return {
         if (!raw) return null;
         if (Array.isArray(raw) && raw.length === 2) {
             const [a, b] = raw as any[];
-            if (typeof a === 'number' && typeof b === 'number' && isFinite(a) && isFinite(b)) {
-                return [a, b];
-            }
+            if (typeof a === 'number' && typeof b === 'number' && isFinite(a) && isFinite(b)) return [a, b];
         }
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 2 && parts.every(v => !isNaN(v))) {
-                return [parts[0], parts[1]];
-            }
+            if (parts.length === 2 && parts.every(v => !isNaN(v))) return [parts[0], parts[1]];
         }
         return null;
     }
@@ -1851,15 +1709,11 @@ return {
         if (Array.isArray(raw) && raw.length === 3) {
             const [a, b, c] = raw as any[];
             if (typeof a === 'number' && typeof b === 'number' && typeof c === 'number'
-                && isFinite(a) && isFinite(b) && isFinite(c)) {
-                return [a, b, c];
-            }
+                && isFinite(a) && isFinite(b) && isFinite(c)) return [a, b, c];
         }
         if (typeof raw === 'string') {
             const parts = raw.split(',').map(Number);
-            if (parts.length === 3 && parts.every(v => !isNaN(v))) {
-                return [parts[0], parts[1], parts[2]];
-            }
+            if (parts.length === 3 && parts.every(v => !isNaN(v))) return [parts[0], parts[1], parts[2]];
         }
         return null;
     }

@@ -298,6 +298,7 @@ export class Marker3D extends SpatialObject {
         const material = new THREE.MeshStandardMaterial({
             color: this._color,
             roughness: 0.5,
+            transparent: true,
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
         });
@@ -390,6 +391,9 @@ export class Marker3D extends SpatialObject {
                         for (const m of mats) {
                             m.depthTest = this._depthTest;
                             m.depthWrite = this._depthWrite;
+                            if (!m.transparent) {
+                                m.transparent = true;
+                            }
                             m.needsUpdate = true;
                         }
                     }

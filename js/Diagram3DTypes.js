@@ -4,6 +4,31 @@ const PALETTE_3D = [
     '#3498db', '#e74c3c', '#2ecc71', '#f39c12',
     '#9b59b6', '#1abc9c', '#e67e22', '#34495e',
 ];
+/**
+ * Создаёт геометрию, вписанную в bbox `(w, h, d)` и «стоящую» на y=0
+ * (нижняя точка — на земле, независимо от primitive).
+ */
+function makeDiagramGeometry(primitive, w, h, d) {
+    let geom;
+    switch (primitive) {
+        case 'sphere':
+            geom = new THREE.SphereGeometry(0.5, 32, 32);
+            geom.scale(w, h, d);
+            break;
+        case 'cylinder':
+            geom = new THREE.CylinderGeometry(Math.min(w, d) / 2, Math.min(w, d) / 2, h, 32);
+            break;
+        case 'cone':
+            geom = new THREE.ConeGeometry(Math.min(w, d) / 2, h, 32);
+            break;
+        case 'box':
+        default:
+            geom = new THREE.BoxGeometry(w, h, d);
+            break;
+    }
+    geom.translate(0, h / 2, 0);
+    return geom;
+}
 // ── Столбчатая 3D ──────────────────────────────────────────────────
 export const bar3D = {
     name: 'bar3d',
@@ -16,13 +41,13 @@ export const bar3D = {
             height: maxVal * unitM,
         };
     },
-    build({ data, unitM, barWidthM = 10, barDepthM = 10, gapM = 2, strokeColor }) {
+    build({ data, unitM, barWidthM = 10, barDepthM = 10, gapM = 2, strokeColor, primitiveType = 'box' }) {
         const group = new THREE.Group();
         let x = 0;
         for (let i = 0; i < data.length; i++) {
             const d = data[i];
             const h = Math.max(0.1, d.value * unitM);
-            const geom = new THREE.BoxGeometry(barWidthM, h, barDepthM);
+            const geom = makeDiagramGeometry(primitiveType, barWidthM, h, barDepthM);
             geom.translate(0, h / 2, 0);
             const mat = new THREE.MeshStandardMaterial({
                 color: d.color ?? PALETTE_3D[i % PALETTE_3D.length], // ← ИСПРАВЛЕНО
@@ -120,7 +145,7 @@ export const circle3D = {
             height: depth,
         };
     },
-    build({ data, unitM, gapM = 2, strokeColor }) {
+    build({ data, unitM, gapM = 2, strokeColor, primitiveType = 'cylinder' }) {
         const group = new THREE.Group();
         const radii = data.map(d => Math.sqrt(Math.max(0, d.value)) * unitM);
         const maxR = Math.max(0, ...radii);
@@ -131,7 +156,7 @@ export const circle3D = {
             const r = radii[i];
             if (r <= 0)
                 continue;
-            const geom = new THREE.CylinderGeometry(r, r, depth, 32);
+            const geom = makeDiagramGeometry(primitiveType, r * 2, depth, r * 2);
             geom.translate(0, depth / 2, 0); // Опускаем на землю
             const mat = new THREE.MeshStandardMaterial({
                 color: d.color ?? PALETTE_3D[i % PALETTE_3D.length],
@@ -174,7 +199,7 @@ export const cube3D = {
             height: maxSide,
         };
     },
-    build({ data, unitM, gapM = 2, strokeColor }) {
+    build({ data, unitM, gapM = 2, strokeColor, primitiveType = 'box' }) {
         const group = new THREE.Group();
         const sides = data.map(d => Math.cbrt(Math.max(0, d.value)) * unitM);
         let x = 0;
@@ -183,7 +208,7 @@ export const cube3D = {
             const side = sides[i];
             if (side <= 0)
                 continue;
-            const geom = new THREE.BoxGeometry(side, side, side);
+            const geom = makeDiagramGeometry(primitiveType, side, side, side);
             geom.translate(0, side / 2, 0); // Опускаем на землю
             const mat = new THREE.MeshStandardMaterial({
                 color: d.color ?? PALETTE_3D[i % PALETTE_3D.length],
@@ -248,7 +273,7 @@ export const vienna3D = {
             height: unitM,
         };
     },
-    build({ data, unitM, gapM = 2, unitValue = 1, maxCols = 5, strokeColor }) {
+    build({ data, unitM, gapM = 2, unitValue = 1, maxCols = 5, strokeColor, primitiveType = 'box' }) {
         const group = new THREE.Group();
         const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
         const totalUnits = Math.max(1, Math.round(total / unitValue));
@@ -257,7 +282,7 @@ export const vienna3D = {
         for (let i = 0; i < totalUnits; i++) {
             const row = Math.floor(i / cols);
             const col = i % cols;
-            const geom = new THREE.BoxGeometry(unitM, unitM, unitM);
+            const geom = makeDiagramGeometry(primitiveType, unitM, unitM, unitM);
             geom.translate(0, unitM / 2, 0); // Стоит на земле
             const mat = new THREE.MeshStandardMaterial({
                 color: unitColors[i],
@@ -303,7 +328,7 @@ export const viennaCubes3D = {
             height: h * unitM + (h - 1) * gapM,
         };
     },
-    build({ data, unitM, gapM = 2, unitValue = 1, strokeColor }) {
+    build({ data, unitM, gapM = 2, unitValue = 1, strokeColor, primitiveType = 'box' }) {
         const group = new THREE.Group();
         const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
         const totalUnits = Math.max(1, Math.round(total / unitValue));
@@ -324,7 +349,7 @@ export const viennaCubes3D = {
             for (let y = d - 1; y >= 0; y--) {
                 for (let x = 0; x < w; x++) {
                     if (count < totalUnits) {
-                        const geom = new THREE.BoxGeometry(unitM, unitM, unitM);
+                        const geom = makeDiagramGeometry(primitiveType, unitM, unitM, unitM);
                         const mat = new THREE.MeshStandardMaterial({
                             color: unitColors[count],
                             roughness: 0.5,

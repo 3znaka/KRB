@@ -1167,6 +1167,7 @@ export class GeoJSONLayer extends Layer {
             altitudeMode: cfg.altitudeMode,
             unitValue: cfg.unitValue,
             maxCols: cfg.maxCols,
+            primitiveType: cfg.primitiveType,
         };
     }
     _diagramFromConfig(_f, props) {

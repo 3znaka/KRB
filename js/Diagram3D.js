@@ -19,6 +19,7 @@ export class Diagram3D extends Marker3D {
             strokeWidthM: options.strokeWidthM,
             unitValue: options.unitValue,
             maxCols: options.maxCols,
+            primitiveType: options.primitiveType,
         };
         super({
             ...options,

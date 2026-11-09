@@ -123,6 +123,7 @@ export interface Diagram3DLayerConfig {
     altitudeMode?: 'clampToGround' | 'absolute';
     unitValue?: number;
     maxCols?: number;
+    primitiveType?: PrimitiveType; 
 }
 
 export interface DiagramLayerConfig {
@@ -1520,6 +1521,7 @@ export class GeoJSONLayer extends Layer {
             altitudeMode: cfg.altitudeMode,
             unitValue: cfg.unitValue,
             maxCols: cfg.maxCols,
+            primitiveType: cfg.primitiveType,
         };
     }
 

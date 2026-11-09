@@ -5,6 +5,8 @@ import {
     type Diagram3DData, type Diagram3DRenderParams, type Diagram3DTypeDefinition,
     getDiagram3DType,
 } from './Diagram3DTypes.js';
+import type { PrimitiveType } from './Marker3D.js';
+
 
 export interface Diagram3DOptions extends Omit<Marker3DOptions, 'primitiveType' | 'size' | 'modelUrl'> {
     type: string;
@@ -17,6 +19,7 @@ export interface Diagram3DOptions extends Omit<Marker3DOptions, 'primitiveType' 
     strokeWidthM?: number;
     unitValue?: number;
     maxCols?: number;   
+    primitiveType?: PrimitiveType; 
 }
 
 export type Diagram3DSpawnOptions = Omit<Diagram3DOptions, 'position' | 'crs'>;
@@ -39,6 +42,7 @@ export class Diagram3D extends Marker3D {
     strokeWidthM: options.strokeWidthM,
     unitValue: options.unitValue, 
     maxCols: options.maxCols,     
+    primitiveType: options.primitiveType,
 };
 
         super({

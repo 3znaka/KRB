@@ -99,16 +99,16 @@ new KRB.GeoJSONLayer({
     tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}<br>Value: ${p.value}`,
 
     diagram: {
-        type: 'pie',                   // Для точек хорошо подходят бары или кружки
+        type: 'vienna',                   // Для точек хорошо подходят бары или кружки
         fields: ['score', 'value', 'count'], 
         colorMap: { 
             score: '#e74c3c', 
             value: '#3498db', 
             count: '#2ecc71' 
         },
-        unitPx: 1,                  // Масштаб для точек (меньше, чем для полигонов)
-        barWidth: 8,
+        unitPx: 10,                  // Масштаб для точек (меньше, чем для полигонов)
         gap: 2,
+        unitValue: 100,
         strokeColor: '#fff',
         strokeWidth: 1,
         minZoom: 1,

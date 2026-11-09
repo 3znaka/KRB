@@ -274,6 +274,11 @@ export namespace THREE {
     export class BoxGeometry extends BufferGeometry {
         constructor(width?: number, height?: number, depth?: number, ...rest: number[]);
     }
+
+ export class EdgesGeometry extends BufferGeometry {
+        constructor(geometry?: BufferGeometry, thresholdAngle?: number);
+    }
+
     export class SphereGeometry extends BufferGeometry {
         constructor(radius?: number, widthSegments?: number, heightSegments?: number);
     }

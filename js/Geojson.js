@@ -19,6 +19,7 @@ import { Diagram } from './Diagram.js';
 import { Diagram3D } from './Diagram3D.js';
 import { calculateBreaks, getClassIndex } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
+import { buildDiagramLegend, buildChoroplethLegend, buildDiagram3DLegend, } from './Legend.js';
 const POINT_ALIASES = { icon: 'iconUrl' };
 const MARKER3D_ALIASES = { model: 'modelUrl' };
 const LINE_ALIASES = {
@@ -280,6 +281,7 @@ export class GeoJSONLayer extends Layer {
     data = null;
     crs = null;
     tooltipOnHover = false;
+    legend = null;
     choropleth = null;
     _choroplethBreaks = [];
     _choroplethRamp = null;
@@ -431,6 +433,13 @@ export class GeoJSONLayer extends Layer {
         for (const obj of [...(self._objects ?? [])])
             obj.remove();
         self._objects = [];
+        if (this.legend) {
+            try {
+                this.legend.destroy();
+            }
+            catch { }
+            this.legend = null;
+        }
         this._loaded = false;
         if (self._map)
             this._load();
@@ -470,6 +479,7 @@ export class GeoJSONLayer extends Layer {
             this.reload();
         return this;
     }
+    getLegend() { return this.legend; }
     setDiagram3D(cfg) {
         this.diagram3D = cfg;
         if (this._map && this._loaded)
@@ -567,10 +577,45 @@ export class GeoJSONLayer extends Layer {
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
             this._parse(geojson);
+            this._buildLegend(geojson);
             this._loaded = true;
         }
         catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
+        }
+    }
+    _buildLegend(geojson) {
+        if (this.legend) {
+            try {
+                this.legend.destroy();
+            }
+            catch { }
+            this.legend = null;
+        }
+        let legendOpts;
+        let builder = null;
+        if (this.diagram?.legend) {
+            legendOpts = this.diagram.legend;
+            builder = () => buildDiagramLegend(this, geojson, this.diagram, legendOpts);
+        }
+        else if (this.diagram3D?.legend) {
+            legendOpts = this.diagram3D.legend;
+            builder = () => buildDiagram3DLegend(this, geojson, this.diagram3D, legendOpts);
+        }
+        else if (this.choropleth?.legend) {
+            legendOpts = this.choropleth.legend;
+            builder = () => buildChoroplethLegend(this, geojson, this.choropleth, legendOpts);
+        }
+        if (!builder || !legendOpts)
+            return;
+        try {
+            this.legend = builder();
+            if (legendOpts.target)
+                this.legend.mount(legendOpts.target);
+            legendOpts.onReady?.(this.legend);
+        }
+        catch (err) {
+            console.warn('GeoJSONLayer: legend build failed', err);
         }
     }
     // =================================================================
@@ -1064,8 +1109,8 @@ export class GeoJSONLayer extends Layer {
             const val = this._evaluateValueExpression(props, this.choropleth.value);
             if (isFinite(val)) {
                 const idx = getClassIndex(val, this._choroplethBreaks);
-                const t = this._choroplethBreaks.length
-                    ? idx / this._choroplethBreaks.length : 0;
+                const denom = Math.max(1, this._choroplethBreaks.length - 2);
+                const t = idx / denom;
                 const rgba = sampleColorRamp(this._choroplethRamp, t);
                 choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
             }

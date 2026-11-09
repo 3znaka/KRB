@@ -22,6 +22,13 @@ import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
 import type { Diagram3DData } from './Diagram3DTypes.js';
 import { calculateBreaks, getClassIndex } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
+import {
+    MapLegend,
+    buildDiagramLegend,
+    buildChoroplethLegend,
+    buildDiagram3DLegend,
+    type LegendOptions,
+} from './Legend.js';
 
 // =====================================================================
 // GeoJSON types
@@ -74,6 +81,7 @@ export interface ChoroplethConfig {
     classification?: 'equal' | 'quantile' | 'jenks' | number[];
     classes?: number;
     noDataColor?: string;
+    legend?: LegendOptions;
 }
 
 // =====================================================================
@@ -124,6 +132,8 @@ export interface Diagram3DLayerConfig {
     unitValue?: number;
     maxCols?: number;
     primitiveType?: PrimitiveType; 
+
+    legend?: LegendOptions;
 }
 
 export interface DiagramLayerConfig {
@@ -166,6 +176,7 @@ type?: string;
     minZoom?: number;
     maxZoom?: number;
     coins?: number[];
+    legend?: LegendOptions;
 }
 
 // =====================================================================
@@ -604,6 +615,8 @@ export class GeoJSONLayer extends Layer {
     public crs: string | null = null;
     public tooltipOnHover = false;
 
+    public legend: MapLegend | null = null;
+
     public choropleth: ChoroplethConfig | null = null;
     private _choroplethBreaks: number[] = [];
     private _choroplethRamp: any = null;
@@ -777,13 +790,16 @@ private _diagramAuto: { unitPx: number } | null = null;
         return this;
     }
 
-    reload(): void {
-        const self = this as any;
-        for (const obj of [...(self._objects ?? [])]) obj.remove();
-        self._objects = [];
-        this._loaded = false;
-        if (self._map) this._load();
-    }
+reload(): void {
+    const self = this as any;
+    for (const obj of [...(self._objects ?? [])]) obj.remove();
+    self._objects = [];
+
+    if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
+
+    this._loaded = false;
+    if (self._map) this._load();
+}
 
     // ── setters (все с авто-reload при активной карте) ─────────────
 
@@ -816,6 +832,8 @@ private _diagramAuto: { unitPx: number } | null = null;
         if (this._map && this._loaded) this.reload();
         return this;
     }
+
+    getLegend(): MapLegend | null { return this.legend; }
 
     setDiagram3D(cfg: Diagram3DLayerConfig | null): this {
         this.diagram3D = cfg;
@@ -906,11 +924,43 @@ private _diagramAuto: { unitPx: number } | null = null;
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
             this._parse(geojson);
+            this._buildLegend(geojson); 
             this._loaded = true;
         } catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
         }
     }
+
+    private _buildLegend(geojson: GeoJSONInput): void {
+    if (this.legend) {
+        try { this.legend.destroy(); } catch {}
+        this.legend = null;
+    }
+
+    let legendOpts: LegendOptions | undefined;
+    let builder: (() => MapLegend) | null = null;
+
+    if (this.diagram?.legend) {
+        legendOpts = this.diagram.legend;
+        builder = () => buildDiagramLegend(this, geojson, this.diagram, legendOpts!);
+    } else if (this.diagram3D?.legend) {
+        legendOpts = this.diagram3D.legend;
+        builder = () => buildDiagram3DLegend(this, geojson, this.diagram3D, legendOpts!);
+    } else if (this.choropleth?.legend) {
+        legendOpts = this.choropleth.legend;
+        builder = () => buildChoroplethLegend(this, geojson, this.choropleth, legendOpts!);
+    }
+
+    if (!builder || !legendOpts) return;
+
+    try {
+        this.legend = builder();
+        if (legendOpts.target) this.legend.mount(legendOpts.target);
+        legendOpts.onReady?.(this.legend);
+    } catch (err) {
+        console.warn('GeoJSONLayer: legend build failed', err);
+    }
+}
 
     // =================================================================
     // Choropleth
@@ -1411,8 +1461,8 @@ private _computeDiagramAuto(geojson: GeoJSONInput): void {
             const val = this._evaluateValueExpression(props, this.choropleth.value);
             if (isFinite(val)) {
                 const idx = getClassIndex(val, this._choroplethBreaks);
-                const t = this._choroplethBreaks.length
-                    ? idx / this._choroplethBreaks.length : 0;
+const denom = Math.max(1, this._choroplethBreaks.length - 2);
+const t = idx / denom;
                 const rgba = sampleColorRamp(this._choroplethRamp, t);
                 choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
             } else {

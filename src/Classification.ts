@@ -9,41 +9,42 @@ export type ClassificationMethod = 'equal' | 'quantile' | 'jenks' | number[];
  */
 export function calculateBreaks(values: number[], method: ClassificationMethod, numClasses: number = 5): number[] {
     if (Array.isArray(method)) return method;
-    
-    // Отбрасываем пустые значения
+
     const sorted = values.filter(v => typeof v === 'number' && isFinite(v)).sort((a, b) => a - b);
     if (sorted.length === 0) return [];
-    
+
     const min = sorted[0];
     const max = sorted[sorted.length - 1];
+    if (min === max) return [min, max];          // вырожденный случай
 
     if (method === 'equal') {
         const step = (max - min) / numClasses;
-        const breaks: number[] = [];
+        const breaks: number[] = [min];
         for (let i = 1; i < numClasses; i++) breaks.push(min + step * i);
+        breaks.push(max);
         return breaks;
     }
 
     if (method === 'quantile') {
-        const breaks: number[] = [];
+        const breaks: number[] = [min];
         const n = sorted.length;
         for (let i = 1; i < numClasses; i++) {
             const pos = (n - 1) * (i / numClasses);
             const base = Math.floor(pos);
             const rest = pos - base;
-            let val;
-            if (sorted[base + 1] !== undefined) {
-                val = sorted[base] + rest * (sorted[base + 1] - sorted[base]);
-            } else {
-                val = sorted[base];
-            }
-            breaks.push(val);
+            breaks.push(
+                sorted[base + 1] !== undefined
+                    ? sorted[base] + rest * (sorted[base + 1] - sorted[base])
+                    : sorted[base]
+            );
         }
+        breaks.push(max);
         return breaks;
     }
 
     if (method === 'jenks') {
-        return jenksBreaks(sorted, numClasses);
+        const internal = jenksBreaks(sorted, numClasses);   // без изменений, всё ещё n−1
+        return [min, ...internal, max];
     }
 
     return [];
@@ -107,8 +108,9 @@ function jenksBreaks(data: number[], numClasses: number): number[] {
  * Возвращает индекс класса (от 0 до breaks.length) для значения v.
  */
 export function getClassIndex(v: number, breaks: number[]): number {
-    for (let i = 0; i < breaks.length; i++) {
-        if (v <= breaks[i]) return i;
+    if (breaks.length < 2) return 0;
+    for (let i = 1; i < breaks.length; i++) {
+        if (v <= breaks[i]) return i - 1;
     }
-    return breaks.length;
+    return breaks.length - 2;   // верхний класс (v > max)
 }

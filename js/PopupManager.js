@@ -2,7 +2,8 @@
  * PopupManager — управление HTML-тултипами на карте.
  *
  * Возможности:
- * - хвостик (SVG-треугольник), указывающий на anchor;
+ * - хвостик (SVG-треугольник) с переходником, гасящим субпиксельные щели
+ *   между телом тултипа и хвостиком;
  * - авто-выбор позиции (top/bottom/right/left) с учётом вьюпорта;
  * - «плавающий» хвостик при сдвиге тултипа внутрь экрана;
  * - закрытие по клику снаружи (не срабатывает при drag/панорамировании
@@ -30,13 +31,13 @@ export class PopupManager {
     _lastPosKey = '';
     _lastPlacement = null;
     _lastTailPosKey = '';
-    // Остриё хвостика в ЛОКАЛЬНЫХ координатах тултипа — нужно для анимации
-    // появления (чтобы «рост» происходил именно из хвостика).
+    // Остриё хвостика в ЛОКАЛЬНЫХ координатах тултипа — для анимации появления.
     _lastTipX = 0;
     _lastTipY = 0;
     _pointerEvents;
     _zIndex;
     _tailSize;
+    _tailConnectorSize;
     _screenPadding;
     _tailColor;
     _placementOrder;
@@ -59,6 +60,7 @@ export class PopupManager {
         this._pointerEvents = options.pointerEvents ?? 'none';
         this._zIndex = String(options.zIndex ?? 1200);
         this._tailSize = options.tailSize ?? 10;
+        this._tailConnectorSize = Math.max(1, options.tailConnectorSize ?? 2);
         this._screenPadding = options.screenPadding ?? 8;
         this._tailColor = options.tailColor ?? '#767676';
         this._placementOrder = options.placementOrder ?? ['top', 'bottom', 'right', 'left'];
@@ -165,8 +167,6 @@ export class PopupManager {
             maxWidth: '300px',
             left: '0',
             top: '0',
-            // Именно 0 0 — чтобы формула «x(s) = x + tipX*(1-s)» работала без
-            // поправок на центр. Анимация translate+scale зашита в keyframes.
             transformOrigin: '0 0',
             willChange: 'transform, opacity',
         });
@@ -192,15 +192,10 @@ export class PopupManager {
     // Внутреннее: анимация появления
     // =================================================================
     /**
-     * Анимирует `transform: translate3d(x, y, 0) scale(s)` целиком.
-     *
-     * Не используем standalone `scale` в keyframes — в ряде браузеров он
-     * интерпретируется как `transform: scale()`, перекрывая translate3d,
-     * из-за чего тултип «выпрыгивает» из точки (0, 0) родителя.
-     *
-     * Чтобы точка острия хвостика `(tipX, tipY)` (в локальных координатах)
-     * оставалась неподвижной при масштабе `s`, координаты translate
-     * пересчитываются: `x' = x + tipX*(1-s)`, `y' = y + tipY*(1-s)`.
+     * Анимирует `transform: translate3d(...) scale(s)` целиком (не трогая
+     * standalone `scale` — в некоторых браузерах он конфликтует с translate).
+     * Координаты translate подбираются так, чтобы остриё хвостика
+     * `(tipX, tipY)` оставалось неподвижным: `x' = x + tipX*(1-s)`.
      */
     _playShowAnimation() {
         if (!this._shouldAnimate())
@@ -224,24 +219,16 @@ export class PopupManager {
         const y0 = y + tipY * (1 - s0);
         try {
             this._currentAnimation = el.animate([
-                {
-                    transform: `translate3d(${x0}px, ${y0}px, 0) scale(${s0})`,
-                    opacity: 0,
-                },
-                {
-                    transform: `translate3d(${x}px, ${y}px, 0) scale(${s1})`,
-                    opacity: 1,
-                },
+                { transform: `translate3d(${x0}px, ${y0}px, 0) scale(${s0})`, opacity: 0 },
+                { transform: `translate3d(${x}px, ${y}px, 0) scale(${s1})`, opacity: 1 },
             ], {
                 duration: this._animationDuration,
-                // лёгкий overshoot — «поп» ощущается живее линейного ease-out
                 easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)',
                 fill: 'none',
             });
             this._currentAnimation.onfinish = () => { this._currentAnimation = null; };
         }
         catch {
-            // Старые браузеры без WAAPI — молча без анимации.
             this._currentAnimation = null;
         }
     }
@@ -268,7 +255,7 @@ export class PopupManager {
         }
     }
     // =================================================================
-    // Внутреннее: клик снаружи (down → up + порог drag'а)
+    // Внутреннее: клик снаружи
     // =================================================================
     _bindOutsideClickHandlers() {
         this._onDocPointerDown = (e) => this._handlePointerDown(e);
@@ -379,7 +366,6 @@ export class PopupManager {
         const canvas = map.renderer.domElement;
         const vw = canvas.clientWidth;
         const vh = canvas.clientHeight;
-        // Измеряем только когда тултип в потоке layout'а.
         if (el.style.display !== 'block') {
             el.style.display = 'block';
             el.style.visibility = 'hidden';
@@ -429,7 +415,6 @@ export class PopupManager {
             }
         }
         if (!pos) {
-            // Fallback: тултип больше вьюпорта — clamp'им 'top'.
             placement = 'top';
             pos = {
                 x: clamp(anchorX - w / 2, PAD, Math.max(PAD, vw - w - PAD)),
@@ -439,8 +424,6 @@ export class PopupManager {
         this._updateTail(placement, pos.x, pos.y, anchorX, anchorY, w, h);
         const posKey = pos.x + '|' + pos.y;
         if (posKey !== this._lastPosKey) {
-            // Не трогаем transform, пока идёт анимация — WAAPI сейчас
-            // главнее, а после её окончания inline-значение снова в силе.
             if (!this._currentAnimation) {
                 el.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0)`;
             }
@@ -449,9 +432,9 @@ export class PopupManager {
         el.style.visibility = 'visible';
     }
     /**
-     * Ставит SVG-хвостик так, чтобы он смотрел на anchor. Дополнительно
-     * запоминает координаты острия в ЛОКАЛЬНОЙ системе тултипа — их
-     * использует `_playShowAnimation()`, чтобы «рост» шёл из хвостика.
+     * Позиционирует SVG-хвостик. База треугольника ложится на *внешний*
+     * край бордера тултипа (`h`/`w` в локальных координатах), а
+     * «переходник» закрашивает бордер и субпиксельную щель изнутри.
      */
     _updateTail(placement, posX, posY, anchorX, anchorY, w, h) {
         const tail = this._tailElement;
@@ -461,6 +444,7 @@ export class PopupManager {
             this._lastTailPosKey = '';
         }
         const T = this._tailSize;
+        const C = this._tailConnectorSize;
         const halfW = Math.max(5, Math.round(T * 0.7));
         const edgeInset = halfW + 2;
         let left = '0';
@@ -475,29 +459,33 @@ export class PopupManager {
         let tipX = 0;
         let tipY = 0;
         if (placement === 'top') {
+            // База на Y = h (низ border-box), переходник закрашивает h-C…h.
             tipX = clampAxis(anchorX - posX, w);
             left = `${tipX}px`;
-            top = 'calc(100% - 0.1px)';
+            top = `calc(100% - ${C - 1}px)`;
             transform = 'translateX(-50%)';
             tipY = h + T;
         }
         else if (placement === 'bottom') {
+            // База на Y = 0 (верх border-box), переходник закрашивает 0…C.
             tipX = clampAxis(anchorX - posX, w);
             left = `${tipX}px`;
-            top = `-${T}px`;
+            top = `${-(T + 1)}px`;
             transform = 'translateX(-50%)';
             tipY = -T;
         }
         else if (placement === 'left') {
+            // База на X = w (правый край border-box), переходник w-C…w.
             tipY = clampAxis(anchorY - posY, h);
-            left = '100%';
+            left = `calc(100% - ${C - 1}px)`;
             top = `${tipY}px`;
             transform = 'translateY(-50%)';
             tipX = w + T;
         }
         else {
+            // 'right': база на X = 0 (левый край border-box), переходник 0…C.
             tipY = clampAxis(anchorY - posY, h);
-            left = `-${T}px`;
+            left = `${-(T + 1)}px`;
             top = `${tipY}px`;
             transform = 'translateY(-50%)';
             tipX = -T;
@@ -512,38 +500,54 @@ export class PopupManager {
             this._lastTailPosKey = key;
         }
     }
+    /**
+     * Строит SVG-геометрию хвостика с переходником.
+     *
+     * Переходник — прямоугольная часть полигона, продолжающая треугольник
+     * в сторону тела тултипа на `C` px. Заливка белая; обводка идёт только
+     * по «наружным» рёбрам (без базы) — стык с тултипом без шва.
+     */
     _rebuildTailSvg(placement) {
         const tail = this._tailElement;
         const ns = 'http://www.w3.org/2000/svg';
         tail.innerHTML = '';
         const T = this._tailSize;
+        const C = this._tailConnectorSize;
         const hw = Math.max(5, Math.round(T * 0.7));
         let wAttr, hAttr, viewBox;
         let poly, path;
         if (placement === 'top' || placement === 'bottom') {
-            wAttr = String(hw * 2);
-            hAttr = String(T);
-            viewBox = `0 0 ${hw * 2} ${T}`;
+            const W = hw * 2;
+            wAttr = String(W);
+            hAttr = String(T + C);
             if (placement === 'top') {
-                poly = `0,0 ${hw * 2},0 ${hw},${T}`;
-                path = `M0,0 L${hw},${T} L${hw * 2},0`;
+                // Острие внизу; сверху — переходник в теле тултипа.
+                viewBox = `0 ${-C} ${W} ${T + C}`;
+                poly = `0,${-C} ${W},${-C} ${W},0 ${hw},${T} 0,0`;
+                path = `M0,0 L${hw},${T} L${W},0`;
             }
             else {
-                poly = `0,${T} ${hw * 2},${T} ${hw},0`;
-                path = `M0,${T} L${hw},0 L${hw * 2},${T}`;
+                // Острие вверху; снизу — переходник в теле тултипа.
+                viewBox = `0 0 ${W} ${T + C}`;
+                poly = `0,${T + C} ${W},${T + C} ${W},${T} ${hw},0 0,${T}`;
+                path = `M0,${T} L${hw},0 L${W},${T}`;
             }
         }
         else {
-            wAttr = String(T);
-            hAttr = String(hw * 2);
-            viewBox = `0 0 ${T} ${hw * 2}`;
+            const H = hw * 2;
+            wAttr = String(T + C);
+            hAttr = String(H);
             if (placement === 'left') {
-                poly = `0,0 ${T},${hw} 0,${hw * 2}`;
-                path = `M0,0 L${T},${hw} L0,${hw * 2}`;
+                // Острие справа; слева — переходник в теле тултипа.
+                viewBox = `${-C} 0 ${T + C} ${H}`;
+                poly = `${-C},0 0,0 ${T},${hw} 0,${H} ${-C},${H}`;
+                path = `M0,0 L${T},${hw} L0,${H}`;
             }
             else {
-                poly = `${T},0 0,${hw} ${T},${hw * 2}`;
-                path = `M${T},0 L0,${hw} L${T},${hw * 2}`;
+                // 'right': острие слева; справа — переходник в теле тултипа.
+                viewBox = `0 0 ${T + C} ${H}`;
+                poly = `${T},0 ${T + C},0 ${T + C},${H} ${T},${H} 0,${hw}`;
+                path = `M${T},0 L0,${hw} L${T},${H}`;
             }
         }
         tail.setAttribute('width', wAttr);
@@ -553,7 +557,6 @@ export class PopupManager {
         polygon.setAttribute('points', poly);
         polygon.setAttribute('fill', 'white');
         tail.appendChild(polygon);
-        // Обводка только по «наружным» рёбрам — стык с тултипом без шва.
         const pathEl = document.createElementNS(ns, 'path');
         pathEl.setAttribute('d', path);
         pathEl.setAttribute('fill', 'none');

@@ -1,28 +1,24 @@
 /**
- * Geojson.ts — слой GeoJSON с поддержкой 3D и векторных линий.
+ * Geojson.ts — слой GeoJSON.
  *
- * Стилизация: декларативный `style` (тематическая карта по одному полю)
- * или коллбэки `*ToOptions` (escape hatch). Оба принимают канонические
- * ключи `*Options` и CSS-подобные алиасы (`fill`, `stroke`, `stroke-width`,
- * `icon`, `model`).
+ * Декларативные опции: `style`, `choropleth`, `diagram` (2D), `diagram3D`.
+ * Escape hatch: коллбэки `*ToOptions` (мержатся поверх декларатива).
+ * Фильтр: строка-выражение, объект-спецификация, предикат или null.
  *
- * Фильтрация: JS-выражение строкой, объект-спецификация или предикат.
- * Строковая форма исполняется через `new Function` и видит глобальный
- * scope — не передавайте туда пользовательский ввод без валидации.
- *
- * @module Geojson
+ * Переключение фильтра без пересоздания слоя: `layer.setFeatureFilter(...)`.
+ * Смена декларативного конфига: `layer.setChoropleth(...)` / `setDiagram3D(...)`.
  */
 import { Layer } from './Layers.js';
 import { Marker } from './Marker.js';
-import { Marker3D, } from './Marker3D.js';
+import { Marker3D } from './Marker3D.js';
 import { Area3D } from './Area3D.js';
 import { Polyline } from './Polyline.js';
 import { Polygon } from './Polygon.js';
 import { Vector3D } from './Vector3D.js';
 import { Diagram } from './Diagram.js';
+import { Diagram3D } from './Diagram3D.js';
 import { calculateBreaks, getClassIndex } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
-import { Diagram3D } from './Diagram3D.js';
 const POINT_ALIASES = { icon: 'iconUrl' };
 const MARKER3D_ALIASES = { model: 'modelUrl' };
 const LINE_ALIASES = {
@@ -35,21 +31,13 @@ const POLYGON_ALIASES = {
     'stroke-width': 'strokeWidth', 'stroke-opacity': 'strokeOpacity',
 };
 const AREA3D_ALIASES = { model: 'modelUrl' };
-const VECTOR_ALIASES = {
-    stroke: 'color', 'stroke-color': 'color',
-    'stroke-width': 'width', 'stroke-opacity': 'opacity',
-};
+const VECTOR_ALIASES = LINE_ALIASES;
 const NUMERIC_OPTION_KEYS = new Set([
     'fillOpacity', 'strokeOpacity', 'strokeWidth', 'width', 'opacity', 'arrowSize',
 ]);
-// =====================================================================
-// Expression compiler
-// =====================================================================
-/** Одиночный `=` → `===`, не трогая `==/===/!=/!==/<=/>=/=>` и строки. */
-function replaceEqualityOutsideStrings(expr) {
-    let out = '';
-    let i = 0;
-    let str = null;
+// ── expression compiler ──────────────────────────────────────────────
+const replaceEqOutsideStrings = (expr) => {
+    let out = '', i = 0, str = null;
     while (i < expr.length) {
         const ch = expr[i];
         if (str) {
@@ -71,10 +59,9 @@ function replaceEqualityOutsideStrings(expr) {
             continue;
         }
         if (ch === '=') {
-            const prev = out[out.length - 1];
-            const next = expr[i + 1];
-            if (prev === '<' || prev === '>' || prev === '!' || prev === '='
-                || next === '=' || next === '>') {
+            const prev = out[out.length - 1], next = expr[i + 1];
+            if (prev === '<' || prev === '>' || prev === '!' || prev === '=' ||
+                next === '=' || next === '>') {
                 out += ch;
                 i++;
                 continue;
@@ -87,35 +74,67 @@ function replaceEqualityOutsideStrings(expr) {
         i++;
     }
     return out;
-}
-function interpolate(template, props) {
-    return template.replace(/\{([\w.]+)\}/g, (_m, key) => {
-        const v = key.includes('.')
-            ? key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), props)
-            : props[key];
-        return v == null ? '' : String(v);
-    });
-}
-/** `f === 'a' || 'b'` → `f === 'a' || f === 'b'` (только цепочки литералов). */
-function expandOrChains(expr) {
+};
+const interpolate = (tpl, props) => tpl.replace(/\{([\w.]+)\}/g, (_m, key) => {
+    const v = key.includes('.')
+        ? key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), props)
+        : props[key];
+    return v == null ? '' : String(v);
+});
+/** `f === 'a' || 'b'` → `f === 'a' || f === 'b'`. */
+const expandOrChains = (expr) => {
     const LIT = String.raw `(?:'[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*"|\d+(?:\.\d+)?|true|false|null)`;
     const FIELD = String.raw `[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*`;
     const chainRe = new RegExp(`(${FIELD})\\s*===\\s*(${LIT}(?:\\s*\\|\\|\\s*${LIT})+)`, 'g');
     const litRe = new RegExp(LIT, 'g');
     return expr.replace(chainRe, (_m, field, chain) => {
         const lits = chain.match(litRe);
-        if (!lits || lits.length < 2)
-            return _m;
-        return lits.map(lit => `${field} === ${lit}`).join(' || ');
+        return lits && lits.length >= 2
+            ? lits.map(l => `${field} === ${l}`).join(' || ')
+            : _m;
     });
-}
-// =====================================================================
-// Mapbox filter → JS expression
-// =====================================================================
-function mapboxToJsExpr(node) {
-    if (!Array.isArray(node) || node.length === 0) {
-        throw new Error('Invalid Mapbox filter (expected non-empty array)');
+};
+const compileExpressionFilter = (expr) => {
+    const processed = expandOrChains(replaceEqOutsideStrings(expr));
+    const src = `
+        const props = feature.properties ?? {};
+        const geometry = feature.geometry?.type ?? null;
+        const __scope = new Proxy(
+            Object.assign(Object.create(null), { feature, props, geometry, geometryType: geometry }),
+            {
+                has: (t, k) => typeof k === 'string' && (
+                    Object.prototype.hasOwnProperty.call(t, k) ||
+                    Object.prototype.hasOwnProperty.call(props, k)),
+                get: (t, k) => {
+                    if (typeof k !== 'string') return undefined;
+                    if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
+                    return props[k];
+                },
+            });
+        with (__scope) { return Boolean(${processed}); }
+    `;
+    let fn;
+    try {
+        fn = new Function('feature', src);
     }
+    catch (err) {
+        console.warn('GeoJSONLayer: invalid filter expression', expr, err);
+        return () => false;
+    }
+    return (f) => {
+        try {
+            return fn(f);
+        }
+        catch (err) {
+            console.warn('GeoJSONLayer: filter expression threw', err);
+            return false;
+        }
+    };
+};
+// ── Mapbox filter → JS expression ───────────────────────────────────
+const mapboxToJsExpr = (node) => {
+    if (!Array.isArray(node) || !node.length)
+        throw new Error('Invalid Mapbox filter');
     const op = node[0];
     const rest = node.slice(1);
     switch (op) {
@@ -135,35 +154,22 @@ function mapboxToJsExpr(node) {
             if (rest.length < 2)
                 throw new Error(`Mapbox "${op}" needs key + values`);
             const key = mapboxField(rest[0]);
-            const rawValues = (rest.length === 2
-                && Array.isArray(rest[1]) && rest[1][0] === 'literal')
+            const vals = (rest.length === 2 && Array.isArray(rest[1]) && rest[1][0] === 'literal')
                 ? rest[1][1]
                 : rest.slice(1);
-            const ors = rawValues.map(v => `${key} === ${mapboxLiteral(v)}`).join(' || ');
+            const ors = vals.map(v => `${key} === ${mapboxLiteral(v)}`).join(' || ');
             return op === 'in' ? `(${ors})` : `!(${ors})`;
         }
-        case 'has': {
-            if (rest.length !== 1)
-                throw new Error('Mapbox "has" needs 1 arg');
-            return `(${mapboxField(rest[0])} !== undefined)`;
-        }
-        case '!has': {
-            if (rest.length !== 1)
-                throw new Error('Mapbox "!has" needs 1 arg');
-            return `(${mapboxField(rest[0])} === undefined)`;
-        }
+        case 'has': return `(${mapboxField(rest[0])} !== undefined)`;
+        case '!has': return `(${mapboxField(rest[0])} === undefined)`;
         case 'all': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' && ')})` : 'true';
         case 'any': return rest.length ? `(${rest.map(mapboxToJsExpr).join(' || ')})` : 'false';
         case 'none': return rest.length ? `!(${rest.map(mapboxToJsExpr).join(' || ')})` : 'true';
-        case '!': {
-            if (rest.length !== 1)
-                throw new Error('Mapbox "!" needs 1 arg');
-            return `!(${mapboxToJsExpr(rest[0])})`;
-        }
+        case '!': return `!(${mapboxToJsExpr(rest[0])})`;
         default: throw new Error(`Unsupported Mapbox operator: "${op}"`);
     }
-}
-function mapboxField(node) {
+};
+const mapboxField = (node) => {
     if (typeof node === 'string') {
         if (node === '$type')
             return 'geometry';
@@ -172,20 +178,16 @@ function mapboxField(node) {
         return `props[${JSON.stringify(node)}]`;
     }
     if (Array.isArray(node)) {
-        const head = node[0];
-        if (head === 'get') {
-            if (node.length < 2)
-                throw new Error('Mapbox "get" needs a key');
+        if (node[0] === 'get')
             return mapboxField(node[1]);
-        }
-        if (head === 'geometry-type')
+        if (node[0] === 'geometry-type')
             return 'geometry';
-        if (head === 'id')
+        if (node[0] === 'id')
             return 'feature.id';
     }
-    throw new Error(`Unsupported Mapbox field operand: ${JSON.stringify(node)}`);
-}
-function mapboxLiteral(node) {
+    throw new Error(`Unsupported Mapbox field: ${JSON.stringify(node)}`);
+};
+const mapboxLiteral = (node) => {
     if (typeof node === 'string')
         return JSON.stringify(node);
     if (typeof node === 'number')
@@ -201,85 +203,43 @@ function mapboxLiteral(node) {
             return mapboxField(node[1]);
         return JSON.stringify(node);
     }
-    throw new Error(`Unsupported Mapbox literal operand: ${JSON.stringify(node)}`);
-}
-/**
- * Компилирует строку-выражение в предикат.
- * `feature`/`props`/`geometry`/`geometryType` — reserved; остальные имена
- * резолвятся в `props`, а при их отсутствии — в глобальный scope.
- */
-function compileExpressionFilter(expr) {
-    const processed = expandOrChains(replaceEqualityOutsideStrings(expr));
-    const src = `
-        const props = feature.properties ?? {};
-        const geometryType = feature.geometry?.type ?? null;
-        const __scope = new Proxy(
-            Object.assign(Object.create(null), { feature, props, geometry: geometryType, geometryType }),
-            {
-                has: (t, k) => typeof k === 'string' && (
-                    Object.prototype.hasOwnProperty.call(t, k) ||
-                    Object.prototype.hasOwnProperty.call(props, k)),
-                get: (t, k) => {
-                    if (typeof k !== 'string') return undefined;
-                    if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
-                    return props[k];
-                },
-            }
-        );
-        with (__scope) { return Boolean(${processed}); }
-    `;
-    let fn;
-    try {
-        fn = new Function('feature', src);
-    }
-    catch (err) {
-        console.warn('GeoJSONLayer: invalid filter expression', expr, err);
-        return () => false;
-    }
-    return (feature) => {
-        try {
-            return fn(feature);
-        }
-        catch (err) {
-            console.warn('GeoJSONLayer: filter expression threw, treating as false', err);
-            return false;
-        }
-    };
-}
-function getPath(obj, path) {
+    throw new Error(`Unsupported Mapbox literal: ${JSON.stringify(node)}`);
+};
+// ── object filter ──────────────────────────────────────────────────
+const getPath = (obj, path) => {
     if (!path.includes('.'))
         return obj?.[path];
     let cur = obj;
-    for (const part of path.split('.')) {
+    for (const p of path.split('.')) {
         if (cur == null)
             return undefined;
-        cur = cur[part];
+        cur = cur[p];
     }
     return cur;
-}
-function matchFilterValue(actual, expected) {
+};
+const matchFilterValue = (actual, expected) => {
     if (Array.isArray(expected))
         return expected.some(v => v === actual);
     if (expected === null)
         return actual == null;
     return actual === expected;
-}
-function resolveFilterPath(feature, path) {
+};
+const resolveFilterPath = (feature, path) => {
     const props = feature.properties ?? {};
-    const geometryType = feature.geometry?.type ?? null;
+    const geom = feature.geometry?.type ?? null;
     if (path === 'geometry' || path === 'geometryType')
-        return geometryType;
+        return geom;
     if (path === 'feature')
         return feature;
     if (path === 'props')
         return props;
     if (path.startsWith('feature.'))
-        return getPath(feature, path.slice('feature.'.length));
+        return getPath(feature, path.slice(8));
     if (path.startsWith('props.'))
-        return getPath(props, path.slice('props.'.length));
+        return getPath(props, path.slice(6));
     return getPath(props, path);
-}
-function compileObjectFilter(spec) {
+};
+const compileObjectFilter = (spec) => {
     const entries = Object.entries(spec);
     return (feature) => {
         for (const [path, expected] of entries) {
@@ -288,19 +248,32 @@ function compileObjectFilter(spec) {
         }
         return true;
     };
-}
+};
+// =====================================================================
+// Color resolution
+// =====================================================================
+const PALETTE_3D_FALLBACK = [
+    '#3498db', '#e74c3c', '#2ecc71', '#f39c12',
+    '#9b59b6', '#1abc9c', '#e67e22', '#34495e',
+];
+const resolveColorMapValue = (spec, value) => {
+    if (!spec)
+        return undefined;
+    if (typeof spec === 'string')
+        return spec;
+    for (const r of spec) {
+        if ((r.min == null || value >= r.min) &&
+            (r.max == null || value < r.max))
+            return r.color;
+    }
+    return undefined;
+};
 // =====================================================================
 // GeoJSONLayer
 // =====================================================================
 /**
- * Слой GeoJSON: маркеры / линии / полигоны / векторные объекты / 3D-диаграммы.
- *
+ * Слой GeoJSON: маркеры / линии / полигоны / диаграммы 2D и 3D / choropleth.
  * Порядок merge: `defaults → style → callback → enforced`.
- *
- * bar3d автосайзинг: если пользователь не задал `barWidthM`/`barDepthM` в
- * `diagram3D`, толщина столбцов подбирается один раз на слой так, чтобы
- * общая ширина диаграммы была ≈ 80 % от максимальной высоты в слое.
- * Пересчёт выполняется при `reload`/`setData`/`setFeatureFilter`.
  */
 export class GeoJSONLayer extends Layer {
     url = null;
@@ -313,8 +286,8 @@ export class GeoJSONLayer extends Layer {
     diagram3D = null;
     diagram3DToOptions = null;
     onEachDiagram3D = null;
-    /** Авторазмер bar3d, вычисленный один раз на слой. */
-    _diagram3DAutoSizing = null;
+    /** Кэш авторасчёта для `diagram3D` (unitM + barWidthM/barDepthM). */
+    _diagram3DAuto = null;
     featureFilter = null;
     filterSpec = null;
     filterExpression = null;
@@ -375,77 +348,73 @@ export class GeoJSONLayer extends Layer {
     defaultPolygon3DDepthTest = true;
     defaultPolygon3DDepthWrite = true;
     _loaded = false;
-    static fromMapboxFilter(arr) {
-        return mapboxToJsExpr(arr);
-    }
-    constructor(options = {}) {
+    static fromMapboxFilter(arr) { return mapboxToJsExpr(arr); }
+    constructor(o = {}) {
         super();
-        this.diagram = options.diagram ?? null;
-        this.diagramToOptions = options.diagramToOptions ?? null;
-        this.onEachDiagram = options.onEachDiagram ?? null;
-        this.tooltipOnHover = options.tooltipOnHover ?? false;
-        this.choropleth = options.choropleth ?? null;
-        if (this.choropleth)
-            this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
-        this.diagram3D = options.diagram3D ?? null;
-        this.diagram3DToOptions = options.diagram3DToOptions ?? null;
-        this.onEachDiagram3D = options.onEachDiagram3D ?? null;
-        this.url = options.url ?? null;
-        this.data = options.data ?? null;
-        this.crs = options.crs ?? null;
-        this.onEachFeature = options.onEachFeature ?? null;
-        this._applyFilter(options.featureFilter ?? options.filter ?? null);
-        this.style = options.style ?? null;
-        this.titleField = options.titleField ?? null;
-        this.pointToOptions = options.pointToOptions ?? null;
-        this.point3DToOptions = options.point3DToOptions ?? null;
-        this.lineToOptions = options.lineToOptions ?? null;
-        this.polygonToOptions = options.polygonToOptions ?? null;
-        this.polygon3DToOptions = options.polygon3DToOptions ?? null;
-        this.vectorToOptions = options.vectorToOptions ?? null;
-        this.tooltip = options.tooltip ?? null;
-        this.tooltipField = options.tooltipField ?? null;
-        this.defaultIconUrl = options.defaultIconUrl ?? 'marker.png';
-        this.defaultIconSize = options.defaultIconSize ?? [16, 16];
-        this.defaultAnchor = options.defaultAnchor ?? [0.5, 1.0];
-        this.default3DPrimitiveType = options.default3DPrimitiveType ?? 'box';
-        this.default3DSize = options.default3DSize ?? [100, 100, 100];
-        this.default3DAnchor = options.default3DAnchor ?? [0.5, 0, 0.5];
-        this.default3DAltitude = options.default3DAltitude ?? 0;
-        this.default3DAltitudeMode = options.default3DAltitudeMode ?? 'clampToGround';
-        this.defaultLineColor = options.defaultLineColor ?? '#3388ff';
-        this.defaultLineWidth = options.defaultLineWidth ?? 2;
-        this.defaultLineOpacity = options.defaultLineOpacity ?? 1;
-        this.defaultLineAltitudeMode = options.defaultLineAltitudeMode ?? 'absolute';
-        this.defaultLineAltitude = options.defaultLineAltitude ?? options.defaultLineAltitudeOffset ?? 10;
-        this.defaultLineDepthTest = options.defaultLineDepthTest ?? false;
-        this.defaultLineDepthWrite = options.defaultLineDepthWrite ?? false;
-        this.defaultLineMinZoom = options.defaultLineMinZoom ?? -Infinity;
-        this.defaultLineMaxZoom = options.defaultLineMaxZoom ?? Infinity;
-        this.defaultFillColor = options.defaultFillColor ?? '#3388ff';
-        this.defaultFillOpacity = options.defaultFillOpacity ?? 0.5;
-        this.defaultStrokeColor = options.defaultStrokeColor ?? '#000000';
-        this.defaultStrokeWidth = options.defaultStrokeWidth ?? 2;
-        this.defaultStrokeOpacity = options.defaultStrokeOpacity ?? 1;
-        this.defaultPolygonAltitudeMode = options.defaultPolygonAltitudeMode ?? 'absolute';
-        this.defaultPolygonAltitude = options.defaultPolygonAltitude ?? options.defaultPolygonAltitudeOffset ?? 10;
-        this.defaultPolygonDepthTest = options.defaultPolygonDepthTest ?? false;
-        this.defaultPolygonDepthWrite = options.defaultPolygonDepthWrite ?? false;
-        this.defaultPolygonMinZoom = options.defaultPolygonMinZoom ?? -Infinity;
-        this.defaultPolygonMaxZoom = options.defaultPolygonMaxZoom ?? Infinity;
-        this.defaultPolygonExtruded = options.defaultPolygonExtruded ?? false;
-        this.defaultPolygonHeight = options.defaultPolygonHeight ?? 0;
-        this.defaultPolygonMinHeight = options.defaultPolygonMinHeight ?? 0;
-        this.defaultPolygon3DPrimitiveType = options.defaultPolygon3DPrimitiveType ?? 'box';
-        this.defaultPolygon3DSize = options.defaultPolygon3DSize ?? null;
-        this.defaultPolygon3DAnchor = options.defaultPolygon3DAnchor ?? [0.5, 0, 0.5];
-        this.defaultPolygon3DAltitude = options.defaultPolygon3DAltitude ?? 0;
-        this.defaultPolygon3DAltitudeMode = options.defaultPolygon3DAltitudeMode ?? 'clampToGround';
-        this.defaultPolygon3DFit = options.defaultPolygon3DFit ?? 'stretch';
-        this.defaultPolygon3DRotate = options.defaultPolygon3DRotate ?? 0;
-        this.defaultPolygon3DModelUrl = options.defaultPolygon3DModelUrl ?? null;
-        this.defaultPolygon3DDepthTest = options.defaultPolygon3DDepthTest ?? true;
-        this.defaultPolygon3DDepthWrite = options.defaultPolygon3DDepthWrite ?? true;
+        this.diagram = o.diagram ?? null;
+        this.diagramToOptions = o.diagramToOptions ?? null;
+        this.onEachDiagram = o.onEachDiagram ?? null;
+        this.diagram3D = o.diagram3D ?? null;
+        this.diagram3DToOptions = o.diagram3DToOptions ?? null;
+        this.onEachDiagram3D = o.onEachDiagram3D ?? null;
+        this.choropleth = o.choropleth ?? null;
+        this.url = o.url ?? null;
+        this.data = o.data ?? null;
+        this.crs = o.crs ?? null;
+        this.onEachFeature = o.onEachFeature ?? null;
+        this.tooltipOnHover = o.tooltipOnHover ?? false;
+        this._applyFilter(o.featureFilter ?? o.filter ?? null);
+        this.style = o.style ?? null;
+        this.titleField = o.titleField ?? null;
+        this.pointToOptions = o.pointToOptions ?? null;
+        this.point3DToOptions = o.point3DToOptions ?? null;
+        this.lineToOptions = o.lineToOptions ?? null;
+        this.polygonToOptions = o.polygonToOptions ?? null;
+        this.polygon3DToOptions = o.polygon3DToOptions ?? null;
+        this.vectorToOptions = o.vectorToOptions ?? null;
+        this.tooltip = o.tooltip ?? null;
+        this.tooltipField = o.tooltipField ?? null;
+        this.defaultIconUrl = o.defaultIconUrl ?? 'marker.png';
+        this.defaultIconSize = o.defaultIconSize ?? [16, 16];
+        this.defaultAnchor = o.defaultAnchor ?? [0.5, 1.0];
+        this.default3DPrimitiveType = o.default3DPrimitiveType ?? 'box';
+        this.default3DSize = o.default3DSize ?? [100, 100, 100];
+        this.default3DAnchor = o.default3DAnchor ?? [0.5, 0, 0.5];
+        this.default3DAltitude = o.default3DAltitude ?? 0;
+        this.default3DAltitudeMode = o.default3DAltitudeMode ?? 'clampToGround';
+        this.defaultLineColor = o.defaultLineColor ?? '#3388ff';
+        this.defaultLineWidth = o.defaultLineWidth ?? 2;
+        this.defaultLineOpacity = o.defaultLineOpacity ?? 1;
+        this.defaultLineAltitudeMode = o.defaultLineAltitudeMode ?? 'absolute';
+        this.defaultLineAltitude = o.defaultLineAltitude ?? o.defaultLineAltitudeOffset ?? 10;
+        this.defaultLineDepthTest = o.defaultLineDepthTest ?? false;
+        this.defaultLineDepthWrite = o.defaultLineDepthWrite ?? false;
+        this.defaultLineMinZoom = o.defaultLineMinZoom ?? -Infinity;
+        this.defaultLineMaxZoom = o.defaultLineMaxZoom ?? Infinity;
+        this.defaultFillColor = o.defaultFillColor ?? '#3388ff';
+        this.defaultFillOpacity = o.defaultFillOpacity ?? 0.5;
+        this.defaultStrokeColor = o.defaultStrokeColor ?? '#000000';
+        this.defaultStrokeWidth = o.defaultStrokeWidth ?? 2;
+        this.defaultStrokeOpacity = o.defaultStrokeOpacity ?? 1;
+        this.defaultPolygonAltitudeMode = o.defaultPolygonAltitudeMode ?? 'absolute';
+        this.defaultPolygonAltitude = o.defaultPolygonAltitude ?? o.defaultPolygonAltitudeOffset ?? 10;
+        this.defaultPolygonDepthTest = o.defaultPolygonDepthTest ?? false;
+        this.defaultPolygonDepthWrite = o.defaultPolygonDepthWrite ?? false;
+        this.defaultPolygonMinZoom = o.defaultPolygonMinZoom ?? -Infinity;
+        this.defaultPolygonMaxZoom = o.defaultPolygonMaxZoom ?? Infinity;
+        this.defaultPolygonExtruded = o.defaultPolygonExtruded ?? false;
+        this.defaultPolygonHeight = o.defaultPolygonHeight ?? 0;
+        this.defaultPolygonMinHeight = o.defaultPolygonMinHeight ?? 0;
+        this.defaultPolygon3DPrimitiveType = o.defaultPolygon3DPrimitiveType ?? 'box';
+        this.defaultPolygon3DSize = o.defaultPolygon3DSize ?? null;
+        this.defaultPolygon3DAnchor = o.defaultPolygon3DAnchor ?? [0.5, 0, 0.5];
+        this.defaultPolygon3DAltitude = o.defaultPolygon3DAltitude ?? 0;
+        this.defaultPolygon3DAltitudeMode = o.defaultPolygon3DAltitudeMode ?? 'clampToGround';
+        this.defaultPolygon3DFit = o.defaultPolygon3DFit ?? 'stretch';
+        this.defaultPolygon3DRotate = o.defaultPolygon3DRotate ?? 0;
+        this.defaultPolygon3DModelUrl = o.defaultPolygon3DModelUrl ?? null;
+        this.defaultPolygon3DDepthTest = o.defaultPolygon3DDepthTest ?? true;
+        this.defaultPolygon3DDepthWrite = o.defaultPolygon3DDepthWrite ?? true;
     }
     // =================================================================
     // Lifecycle
@@ -456,30 +425,16 @@ export class GeoJSONLayer extends Layer {
             this._load();
         return this;
     }
-    /** Полная перезагрузка: удаляет объекты, сбрасывает флаг, загружает заново. */
     reload() {
-        const layer = this;
-        const objects = layer._objects ?? [];
-        for (const obj of [...objects])
+        const self = this;
+        for (const obj of [...(self._objects ?? [])])
             obj.remove();
-        layer._objects = [];
+        self._objects = [];
         this._loaded = false;
-        if (layer._map)
+        if (self._map)
             this._load();
     }
-    /** Меняет feature-фильтр. При активной карте автоматически `reload()`. */
-    setFeatureFilter(input) {
-        this._applyFilter(input);
-        if (this._map && this._loaded)
-            this.reload();
-        return this;
-    }
-    setStyle(style) {
-        this.style = style;
-        if (this._map && this._loaded)
-            this.reload();
-        return this;
-    }
+    // ── setters (все с авто-reload при активной карте) ─────────────
     setData(data) {
         this.data = data;
         if (this._map)
@@ -487,23 +442,6 @@ export class GeoJSONLayer extends Layer {
         else
             this._loaded = false;
         return this;
-    }
-    /** Alias для {@link setFeatureFilter}. */
-    setFilter(input) {
-        return this.setFeatureFilter(input);
-    }
-    setDiagram(cfg) {
-        this.diagram = cfg;
-        if (this._map && this._loaded)
-            this.reload();
-        return this;
-    }
-    getFilter() {
-        if (this.filterExpression != null)
-            return this.filterExpression;
-        if (this.filterSpec != null)
-            return this.filterSpec;
-        return this.featureFilter;
     }
     setUrl(url) {
         this.url = url;
@@ -513,11 +451,56 @@ export class GeoJSONLayer extends Layer {
             this._loaded = false;
         return this;
     }
-    /** Добавляет объекты к уже загруженным (без пересчёта авто-размеров bar3d). */
+    setStyle(style) {
+        this.style = style;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    setChoropleth(cfg) {
+        this.choropleth = cfg;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    setDiagram(cfg) {
+        this.diagram = cfg;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    setDiagram3D(cfg) {
+        this.diagram3D = cfg;
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    /** Меняет feature-фильтр. Пересоздаёт объекты слоя без пересоздания слоя. */
+    setFeatureFilter(input) {
+        this._applyFilter(input);
+        if (this._map && this._loaded)
+            this.reload();
+        return this;
+    }
+    /** Alias для `setFeatureFilter`. */
+    setFilter(input) {
+        return this.setFeatureFilter(input);
+    }
+    getFilter() {
+        if (this.filterExpression != null)
+            return this.filterExpression;
+        if (this.filterSpec != null)
+            return this.filterSpec;
+        return this.featureFilter;
+    }
+    /** Добавляет объекты к уже загруженным. */
     addData(data) {
         this._parse(data);
         return this;
     }
+    // =================================================================
+    // Filter
+    // =================================================================
     _applyFilter(input) {
         if (Array.isArray(input)) {
             try {
@@ -525,30 +508,23 @@ export class GeoJSONLayer extends Layer {
             }
             catch (err) {
                 console.warn('GeoJSONLayer: cannot convert Mapbox filter.', err, input);
-                this.featureFilter = null;
-                this.filterSpec = null;
-                this.filterExpression = null;
+                this.featureFilter = this.filterSpec = this.filterExpression = null;
                 return;
             }
         }
         if (!input) {
-            this.featureFilter = null;
-            this.filterSpec = null;
-            this.filterExpression = null;
+            this.featureFilter = this.filterSpec = this.filterExpression = null;
             return;
         }
         if (typeof input === 'function') {
             this.featureFilter = input;
-            this.filterSpec = null;
-            this.filterExpression = null;
+            this.filterSpec = this.filterExpression = null;
             return;
         }
         if (typeof input === 'string') {
             const trimmed = input.trim();
             if (!trimmed) {
-                this.featureFilter = null;
-                this.filterSpec = null;
-                this.filterExpression = null;
+                this.featureFilter = this.filterSpec = this.filterExpression = null;
                 return;
             }
             this.featureFilter = compileExpressionFilter(trimmed);
@@ -558,15 +534,16 @@ export class GeoJSONLayer extends Layer {
         }
         const spec = input;
         if (!Object.keys(spec).length) {
-            this.featureFilter = null;
-            this.filterSpec = null;
-            this.filterExpression = null;
+            this.featureFilter = this.filterSpec = this.filterExpression = null;
             return;
         }
         this.featureFilter = compileObjectFilter(spec);
         this.filterSpec = spec;
         this.filterExpression = null;
     }
+    // =================================================================
+    // Load
+    // =================================================================
     async _load() {
         let geojson = null;
         try {
@@ -579,12 +556,14 @@ export class GeoJSONLayer extends Layer {
                 geojson = await resp.json();
             }
             if (!geojson) {
-                console.warn('GeoJSONLayer: no data or URL provided');
+                console.warn('GeoJSONLayer: no data or URL');
                 return;
             }
-            if (this.choropleth)
+            if (this.choropleth) {
+                this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
                 this._calculateChoroplethBreaks(geojson);
-            this._computeDiagram3DAutoSizing(geojson);
+            }
+            this._computeDiagram3DAuto(geojson);
             this._parse(geojson);
             this._loaded = true;
         }
@@ -592,46 +571,45 @@ export class GeoJSONLayer extends Layer {
             console.error('GeoJSONLayer: load/parse error', err);
         }
     }
-    // ── Auto-sizing bar3d ───────────────────────────────────────────
+    // =================================================================
+    // Choropleth
+    // =================================================================
+    _calculateChoroplethBreaks(geojson) {
+        if (!this.choropleth)
+            return;
+        const values = [];
+        const visit = (f) => {
+            if (!f.properties)
+                return;
+            const v = this._evaluateValueExpression(f.properties, this.choropleth.value);
+            if (isFinite(v))
+                values.push(v);
+        };
+        if (geojson.type === 'FeatureCollection')
+            geojson.features.forEach(visit);
+        else if (geojson.type === 'Feature')
+            visit(geojson);
+        this._choroplethBreaks = calculateBreaks(values, this.choropleth.classification ?? 'jenks', this.choropleth.classes ?? 5);
+    }
+    // =================================================================
+    // 3D diagram: auto-sizing (unitM + bar dimensions)
+    // =================================================================
     /**
-     * Один раз на слой: определяет толщину/глубину bar3d-столбцов.
-     *
-     * - `cfg.barWidthM` и `cfg.barDepthM` заданы — берём их.
-     * - Задан только один — второй зеркалим.
-     * - Не заданы оба — считаем по `maxHeight` всех features (после фильтра):
-     *   `targetW = maxH * 0.8`, `barW = (targetW − gap·(n−1)) / n`,
-     *   но не тоньше `maxH * 0.05`.
-     *
-     * Значение «n» — максимум количества столбцов в одной feature, чтобы
-     * все диаграммы слоя имели одинаковую толщину столбцов.
+     * Один раз на слой:
+     * - если `unitM: 'auto'` — `unitM = maxHeightM / maxValue`;
+     * - если `barWidthM`/`barDepthM` не заданы — подбираем по maxH и n.
      */
-    _computeDiagram3DAutoSizing(geojson) {
-        this._diagram3DAutoSizing = null;
+    _computeDiagram3DAuto(geojson) {
+        this._diagram3DAuto = null;
         const cfg = this.diagram3D;
         if (!cfg?.fields?.length)
             return;
-        if ((cfg.type ?? 'bar3d') !== 'bar3d')
-            return;
-        if (cfg.barWidthM != null && cfg.barDepthM != null) {
-            this._diagram3DAutoSizing = { barWidthM: cfg.barWidthM, barDepthM: cfg.barDepthM };
-            return;
-        }
-        if (cfg.barWidthM != null) {
-            this._diagram3DAutoSizing = { barWidthM: cfg.barWidthM, barDepthM: cfg.barWidthM };
-            return;
-        }
-        if (cfg.barDepthM != null) {
-            this._diagram3DAutoSizing = { barWidthM: cfg.barDepthM, barDepthM: cfg.barDepthM };
-            return;
-        }
-        let maxH = 0;
-        let maxBars = 1;
+        let maxValue = 0, maxBars = 1;
         const scan = (f) => {
             if (this.featureFilter && !this.featureFilter(f))
                 return;
             const p = f.properties ?? {};
-            let localMax = 0;
-            let cnt = 0;
+            let localMax = 0, cnt = 0;
             for (const k of cfg.fields) {
                 const v = Number(p[k]);
                 if (isFinite(v) && v > 0) {
@@ -642,64 +620,64 @@ export class GeoJSONLayer extends Layer {
             }
             if (cnt === 0)
                 return;
-            const h = localMax * (cfg.unitM ?? 1);
-            if (h > maxH)
-                maxH = h;
+            if (localMax > maxValue)
+                maxValue = localMax;
             if (cnt > maxBars)
                 maxBars = cnt;
         };
         if (geojson.type === 'FeatureCollection')
-            for (const f of geojson.features)
-                scan(f);
+            geojson.features.forEach(scan);
         else if (geojson.type === 'Feature')
             scan(geojson);
-        if (maxH <= 0)
+        if (maxValue <= 0)
             return;
-        const gap = cfg.gapM ?? 0;
-        const targetW = maxH * 0.3;
-        const derived = Math.max(maxH * 0.05, (targetW - gap * Math.max(0, maxBars - 1)) / maxBars);
-        this._diagram3DAutoSizing = { barWidthM: derived, barDepthM: derived };
-    }
-    /**
-     * Дополняет bar3d-опции авто-размерами:
-     * - оба в opts заданы — не трогаем;
-     * - один задан — зеркалим второй;
-     * - ни один — берём из `_diagram3DAutoSizing`.
-     */
-    _withDiagram3DAutoSizing(opts) {
-        if ((opts.type ?? 'bar3d') !== 'bar3d')
-            return opts;
-        if (opts.barWidthM != null && opts.barDepthM != null)
-            return opts;
-        if (opts.barWidthM != null)
-            return { ...opts, barDepthM: opts.barWidthM };
-        if (opts.barDepthM != null)
-            return { ...opts, barWidthM: opts.barDepthM };
-        const auto = this._diagram3DAutoSizing;
-        if (!auto)
-            return opts;
-        return { ...opts, barWidthM: auto.barWidthM, barDepthM: auto.barDepthM };
-    }
-    // ── Choropleth ──────────────────────────────────────────────────
-    _calculateChoroplethBreaks(geojson) {
-        if (!this.choropleth)
-            return;
-        const values = [];
-        const processFeature = (f) => {
-            if (!f.properties)
-                return;
-            const val = this._evaluateValueExpression(f.properties, this.choropleth.value);
-            if (isFinite(val))
-                values.push(val);
+        const unitM = cfg.unitM === 'auto'
+            ? (cfg.maxHeightM ?? 1000) / maxValue
+            : (typeof cfg.unitM === 'number' ? cfg.unitM : 1);
+        let barWidthM = cfg.barWidthM ?? null;
+        let barDepthM = cfg.barDepthM ?? null;
+        if ((cfg.type ?? 'bar3d') === 'bar3d') {
+            if (barWidthM != null && barDepthM == null)
+                barDepthM = barWidthM;
+            else if (barDepthM != null && barWidthM == null)
+                barWidthM = barDepthM;
+            else if (barWidthM == null && barDepthM == null) {
+                const maxH = maxValue * unitM;
+                const gap = cfg.gapM ?? 0;
+                const targetW = maxH * 0.3;
+                const derived = Math.max(maxH * 0.05, (targetW - gap * Math.max(0, maxBars - 1)) / maxBars);
+                barWidthM = derived;
+                barDepthM = derived;
+            }
+        }
+        this._diagram3DAuto = {
+            unitM,
+            barWidthM: barWidthM ?? 0,
+            barDepthM: barDepthM ?? 0,
         };
-        if (geojson.type === 'FeatureCollection')
-            geojson.features.forEach(processFeature);
-        else if (geojson.type === 'Feature')
-            processFeature(geojson);
-        this._choroplethBreaks = calculateBreaks(values, this.choropleth.classification || 'jenks', this.choropleth.classes || 5);
+    }
+    /** Дополняет `opts` авто-размерами bar3d, если они не заданы. */
+    _withDiagram3DAuto(opts) {
+        const out = { ...opts };
+        const auto = this._diagram3DAuto;
+        if (!auto)
+            return out;
+        if (out.unitM == null)
+            out.unitM = auto.unitM;
+        if ((out.type ?? 'bar3d') === 'bar3d') {
+            if (out.barWidthM != null && out.barDepthM == null)
+                out.barDepthM = out.barWidthM;
+            else if (out.barDepthM != null && out.barWidthM == null)
+                out.barWidthM = out.barDepthM;
+            else if (out.barWidthM == null && out.barDepthM == null) {
+                out.barWidthM = auto.barWidthM;
+                out.barDepthM = auto.barDepthM;
+            }
+        }
+        return out;
     }
     // =================================================================
-    // Style resolution
+    // Style helpers
     // =================================================================
     _getTitle(props) {
         if (this.titleField) {
@@ -725,8 +703,7 @@ export class GeoJSONLayer extends Layer {
                             if (Object.prototype.hasOwnProperty.call(t, k)) return t[k];
                             return props[k];
                         },
-                    }
-                );
+                    });
                 with (__scope) { return Number(${exprOrFn}); }
             `);
             return fn(props);
@@ -752,21 +729,20 @@ export class GeoJSONLayer extends Layer {
         }
         if (this.tooltipField) {
             const raw = props[this.tooltipField];
-            if (raw != null && raw !== '' && String(raw).includes('{'))
-                return interpolate(String(raw), props);
-            if (raw != null && raw !== '')
-                return String(raw);
+            if (raw != null && raw !== '') {
+                return String(raw).includes('{') ? interpolate(String(raw), props) : String(raw);
+            }
         }
         return props.tooltip || props.description || '';
     }
     _resolveStyle(props, type) {
-        const style = this.style;
-        if (!style)
+        const s = this.style;
+        if (!s)
             return null;
-        const by = style.by ?? 'category';
+        const by = s.by ?? 'category';
         const value = props[by];
-        const shared = this._pickStyleLevel(style, value);
-        const perType = this._pickStyleLevel(style[type], value);
+        const shared = this._pickStyleLevel(s, value);
+        const perType = this._pickStyleLevel(s[type], value);
         if (!shared && !perType)
             return null;
         if (!shared)
@@ -785,21 +761,15 @@ export class GeoJSONLayer extends Layer {
         }
         return cfg.default ?? null;
     }
-    /** Alias → canonical; canonical побеждает; числовые ключи приводятся к number. */
     _normalizeStyle(src, aliases) {
         if (!src)
             return null;
         const out = { ...src };
         for (const [alias, canonical] of Object.entries(aliases)) {
             if (out[canonical] === undefined && out[alias] != null) {
-                if (NUMERIC_OPTION_KEYS.has(canonical)) {
-                    const num = this._asNumber(out[alias]);
-                    if (num !== undefined)
-                        out[canonical] = num;
-                }
-                else {
-                    out[canonical] = out[alias];
-                }
+                out[canonical] = NUMERIC_OPTION_KEYS.has(canonical)
+                    ? this._asNumber(out[alias]) ?? out[alias]
+                    : out[alias];
             }
             delete out[alias];
         }
@@ -811,8 +781,8 @@ export class GeoJSONLayer extends Layer {
     _parse(geojson) {
         const type = geojson.type;
         if (type === 'FeatureCollection') {
-            for (const feature of geojson.features)
-                this._addFeature(feature);
+            for (const f of geojson.features)
+                this._addFeature(f);
         }
         else if (type === 'Feature') {
             this._addFeature(geojson);
@@ -857,111 +827,64 @@ export class GeoJSONLayer extends Layer {
     // =================================================================
     // Points
     // =================================================================
-    _addPointDiagram3D(feature, props, lonLat, _altFromCoords) {
-        const raw = this.diagram3DToOptions
-            ? this.diagram3DToOptions(feature, props)
-            : this._diagram3DFromConfig(feature, props);
-        if (!raw)
-            return;
-        const baseOpts = this._withDiagram3DAutoSizing(raw);
-        const diagram = new Diagram3D({
-            ...baseOpts,
-            position: lonLat,
-            crs: this.crs ?? undefined,
-            altitude: (baseOpts.altitude ?? this.defaultPolygonAltitude) + 5,
-            altitudeMode: baseOpts.altitudeMode ?? this.defaultPolygonAltitudeMode,
-            clusterable: false,
-        });
-        this.add(diagram);
-        if (this.onEachDiagram3D)
-            this.onEachDiagram3D(feature, diagram);
-    }
-    _addCartodiagram3D(feature, props, polygon) {
-        const raw = this.diagram3DToOptions
-            ? this.diagram3DToOptions(feature, props)
-            : this._diagram3DFromConfig(feature, props);
-        if (!raw)
-            return;
-        const baseOpts = this._withDiagram3DAutoSizing(raw);
-        const center = polygon.getVisualCenter();
-        if (!center)
-            return;
-        const diagram = new Diagram3D({
-            ...baseOpts,
-            position: center,
-            crs: 'EPSG:4326',
-            altitude: baseOpts.altitude ?? this.defaultPolygonAltitude,
-            altitudeMode: baseOpts.altitudeMode ?? this.defaultPolygonAltitudeMode,
-            clusterable: false,
-        });
-        this.add(diagram);
-        if (this.onEachDiagram3D)
-            this.onEachDiagram3D(feature, diagram);
-    }
-    _diagram3DFromConfig(feature, props) {
-        const cfg = this.diagram3D;
-        if (!cfg?.fields?.length)
-            return null;
-        const data = cfg.fields
-            .map(key => {
-            const v = Number(props[key]);
-            if (!isFinite(v))
-                return null;
-            return { label: key, value: v, color: cfg.colorMap?.[key] };
-        })
-            .filter((d) => d !== null);
-        if (!data.length)
-            return null;
-        let tooltip = this._getTooltip(props);
-        if (!tooltip)
-            tooltip = data.map(d => `${d.label}: <b>${d.value}</b>`).join('<br>');
-        return {
-            type: cfg.type ?? 'bar3d',
-            data,
-            unitM: cfg.unitM,
-            barWidthM: cfg.barWidthM,
-            barDepthM: cfg.barDepthM,
-            gapM: cfg.gapM,
-            strokeColor: cfg.strokeColor,
-            strokeWidthM: cfg.strokeWidthM,
-            minZoom: cfg.minZoom,
-            maxZoom: cfg.maxZoom,
-            tooltip,
-            altitude: cfg.altitude,
-            altitudeMode: cfg.altitudeMode,
-            unitValue: cfg.unitValue,
-            maxCols: cfg.maxCols,
-        };
-    }
     _addPointFeature(feature) {
         const geom = feature.geometry;
         if (geom.type !== 'Point')
             return;
         const props = feature.properties ?? {};
-        const coords = geom.coordinates;
-        const lonLat = [coords[0], coords[1]];
-        const altFromCoords = coords.length >= 3 ? coords[2] : undefined;
-        if (this.diagram3D || this.diagram3DToOptions) {
-            if (props.diagram3D !== false) {
-                this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
-                return;
-            }
+        const [lon, lat, alt] = geom.coordinates;
+        const lonLat = [lon, lat];
+        const altFromCoords = alt !== undefined ? alt : undefined;
+        if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
+            this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
+            return;
         }
-        if (this.diagram || this.diagramToOptions) {
-            if (props.diagram !== false) {
-                this._addPointDiagram(feature, props, lonLat);
-                return;
-            }
+        if ((this.diagram || this.diagramToOptions) && props.diagram !== false) {
+            this._addPointDiagram(feature, props, lonLat);
+            return;
         }
-        const cb3D = this.point3DToOptions ? this.point3DToOptions(feature, props) : null;
+        const cb3D = this.point3DToOptions?.(feature, props) ?? null;
         const is3D = cb3D != null
             || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
         if (is3D)
             this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
-        else {
-            const cb = this.pointToOptions ? this.pointToOptions(feature, props) : null;
-            this._createMarker(feature, props, lonLat, altFromCoords, cb);
-        }
+        else
+            this._createMarker(feature, props, lonLat, altFromCoords, this.pointToOptions?.(feature, props) ?? null);
+    }
+    _addPointDiagram3D(feature, props, lonLat, altFromCoords) {
+        const raw = this.diagram3DToOptions
+            ? this.diagram3DToOptions(feature, props)
+            : this._diagram3DFromConfig(feature, props);
+        if (!raw)
+            return;
+        const baseOpts = this._withDiagram3DAuto(raw);
+        const d = new Diagram3D({
+            ...baseOpts,
+            position: lonLat,
+            crs: this.crs ?? undefined,
+            altitude: baseOpts.altitude ?? altFromCoords ?? 0,
+            altitudeMode: baseOpts.altitudeMode ?? 'clampToGround',
+            clusterable: false,
+        });
+        this.add(d);
+        this.onEachDiagram3D?.(feature, d);
+    }
+    _addPointDiagram(feature, props, lonLat) {
+        const opts = this.diagramToOptions
+            ? this.diagramToOptions(feature, props)
+            : this._diagramFromConfig(feature, props);
+        if (!opts)
+            return;
+        const d = new Diagram({
+            ...opts,
+            position: lonLat,
+            crs: this.crs ?? undefined,
+            parentPolygon: null,
+            fitToPolygon: false,
+            clusterable: false,
+        });
+        this.add(d);
+        this.onEachDiagram?.(feature, d);
     }
     _createMarker(feature, props, lonLat, altFromCoords, cb) {
         const defaults = {
@@ -985,13 +908,13 @@ export class GeoJSONLayer extends Layer {
             titleAllowOverflow: props.titleAllowOverflow,
             titlePriority: this._asNumber(props.titlePriority),
         };
-        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'point'), POINT_ALIASES);
-        const normCb = this._normalizeStyle(cb, POINT_ALIASES);
-        const merged = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), position: lonLat };
-        const marker = new Marker(merged);
+        const style = this._normalizeStyle(this._resolveStyle(props, 'point'), POINT_ALIASES);
+        const cbNorm = this._normalizeStyle(cb, POINT_ALIASES);
+        const marker = new Marker({
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
+        });
         this.add(marker);
-        if (this.onEachFeature)
-            this.onEachFeature(feature, marker);
+        this.onEachFeature?.(feature, marker);
     }
     _createMarker3D(feature, props, lonLat, altFromCoords, cb) {
         const defaults = {
@@ -1020,13 +943,13 @@ export class GeoJSONLayer extends Layer {
             depthWrite: props.depthWrite,
             playAnimation: props.playAnimation,
         };
-        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
-        const normCb = this._normalizeStyle(cb, MARKER3D_ALIASES);
-        const merged = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), position: lonLat };
-        const marker = new Marker3D(merged);
+        const style = this._normalizeStyle(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
+        const cbNorm = this._normalizeStyle(cb, MARKER3D_ALIASES);
+        const marker = new Marker3D({
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
+        });
         this.add(marker);
-        if (this.onEachFeature)
-            this.onEachFeature(feature, marker);
+        this.onEachFeature?.(feature, marker);
     }
     // =================================================================
     // Lines
@@ -1040,7 +963,7 @@ export class GeoJSONLayer extends Layer {
         for (const coords of coordSets) {
             if (coords.length < 2)
                 continue;
-            const cb = this.lineToOptions ? this.lineToOptions(feature, props) : null;
+            const cb = this.lineToOptions?.(feature, props) ?? null;
             const defaults = {
                 positions: coords,
                 crs: this.crs ?? undefined,
@@ -1066,13 +989,11 @@ export class GeoJSONLayer extends Layer {
                 titleAllowOverflow: props.titleAllowOverflow,
                 titlePriority: this._asNumber(props.titlePriority),
             };
-            const normStyle = this._normalizeStyle(this._resolveStyle(props, 'line'), LINE_ALIASES);
-            const normCb = this._normalizeStyle(cb, LINE_ALIASES);
-            const merged = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), positions: coords };
-            const polyline = new Polyline(merged);
+            const style = this._normalizeStyle(this._resolveStyle(props, 'line'), LINE_ALIASES);
+            const cbNorm = this._normalizeStyle(cb, LINE_ALIASES);
+            const polyline = new Polyline({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions: coords });
             this.add(polyline);
-            if (this.onEachFeature)
-                this.onEachFeature(feature, polyline);
+            this.onEachFeature?.(feature, polyline);
         }
     }
     // =================================================================
@@ -1087,65 +1008,168 @@ export class GeoJSONLayer extends Layer {
         for (const rings of ringSets) {
             if (!rings.length || !rings[0].length)
                 continue;
-            const cb3D = this.polygon3DToOptions ? this.polygon3DToOptions(feature, props) : null;
+            const cb3D = this.polygon3DToOptions?.(feature, props) ?? null;
             const is3D = cb3D != null
                 || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
             if (is3D) {
                 this._createArea3D(feature, props, rings, cb3D);
+                continue;
             }
-            else {
-                const cb = this.polygonToOptions ? this.polygonToOptions(feature, props) : null;
-                const polygon = this._createPolygon(feature, props, rings, cb);
-                if (polygon) {
-                    if (this.diagram3D || this.diagram3DToOptions)
-                        this._addCartodiagram3D(feature, props, polygon);
-                    else if (this.diagram || this.diagramToOptions)
-                        this._addCartodiagram(feature, props, polygon);
-                }
-            }
+            const polygon = this._createPolygon(feature, props, rings, this.polygonToOptions?.(feature, props) ?? null);
+            if (!polygon)
+                continue;
+            if (this.diagram3D || this.diagram3DToOptions)
+                this._addCartodiagram3D(feature, props, polygon);
+            else if (this.diagram || this.diagramToOptions)
+                this._addCartodiagram(feature, props, polygon);
         }
     }
-    _addPointDiagram(feature, props, lonLat) {
-        const baseOpts = this.diagramToOptions
-            ? this.diagramToOptions(feature, props)
-            : this._diagramFromConfig(feature, props);
-        if (!baseOpts)
-            return;
-        const diagram = new Diagram({
-            ...baseOpts,
-            position: lonLat,
+    _createPolygon(feature, props, rings, cb) {
+        let choroplethColor;
+        if (this.choropleth && this._choroplethRamp) {
+            const val = this._evaluateValueExpression(props, this.choropleth.value);
+            if (isFinite(val)) {
+                const idx = getClassIndex(val, this._choroplethBreaks);
+                const t = this._choroplethBreaks.length
+                    ? idx / this._choroplethBreaks.length : 0;
+                const rgba = sampleColorRamp(this._choroplethRamp, t);
+                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
+            }
+            else {
+                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
+            }
+        }
+        const defaults = {
+            rings,
             crs: this.crs ?? undefined,
-            parentPolygon: null,
-            fitToPolygon: false,
-            clusterable: false,
-        });
-        this.add(diagram);
-        if (this.onEachDiagram)
-            this.onEachDiagram(feature, diagram);
+            fillColor: choroplethColor || props.fill || props['fill-color'] || this.defaultFillColor,
+            fillOpacity: this._asNumber(props['fill-opacity']) ?? this.defaultFillOpacity,
+            strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
+            strokeWidth: this._asNumber(props['stroke-width']) ?? this.defaultStrokeWidth,
+            strokeOpacity: this._asNumber(props['stroke-opacity']) ?? this.defaultStrokeOpacity,
+            altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
+            altitude: this._asNumber(props.altitude)
+                ?? this._asNumber(props.altitudeOffset)
+                ?? this.defaultPolygonAltitude,
+            depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
+            depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
+            minZoom: this._asNumber(props.minZoom) ?? this.defaultPolygonMinZoom,
+            maxZoom: this._asNumber(props.maxZoom) ?? this.defaultPolygonMaxZoom,
+            extruded: props.extruded ?? this.defaultPolygonExtruded,
+            height: this._asNumber(props.height) ?? this.defaultPolygonHeight,
+            minHeight: this._asNumber(props.minHeight) ?? this.defaultPolygonMinHeight,
+            title: this._getTitle(props),
+            titleOffset: this._parsePair(props.titleOffset) ?? undefined,
+            titleAlign: props.titleAlign,
+            titleStyle: props.titleStyle,
+            titleMinZoom: this._asNumber(props.titleMinZoom),
+            titleMaxZoom: this._asNumber(props.titleMaxZoom),
+            titleAllowOverflow: props.titleAllowOverflow,
+            titlePriority: this._asNumber(props.titlePriority),
+            tooltip: this._getTooltip(props),
+            tooltipOnHover: this.tooltipOnHover,
+        };
+        const style = this._normalizeStyle(this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
+        const cbNorm = this._normalizeStyle(cb, POLYGON_ALIASES);
+        const merged = {
+            ...defaults,
+            ...(style ?? {}),
+            ...(cbNorm ?? {}),
+            rings,
+            fillColor: choroplethColor || cbNorm?.fillColor || style?.fillColor || defaults.fillColor,
+        };
+        const polygon = new Polygon(merged);
+        this.add(polygon);
+        this.onEachFeature?.(feature, polygon);
+        return polygon;
     }
     _addCartodiagram(feature, props, polygon) {
-        const baseOpts = this.diagramToOptions
+        const opts = this.diagramToOptions
             ? this.diagramToOptions(feature, props)
             : this._diagramFromConfig(feature, props);
-        if (!baseOpts)
+        if (!opts)
             return;
         const center = polygon.getVisualCenter();
         if (!center)
             return;
-        const diagram = new Diagram({
-            ...baseOpts,
+        const d = new Diagram({
+            ...opts,
             position: center,
             crs: this.crs,
             parentPolygon: polygon,
-            fitToPolygon: baseOpts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
-            minScreenScale: baseOpts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,
+            fitToPolygon: opts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
+            minScreenScale: opts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,
             clusterable: false,
         });
-        this.add(diagram);
-        if (this.onEachDiagram)
-            this.onEachDiagram(feature, diagram);
+        this.add(d);
+        this.onEachDiagram?.(feature, d);
     }
-    _diagramFromConfig(feature, props) {
+    _addCartodiagram3D(feature, props, polygon) {
+        const raw = this.diagram3DToOptions
+            ? this.diagram3DToOptions(feature, props)
+            : this._diagram3DFromConfig(feature, props);
+        if (!raw)
+            return;
+        const baseOpts = this._withDiagram3DAuto(raw);
+        const center = polygon.getVisualCenter();
+        if (!center)
+            return;
+        const d = new Diagram3D({
+            ...baseOpts,
+            position: center,
+            crs: 'EPSG:4326',
+            altitude: baseOpts.altitude ?? this.defaultPolygonAltitude,
+            altitudeMode: baseOpts.altitudeMode ?? this.defaultPolygonAltitudeMode,
+            clusterable: false,
+        });
+        this.add(d);
+        this.onEachDiagram3D?.(feature, d);
+    }
+    // ── config → opts ─────────────────────────────────────────────────
+    _diagram3DFromConfig(_f, props) {
+        const cfg = this.diagram3D;
+        if (!cfg?.fields?.length)
+            return null;
+        const unitM = this._diagram3DAuto?.unitM
+            ?? (typeof cfg.unitM === 'number' ? cfg.unitM : 1);
+        const minVal = (cfg.minValueM ?? 0) > 0 ? (cfg.minValueM / unitM) : 0;
+        const data = [];
+        for (let i = 0; i < cfg.fields.length; i++) {
+            const key = cfg.fields[i];
+            const raw = Number(props[key]);
+            if (!isFinite(raw))
+                continue;
+            const value = Math.max(raw, minVal);
+            const color = resolveColorMapValue(cfg.colorMap?.[key], raw);
+            data.push(color !== undefined
+                ? { label: key, value, color }
+                : { label: key, value });
+        }
+        if (!data.length)
+            return null;
+        let tooltip = this._getTooltip(props);
+        if (!tooltip) {
+            tooltip = cfg.fields.map(k => `${k}: <b>${props[k]}</b>`).join('<br>');
+        }
+        return {
+            type: cfg.type ?? 'bar3d',
+            data,
+            unitM,
+            barWidthM: cfg.barWidthM,
+            barDepthM: cfg.barDepthM,
+            gapM: cfg.gapM,
+            strokeColor: cfg.strokeColor,
+            strokeWidthM: cfg.strokeWidthM,
+            minZoom: cfg.minZoom,
+            maxZoom: cfg.maxZoom,
+            tooltip,
+            altitude: cfg.altitude,
+            altitudeMode: cfg.altitudeMode,
+            unitValue: cfg.unitValue,
+            maxCols: cfg.maxCols,
+        };
+    }
+    _diagramFromConfig(_f, props) {
         const cfg = this.diagram;
         if (!cfg?.fields?.length)
             return null;
@@ -1200,67 +1224,6 @@ export class GeoJSONLayer extends Layer {
             segmentSizes: cfg.segmentSizes,
         };
     }
-    _createPolygon(feature, props, rings, cb) {
-        let choroplethColor;
-        if (this.choropleth && this._choroplethRamp) {
-            const val = this._evaluateValueExpression(props, this.choropleth.value);
-            if (isFinite(val)) {
-                const classIdx = getClassIndex(val, this._choroplethBreaks);
-                const t = this._choroplethBreaks.length > 0
-                    ? classIdx / this._choroplethBreaks.length
-                    : 0;
-                const rgba = sampleColorRamp(this._choroplethRamp, t);
-                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
-            }
-            else {
-                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
-            }
-        }
-        const defaults = {
-            rings,
-            crs: this.crs ?? undefined,
-            fillColor: choroplethColor || props.fill || props['fill-color'] || this.defaultFillColor,
-            fillOpacity: this._asNumber(props['fill-opacity']) ?? this.defaultFillOpacity,
-            strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,
-            strokeWidth: this._asNumber(props['stroke-width']) ?? this.defaultStrokeWidth,
-            strokeOpacity: this._asNumber(props['stroke-opacity']) ?? this.defaultStrokeOpacity,
-            altitudeMode: props.altitudeMode || this.defaultPolygonAltitudeMode,
-            altitude: this._asNumber(props.altitude)
-                ?? this._asNumber(props.altitudeOffset)
-                ?? this.defaultPolygonAltitude,
-            depthTest: props.depthTest ?? this.defaultPolygonDepthTest,
-            depthWrite: props.depthWrite ?? this.defaultPolygonDepthWrite,
-            minZoom: this._asNumber(props.minZoom) ?? this.defaultPolygonMinZoom,
-            maxZoom: this._asNumber(props.maxZoom) ?? this.defaultPolygonMaxZoom,
-            extruded: props.extruded ?? this.defaultPolygonExtruded,
-            height: this._asNumber(props.height) ?? this.defaultPolygonHeight,
-            minHeight: this._asNumber(props.minHeight) ?? this.defaultPolygonMinHeight,
-            title: this._getTitle(props),
-            titleOffset: this._parsePair(props.titleOffset) ?? undefined,
-            titleAlign: props.titleAlign,
-            titleStyle: props.titleStyle,
-            titleMinZoom: this._asNumber(props.titleMinZoom),
-            titleMaxZoom: this._asNumber(props.titleMaxZoom),
-            titleAllowOverflow: props.titleAllowOverflow,
-            titlePriority: this._asNumber(props.titlePriority),
-            tooltip: this._getTooltip(props),
-            tooltipOnHover: this.tooltipOnHover,
-        };
-        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
-        const normCb = this._normalizeStyle(cb, POLYGON_ALIASES);
-        const merged = {
-            ...defaults,
-            ...(normStyle ?? {}),
-            ...(normCb ?? {}),
-            rings,
-            fillColor: choroplethColor || normCb?.fillColor || normStyle?.fillColor || defaults.fillColor,
-        };
-        const polygon = new Polygon(merged);
-        this.add(polygon);
-        if (this.onEachFeature)
-            this.onEachFeature(feature, polygon);
-        return polygon;
-    }
     _createArea3D(feature, props, rings, cb) {
         const defaults = {
             rings,
@@ -1287,13 +1250,11 @@ export class GeoJSONLayer extends Layer {
             titleMaxZoom: this._asNumber(props.titleMaxZoom),
             tooltip: this._getTooltip(props),
         };
-        const normStyle = this._normalizeStyle(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
-        const normCb = this._normalizeStyle(cb, AREA3D_ALIASES);
-        const merged = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), rings };
-        const area = new Area3D(merged);
+        const style = this._normalizeStyle(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
+        const cbNorm = this._normalizeStyle(cb, AREA3D_ALIASES);
+        const area = new Area3D({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), rings });
         this.add(area);
-        if (this.onEachFeature)
-            this.onEachFeature(feature, area);
+        this.onEachFeature?.(feature, area);
     }
     // =================================================================
     // Vector3D
@@ -1301,17 +1262,12 @@ export class GeoJSONLayer extends Layer {
     _addVectorFeature(feature) {
         const geom = feature.geometry;
         const props = feature.properties ?? {};
-        let coordSets;
-        if (geom.type === 'LineString')
-            coordSets = [geom.coordinates];
-        else if (geom.type === 'MultiLineString')
-            coordSets = geom.coordinates;
-        else
-            coordSets = [null];
+        const coordSets = geom.type === 'LineString' ? [geom.coordinates]
+            : geom.type === 'MultiLineString' ? geom.coordinates
+                : [null];
         for (const coords of coordSets) {
-            const cb = this.vectorToOptions ? this.vectorToOptions(feature, props) : null;
-            const defaultPositions = coords ? this._toVectorPositions(coords) : undefined;
-            const positions = cb?.positions ?? defaultPositions;
+            const cb = this.vectorToOptions?.(feature, props) ?? null;
+            const positions = cb?.positions ?? (coords ? this._toVectorPositions(coords) : undefined);
             if (!positions || positions.length < 2)
                 continue;
             const defaults = {
@@ -1333,17 +1289,15 @@ export class GeoJSONLayer extends Layer {
                 arrowSize: this._asNumber(props.arrowSize) ?? 10,
                 opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? 1,
             };
-            const normStyle = this._normalizeStyle(this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
-            const normCb = this._normalizeStyle(cb, VECTOR_ALIASES);
-            const merged = { ...defaults, ...(normStyle ?? {}), ...(normCb ?? {}), positions };
-            const vector = new Vector3D(merged);
-            this.add(vector);
-            if (this.onEachFeature)
-                this.onEachFeature(feature, vector);
+            const style = this._normalizeStyle(this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
+            const cbNorm = this._normalizeStyle(cb, VECTOR_ALIASES);
+            const v = new Vector3D({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions });
+            this.add(v);
+            this.onEachFeature?.(feature, v);
         }
     }
     // =================================================================
-    // Internal parsers / utils
+    // Parsers
     // =================================================================
     _toVectorPositions(coords) {
         return coords.map(c => [c[0], c[1], c[2] ?? 0]);
@@ -1354,23 +1308,19 @@ export class GeoJSONLayer extends Layer {
         if (Array.isArray(raw))
             return raw;
         if (typeof raw === 'string') {
-            const parts = raw.split(',').map(Number);
-            if (parts.length >= 1 && parts.length <= 3 && parts.every(v => !isNaN(v)))
-                return parts;
+            const p = raw.split(',').map(Number);
+            if (p.length >= 1 && p.length <= 3 && p.every(v => !isNaN(v)))
+                return p;
         }
         return null;
     }
     _parseIconSize(raw) {
-        const arr = this._parseSize(raw);
-        if (!arr || arr.length !== 2)
-            return null;
-        return [arr[0], arr[1]];
+        const a = this._parseSize(raw);
+        return a && a.length === 2 ? [a[0], a[1]] : null;
     }
     _parseSizeSpec(raw) {
-        const arr = this._parseSize(raw);
-        if (!arr || arr.length < 1 || arr.length > 3)
-            return null;
-        return arr;
+        const a = this._parseSize(raw);
+        return a && a.length >= 1 && a.length <= 3 ? a : null;
     }
     _parsePair(raw) {
         if (!raw)
@@ -1381,9 +1331,9 @@ export class GeoJSONLayer extends Layer {
                 return [a, b];
         }
         if (typeof raw === 'string') {
-            const parts = raw.split(',').map(Number);
-            if (parts.length === 2 && parts.every(v => !isNaN(v)))
-                return [parts[0], parts[1]];
+            const p = raw.split(',').map(Number);
+            if (p.length === 2 && p.every(v => !isNaN(v)))
+                return [p[0], p[1]];
         }
         return null;
     }
@@ -1397,9 +1347,9 @@ export class GeoJSONLayer extends Layer {
                 return [a, b, c];
         }
         if (typeof raw === 'string') {
-            const parts = raw.split(',').map(Number);
-            if (parts.length === 3 && parts.every(v => !isNaN(v)))
-                return [parts[0], parts[1], parts[2]];
+            const p = raw.split(',').map(Number);
+            if (p.length === 3 && p.every(v => !isNaN(v)))
+                return [p[0], p[1], p[2]];
         }
         return null;
     }

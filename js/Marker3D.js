@@ -13,6 +13,7 @@
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
+import { getDracoDecoderPath } from './Defaults.js';
 const MARKER_RENDER_ORDER = 1000;
 // =====================================================================
 // Marker3D
@@ -363,7 +364,7 @@ export class Marker3D extends SpatialObject {
             try {
                 const loader = new GLTFLoader();
                 const dracoLoader = new DRACOLoader();
-                dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
+                dracoLoader.setDecoderPath(getDracoDecoderPath());
                 dracoLoader.setDecoderConfig({ type: 'wasm' });
                 loader.setDRACOLoader(dracoLoader);
                 const gltf = await loader.loadAsync(this._modelUrl);

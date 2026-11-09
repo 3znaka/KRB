@@ -28,3 +28,4 @@ export { VectorLineLayer } from './VectorLineLayer.js';
 export * from './styles/index.js';
 export { Diagram } from './Diagram.js';
 import './PolygonBatcher.js';
+export { setDracoDecoderPath, getDracoDecoderPath } from './Defaults.js';

@@ -46,4 +46,22 @@ export const DEFAULTS = {
     STATIC_BG_ZOOM: 2,
     /** Размер тайла в пикселях (информативное значение). */
     TILE_PIXELS: 256,
+    DRACO_DECODER_PATH: './js_TP/draco/',
 };
+let _dracoDecoderPath = DEFAULTS.DRACO_DECODER_PATH;
+/**
+ * Задаёт путь к каталогу с DRACO-декодером. Вызывать один раз при
+ * инициализации приложения — до создания `Marker3D` / `Area3D`
+ * с `modelUrl`.
+ *
+ * @example
+ * import * as KRB from '../js/KRB.js';
+ * KRB.setDracoDecoderPath('../js/js_TP/draco/');
+ */
+export function setDracoDecoderPath(path) {
+    _dracoDecoderPath = path;
+}
+/** Текущий путь к DRACO-декодеру (default или переопределённый). */
+export function getDracoDecoderPath() {
+    return _dracoDecoderPath;
+}

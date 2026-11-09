@@ -15,6 +15,7 @@
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
+import { getDracoDecoderPath } from './Defaults.js';
 
 // =====================================================================
 // Типы
@@ -466,11 +467,11 @@ this._userData = options.userData ?? {};
         if (this._modelPromise) return this._modelPromise;
         this._modelPromise = (async () => {
             try {
-                const loader = new GLTFLoader();
-                const dracoLoader = new DRACOLoader();
-                dracoLoader.setDecoderPath('https://cdn.mapengine.ru/KRB/js_TP/draco/');
-                dracoLoader.setDecoderConfig({ type: 'wasm' });
-                loader.setDRACOLoader(dracoLoader);
+               const loader = new GLTFLoader();
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath(getDracoDecoderPath());
+dracoLoader.setDecoderConfig({ type: 'wasm' });
+loader.setDRACOLoader(dracoLoader);
 
                 const gltf = await (loader as any).loadAsync(this._modelUrl!);
                 const model = gltf.scene;

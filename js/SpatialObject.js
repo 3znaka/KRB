@@ -237,6 +237,9 @@ export class SpatialObject {
     getProperties() {
         return this._properties;
     }
+    getPopupAnchor() {
+        return this.getScreenPosition();
+    }
     /**
  * Включает/выключает интерполяцию числовых свойств по зуму.
  *

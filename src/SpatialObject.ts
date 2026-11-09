@@ -289,6 +289,10 @@ isVisible(): boolean {
         return this._properties;
     }
 
+    getPopupAnchor(): { x: number; y: number } | null {
+    return this.getScreenPosition();
+}
+
         /**
      * Включает/выключает интерполяцию числовых свойств по зуму.
      *

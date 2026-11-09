@@ -835,6 +835,58 @@ export class Marker3D extends SpatialObject {
         }
     }
     // =================================================================
+    // PopupManager: точка привязки тултипа (не подписи!)
+    // =================================================================
+    /** Проецирует произвольную world-точку в экранные координаты. */
+    _projectWorldPoint(map, canvas, x, y, z) {
+        const v = map.getVec3().set(x, y, z);
+        v.project(map.camera);
+        if (v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1)
+            return null;
+        return {
+            x: (v.x * 0.5 + 0.5) * canvas.clientWidth,
+            y: (-v.y * 0.5 + 0.5) * canvas.clientHeight,
+        };
+    }
+    /**
+     * Точка привязки тултипа — ЦЕНТР соответствующей грани bbox.
+     *
+     * В отличие от `getScreenPosition()` (он проецирует все 8 углов AABB
+     * и берёт min/max — из-за перспективы дальний верхний угол
+     * проецируется выше видимой кромки объекта, и хвостик «висит»),
+     * здесь мы проецируем ОДНУ точку в центре нужной грани.
+     *
+     * По умолчанию — верхняя грань (titlePlacement 'top'), т.к. для
+     * тултипа это самое естественное место.
+     */
+    getPopupAnchor() {
+        if (!this._isVisible || !this._object3D || !this._map)
+            return null;
+        const map = this._map;
+        const canvas = map.renderer.domElement;
+        let box;
+        if (this._isModel) {
+            box = this._tempBox.setFromObject(this._object3D);
+        }
+        else if (this._localBox) {
+            this._object3D.updateWorldMatrix(true, false);
+            box = this._tempBox.copy(this._localBox).applyMatrix4(this._object3D.matrixWorld);
+        }
+        else {
+            return null;
+        }
+        const cx = (box.min.x + box.max.x) / 2;
+        const cz = (box.min.z + box.max.z) / 2;
+        const cy = (box.min.y + box.max.y) / 2;
+        switch (this._titlePlacement) {
+            case 'bottom': return this._projectWorldPoint(map, canvas, cx, box.min.y, cz);
+            case 'left': return this._projectWorldPoint(map, canvas, box.min.x, cy, cz);
+            case 'right': return this._projectWorldPoint(map, canvas, box.max.x, cy, cz);
+            case 'top':
+            default: return this._projectWorldPoint(map, canvas, cx, box.max.y, cz);
+        }
+    }
+    // =================================================================
     // KrbMap#fitTo / getBounds
     // =================================================================
     getBounds(crs = 'EPSG:4326') {

@@ -17,8 +17,8 @@ import { Polygon } from './Polygon.js';
 import { Vector3D } from './Vector3D.js';
 import { Diagram } from './Diagram.js';
 import { Diagram3D } from './Diagram3D.js';
-import { calculateBreaks, getClassIndex } from './Classification.js';
-import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
+import { calculateBreaks, getClassIndex, makeBreaksPretty } from './Classification.js';
+import { resolveColorRamp, sampleColorRamp, invertColorRamp } from './ColorRamps.js';
 import { buildDiagramLegend, buildChoroplethLegend, buildDiagram3DLegend, } from './Legend.js';
 const POINT_ALIASES = { icon: 'iconUrl' };
 const MARKER3D_ALIASES = { model: 'modelUrl' };
@@ -303,6 +303,7 @@ export class GeoJSONLayer extends Layer {
     polygonToOptions = null;
     polygon3DToOptions = null;
     vectorToOptions = null;
+    legendToOptions = null;
     tooltip = null;
     /** @deprecated Используйте `tooltip: '{fieldName}'`. */
     tooltipField = null;
@@ -418,6 +419,7 @@ export class GeoJSONLayer extends Layer {
         this.defaultPolygon3DModelUrl = o.defaultPolygon3DModelUrl ?? null;
         this.defaultPolygon3DDepthTest = o.defaultPolygon3DDepthTest ?? true;
         this.defaultPolygon3DDepthWrite = o.defaultPolygon3DDepthWrite ?? true;
+        this.legendToOptions = o.legendToOptions ?? null;
     }
     // =================================================================
     // Lifecycle
@@ -571,7 +573,10 @@ export class GeoJSONLayer extends Layer {
                 return;
             }
             if (this.choropleth) {
-                this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
+                const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
+                this._choroplethRamp = this.choropleth.colorRampInvert
+                    ? invertColorRamp(baseRamp)
+                    : baseRamp;
                 this._calculateChoroplethBreaks(geojson);
             }
             this._computeDiagram3DAuto(geojson);
@@ -592,24 +597,48 @@ export class GeoJSONLayer extends Layer {
             catch { }
             this.legend = null;
         }
+        let kind = null;
+        let cfg = null;
         let legendOpts;
-        let builder = null;
         if (this.diagram?.legend) {
+            kind = 'diagram';
+            cfg = this.diagram;
             legendOpts = this.diagram.legend;
-            builder = () => buildDiagramLegend(this, geojson, this.diagram, legendOpts);
         }
         else if (this.diagram3D?.legend) {
+            kind = 'diagram3D';
+            cfg = this.diagram3D;
             legendOpts = this.diagram3D.legend;
-            builder = () => buildDiagram3DLegend(this, geojson, this.diagram3D, legendOpts);
         }
         else if (this.choropleth?.legend) {
+            kind = 'choropleth';
+            cfg = this.choropleth;
             legendOpts = this.choropleth.legend;
-            builder = () => buildChoroplethLegend(this, geojson, this.choropleth, legendOpts);
         }
-        if (!builder || !legendOpts)
+        if (!kind || !legendOpts)
             return;
+        // ── legendToOptions: патч декларативных опций ──
+        if (this.legendToOptions) {
+            try {
+                const ctx = { layer: this, kind, cfg, geojson, base: legendOpts };
+                const patch = this.legendToOptions(ctx);
+                if (patch === null)
+                    return; // ← явный «не строить»
+                if (patch)
+                    legendOpts = { ...legendOpts, ...patch };
+            }
+            catch (err) {
+                console.warn('GeoJSONLayer: legendToOptions threw', err);
+            }
+        }
+        // ── build ──
         try {
-            this.legend = builder();
+            const builder = kind === 'diagram'
+                ? buildDiagramLegend(this, geojson, cfg, legendOpts)
+                : kind === 'diagram3D'
+                    ? buildDiagram3DLegend(this, geojson, cfg, legendOpts)
+                    : buildChoroplethLegend(this, geojson, cfg, legendOpts);
+            this.legend = builder;
             if (legendOpts.target)
                 this.legend.mount(legendOpts.target);
             legendOpts.onReady?.(this.legend);
@@ -637,6 +666,10 @@ export class GeoJSONLayer extends Layer {
         else if (geojson.type === 'Feature')
             visit(geojson);
         this._choroplethBreaks = calculateBreaks(values, this.choropleth.classification ?? 'jenks', this.choropleth.classes ?? 5);
+        // ── pretty: true — округлить до 1-2-5, кроме ручных границ ──
+        if (this.choropleth.pretty && !Array.isArray(this.choropleth.classification)) {
+            this._choroplethBreaks = makeBreaksPretty(this._choroplethBreaks);
+        }
     }
     // =================================================================
     // 3D diagram: auto-sizing (unitM + bar dimensions)

@@ -2,36 +2,73 @@
 import { getDiagramType, } from './DiagramTypes.js';
 import { sampleColorRamp } from './ColorRamps.js';
 const RESERVED = new Set([
-    'layer', 'kind', 'diagramType', 'title', 'fields', 'example',
+    'layer', 'kind', 'diagramType', 'title', 'fields', 'example', 'classes',
     'unitPx', 'unitValue', 'maxCols', 'orientation', 'shape', 'coins',
     'breaks', 'colors', 'valueExpr',
     'mount', 'render', 'destroy', 'update',
     '_target', '_renderedEl', '_template',
+    '_render', '_extractBlock', '_truthy', '_resolvePath',
 ]);
+// ─────────────────────────────────────────────────────────────────
+// Русские форматтеры по умолчанию
+// ─────────────────────────────────────────────────────────────────
+/**
+ * Форматирование чисел по-русски:
+ *   500         → "500"
+ *   1000        → "1000"
+ *   50 000      → "50 тыс."
+ *   1 000 000   → "1 млн."
+ *   1,4e9       → "1,4 млрд."
+ *   1e12        → "1 трлн."
+ */
+export function defaultFormatNumber(v) {
+    if (!isFinite(v))
+        return String(v);
+    const abs = Math.abs(v);
+    const sign = v < 0 ? '-' : '';
+    const fmt = (unit, suffix) => {
+        const s = abs / unit;
+        const rounded = s >= 100 ? Math.round(s) : Math.round(s * 10) / 10;
+        return sign + String(rounded).replace('.', ',') + ' ' + suffix;
+    };
+    if (abs >= 1e12)
+        return fmt(1e12, 'трлн.');
+    if (abs >= 1e9)
+        return fmt(1e9, 'млрд.');
+    if (abs >= 1e6)
+        return fmt(1e6, 'млн.');
+    if (abs >= 10000) {
+        if (Math.round(abs / 1000) >= 1000)
+            return fmt(1e6, 'млн.');
+        return fmt(1000, 'тыс.');
+    }
+    return sign + String(Math.round(abs));
+}
+/**
+ * Подпись диапазона:
+ *   первый класс    → "до X"
+ *   последний класс → "X и более"
+ *   середина        → "от X до Y"
+ */
+export function defaultFormatRange(lo, hi, ctx, fmt) {
+    const fmtLo = lo != null ? fmt(lo) : '…';
+    const fmtHi = hi != null ? fmt(hi) : '…';
+    if (ctx.isFirst)
+        return `до ${fmtHi}`;
+    if (ctx.isLast)
+        return `${fmtLo} и более`;
+    return `от ${fmtLo} до ${fmtHi}`;
+}
 // ─────────────────────────────────────────────────────────────────
 // MapLegend
 // ─────────────────────────────────────────────────────────────────
-/**
- * Легенда к картодиаграмме / картограмме.
- *
- * Доступные свойства:
- *   legend.title            — заголовок
- *   legend.example          — HTMLCanvasElement с примером (или null)
- *   legend.fields           — Record<string, {color,label}>
- *   legend.<fieldKey>       — сахар: {color,label} (например legend.score.color)
- *   legend.unitValue        — для vienna/viennaCubes
- *   legend.unitPx           — для bar/circle/cube/vienna/coin
- *   legend.maxCols          — для vienna
- *   legend.shape            — для vienna
- *   legend.coins            — для coin
- *   legend.breaks / colors / valueExpr — для choropleth
- */
 export class MapLegend {
     layer;
     kind;
     diagramType;
     title;
     fields = {};
+    classes;
     example = null;
     unitPx;
     unitValue;
@@ -64,8 +101,8 @@ export class MapLegend {
     }
     mount(target) {
         const el = typeof target === 'string'
-            ? (document.getElementById(target) // сначала по id
-                ?? document.querySelector(target)) // потом как селектор
+            ? (document.getElementById(target)
+                ?? document.querySelector(target))
             : target;
         if (!el) {
             console.warn('MapLegend.mount: target not found', target);
@@ -91,25 +128,144 @@ export class MapLegend {
         this._target = null;
         this._renderedEl = null;
     }
-    // ── internals ────────────────────────────────────────────────
+    // ── template engine: {{path}}, {{#each}}, {{#if}}, {{#unless}} ──
     _interpolate(tpl) {
-        return tpl.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, path) => {
-            const v = this._resolvePath(path);
-            if (v instanceof HTMLCanvasElement)
-                return `<span data-krb-example></span>`;
-            if (v == null)
-                return '';
-            if (typeof v === 'object')
-                return JSON.stringify(v);
-            return String(v);
-        });
+        return this._render(tpl, this);
     }
-    _resolvePath(path) {
-        let cur = this;
-        for (const p of path.split('.')) {
+    _render(tpl, scope) {
+        let out = '';
+        let i = 0;
+        while (i < tpl.length) {
+            const open = tpl.indexOf('{{', i);
+            if (open < 0) {
+                out += tpl.slice(i);
+                break;
+            }
+            out += tpl.slice(i, open);
+            const close = tpl.indexOf('}}', open);
+            if (close < 0) {
+                out += tpl.slice(open);
+                break;
+            }
+            const tag = tpl.slice(open + 2, close).trim();
+            const afterOpen = close + 2;
+            if (tag.startsWith('#each ')) {
+                const path = tag.slice(6).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'each');
+                if (!block) {
+                    out += tpl.slice(open, afterOpen);
+                    i = afterOpen;
+                    continue;
+                }
+                const arr = this._resolvePath(path, scope);
+                if (Array.isArray(arr)) {
+                    out += arr.map((item, idx) => {
+                        const itemScope = (item && typeof item === 'object')
+                            ? Object.assign(Object.create(null), item, { this: item })
+                            : { this: item };
+                        itemScope['@index'] = idx;
+                        itemScope['@number'] = idx + 1;
+                        itemScope['@first'] = idx === 0;
+                        itemScope['@last'] = idx === arr.length - 1;
+                        return this._render(block.body, itemScope);
+                    }).join('');
+                }
+                i = block.endIdx;
+                continue;
+            }
+            if (tag.startsWith('#if ')) {
+                const path = tag.slice(4).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'if');
+                if (!block) {
+                    out += tpl.slice(open, afterOpen);
+                    i = afterOpen;
+                    continue;
+                }
+                if (this._truthy(this._resolvePath(path, scope))) {
+                    out += this._render(block.body, scope);
+                }
+                i = block.endIdx;
+                continue;
+            }
+            if (tag.startsWith('#unless ')) {
+                const path = tag.slice(8).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'unless');
+                if (!block) {
+                    out += tpl.slice(open, afterOpen);
+                    i = afterOpen;
+                    continue;
+                }
+                if (!this._truthy(this._resolvePath(path, scope))) {
+                    out += this._render(block.body, scope);
+                }
+                i = block.endIdx;
+                continue;
+            }
+            if (tag.startsWith('/')) {
+                out += tpl.slice(open, afterOpen);
+                i = afterOpen;
+                continue;
+            }
+            const v = this._resolvePath(tag, scope);
+            if (v instanceof HTMLCanvasElement)
+                out += `<span data-krb-example></span>`;
+            else if (v == null)
+                out += '';
+            else if (typeof v === 'object')
+                out += JSON.stringify(v);
+            else
+                out += String(v);
+            i = afterOpen;
+        }
+        return out;
+    }
+    _extractBlock(tpl, start, kind) {
+        const openTag = `{{#${kind} `;
+        const closeTag = `{{/${kind}}}`;
+        let depth = 1;
+        let i = start;
+        while (i < tpl.length) {
+            const nextOpen = tpl.indexOf(openTag, i);
+            const nextClose = tpl.indexOf(closeTag, i);
+            if (nextClose < 0)
+                return null;
+            if (nextOpen >= 0 && nextOpen < nextClose) {
+                depth++;
+                i = nextOpen + openTag.length;
+            }
+            else {
+                depth--;
+                if (depth === 0) {
+                    return {
+                        body: tpl.slice(start, nextClose),
+                        endIdx: nextClose + closeTag.length,
+                    };
+                }
+                i = nextClose + closeTag.length;
+            }
+        }
+        return null;
+    }
+    _truthy(v) {
+        if (Array.isArray(v))
+            return v.length > 0;
+        return !!v;
+    }
+    _resolvePath(path, scope) {
+        const parts = path.split('.');
+        let cur = scope;
+        for (const p of parts) {
             if (cur == null)
                 return undefined;
-            cur = cur[p];
+            if (typeof cur === 'object' && p in cur) {
+                cur = cur[p];
+            }
+            else if (cur !== this && p in this) {
+                cur = this[p]; // fallback к legend: {{unitValue}} внутри #each
+            }
+            else {
+                return undefined;
+            }
         }
         return cur;
     }
@@ -134,7 +290,7 @@ export class MapLegend {
     }
 }
 // ─────────────────────────────────────────────────────────────────
-// Builders
+// Builders — helpers
 // ─────────────────────────────────────────────────────────────────
 function featuresOf(input) {
     if (input.type === 'FeatureCollection')
@@ -205,6 +361,9 @@ function renderDiagramCanvas(typeName, data, opts, dpr) {
     def.render(ctx, params);
     return canvas;
 }
+// ─────────────────────────────────────────────────────────────────
+// buildDiagramLegend
+// ─────────────────────────────────────────────────────────────────
 export function buildDiagramLegend(layer, geojson, cfg, opts) {
     const features = featuresOf(geojson).filter(f => !layer.featureFilter || layer.featureFilter(f));
     const fields = (cfg.fields ?? []).map((key) => ({
@@ -220,7 +379,16 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
         template: opts.template,
         fields,
     });
-    // pick example
+    // Единицы — всегда, независимо от того, есть ли пример
+    legend.unitValue = cfg.unitValue;
+    legend.unitPx = typeof cfg.unitPx === 'number'
+        ? cfg.unitPx
+        : (layer._diagramAuto?.unitPx ?? undefined);
+    legend.maxCols = cfg.maxCols;
+    legend.orientation = cfg.orientation;
+    legend.shape = cfg.shape;
+    legend.coins = cfg.coins;
+    // Пример
     const pick = opts.example ?? 'auto';
     let exampleFeature = null;
     if (pick === 'auto')
@@ -232,7 +400,6 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
     else if (pick && typeof pick === 'object') {
         exampleFeature = features.find(f => Object.entries(pick).every(([k, v]) => f.properties?.[k] === v)) ?? null;
     }
-    // example canvas
     if (exampleFeature && opts.showExample !== false) {
         const data = cfg.fields
             .map((key) => {
@@ -243,17 +410,8 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
         })
             .filter((d) => d !== null);
         if (data.length) {
-            const unitPx = typeof cfg.unitPx === 'number'
-                ? cfg.unitPx
-                : (layer._diagramAuto?.unitPx ?? 1);
-            legend.unitPx = unitPx;
-            legend.unitValue = cfg.unitValue;
-            legend.maxCols = cfg.maxCols;
-            legend.orientation = cfg.orientation;
-            legend.shape = cfg.shape;
-            legend.coins = cfg.coins;
             legend.example = renderDiagramCanvas(legend.diagramType, data, {
-                unitPx,
+                unitPx: legend.unitPx ?? 1,
                 unitValue: cfg.unitValue,
                 maxCols: cfg.maxCols,
                 orientation: cfg.orientation,
@@ -268,8 +426,14 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
             }, opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1));
         }
     }
+    legend.classes = fields.map((f, i) => ({
+        key: f.key, label: f.label, color: f.color, index: i,
+    }));
     return legend;
 }
+// ─────────────────────────────────────────────────────────────────
+// buildChoroplethLegend
+// ─────────────────────────────────────────────────────────────────
 export function buildChoroplethLegend(layer, _geojson, cfg, opts) {
     const legend = new MapLegend({
         layer,
@@ -286,13 +450,21 @@ export function buildChoroplethLegend(layer, _geojson, cfg, opts) {
         console.warn('Legend: choropleth ramp is null');
         return legend;
     }
-    const breaksLen = Array.isArray(legend.breaks) ? legend.breaks.length : 0;
-    const n = Math.max(1, breaksLen - 1);
-    if (!legend.breaks || legend.breaks.length < 2) {
+    // Вырожденный случай: одна граница или пусто
+    if (!Array.isArray(legend.breaks) || legend.breaks.length < 2) {
+        const fb = {
+            key: 'class0',
+            label: 'Нет данных',
+            color: cfg.noDataColor ?? '#ccc',
+            index: 0,
+        };
         legend.colors = [];
-        legend.class0 = { color: cfg.noDataColor ?? '#ccc', label: 'Нет данных' };
+        legend.classes = [fb];
+        legend.fields['class0'] = { key: fb.key, label: fb.label, color: fb.color };
+        legend.class0 = { color: fb.color, label: fb.label };
         return legend;
     }
+    const n = legend.breaks.length - 1;
     const colors = [];
     for (let i = 0; i < n; i++) {
         const t = n > 1 ? i / (n - 1) : 0.5;
@@ -300,31 +472,33 @@ export function buildChoroplethLegend(layer, _geojson, cfg, opts) {
         colors.push(`#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`);
     }
     legend.colors = colors;
-    // pseudo-fields: class0.color, class1.color, ...
+    // Русское форматирование по умолчанию, переопределяемое через opts.format
+    const fmtNumber = opts.format?.number ?? defaultFormatNumber;
+    const fmtRange = opts.format?.range;
+    const classes = [];
     for (let i = 0; i < colors.length; i++) {
         const key = `class${i}`;
         const lo = legend.breaks[i];
         const hi = legend.breaks[i + 1];
-        const fmtNum = (v) => {
-            if (v == null)
-                return '…';
-            const n = Number(v);
-            if (!isFinite(n))
-                return String(v);
-            if (Math.abs(n) >= 1e9)
-                return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
-            if (Math.abs(n) >= 1e6)
-                return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
-            if (Math.abs(n) >= 1e3)
-                return (n / 1e3).toFixed(0) + 'K';
-            return String(Math.round(n));
+        const ctx = {
+            isFirst: i === 0,
+            isLast: i === colors.length - 1,
+            index: i,
+            total: colors.length,
         };
-        const label = `${fmtNum(lo)} – ${fmtNum(hi)}`;
+        const label = fmtRange
+            ? fmtRange(lo, hi, ctx)
+            : defaultFormatRange(lo, hi, ctx, fmtNumber);
+        classes.push({ key, label, color: colors[i], index: i, lo, hi });
         legend.fields[key] = { key, label, color: colors[i] };
         legend[key] = { color: colors[i], label };
     }
+    legend.classes = classes;
     return legend;
 }
+// ─────────────────────────────────────────────────────────────────
+// buildDiagram3DLegend
+// ─────────────────────────────────────────────────────────────────
 const _3D_TO_2D = {
     bar3d: 'bar',
     vienna3d: 'vienna',
@@ -358,5 +532,8 @@ export function buildDiagram3DLegend(layer, _geojson, cfg, opts) {
             strokeWidth: cfg.strokeWidthM ?? 1,
         }, opts.dpr ?? 1);
     }
+    legend.classes = fields.map((f, i) => ({
+        key: f.key, label: f.label, color: f.color, index: i,
+    }));
     return legend;
 }

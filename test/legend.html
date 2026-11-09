@@ -6,89 +6,64 @@
 <link href="../KRB.css" rel="stylesheet">
 <style>
     html, body { margin: 0; height: 100%; overflow: hidden; }
-    #map { position: absolute; inset: 0; width: 100%; height: 100dvh; }
+    #map { position: absolute; inset: 0; }
 
+    /* панель легенд поверх карты */
     #legends {
         position: absolute;
-        top: 16px;
-        right: 16px;
+        top: 12px;
+        right: 12px;
+        z-index: 1000;
         display: flex;
         flex-direction: column;
-        gap: 12px;
-        z-index: 1000;
-        max-width: 260px;
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        font-size: 13px;
-        line-height: 1.4;
+        gap: 10px;
+        max-width: 240px;
+        font: 13px/1.35 system-ui, sans-serif;
     }
     .legend-card {
-        background: rgba(255, 255, 255, 0.96);
-        border-radius: 12px;
-        padding: 14px 16px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-        backdrop-filter: blur(8px);
-        color: #222;
+        background: #fff;
+        border: 1px solid #ddd;
+        padding: 10px 12px;
     }
     .legend-card:empty { display: none; }
     .legend-card h3 {
-        margin: 0 0 10px 0;
+        margin: 0 0 8px;
         font-size: 13px;
-        font-weight: 600;
-        color: #111;
     }
+
+    /* строка легенды: свотч + подпись */
     .legend-row {
         display: flex;
         align-items: center;
-        gap: 8px;
-        margin-bottom: 4px;
-        font-size: 12px;
-        color: #333;
+        gap: 6px;
+        margin-bottom: 3px;
     }
     .legend-row:last-child { margin-bottom: 0; }
+
     .legend-swatch {
-        display: inline-block;
         width: 14px;
         height: 14px;
         flex-shrink: 0;
-        border-radius: 2px;
         border: 1px solid rgba(0, 0, 0, 0.15);
         box-sizing: border-box;
     }
-    .legend-example-wrap {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 12px 0;
-        margin-bottom: 10px;
-        border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-        min-height: 60px;
-    }
-    .legend-example-wrap canvas {
-        display: block;
-        filter: drop-shadow(0 1px 2px rgba(0,0,0,0.12));
-    }
-    .legend-footer {
-        margin-top: 10px;
-        padding-top: 10px;
-        border-top: 1px solid rgba(0, 0, 0, 0.08);
-        font-size: 12px;
-        color: #666;
-    }
 
-    #info {
-        position: absolute;
-        bottom: 16px;
-        left: 16px;
-        padding: 8px 14px;
-        background: rgba(255, 255, 255, 0.95);
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
-        font-family: system-ui, sans-serif;
-        font-size: 12px;
-        color: #333;
-        z-index: 1000;
+    /* пример диаграммы */
+    .legend-example {
+        text-align: center;
+        padding: 8px 0;
+        margin-bottom: 8px;
+        border-bottom: 1px solid #eee;
     }
-    #info b { color: #111; }
+    .legend-example canvas { display: block; margin: 0 auto; }
+
+    .legend-footer {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #eee;
+        color: #666;
+        font-size: 12px;
+    }
 </style>
 </head>
 <body>
@@ -98,8 +73,6 @@
     <div class="legend-card" id="legend-choropleth"></div>
     <div class="legend-card" id="legend-diagram"></div>
 </div>
-
-<div id="info">Zoom: <b id="zoom-val">–</b></div>
 
 <script type="module">
 import * as KRB from '../js/KRB.js';
@@ -116,58 +89,41 @@ const map = new KRB.Map({
     }),
 });
 
-// ── Zoom indicator ─────────────────────────────────────────────
-const zoomEl = document.getElementById('zoom-val');
-const updateZoom = () => {
-    zoomEl.textContent = (map.continuousZoom ?? map.view?.zoom ?? 0).toFixed(2);
-};
-map.on?.('zoom', updateZoom);
-updateZoom();
 
-// ─────────────────────────────────────────────────────────────────
-// СЛОЙ 1: Картограмма с РУЧНЫМИ интервалами
-// ─────────────────────────────────────────────────────────────────
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
     crs: 'EPSG:4326',
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
     style: { polygon: { default: { title: '' } } },
- choropleth: {
-        value: 'value',
-        classification: 'equal',
-        classes: 3,             
-        colorRamp: 'terrain',
+
+   choropleth: {
+        value: 'score',
+        classification: 'arithmetic', 
+        colorRamp: 'Purples',
+        colorRampInvert: true,
         noDataColor: '#cccccc',
+        pretty: true,
 
         legend: {
             target: 'legend-choropleth',
-            title: 'Население, млн',
+            title: 'Население, чел.',
             template: `
                 <h3>{{title}}</h3>
-                <div class="legend-row">
-                    <span class="legend-swatch" style="background:{{class0.color}}"></span>
-                    <span>{{class0.label}}</span>
-                </div>
-                <div class="legend-row">
-                    <span class="legend-swatch" style="background:{{class1.color}}"></span>
-                    <span>{{class1.label}}</span>
-                </div>
-                <div class="legend-row">
-                    <span class="legend-swatch" style="background:{{class2.color}}"></span>
-                    <span>{{class1.label}}</span>
-                </div>
+                {{#each classes}}
+                    <div class="legend-row">
+                        <span class="legend-swatch" style="background:{{color}}"></span>
+                        <span>{{label}}</span>
+                    </div>
+                {{/each}}
             `,
         },
     },
 
-    defaultFillOpacity: 0.6,
-    defaultStrokeColor: '#333',
-    defaultStrokeWidth: 0.5,
 }).addTo(map);
 
 // ─────────────────────────────────────────────────────────────────
-// СЛОЙ 2: Точки с диаграммами (без изменений)
+// СЛОЙ 2: Точки с диаграммами — тот же #each classes
 // ─────────────────────────────────────────────────────────────────
 const cities = [
     { name: 'Москва',   lon: 37.61,  lat: 55.75 },
@@ -185,11 +141,15 @@ const cities = [
 const pointsFeatures = [];
 for (let i = 0; i < 40; i++) {
     const c = cities[Math.floor(Math.random() * cities.length)];
-    const lon = c.lon + (Math.random() - 0.5) * 5;
-    const lat = c.lat + (Math.random() - 0.5) * 5;
     pointsFeatures.push({
         type: 'Feature',
-        geometry: { type: 'Point', coordinates: [lon, lat] },
+        geometry: {
+            type: 'Point',
+            coordinates: [
+                c.lon + (Math.random() - 0.5) * 5,
+                c.lat + (Math.random() - 0.5) * 5,
+            ],
+        },
         properties: {
             name:  `${c.name} ${i}`,
             score: Math.floor(Math.random() * 500) + 10,
@@ -199,10 +159,8 @@ for (let i = 0; i < 40; i++) {
     });
 }
 
-const pointsFC = { type: 'FeatureCollection', features: pointsFeatures };
-
 new KRB.GeoJSONLayer({
-    data: pointsFC,
+    data: { type: 'FeatureCollection', features: pointsFeatures },
     crs: 'EPSG:4326',
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}<br>Value: ${p.value}<br>Count: ${p.count}`,
@@ -224,13 +182,17 @@ new KRB.GeoJSONLayer({
 
         legend: {
             target: 'legend-diagram',
+            title: 'Городская статистика',
             example: 'auto',
             template: `
-                <h3>Городская статистика</h3>
-                <div class="legend-example-wrap">{{example}}</div>
-                <div class="legend-row"><span class="legend-swatch" style="background:{{score.color}}"></span><span>Score</span></div>
-                <div class="legend-row"><span class="legend-swatch" style="background:{{value.color}}"></span><span>Value</span></div>
-                <div class="legend-row"><span class="legend-swatch" style="background:{{count.color}}"></span><span>Count</span></div>
+                <h3>{{title}}</h3>
+                <div class="legend-example">{{example}}</div>
+                {{#each classes}}
+                    <div class="legend-row">
+                        <span class="legend-swatch" style="background:{{color}}"></span>
+                        <span>{{label}}</span>
+                    </div>
+                {{/each}}
                 <div class="legend-footer">Один кубик ≈ {{unitValue}} ед.</div>
             `,
         },

@@ -16,61 +16,139 @@ export interface LegendFieldInfo {
     color: string;
 }
 
+export interface LegendFormatContext {
+    isFirst: boolean;
+    isLast: boolean;
+    index: number;
+    total: number;
+}
+
+export interface LegendFormatOptions {
+    /** Как форматировать отдельное число. @default — русская шкала. */
+    number?: (v: number) => string;
+    /** Как собрать подпись класса из границ. Переопределяет встроенную логику. */
+    range?: (
+        lo: number | undefined,
+        hi: number | undefined,
+        ctx: LegendFormatContext,
+    ) => string;
+}
+
 export type ExamplePicker =
     | 'auto'
     | number
     | Record<string, any>
     | ((features: GeoJSONFeature[]) => GeoJSONFeature | null);
 
+export interface LegendClassInfo {
+    /** `'class0'`, `'class1'`, … — для обратной совместимости с {{classN.color}}. */
+    key: string;
+    /** Готовая подпись, например `'10 тыс. – 50 тыс.'`. */
+    label: string;
+    color: string;
+    index: number;
+    /** Нижняя граница интервала. Только для choropleth. */
+    lo?: number;
+    /** Верхняя граница интервала. Только для choropleth. */
+    hi?: number;
+}
+
 export interface LegendOptions {
-    /** Куда вмонтировать готовую легенду. */
     target?: string | HTMLElement;
-    /** Заголовок (доступен как {{title}}). */
     title?: string;
-    /** HTML-шаблон с {{placeholders}}. */
     template?: string;
-    /** Как выбрать «пример». @default 'auto' */
     example?: ExamplePicker;
-    /** Готовый объект легенды (например, чтобы сохранить в переменную). */
     onReady?: (legend: MapLegend) => void;
-    /** Скрыть пример (только поля / unitValue). */
     showExample?: boolean;
     dpr?: number;
+    format?: LegendFormatOptions;
+    /** @internal Используется только на уровне GeoJSONLayerOptions. */
+    legendToOptions?: (ctx: LegendContext) => Partial<LegendOptions> | null | undefined;
+}
+
+export interface LegendContext {
+    layer: any;
+    kind: 'diagram' | 'diagram3D' | 'choropleth';
+    cfg: any;
+    geojson: GeoJSONInput;
+    base: LegendOptions;
 }
 
 const RESERVED = new Set([
-    'layer', 'kind', 'diagramType', 'title', 'fields', 'example',
+    'layer', 'kind', 'diagramType', 'title', 'fields', 'example', 'classes',
     'unitPx', 'unitValue', 'maxCols', 'orientation', 'shape', 'coins',
     'breaks', 'colors', 'valueExpr',
     'mount', 'render', 'destroy', 'update',
     '_target', '_renderedEl', '_template',
+    '_render', '_extractBlock', '_truthy', '_resolvePath',
 ]);
+
+// ─────────────────────────────────────────────────────────────────
+// Русские форматтеры по умолчанию
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Форматирование чисел по-русски:
+ *   500         → "500"
+ *   1000        → "1000"
+ *   50 000      → "50 тыс."
+ *   1 000 000   → "1 млн."
+ *   1,4e9       → "1,4 млрд."
+ *   1e12        → "1 трлн."
+ */
+export function defaultFormatNumber(v: number): string {
+    if (!isFinite(v)) return String(v);
+    const abs  = Math.abs(v);
+    const sign = v < 0 ? '-' : '';
+
+    const fmt = (unit: number, suffix: string) => {
+        const s = abs / unit;
+        const rounded = s >= 100 ? Math.round(s) : Math.round(s * 10) / 10;
+        return sign + String(rounded).replace('.', ',') + ' ' + suffix;
+    };
+
+    if (abs >= 1e12) return fmt(1e12, 'трлн.');
+    if (abs >= 1e9)  return fmt(1e9,  'млрд.');
+    if (abs >= 1e6)  return fmt(1e6,  'млн.');
+    if (abs >= 10000) {
+        if (Math.round(abs / 1000) >= 1000) return fmt(1e6, 'млн.');
+        return fmt(1000, 'тыс.');
+    }
+    return sign + String(Math.round(abs));
+}
+
+/**
+ * Подпись диапазона:
+ *   первый класс    → "до X"
+ *   последний класс → "X и более"
+ *   середина        → "от X до Y"
+ */
+export function defaultFormatRange(
+    lo: number | undefined,
+    hi: number | undefined,
+    ctx: LegendFormatContext,
+    fmt: (v: number) => string,
+): string {
+    const fmtLo = lo != null ? fmt(lo) : '…';
+    const fmtHi = hi != null ? fmt(hi) : '…';
+
+    if (ctx.isFirst) return `до ${fmtHi}`;
+    if (ctx.isLast)  return `${fmtLo} и более`;
+    return `от ${fmtLo} до ${fmtHi}`;
+}
 
 // ─────────────────────────────────────────────────────────────────
 // MapLegend
 // ─────────────────────────────────────────────────────────────────
 
-/**
- * Легенда к картодиаграмме / картограмме.
- *
- * Доступные свойства:
- *   legend.title            — заголовок
- *   legend.example          — HTMLCanvasElement с примером (или null)
- *   legend.fields           — Record<string, {color,label}>
- *   legend.<fieldKey>       — сахар: {color,label} (например legend.score.color)
- *   legend.unitValue        — для vienna/viennaCubes
- *   legend.unitPx           — для bar/circle/cube/vienna/coin
- *   legend.maxCols          — для vienna
- *   legend.shape            — для vienna
- *   legend.coins            — для coin
- *   legend.breaks / colors / valueExpr — для choropleth
- */
 export class MapLegend {
     readonly layer: any;
     readonly kind: 'diagram' | 'diagram3D' | 'choropleth';
     readonly diagramType: string;
     title: string;
     readonly fields: Record<string, LegendFieldInfo> = {};
+    classes?: LegendClassInfo[];
+
     example: HTMLCanvasElement | null = null;
     unitPx?: number;
     unitValue?: number;
@@ -94,11 +172,11 @@ export class MapLegend {
         template?: string;
         fields?: LegendFieldInfo[];
     }) {
-        this.layer = init.layer;
-        this.kind = init.kind;
+        this.layer       = init.layer;
+        this.kind        = init.kind;
         this.diagramType = init.diagramType;
-        this.title = init.title ?? '';
-        this._template = init.template ?? null;
+        this.title       = init.title ?? '';
+        this._template   = init.template ?? null;
 
         for (const f of init.fields ?? []) {
             this.fields[f.key] = f;
@@ -115,10 +193,10 @@ export class MapLegend {
     }
 
     mount(target: string | HTMLElement): this {
-   const el = typeof target === 'string'
-    ? (document.getElementById(target)            // сначала по id
-        ?? document.querySelector<HTMLElement>(target))  // потом как селектор
-    : target;
+        const el = typeof target === 'string'
+            ? (document.getElementById(target)
+                ?? document.querySelector<HTMLElement>(target))
+            : target;
         if (!el) {
             console.warn('MapLegend.mount: target not found', target);
             return this;
@@ -144,30 +222,141 @@ export class MapLegend {
         this._renderedEl = null;
     }
 
-    // ── internals ────────────────────────────────────────────────
+    // ── template engine: {{path}}, {{#each}}, {{#if}}, {{#unless}} ──
 
     private _interpolate(tpl: string): string {
-        return tpl.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, path: string) => {
-            const v = this._resolvePath(path);
-            if (v instanceof HTMLCanvasElement) return `<span data-krb-example></span>`;
-            if (v == null) return '';
-            if (typeof v === 'object') return JSON.stringify(v);
-            return String(v);
-        });
+        return this._render(tpl, this);
     }
 
-    private _resolvePath(path: string): any {
-        let cur: any = this;
-        for (const p of path.split('.')) {
+    private _render(tpl: string, scope: any): string {
+        let out = '';
+        let i = 0;
+        while (i < tpl.length) {
+            const open = tpl.indexOf('{{', i);
+            if (open < 0) { out += tpl.slice(i); break; }
+            out += tpl.slice(i, open);
+
+            const close = tpl.indexOf('}}', open);
+            if (close < 0) { out += tpl.slice(open); break; }
+
+            const tag = tpl.slice(open + 2, close).trim();
+            const afterOpen = close + 2;
+
+            if (tag.startsWith('#each ')) {
+                const path = tag.slice(6).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'each');
+                if (!block) { out += tpl.slice(open, afterOpen); i = afterOpen; continue; }
+                const arr = this._resolvePath(path, scope);
+                if (Array.isArray(arr)) {
+                    out += arr.map((item, idx) => {
+                        const itemScope: any =
+                            (item && typeof item === 'object')
+                                ? Object.assign(Object.create(null), item, { this: item })
+                                : { this: item };
+                        itemScope['@index']  = idx;
+                        itemScope['@number'] = idx + 1;
+                        itemScope['@first']  = idx === 0;
+                        itemScope['@last']   = idx === arr.length - 1;
+                        return this._render(block.body, itemScope);
+                    }).join('');
+                }
+                i = block.endIdx;
+                continue;
+            }
+
+            if (tag.startsWith('#if ')) {
+                const path = tag.slice(4).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'if');
+                if (!block) { out += tpl.slice(open, afterOpen); i = afterOpen; continue; }
+                if (this._truthy(this._resolvePath(path, scope))) {
+                    out += this._render(block.body, scope);
+                }
+                i = block.endIdx;
+                continue;
+            }
+
+            if (tag.startsWith('#unless ')) {
+                const path = tag.slice(8).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'unless');
+                if (!block) { out += tpl.slice(open, afterOpen); i = afterOpen; continue; }
+                if (!this._truthy(this._resolvePath(path, scope))) {
+                    out += this._render(block.body, scope);
+                }
+                i = block.endIdx;
+                continue;
+            }
+
+            if (tag.startsWith('/')) {
+                out += tpl.slice(open, afterOpen);
+                i = afterOpen;
+                continue;
+            }
+
+            const v = this._resolvePath(tag, scope);
+            if (v instanceof HTMLCanvasElement) out += `<span data-krb-example></span>`;
+            else if (v == null)                 out += '';
+            else if (typeof v === 'object')     out += JSON.stringify(v);
+            else                                out += String(v);
+
+            i = afterOpen;
+        }
+        return out;
+    }
+
+    private _extractBlock(
+        tpl: string, start: number, kind: 'each' | 'if' | 'unless',
+    ): { body: string; endIdx: number } | null {
+        const openTag  = `{{#${kind} `;
+        const closeTag = `{{/${kind}}}`;
+        let depth = 1;
+        let i = start;
+
+        while (i < tpl.length) {
+            const nextOpen  = tpl.indexOf(openTag,  i);
+            const nextClose = tpl.indexOf(closeTag, i);
+            if (nextClose < 0) return null;
+
+            if (nextOpen >= 0 && nextOpen < nextClose) {
+                depth++;
+                i = nextOpen + openTag.length;
+            } else {
+                depth--;
+                if (depth === 0) {
+                    return {
+                        body:   tpl.slice(start, nextClose),
+                        endIdx: nextClose + closeTag.length,
+                    };
+                }
+                i = nextClose + closeTag.length;
+            }
+        }
+        return null;
+    }
+
+    private _truthy(v: any): boolean {
+        if (Array.isArray(v)) return v.length > 0;
+        return !!v;
+    }
+
+    private _resolvePath(path: string, scope: any): any {
+        const parts = path.split('.');
+        let cur: any = scope;
+        for (const p of parts) {
             if (cur == null) return undefined;
-            cur = cur[p];
+            if (typeof cur === 'object' && p in cur) {
+                cur = cur[p];
+            } else if (cur !== this && p in (this as any)) {
+                cur = (this as any)[p];   // fallback к legend: {{unitValue}} внутри #each
+            } else {
+                return undefined;
+            }
         }
         return cur;
     }
 
     private _defaultRender(): string {
         const p: string[] = [];
-        if (this.title) p.push(`<div class="krb-legend-title">${this.title}</div>`);
+        if (this.title)   p.push(`<div class="krb-legend-title">${this.title}</div>`);
         if (this.example) p.push(`<div class="krb-legend-example"></div>`);
 
         const items = Object.values(this.fields)
@@ -184,7 +373,7 @@ export class MapLegend {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Builders
+// Builders — helpers
 // ─────────────────────────────────────────────────────────────────
 
 function featuresOf(input: GeoJSONInput): GeoJSONFeature[] {
@@ -259,6 +448,10 @@ function renderDiagramCanvas(
     return canvas;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// buildDiagramLegend
+// ─────────────────────────────────────────────────────────────────
+
 export function buildDiagramLegend(
     layer: any,
     geojson: GeoJSONInput,
@@ -284,7 +477,17 @@ export function buildDiagramLegend(
         fields,
     });
 
-    // pick example
+    // Единицы — всегда, независимо от того, есть ли пример
+    legend.unitValue  = cfg.unitValue;
+    legend.unitPx     = typeof cfg.unitPx === 'number'
+        ? cfg.unitPx
+        : (layer._diagramAuto?.unitPx ?? undefined);
+    legend.maxCols    = cfg.maxCols;
+    legend.orientation = cfg.orientation;
+    legend.shape      = cfg.shape;
+    legend.coins      = cfg.coins;
+
+    // Пример
     const pick = opts.example ?? 'auto';
     let exampleFeature: GeoJSONFeature | null = null;
     if (pick === 'auto')                       exampleFeature = pickAverageFeature(features, cfg.fields);
@@ -296,7 +499,6 @@ export function buildDiagramLegend(
         ) ?? null;
     }
 
-    // example canvas
     if (exampleFeature && opts.showExample !== false) {
         const data: DiagramData[] = cfg.fields
             .map((key: string) => {
@@ -307,27 +509,16 @@ export function buildDiagramLegend(
             .filter((d): d is DiagramData => d !== null);
 
         if (data.length) {
-            const unitPx = typeof cfg.unitPx === 'number'
-                ? cfg.unitPx
-                : (layer._diagramAuto?.unitPx ?? 1);
-
-            legend.unitPx    = unitPx;
-            legend.unitValue = cfg.unitValue;
-            legend.maxCols   = cfg.maxCols;
-            legend.orientation = cfg.orientation;
-            legend.shape     = cfg.shape;
-            legend.coins     = cfg.coins;
-
             legend.example = renderDiagramCanvas(legend.diagramType, data, {
-                unitPx,
-                unitValue: cfg.unitValue,
-                maxCols:   cfg.maxCols,
+                unitPx:      legend.unitPx ?? 1,
+                unitValue:   cfg.unitValue,
+                maxCols:     cfg.maxCols,
                 orientation: cfg.orientation,
-                shape:     cfg.shape,
-                coins:     cfg.coins,
+                shape:       cfg.shape,
+                coins:       cfg.coins,
                 segmentSizes: cfg.segmentSizes,
-                gap:       cfg.gap,
-                padding:   cfg.padding,
+                gap:         cfg.gap,
+                padding:     cfg.padding,
                 strokeColor: cfg.strokeColor,
                 strokeWidth: cfg.strokeWidth,
                 projection:  cfg.projection,
@@ -335,8 +526,16 @@ export function buildDiagramLegend(
         }
     }
 
+    legend.classes = fields.map((f, i) => ({
+        key: f.key, label: f.label, color: f.color, index: i,
+    }));
+
     return legend;
 }
+
+// ─────────────────────────────────────────────────────────────────
+// buildChoroplethLegend
+// ─────────────────────────────────────────────────────────────────
 
 export function buildChoroplethLegend(
     layer: any,
@@ -356,18 +555,28 @@ export function buildChoroplethLegend(
     legend.breaks    = layer._choroplethBreaks ?? [];
     legend.valueExpr = typeof cfg.value === 'string' ? cfg.value : '(fn)';
 
-   const ramp = layer._choroplethRamp;
-if (!ramp) {
-    console.warn('Legend: choropleth ramp is null');
-    return legend;
-}
-const breaksLen = Array.isArray(legend.breaks) ? legend.breaks.length : 0;
-const n = Math.max(1, breaksLen - 1);
-if (!legend.breaks || legend.breaks.length < 2) {
-    legend.colors = [];
-    (legend as any).class0 = { color: cfg.noDataColor ?? '#ccc', label: 'Нет данных' };
-    return legend;
-}
+    const ramp = layer._choroplethRamp;
+    if (!ramp) {
+        console.warn('Legend: choropleth ramp is null');
+        return legend;
+    }
+
+    // Вырожденный случай: одна граница или пусто
+    if (!Array.isArray(legend.breaks) || legend.breaks.length < 2) {
+        const fb: LegendClassInfo = {
+            key: 'class0',
+            label: 'Нет данных',
+            color: cfg.noDataColor ?? '#ccc',
+            index: 0,
+        };
+        legend.colors   = [];
+        legend.classes  = [fb];
+        legend.fields['class0'] = { key: fb.key, label: fb.label, color: fb.color };
+        (legend as any).class0  = { color: fb.color, label: fb.label };
+        return legend;
+    }
+
+    const n = legend.breaks.length - 1;
     const colors: string[] = [];
     for (let i = 0; i < n; i++) {
         const t = n > 1 ? i / (n - 1) : 0.5;
@@ -378,32 +587,42 @@ if (!legend.breaks || legend.breaks.length < 2) {
     }
     legend.colors = colors;
 
-    // pseudo-fields: class0.color, class1.color, ...
+    // Русское форматирование по умолчанию, переопределяемое через opts.format
+    const fmtNumber = opts.format?.number ?? defaultFormatNumber;
+    const fmtRange  = opts.format?.range;
+
+    const classes: LegendClassInfo[] = [];
     for (let i = 0; i < colors.length; i++) {
         const key = `class${i}`;
-        const lo = legend.breaks[i];
-        const hi = legend.breaks[i + 1];
-        const fmtNum = (v: number | undefined): string => {
-    if (v == null) return '…';
-    const n = Number(v);
-    if (!isFinite(n)) return String(v);
-    if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
-    if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
-    if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(0) + 'K';
-    return String(Math.round(n));
-};
+        const lo  = legend.breaks[i];
+        const hi  = legend.breaks[i + 1];
+        const ctx: LegendFormatContext = {
+            isFirst: i === 0,
+            isLast:  i === colors.length - 1,
+            index:   i,
+            total:   colors.length,
+        };
 
-const label = `${fmtNum(lo)} – ${fmtNum(hi)}`;
-        legend.fields[key] = { key, label, color: colors[i] };
+        const label = fmtRange
+            ? fmtRange(lo, hi, ctx)
+            : defaultFormatRange(lo, hi, ctx, fmtNumber);
+
+        classes.push({ key, label, color: colors[i], index: i, lo, hi });
+        legend.fields[key]   = { key, label, color: colors[i] };
         (legend as any)[key] = { color: colors[i], label };
     }
+    legend.classes = classes;
 
     return legend;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// buildDiagram3DLegend
+// ─────────────────────────────────────────────────────────────────
+
 const _3D_TO_2D: Record<string, string> = {
-    bar3d: 'bar',
-    vienna3d: 'vienna',
+    bar3d:       'bar',
+    vienna3d:    'vienna',
     viennacubes: 'vienna',
 };
 
@@ -442,5 +661,10 @@ export function buildDiagram3DLegend(
             strokeWidth: cfg.strokeWidthM ?? 1,
         }, opts.dpr ?? 1);
     }
+
+    legend.classes = fields.map((f, i) => ({
+        key: f.key, label: f.label, color: f.color, index: i,
+    }));
+
     return legend;
 }

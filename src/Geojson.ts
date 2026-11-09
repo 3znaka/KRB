@@ -20,14 +20,16 @@ import { Diagram3D, type Diagram3DSpawnOptions } from './Diagram3D.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
 import type { Diagram3DData } from './Diagram3DTypes.js';
-import { calculateBreaks, getClassIndex } from './Classification.js';
-import { resolveColorRamp, sampleColorRamp } from './ColorRamps.js';
+import { calculateBreaks, getClassIndex, makeBreaksPretty } from './Classification.js';
+import { resolveColorRamp, sampleColorRamp, invertColorRamp } from './ColorRamps.js';
+
 import {
     MapLegend,
     buildDiagramLegend,
     buildChoroplethLegend,
     buildDiagram3DLegend,
     type LegendOptions,
+    type LegendContext,
 } from './Legend.js';
 
 // =====================================================================
@@ -73,14 +75,17 @@ export type DiagramSpawnOptions = Omit<DiagramOptions, 'position' | 'crs' | 'par
 // =====================================================================
 
 export interface ChoroplethConfig {
-    /** Формула или поле, например `'population / area'` или `'gdp'`. */
     value: string | ((props: Props) => number);
-    /** Имя палитры или массив стопов. */
     colorRamp: string | any[];
-    /** Метод классификации. @default 'jenks' */
-    classification?: 'equal' | 'quantile' | 'jenks' | number[];
+
+    colorRampInvert?: boolean;
+
+    classification?: 'equal' | 'quantile' | 'jenks' | 'logarithmic'
+                   | 'stddev' | 'geometric' | 'arithmetic' | 'headtail'
+                   | number[];
     classes?: number;
     noDataColor?: string;
+    pretty?: boolean;
     legend?: LegendOptions;
 }
 
@@ -536,6 +541,8 @@ export interface GeoJSONLayerOptions {
     polygonToOptions?:  PolygonOptionsCallback;
     polygon3DToOptions?: Polygon3DOptionsCallback;
     vectorToOptions?:   VectorOptionsCallback;
+     legendToOptions?: (ctx: LegendContext) => Partial<LegendOptions> | null | undefined;
+    
 
     diagram3D?: Diagram3DLayerConfig;
     diagram3DToOptions?: (feature: GeoJSONFeature, props: Props) => Diagram3DSpawnOptions | null;
@@ -642,6 +649,9 @@ private _diagramAuto: { unitPx: number } | null = null;
     public polygonToOptions: PolygonOptionsCallback | null = null;
     public polygon3DToOptions: Polygon3DOptionsCallback | null = null;
     public vectorToOptions: VectorOptionsCallback | null = null;
+    public legendToOptions:
+        ((ctx: LegendContext) => Partial<LegendOptions> | null | undefined) | null = null;
+    
 
     public tooltip: string | ((props: Props) => string | null) | null = null;
     /** @deprecated Используйте `tooltip: '{fieldName}'`. */
@@ -778,6 +788,8 @@ private _diagramAuto: { unitPx: number } | null = null;
         this.defaultPolygon3DModelUrl = o.defaultPolygon3DModelUrl ?? null;
         this.defaultPolygon3DDepthTest = o.defaultPolygon3DDepthTest ?? true;
         this.defaultPolygon3DDepthWrite = o.defaultPolygon3DDepthWrite ?? true;
+
+         this.legendToOptions = o.legendToOptions ?? null;
     }
 
     // =================================================================
@@ -916,11 +928,13 @@ reload(): void {
                 geojson = await resp.json() as GeoJSONInput;
             }
             if (!geojson) { console.warn('GeoJSONLayer: no data or URL'); return; }
-
-            if (this.choropleth) {
-                this._choroplethRamp = resolveColorRamp(this.choropleth.colorRamp);
-                this._calculateChoroplethBreaks(geojson);
-            }
+if (this.choropleth) {
+    const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
+    this._choroplethRamp = this.choropleth.colorRampInvert
+        ? invertColorRamp(baseRamp)
+        : baseRamp;
+    this._calculateChoroplethBreaks(geojson);
+}
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
             this._parse(geojson);
@@ -931,30 +945,54 @@ reload(): void {
         }
     }
 
-    private _buildLegend(geojson: GeoJSONInput): void {
+private _buildLegend(geojson: GeoJSONInput): void {
     if (this.legend) {
         try { this.legend.destroy(); } catch {}
         this.legend = null;
     }
 
+    let kind: 'diagram' | 'diagram3D' | 'choropleth' | null = null;
+    let cfg: any = null;
     let legendOpts: LegendOptions | undefined;
-    let builder: (() => MapLegend) | null = null;
 
     if (this.diagram?.legend) {
+        kind = 'diagram';
+        cfg = this.diagram;
         legendOpts = this.diagram.legend;
-        builder = () => buildDiagramLegend(this, geojson, this.diagram, legendOpts!);
     } else if (this.diagram3D?.legend) {
+        kind = 'diagram3D';
+        cfg = this.diagram3D;
         legendOpts = this.diagram3D.legend;
-        builder = () => buildDiagram3DLegend(this, geojson, this.diagram3D, legendOpts!);
     } else if (this.choropleth?.legend) {
+        kind = 'choropleth';
+        cfg = this.choropleth;
         legendOpts = this.choropleth.legend;
-        builder = () => buildChoroplethLegend(this, geojson, this.choropleth, legendOpts!);
     }
 
-    if (!builder || !legendOpts) return;
+    if (!kind || !legendOpts) return;
 
+    // ── legendToOptions: патч декларативных опций ──
+    if (this.legendToOptions) {
+        try {
+            const ctx: LegendContext = { layer: this, kind, cfg, geojson, base: legendOpts };
+            const patch = this.legendToOptions(ctx);
+
+            if (patch === null) return;          // ← явный «не строить»
+            if (patch) legendOpts = { ...legendOpts, ...patch };
+        } catch (err) {
+            console.warn('GeoJSONLayer: legendToOptions threw', err);
+        }
+    }
+
+    // ── build ──
     try {
-        this.legend = builder();
+        const builder = kind === 'diagram'
+            ? buildDiagramLegend(this, geojson, cfg, legendOpts)
+            : kind === 'diagram3D'
+                ? buildDiagram3DLegend(this, geojson, cfg, legendOpts)
+                : buildChoroplethLegend(this, geojson, cfg, legendOpts);
+
+        this.legend = builder;
         if (legendOpts.target) this.legend.mount(legendOpts.target);
         legendOpts.onReady?.(this.legend);
     } catch (err) {
@@ -966,22 +1004,28 @@ reload(): void {
     // Choropleth
     // =================================================================
 
-    private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
-        if (!this.choropleth) return;
-        const values: number[] = [];
-        const visit = (f: GeoJSONFeature) => {
-            if (!f.properties) return;
-            const v = this._evaluateValueExpression(f.properties, this.choropleth!.value);
-            if (isFinite(v)) values.push(v);
-        };
-        if (geojson.type === 'FeatureCollection') geojson.features.forEach(visit);
-        else if (geojson.type === 'Feature')       visit(geojson);
-        this._choroplethBreaks = calculateBreaks(
-            values,
-            this.choropleth.classification ?? 'jenks',
-            this.choropleth.classes ?? 5,
-        );
+private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
+    if (!this.choropleth) return;
+    const values: number[] = [];
+    const visit = (f: GeoJSONFeature) => {
+        if (!f.properties) return;
+        const v = this._evaluateValueExpression(f.properties, this.choropleth!.value);
+        if (isFinite(v)) values.push(v);
+    };
+    if (geojson.type === 'FeatureCollection') geojson.features.forEach(visit);
+    else if (geojson.type === 'Feature')       visit(geojson);
+
+    this._choroplethBreaks = calculateBreaks(
+        values,
+        this.choropleth.classification ?? 'jenks',
+        this.choropleth.classes ?? 5,
+    );
+
+    // ── pretty: true — округлить до 1-2-5, кроме ручных границ ──
+    if (this.choropleth.pretty && !Array.isArray(this.choropleth.classification)) {
+        this._choroplethBreaks = makeBreaksPretty(this._choroplethBreaks);
     }
+}
 
     // =================================================================
     // 3D diagram: auto-sizing (unitM + bar dimensions)

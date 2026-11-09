@@ -127,11 +127,18 @@ export interface Diagram3DLayerConfig {
 }
 
 export interface DiagramLayerConfig {
-    type?: string;
+type?: string;
     fields: string[];
-    unitPx?: number;
+
+    /** Масштаб: пикселей на единицу значения. `'auto'` → `maxHeightPx / maxValue`. */
+    unitPx?: number | 'auto';
+    /** Максимальная высота диаграммы (px) при `unitPx: 'auto'`. @default 200 */
+    maxHeightPx?: number;
+
     orientation?: DiagramOrientation;
-    colorMap?: Record<string, string>;
+    /** Строка — фиксированный цвет; массив — правила по значению (как в 3D). */
+    colorMap?: Record<string, ColorMapValue>;
+
     barWidth?: number;
     gap?: number;
     padding?: number;
@@ -607,7 +614,7 @@ export class GeoJSONLayer extends Layer {
 
     /** Кэш авторасчёта для `diagram3D` (unitM + barWidthM/barDepthM). */
     private _diagram3DAuto: { unitM: number; barWidthM: number; barDepthM: number } | null = null;
-
+private _diagramAuto: { unitPx: number } | null = null;
     public featureFilter: ((f: GeoJSONFeature) => boolean) | null = null;
     public filterSpec: FeatureFilterSpec | null = null;
     public filterExpression: string | null = null;
@@ -897,6 +904,7 @@ export class GeoJSONLayer extends Layer {
                 this._calculateChoroplethBreaks(geojson);
             }
             this._computeDiagram3DAuto(geojson);
+            this._computeDiagramAuto(geojson);
             this._parse(geojson);
             this._loaded = true;
         } catch (err) {
@@ -928,6 +936,34 @@ export class GeoJSONLayer extends Layer {
     // =================================================================
     // 3D diagram: auto-sizing (unitM + bar dimensions)
     // =================================================================
+
+/**
+ * Один раз на слой: если `diagram.unitPx === 'auto'` — считаем
+ * `unitPx = maxHeightPx / maxValue`.
+ */
+private _computeDiagramAuto(geojson: GeoJSONInput): void {
+    this._diagramAuto = null;
+    const cfg = this.diagram;
+    if (!cfg?.fields?.length) return;
+    if (cfg.unitPx !== 'auto') return;
+
+    let maxValue = 0;
+    const scan = (f: GeoJSONFeature) => {
+        if (this.featureFilter && !this.featureFilter(f)) return;
+        const p = f.properties ?? {};
+        for (const k of cfg.fields) {
+            const v = Number(p[k]);
+            if (isFinite(v) && v > maxValue) maxValue = v;
+        }
+    };
+    if (geojson.type === 'FeatureCollection') geojson.features.forEach(scan);
+    else if (geojson.type === 'Feature')       scan(geojson);
+    if (maxValue <= 0) return;
+
+    this._diagramAuto = {
+        unitPx: (cfg.maxHeightPx ?? 200) / maxValue,
+    };
+}
 
     /**
      * Один раз на слой:
@@ -1525,22 +1561,28 @@ export class GeoJSONLayer extends Layer {
         };
     }
 
-    private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
-        const cfg = this.diagram;
-        if (!cfg?.fields?.length) return null;
+private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
+    const cfg = this.diagram;
+    if (!cfg?.fields?.length) return null;
 
-        const data = cfg.fields
-            .map(key => {
-                const v = Number(props[key]);
-                if (!isFinite(v)) return null;
-                return {
-                    label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
-                    value: v,
-                    color: cfg.colorMap?.[key],
-                };
-            })
-            .filter((d): d is NonNullable<typeof d> => d !== null);
-        if (!data.length) return null;
+    // Разрешённый unitPx (число или авто)
+    const unitPx = this._diagramAuto?.unitPx
+        ?? (typeof cfg.unitPx === 'number' ? cfg.unitPx : 1);
+
+    const data = cfg.fields
+        .map(key => {
+            const v = Number(props[key]);
+            if (!isFinite(v)) return null;
+            // Цвет — через тот же resolver, что и в 3D
+            const color = resolveColorMapValue(cfg.colorMap?.[key], v);
+            return {
+                label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
+                value: v,
+                color,
+            };
+        })
+        .filter((d): d is NonNullable<typeof d> => d !== null);
+    if (!data.length) return null;
 
         let tooltip = this._getTooltip(props);
         if (!tooltip) {
@@ -1552,10 +1594,10 @@ export class GeoJSONLayer extends Layer {
         }
 
         const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
-        return {
-            type: cfg.type ?? 'bar',
-            data,
-            unitPx: cfg.unitPx,
+         return {
+        type: cfg.type ?? 'bar',
+        data,
+        unitPx,
             orientation: cfg.orientation,
             barWidth: cfg.barWidth,
             gap: cfg.gap,

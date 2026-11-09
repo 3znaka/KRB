@@ -44,11 +44,13 @@ choropleth: {
 
   diagram: {
         type: 'vienna',
-         fields: ['score', 'value', 'count'], 
+         fields: ['score'], 
+
+         colorMap: { score: [{ max: 300, color: '#e74c3c' }, { color: '#2ecc71' }] },
 
         gap: -1,
-        unitPx: 10,      
-        unitValue: 100,   
+        unitPx: 5,      
+        unitValue: 50,   
 
         strokeColor: '#111',
         strokeWidth: 1,

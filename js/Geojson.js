@@ -288,6 +288,7 @@ export class GeoJSONLayer extends Layer {
     onEachDiagram3D = null;
     /** Кэш авторасчёта для `diagram3D` (unitM + barWidthM/barDepthM). */
     _diagram3DAuto = null;
+    _diagramAuto = null;
     featureFilter = null;
     filterSpec = null;
     filterExpression = null;
@@ -564,6 +565,7 @@ export class GeoJSONLayer extends Layer {
                 this._calculateChoroplethBreaks(geojson);
             }
             this._computeDiagram3DAuto(geojson);
+            this._computeDiagramAuto(geojson);
             this._parse(geojson);
             this._loaded = true;
         }
@@ -594,6 +596,38 @@ export class GeoJSONLayer extends Layer {
     // =================================================================
     // 3D diagram: auto-sizing (unitM + bar dimensions)
     // =================================================================
+    /**
+     * Один раз на слой: если `diagram.unitPx === 'auto'` — считаем
+     * `unitPx = maxHeightPx / maxValue`.
+     */
+    _computeDiagramAuto(geojson) {
+        this._diagramAuto = null;
+        const cfg = this.diagram;
+        if (!cfg?.fields?.length)
+            return;
+        if (cfg.unitPx !== 'auto')
+            return;
+        let maxValue = 0;
+        const scan = (f) => {
+            if (this.featureFilter && !this.featureFilter(f))
+                return;
+            const p = f.properties ?? {};
+            for (const k of cfg.fields) {
+                const v = Number(p[k]);
+                if (isFinite(v) && v > maxValue)
+                    maxValue = v;
+            }
+        };
+        if (geojson.type === 'FeatureCollection')
+            geojson.features.forEach(scan);
+        else if (geojson.type === 'Feature')
+            scan(geojson);
+        if (maxValue <= 0)
+            return;
+        this._diagramAuto = {
+            unitPx: (cfg.maxHeightPx ?? 200) / maxValue,
+        };
+    }
     /**
      * Один раз на слой:
      * - если `unitM: 'auto'` — `unitM = maxHeightM / maxValue`;
@@ -1174,15 +1208,20 @@ export class GeoJSONLayer extends Layer {
         const cfg = this.diagram;
         if (!cfg?.fields?.length)
             return null;
+        // Разрешённый unitPx (число или авто)
+        const unitPx = this._diagramAuto?.unitPx
+            ?? (typeof cfg.unitPx === 'number' ? cfg.unitPx : 1);
         const data = cfg.fields
             .map(key => {
             const v = Number(props[key]);
             if (!isFinite(v))
                 return null;
+            // Цвет — через тот же resolver, что и в 3D
+            const color = resolveColorMapValue(cfg.colorMap?.[key], v);
             return {
                 label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
                 value: v,
-                color: cfg.colorMap?.[key],
+                color,
             };
         })
             .filter((d) => d !== null);
@@ -1198,7 +1237,7 @@ export class GeoJSONLayer extends Layer {
         return {
             type: cfg.type ?? 'bar',
             data,
-            unitPx: cfg.unitPx,
+            unitPx,
             orientation: cfg.orientation,
             barWidth: cfg.barWidth,
             gap: cfg.gap,

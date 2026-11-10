@@ -4,9 +4,6 @@
  * Декларативные опции: `style`, `choropleth`, `diagram` (2D), `diagram3D`.
  * Escape hatch: коллбэки `*ToOptions` (мержатся поверх декларатива).
  * Фильтр: строка-выражение, объект-спецификация, предикат или null.
- *
- * Переключение фильтра без пересоздания слоя: `layer.setFeatureFilter(...)`.
- * Смена декларативного конфига: `layer.setChoropleth(...)` / `setDiagram3D(...)`.
  */
 import { Layer } from './Layers.js';
 import { Marker, type MarkerOptions, type LonLat, type IconSize } from './Marker.js';
@@ -19,6 +16,7 @@ import { Diagram, type DiagramOptions } from './Diagram.js';
 import { Diagram3D, type Diagram3DSpawnOptions } from './Diagram3D.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
+import { getAutoCoins, resolveDiagramUnitPx } from './DiagramTypes.js';
 import type { Diagram3DData } from './Diagram3DTypes.js';
 import { calculateBreaks, getClassIndex, makeBreaksPretty } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp, invertColorRamp } from './ColorRamps.js';
@@ -78,7 +76,7 @@ export interface ChoroplethConfig {
     value: string | ((props: Props) => number);
     colorRamp: string | any[];
 
-    colorRampInvert?: boolean;
+    colorRampReverse?: boolean;
 
     classification?: 'equal' | 'quantile' | 'jenks' | 'logarithmic'
                    | 'stddev' | 'geometric' | 'arithmetic' | 'headtail'
@@ -93,14 +91,12 @@ export interface ChoroplethConfig {
 // Color ranges for diagram3D
 // =====================================================================
 
-/** Диапазон значений для `colorMap`. Границы: [min, max). */
 export interface ColorRange {
     min?: number;
     max?: number;
     color: string;
 }
 
-/** Строка — фиксированный цвет; массив — по значению (первое совпадение). */
 export type ColorMapValue = string | ColorRange[];
 
 // =====================================================================
@@ -111,21 +107,14 @@ export interface Diagram3DLayerConfig {
     type?: string;
     fields: string[];
 
-    /**
-     * Масштаб: метров на единицу значения.
-     * `'auto'` — подобрать так, чтобы максимум в слое был равен `maxHeightM`.
-     */
     unitM?: number | 'auto';
-    /** Высота самого высокого столбца при `unitM: 'auto'`. @default 1000 */
     maxHeightM?: number;
-    /** Минимальная видимая высота столбца (м). @default 0 */
     minValueM?: number;
 
     barWidthM?: number;
     barDepthM?: number;
     gapM?: number;
 
-    /** Цвет по полю. Строка — фиксированный, массив — правила по значению. */
     colorMap?: Record<string, ColorMapValue>;
     strokeColor?: string | number;
     strokeWidthM?: number;
@@ -136,22 +125,29 @@ export interface Diagram3DLayerConfig {
     altitudeMode?: 'clampToGround' | 'absolute';
     unitValue?: number;
     maxCols?: number;
-    primitiveType?: PrimitiveType; 
+    primitiveType?: PrimitiveType;
 
     legend?: LegendOptions;
 }
 
 export interface DiagramLayerConfig {
-type?: string;
+    type?: string;
     fields: string[];
 
-    /** Масштаб: пикселей на единицу значения. `'auto'` → `maxHeightPx / maxValue`. */
+    /** Пикселей на единицу значения. `'auto'` → `maxHeightPx / maxValue`. */
     unitPx?: number | 'auto';
+    /**
+     * Альтернатива `unitPx` — «цена» одного пикселя:
+     *   linear (bar):      1 px высоты   = valuePerPx ед.
+     *   area (pie/circle/coin): 1 px радиуса = valuePerPx ед.
+     *   volume (cube):     1 px стороны  = valuePerPx ед.
+     * Удобно для круглых чисел в легенде.
+     */
+    valuePerPx?: number;
     /** Максимальная высота диаграммы (px) при `unitPx: 'auto'`. @default 200 */
     maxHeightPx?: number;
 
     orientation?: DiagramOrientation;
-    /** Строка — фиксированный цвет; массив — правила по значению (как в 3D). */
     colorMap?: Record<string, ColorMapValue>;
 
     barWidth?: number;
@@ -321,7 +317,6 @@ const interpolate = (tpl: string, props: Record<string, any>): string =>
         return v == null ? '' : String(v);
     });
 
-/** `f === 'a' || 'b'` → `f === 'a' || f === 'b'`. */
 const expandOrChains = (expr: string): string => {
     const LIT = String.raw`(?:'[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*"|\d+(?:\.\d+)?|true|false|null)`;
     const FIELD = String.raw`[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*`;
@@ -354,14 +349,14 @@ const compileExpressionFilter = (expr: string): (f: GeoJSONFeature) => boolean =
             });
         with (__scope) { return Boolean(${processed}); }
     `;
-let fn: (f: any) => boolean;
-try {
-    fn = new Function('feature', src) as (f: any) => boolean;
-}
-catch (err) {
-    console.warn('GeoJSONLayer: invalid filter expression', expr, err);
-    return () => false;
-}
+    let fn: (f: any) => boolean;
+    try {
+        fn = new Function('feature', src) as (f: any) => boolean;
+    }
+    catch (err) {
+        console.warn('GeoJSONLayer: invalid filter expression', expr, err);
+        return () => false;
+    }
     return (f) => {
         try { return fn(f); }
         catch (err) {
@@ -520,10 +515,6 @@ export interface GeoJSONLayerOptions {
 
     choropleth?: ChoroplethConfig;
 
-    /**
-     * Тултип: строка-шаблон с `{field}`, функция `(props) => html | null`,
-     * либо `null` (fallback на `tooltipField` → `props.tooltip`/`description`).
-     */
     tooltip?: string | ((props: Props) => string | null) | null;
     tooltipField?: string | null;
     tooltipOnHover?: boolean;
@@ -541,8 +532,7 @@ export interface GeoJSONLayerOptions {
     polygonToOptions?:  PolygonOptionsCallback;
     polygon3DToOptions?: Polygon3DOptionsCallback;
     vectorToOptions?:   VectorOptionsCallback;
-     legendToOptions?: (ctx: LegendContext) => Partial<LegendOptions> | null | undefined;
-    
+    legendToOptions?: (ctx: LegendContext) => Partial<LegendOptions> | null | undefined;
 
     diagram3D?: Diagram3DLayerConfig;
     diagram3DToOptions?: (feature: GeoJSONFeature, props: Props) => Diagram3DSpawnOptions | null;
@@ -552,19 +542,16 @@ export interface GeoJSONLayerOptions {
     diagramToOptions?: (feature: GeoJSONFeature, props: Props) => DiagramSpawnOptions | null;
     onEachDiagram?: (feature: GeoJSONFeature, diagram: Diagram) => void;
 
-    // defaults (Marker)
     defaultIconUrl?: string;
     defaultIconSize?: IconSize;
     defaultAnchor?: [number, number];
 
-    // defaults (Marker3D)
     default3DPrimitiveType?: PrimitiveType;
     default3DSize?: SizeSpec | null;
     default3DAnchor?: Vec3;
     default3DAltitude?: number;
     default3DAltitudeMode?: 'clampToGround' | 'absolute';
 
-    // defaults (Polyline)
     defaultLineColor?: string | number;
     defaultLineWidth?: number;
     defaultLineOpacity?: number;
@@ -577,7 +564,6 @@ export interface GeoJSONLayerOptions {
     defaultLineMinZoom?: number;
     defaultLineMaxZoom?: number;
 
-    // defaults (Polygon)
     defaultFillColor?: string | number;
     defaultFillOpacity?: number;
     defaultStrokeColor?: string | number;
@@ -595,7 +581,6 @@ export interface GeoJSONLayerOptions {
     defaultPolygonHeight?: number;
     defaultPolygonMinHeight?: number;
 
-    // defaults (Area3D)
     defaultPolygon3DPrimitiveType?: PrimitiveType;
     defaultPolygon3DSize?: SizeSpec | null;
     defaultPolygon3DAnchor?: [number, number, number];
@@ -612,10 +597,6 @@ export interface GeoJSONLayerOptions {
 // GeoJSONLayer
 // =====================================================================
 
-/**
- * Слой GeoJSON: маркеры / линии / полигоны / диаграммы 2D и 3D / choropleth.
- * Порядок merge: `defaults → style → callback → enforced`.
- */
 export class GeoJSONLayer extends Layer {
     public url: string | null = null;
     public data: GeoJSONInput | null = null;
@@ -632,9 +613,13 @@ export class GeoJSONLayer extends Layer {
     public diagram3DToOptions: ((f: GeoJSONFeature, p: Props) => Diagram3DSpawnOptions | null) | null = null;
     public onEachDiagram3D: ((f: GeoJSONFeature, d: Diagram3D) => void) | null = null;
 
-    /** Кэш авторасчёта для `diagram3D` (unitM + barWidthM/barDepthM). */
+    /** Кэш авторасчёта для `diagram3D`. */
     private _diagram3DAuto: { unitM: number; barWidthM: number; barDepthM: number } | null = null;
-private _diagramAuto: { unitPx: number } | null = null;
+    /** Кэш авторасчёта для `diagram.unitPx: 'auto'`. */
+    private _diagramAuto: { unitPx: number } | null = null;
+    /** Единый набор номиналов для `type: 'coin'` на весь слой. */
+    private _diagramCoins: number[] | null = null;
+
     public featureFilter: ((f: GeoJSONFeature) => boolean) | null = null;
     public filterSpec: FeatureFilterSpec | null = null;
     public filterExpression: string | null = null;
@@ -651,7 +636,6 @@ private _diagramAuto: { unitPx: number } | null = null;
     public vectorToOptions: VectorOptionsCallback | null = null;
     public legendToOptions:
         ((ctx: LegendContext) => Partial<LegendOptions> | null | undefined) | null = null;
-    
 
     public tooltip: string | ((props: Props) => string | null) | null = null;
     /** @deprecated Используйте `tooltip: '{fieldName}'`. */
@@ -789,7 +773,7 @@ private _diagramAuto: { unitPx: number } | null = null;
         this.defaultPolygon3DDepthTest = o.defaultPolygon3DDepthTest ?? true;
         this.defaultPolygon3DDepthWrite = o.defaultPolygon3DDepthWrite ?? true;
 
-         this.legendToOptions = o.legendToOptions ?? null;
+        this.legendToOptions = o.legendToOptions ?? null;
     }
 
     // =================================================================
@@ -802,18 +786,18 @@ private _diagramAuto: { unitPx: number } | null = null;
         return this;
     }
 
-reload(): void {
-    const self = this as any;
-    for (const obj of [...(self._objects ?? [])]) obj.remove();
-    self._objects = [];
+    reload(): void {
+        const self = this as any;
+        for (const obj of [...(self._objects ?? [])]) obj.remove();
+        self._objects = [];
 
-    if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
+        if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
 
-    this._loaded = false;
-    if (self._map) this._load();
-}
+        this._loaded = false;
+        if (self._map) this._load();
+    }
 
-    // ── setters (все с авто-reload при активной карте) ─────────────
+    // ── setters ────────────────────────────────────────────────────
 
     setData(data: GeoJSONInput | null): this {
         this.data = data;
@@ -845,13 +829,16 @@ reload(): void {
         return this;
     }
 
-    getLegend(): MapLegend | null { return this.legend; }
-
     setDiagram3D(cfg: Diagram3DLayerConfig | null): this {
         this.diagram3D = cfg;
         if (this._map && this._loaded) this.reload();
         return this;
     }
+
+    getLegend(): MapLegend | null { return this.legend; }
+
+    /** Единый набор номиналов для `coin` (null — если тип не 'coin' или слой не загружен). */
+    getDiagramCoins(): number[] | null { return this._diagramCoins; }
 
     /** Меняет feature-фильтр. Пересоздаёт объекты слоя без пересоздания слоя. */
     setFeatureFilter(input: FeatureFilterInput): this {
@@ -860,7 +847,6 @@ reload(): void {
         return this;
     }
 
-    /** Alias для `setFeatureFilter`. */
     setFilter(input: FeatureFilterInput): this {
         return this.setFeatureFilter(input);
     }
@@ -871,7 +857,6 @@ reload(): void {
         return this.featureFilter;
     }
 
-    /** Добавляет объекты к уже загруженным. */
     addData(data: GeoJSONInput): this {
         this._parse(data);
         return this;
@@ -928,142 +913,190 @@ reload(): void {
                 geojson = await resp.json() as GeoJSONInput;
             }
             if (!geojson) { console.warn('GeoJSONLayer: no data or URL'); return; }
-if (this.choropleth) {
-    const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
-    this._choroplethRamp = this.choropleth.colorRampInvert
-        ? invertColorRamp(baseRamp)
-        : baseRamp;
-    this._calculateChoroplethBreaks(geojson);
-}
+            if (this.choropleth) {
+                const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
+                this._choroplethRamp = this.choropleth.colorRampReverse
+                    ? invertColorRamp(baseRamp)
+                    : baseRamp;
+                this._calculateChoroplethBreaks(geojson);
+            }
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
+            this._computeCoinDenoms(geojson);
             this._parse(geojson);
-            this._buildLegend(geojson); 
+            this._buildLegend(geojson);
             this._loaded = true;
         } catch (err) {
             console.error('GeoJSONLayer: load/parse error', err);
         }
     }
 
-private _buildLegend(geojson: GeoJSONInput): void {
-    if (this.legend) {
-        try { this.legend.destroy(); } catch {}
-        this.legend = null;
-    }
+    private _buildLegend(geojson: GeoJSONInput): void {
+        if (this.legend) {
+            try { this.legend.destroy(); } catch {}
+            this.legend = null;
+        }
 
-    let kind: 'diagram' | 'diagram3D' | 'choropleth' | null = null;
-    let cfg: any = null;
-    let legendOpts: LegendOptions | undefined;
+        let kind: 'diagram' | 'diagram3D' | 'choropleth' | null = null;
+        let cfg: any = null;
+        let legendOpts: LegendOptions | undefined;
 
-    if (this.diagram?.legend) {
-        kind = 'diagram';
-        cfg = this.diagram;
-        legendOpts = this.diagram.legend;
-    } else if (this.diagram3D?.legend) {
-        kind = 'diagram3D';
-        cfg = this.diagram3D;
-        legendOpts = this.diagram3D.legend;
-    } else if (this.choropleth?.legend) {
-        kind = 'choropleth';
-        cfg = this.choropleth;
-        legendOpts = this.choropleth.legend;
-    }
+        if (this.diagram?.legend) {
+            kind = 'diagram';
+            cfg = this.diagram;
+            legendOpts = this.diagram.legend;
+        } else if (this.diagram3D?.legend) {
+            kind = 'diagram3D';
+            cfg = this.diagram3D;
+            legendOpts = this.diagram3D.legend;
+        } else if (this.choropleth?.legend) {
+            kind = 'choropleth';
+            cfg = this.choropleth;
+            legendOpts = this.choropleth.legend;
+        }
 
-    if (!kind || !legendOpts) return;
+        if (!kind || !legendOpts) return;
 
-    // ── legendToOptions: патч декларативных опций ──
-    if (this.legendToOptions) {
+        if (this.legendToOptions) {
+            try {
+                const ctx: LegendContext = { layer: this, kind, cfg, geojson, base: legendOpts };
+                const patch = this.legendToOptions(ctx);
+                if (patch === null) return;
+                if (patch) legendOpts = { ...legendOpts, ...patch };
+            } catch (err) {
+                console.warn('GeoJSONLayer: legendToOptions threw', err);
+            }
+        }
+
         try {
-            const ctx: LegendContext = { layer: this, kind, cfg, geojson, base: legendOpts };
-            const patch = this.legendToOptions(ctx);
+            const builder = kind === 'diagram'
+                ? buildDiagramLegend(this, geojson, cfg, legendOpts)
+                : kind === 'diagram3D'
+                    ? buildDiagram3DLegend(this, geojson, cfg, legendOpts)
+                    : buildChoroplethLegend(this, geojson, cfg, legendOpts);
 
-            if (patch === null) return;          // ← явный «не строить»
-            if (patch) legendOpts = { ...legendOpts, ...patch };
+            this.legend = builder;
+            if (legendOpts.target) this.legend.mount(legendOpts.target);
+            legendOpts.onReady?.(this.legend);
         } catch (err) {
-            console.warn('GeoJSONLayer: legendToOptions threw', err);
+            console.warn('GeoJSONLayer: legend build failed', err);
         }
     }
-
-    // ── build ──
-    try {
-        const builder = kind === 'diagram'
-            ? buildDiagramLegend(this, geojson, cfg, legendOpts)
-            : kind === 'diagram3D'
-                ? buildDiagram3DLegend(this, geojson, cfg, legendOpts)
-                : buildChoroplethLegend(this, geojson, cfg, legendOpts);
-
-        this.legend = builder;
-        if (legendOpts.target) this.legend.mount(legendOpts.target);
-        legendOpts.onReady?.(this.legend);
-    } catch (err) {
-        console.warn('GeoJSONLayer: legend build failed', err);
-    }
-}
 
     // =================================================================
     // Choropleth
     // =================================================================
 
-private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
-    if (!this.choropleth) return;
-    const values: number[] = [];
-    const visit = (f: GeoJSONFeature) => {
-        if (!f.properties) return;
-        const v = this._evaluateValueExpression(f.properties, this.choropleth!.value);
-        if (isFinite(v)) values.push(v);
-    };
-    if (geojson.type === 'FeatureCollection') geojson.features.forEach(visit);
-    else if (geojson.type === 'Feature')       visit(geojson);
+    private _calculateChoroplethBreaks(geojson: GeoJSONInput): void {
+        if (!this.choropleth) return;
+        const values: number[] = [];
+        const visit = (f: GeoJSONFeature) => {
+            if (!f.properties) return;
+            const v = this._evaluateValueExpression(f.properties, this.choropleth!.value);
+            if (isFinite(v)) values.push(v);
+        };
+        if (geojson.type === 'FeatureCollection') geojson.features.forEach(visit);
+        else if (geojson.type === 'Feature')       visit(geojson);
 
-    this._choroplethBreaks = calculateBreaks(
-        values,
-        this.choropleth.classification ?? 'jenks',
-        this.choropleth.classes ?? 5,
-    );
+        this._choroplethBreaks = calculateBreaks(
+            values,
+            this.choropleth.classification ?? 'jenks',
+            this.choropleth.classes ?? 5,
+        );
 
-    // ── pretty: true — округлить до 1-2-5, кроме ручных границ ──
-    if (this.choropleth.pretty && !Array.isArray(this.choropleth.classification)) {
-        this._choroplethBreaks = makeBreaksPretty(this._choroplethBreaks);
+        if (this.choropleth.pretty && !Array.isArray(this.choropleth.classification)) {
+            this._choroplethBreaks = makeBreaksPretty(this._choroplethBreaks);
+        }
     }
-}
 
     // =================================================================
-    // 3D diagram: auto-sizing (unitM + bar dimensions)
+    // 2D diagram: auto-sizing
     // =================================================================
+
+    /** Если `diagram.unitPx === 'auto'` — считаем `unitPx = maxHeightPx / maxValue`. */
+    private _computeDiagramAuto(geojson: GeoJSONInput): void {
+        this._diagramAuto = null;
+        const cfg = this.diagram;
+        if (!cfg?.fields?.length) return;
+        if (cfg.unitPx !== 'auto') return;
+
+        let maxValue = 0;
+        const scan = (f: GeoJSONFeature) => {
+            if (this.featureFilter && !this.featureFilter(f)) return;
+            const p = f.properties ?? {};
+            for (const k of cfg.fields) {
+                const v = Number(p[k]);
+                if (isFinite(v) && v > maxValue) maxValue = v;
+            }
+        };
+        if (geojson.type === 'FeatureCollection') geojson.features.forEach(scan);
+        else if (geojson.type === 'Feature')       scan(geojson);
+        if (maxValue <= 0) return;
+
+        this._diagramAuto = {
+            unitPx: (cfg.maxHeightPx ?? 200) / maxValue,
+        };
+    }
 
 /**
- * Один раз на слой: если `diagram.unitPx === 'auto'` — считаем
- * `unitPx = maxHeightPx / maxValue`.
+ * Один раз на слой для `coin`: единый набор номиналов,
+ * чтобы рендер и легенда показывали одинаковые кружки.
+ *
+ * Оставляем только те номиналы, которые реально используются
+ * хотя бы одной диаграммой — иначе легенда показала бы
+ * «500 ед.», которого нет на карте.
  */
-private _computeDiagramAuto(geojson: GeoJSONInput): void {
-    this._diagramAuto = null;
+private _computeCoinDenoms(geojson: GeoJSONInput): void {
+    this._diagramCoins = null;
     const cfg = this.diagram;
-    if (!cfg?.fields?.length) return;
-    if (cfg.unitPx !== 'auto') return;
+    if (!cfg || (cfg.type ?? 'bar') !== 'coin') return;
 
-    let maxValue = 0;
+    // Явный список от пользователя — уважаем без фильтра.
+    if (cfg.coins && cfg.coins.length > 0) {
+        this._diagramCoins = [...cfg.coins].sort((a, b) => b - a);
+        return;
+    }
+
+    // Собираем ВСЕ значения по всем отрисовываемым фичам.
+    const allValues: number[] = [];
     const scan = (f: GeoJSONFeature) => {
         if (this.featureFilter && !this.featureFilter(f)) return;
         const p = f.properties ?? {};
+        // Синхронизировано с _addPointFeature: такие фичи не дают диаграмм.
+        if (p.diagram === false) return;
         for (const k of cfg.fields) {
             const v = Number(p[k]);
-            if (isFinite(v) && v > maxValue) maxValue = v;
+            if (isFinite(v) && v > 0) allValues.push(v);
         }
     };
     if (geojson.type === 'FeatureCollection') geojson.features.forEach(scan);
     else if (geojson.type === 'Feature')       scan(geojson);
-    if (maxValue <= 0) return;
+    if (!allValues.length) return;
 
-    this._diagramAuto = {
-        unitPx: (cfg.maxHeightPx ?? 200) / maxValue,
-    };
+    const maxVal = Math.max(...allValues);
+    const candidates = getAutoCoins(maxVal);
+
+    // Проходим тем же алгоритмом разложения, что и рендер, и отмечаем
+    // номиналы, встретившиеся хотя бы раз.
+    const used = new Set<number>();
+    for (const v of allValues) {
+        let rem = v;
+        for (const c of candidates) {
+            if (rem >= c) {
+                used.add(c);
+                rem %= c;
+            }
+        }
+    }
+
+    const filtered = candidates.filter(c => used.has(c));
+    this._diagramCoins = filtered.length ? filtered : candidates;
 }
 
-    /**
-     * Один раз на слой:
-     * - если `unitM: 'auto'` — `unitM = maxHeightM / maxValue`;
-     * - если `barWidthM`/`barDepthM` не заданы — подбираем по maxH и n.
-     */
+    // =================================================================
+    // 3D diagram: auto-sizing
+    // =================================================================
+
     private _computeDiagram3DAuto(geojson: GeoJSONInput): void {
         this._diagram3DAuto = null;
         const cfg = this.diagram3D;
@@ -1115,7 +1148,6 @@ private _computeDiagramAuto(geojson: GeoJSONInput): void {
         };
     }
 
-    /** Дополняет `opts` авто-размерами bar3d, если они не заданы. */
     private _withDiagram3DAuto(opts: Diagram3DSpawnOptions): Diagram3DSpawnOptions {
         const out = { ...opts };
         const auto = this._diagram3DAuto;
@@ -1505,8 +1537,8 @@ private _computeDiagramAuto(geojson: GeoJSONInput): void {
             const val = this._evaluateValueExpression(props, this.choropleth.value);
             if (isFinite(val)) {
                 const idx = getClassIndex(val, this._choroplethBreaks);
-const denom = Math.max(1, this._choroplethBreaks.length - 2);
-const t = idx / denom;
+                const denom = Math.max(1, this._choroplethBreaks.length - 2);
+                const t = idx / denom;
                 const rgba = sampleColorRamp(this._choroplethRamp, t);
                 choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
             } else {
@@ -1655,28 +1687,26 @@ const t = idx / denom;
         };
     }
 
-private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
-    const cfg = this.diagram;
-    if (!cfg?.fields?.length) return null;
+    private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOptions | null {
+        const cfg = this.diagram;
+        if (!cfg?.fields?.length) return null;
 
-    // Разрешённый unitPx (число или авто)
-    const unitPx = this._diagramAuto?.unitPx
-        ?? (typeof cfg.unitPx === 'number' ? cfg.unitPx : 1);
+        const typeName = cfg.type ?? 'bar';
+        const unitPx = resolveDiagramUnitPx(typeName, cfg, this._diagramAuto?.unitPx);
 
-    const data = cfg.fields
-        .map(key => {
-            const v = Number(props[key]);
-            if (!isFinite(v)) return null;
-            // Цвет — через тот же resolver, что и в 3D
-            const color = resolveColorMapValue(cfg.colorMap?.[key], v);
-            return {
-                label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
-                value: v,
-                color,
-            };
-        })
-        .filter((d): d is NonNullable<typeof d> => d !== null);
-    if (!data.length) return null;
+        const data = cfg.fields
+            .map(key => {
+                const v = Number(props[key]);
+                if (!isFinite(v)) return null;
+                const color = resolveColorMapValue(cfg.colorMap?.[key], v);
+                return {
+                    label: cfg.labelField ? String(props[cfg.labelField] ?? key) : key,
+                    value: v,
+                    color,
+                };
+            })
+            .filter((d): d is NonNullable<typeof d> => d !== null);
+        if (!data.length) return null;
 
         let tooltip = this._getTooltip(props);
         if (!tooltip) {
@@ -1688,10 +1718,10 @@ private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOption
         }
 
         const label = cfg.labelField ? String(props[cfg.labelField] ?? '') : '';
-         return {
-        type: cfg.type ?? 'bar',
-        data,
-        unitPx,
+        return {
+            type: typeName,
+            data,
+            unitPx,
             orientation: cfg.orientation,
             barWidth: cfg.barWidth,
             gap: cfg.gap,
@@ -1714,7 +1744,8 @@ private _diagramFromConfig(_f: GeoJSONFeature, props: Props): DiagramSpawnOption
             minZoom: cfg.minZoom,
             maxZoom: cfg.maxZoom,
             tooltip,
-            coins: cfg.coins,
+            // Единый набор номиналов на слой — иначе каждая фича считает свой
+            coins: this._diagramCoins ?? cfg.coins,
             segmentSizes: cfg.segmentSizes,
         };
     }

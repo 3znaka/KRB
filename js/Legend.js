@@ -1,9 +1,9 @@
 // Legend.ts
-import { getDiagramType, } from './DiagramTypes.js';
+import { getDiagramType, resolveDiagramUnitPx, } from './DiagramTypes.js';
 import { sampleColorRamp } from './ColorRamps.js';
 const RESERVED = new Set([
     'layer', 'kind', 'diagramType', 'title', 'fields', 'example', 'classes',
-    'unitPx', 'unitValue', 'maxCols', 'orientation', 'shape', 'coins',
+    'unitPx', 'unitValue', 'maxCols', 'orientation', 'shape', 'coins', 'scale',
     'breaks', 'colors', 'valueExpr',
     'mount', 'render', 'destroy', 'update',
     '_target', '_renderedEl', '_template',
@@ -12,15 +12,6 @@ const RESERVED = new Set([
 // ─────────────────────────────────────────────────────────────────
 // Русские форматтеры по умолчанию
 // ─────────────────────────────────────────────────────────────────
-/**
- * Форматирование чисел по-русски:
- *   500         → "500"
- *   1000        → "1000"
- *   50 000      → "50 тыс."
- *   1 000 000   → "1 млн."
- *   1,4e9       → "1,4 млрд."
- *   1e12        → "1 трлн."
- */
 export function defaultFormatNumber(v) {
     if (!isFinite(v))
         return String(v);
@@ -44,12 +35,6 @@ export function defaultFormatNumber(v) {
     }
     return sign + String(Math.round(abs));
 }
-/**
- * Подпись диапазона:
- *   первый класс    → "до X"
- *   последний класс → "X и более"
- *   середина        → "от X до Y"
- */
 export function defaultFormatRange(lo, hi, ctx, fmt) {
     const fmtLo = lo != null ? fmt(lo) : '…';
     const fmtHi = hi != null ? fmt(hi) : '…';
@@ -75,7 +60,10 @@ export class MapLegend {
     maxCols;
     orientation;
     shape;
+    /** Готовые кружки-монетки для типа 'coin' (шаблон: {{#each coins}}{{html}}{{value}}{{/each}}). */
     coins;
+    /** Полное описание масштаба — {{scale.text}}, {{scale.valueText}}, {{scale.unitLabel}}. */
+    scale = null;
     breaks;
     colors;
     valueExpr;
@@ -128,7 +116,7 @@ export class MapLegend {
         this._target = null;
         this._renderedEl = null;
     }
-    // ── template engine: {{path}}, {{#each}}, {{#if}}, {{#unless}} ──
+    // ── template engine ─────────────────────────────────────────
     _interpolate(tpl) {
         return this._render(tpl, this);
     }
@@ -167,6 +155,31 @@ export class MapLegend {
                         itemScope['@number'] = idx + 1;
                         itemScope['@first'] = idx === 0;
                         itemScope['@last'] = idx === arr.length - 1;
+                        return this._render(block.body, itemScope);
+                    }).join('');
+                }
+                i = block.endIdx;
+                continue;
+            }
+            if (tag.startsWith('#each-reverse ')) {
+                const path = tag.slice(14).trim();
+                const block = this._extractBlock(tpl, afterOpen, 'each-reverse');
+                if (!block) {
+                    out += tpl.slice(open, afterOpen);
+                    i = afterOpen;
+                    continue;
+                }
+                const arr = this._resolvePath(path, scope);
+                if (Array.isArray(arr)) {
+                    const reversed = arr.slice().reverse();
+                    out += reversed.map((item, idx) => {
+                        const itemScope = (item && typeof item === 'object')
+                            ? Object.assign(Object.create(null), item, { this: item })
+                            : { this: item };
+                        itemScope['@index'] = idx;
+                        itemScope['@number'] = idx + 1;
+                        itemScope['@first'] = idx === 0;
+                        itemScope['@last'] = idx === reversed.length - 1;
                         return this._render(block.body, itemScope);
                     }).join('');
                 }
@@ -261,7 +274,7 @@ export class MapLegend {
                 cur = cur[p];
             }
             else if (cur !== this && p in this) {
-                cur = this[p]; // fallback к legend: {{unitValue}} внутри #each
+                cur = this[p]; // fallback: {{unitValue}} внутри #each
             }
             else {
                 return undefined;
@@ -280,10 +293,15 @@ export class MapLegend {
         if (items.length)
             p.push(`<div class="krb-legend-fields">${items.join('')}</div>`);
         const footer = [];
-        if (this.unitValue != null)
-            footer.push(`1 символ = ${this.unitValue}`);
-        if (this.unitPx != null)
-            footer.push(`1 ед. = ${this.unitPx}px`);
+        if (this.scale?.text) {
+            footer.push(this.scale.text);
+        }
+        else {
+            if (this.unitValue != null)
+                footer.push(`1 символ = ${this.unitValue}`);
+            if (this.unitPx != null)
+                footer.push(`1 ед. = ${this.unitPx}px`);
+        }
         if (footer.length)
             p.push(`<div class="krb-legend-footer">${footer.join(' · ')}</div>`);
         return p.join('');
@@ -371,24 +389,50 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
         label: key,
         color: fallbackColor(cfg.colorMap?.[key]),
     }));
+    const typeName = cfg.type ?? 'bar';
     const legend = new MapLegend({
         layer,
         kind: 'diagram',
-        diagramType: cfg.type ?? 'bar',
+        diagramType: typeName,
         title: opts.title,
         template: opts.template,
         fields,
     });
-    // Единицы — всегда, независимо от того, есть ли пример
+    // ── Масштаб ──────────────────────────────────────────────────
+    // Один и тот же unitPx используют рендер, пример и describeScale.
+    const type = getDiagramType(typeName);
+    const unitPx = resolveDiagramUnitPx(typeName, cfg, layer._diagramAuto?.unitPx);
+    // Единый набор номиналов на слой (для 'coin') — иначе пример легенды
+    // не совпадёт с рендером.
+    const layerCoins = (typeof layer.getDiagramCoins === 'function'
+        ? layer.getDiagramCoins()
+        : null)
+        ?? (Array.isArray(cfg.coins) ? cfg.coins : undefined);
+    // Для describeScale('coin') нужен максимум по всем фичам слоя —
+    // на случай, если coins пуст.
+    let maxVal = 1;
+    for (const f of features) {
+        for (const k of (cfg.fields ?? [])) {
+            const v = Number(f.properties?.[k]);
+            if (isFinite(v) && v > maxVal)
+                maxVal = v;
+        }
+    }
+    const scale = type.describeScale?.({
+        data: [{ label: '', value: maxVal }],
+        width: 0, height: 0, dpr: 1,
+        unitPx,
+        unitValue: cfg.unitValue,
+        coins: layerCoins,
+    }) ?? null;
+    legend.unitPx = unitPx;
     legend.unitValue = cfg.unitValue;
-    legend.unitPx = typeof cfg.unitPx === 'number'
-        ? cfg.unitPx
-        : (layer._diagramAuto?.unitPx ?? undefined);
     legend.maxCols = cfg.maxCols;
     legend.orientation = cfg.orientation;
     legend.shape = cfg.shape;
-    legend.coins = cfg.coins;
-    // Пример
+    legend.scale = scale;
+    legend.coins = scale?.coins;
+    // ── Пример ───────────────────────────────────────────────────
     const pick = opts.example ?? 'auto';
     let exampleFeature = null;
     if (pick === 'auto')
@@ -411,12 +455,12 @@ export function buildDiagramLegend(layer, geojson, cfg, opts) {
             .filter((d) => d !== null);
         if (data.length) {
             legend.example = renderDiagramCanvas(legend.diagramType, data, {
-                unitPx: legend.unitPx ?? 1,
+                unitPx,
                 unitValue: cfg.unitValue,
                 maxCols: cfg.maxCols,
                 orientation: cfg.orientation,
                 shape: cfg.shape,
-                coins: cfg.coins,
+                coins: layerCoins,
                 segmentSizes: cfg.segmentSizes,
                 gap: cfg.gap,
                 padding: cfg.padding,
@@ -450,7 +494,6 @@ export function buildChoroplethLegend(layer, _geojson, cfg, opts) {
         console.warn('Legend: choropleth ramp is null');
         return legend;
     }
-    // Вырожденный случай: одна граница или пусто
     if (!Array.isArray(legend.breaks) || legend.breaks.length < 2) {
         const fb = {
             key: 'class0',
@@ -472,7 +515,6 @@ export function buildChoroplethLegend(layer, _geojson, cfg, opts) {
         colors.push(`#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`);
     }
     legend.colors = colors;
-    // Русское форматирование по умолчанию, переопределяемое через opts.format
     const fmtNumber = opts.format?.number ?? defaultFormatNumber;
     const fmtRange = opts.format?.range;
     const classes = [];
@@ -520,7 +562,6 @@ export function buildDiagram3DLegend(layer, _geojson, cfg, opts) {
         fields,
     });
     legend.unitValue = cfg.unitValue;
-    // Пример: 2D-эквивалент
     const twoD = _3D_TO_2D[String(diagType).toLowerCase()];
     if (twoD && opts.showExample !== false && fields.length) {
         const syntheticData = fields.map(f => ({

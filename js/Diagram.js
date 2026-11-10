@@ -1,6 +1,6 @@
 // Diagram.ts
 import { Marker } from './Marker.js';
-import { getDiagramType, } from './DiagramTypes.js';
+import { getDiagramType, unitPxFromValuePerPx, valuePerPxFromUnitPx, } from './DiagramTypes.js';
 const DIAGRAM_PRIORITY_BASE = 1e6;
 export class Diagram extends Marker {
     _typeName;
@@ -15,13 +15,26 @@ export class Diagram extends Marker {
     _parentPolygon;
     _fitToPolygon;
     _minScreenScale;
+    /** Если пользователь задал valuePerPx — храним его, чтобы пересчитывать при смене типа. */
+    _valuePerPxInput = null;
     constructor(options) {
         const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
         const type = getDiagramType(options.type);
+        // Резолв unitPx: явный unitPx > valuePerPx (через scaleKind) > 1
+        let unitPx;
+        if (typeof options.unitPx === 'number') {
+            unitPx = options.unitPx;
+        }
+        else if (typeof options.valuePerPx === 'number') {
+            unitPx = unitPxFromValuePerPx(type.scaleKind, options.valuePerPx);
+        }
+        else {
+            unitPx = 1;
+        }
         const params = {
             data: options.data,
             width: 0, height: 0, dpr,
-            unitPx: options.unitPx ?? 1,
+            unitPx,
             orientation: options.orientation,
             barWidth: options.barWidth,
             gap: options.gap,
@@ -65,6 +78,10 @@ export class Diagram extends Marker {
         this._parentPolygon = options.parentPolygon ?? null;
         this._fitToPolygon = options.fitToPolygon ?? !!options.parentPolygon;
         this._minScreenScale = options.minScreenScale ?? 0.5;
+        // Запоминаем, что именно пользователь задал
+        if (typeof options.unitPx !== 'number' && typeof options.valuePerPx === 'number') {
+            this._valuePerPxInput = options.valuePerPx;
+        }
         this._canvas = document.createElement('canvas');
         this._applyCanvasSize();
         this._canvas.style.display = 'block';
@@ -99,6 +116,10 @@ export class Diagram extends Marker {
             return this;
         this._typeName = name;
         this._type = getDiagramType(name);
+        // Если пользователь задавал valuePerPx — пересчитываем под новый scaleKind
+        if (this._valuePerPxInput != null) {
+            this._params.unitPx = unitPxFromValuePerPx(this._type.scaleKind, this._valuePerPxInput);
+        }
         this._recompute();
         return this;
     }
@@ -111,11 +132,30 @@ export class Diagram extends Marker {
     }
     getUnitPx() { return this._params.unitPx; }
     setUnitPx(px) {
-        if (!(px > 0) || this._params.unitPx === px)
+        if (!(px > 0))
+            return this;
+        this._valuePerPxInput = null; // явный unitPx отменяет «семантический» вход
+        if (this._params.unitPx === px)
             return this;
         this._params.unitPx = px;
         this._recompute();
         return this;
+    }
+    /** «1 px [размерность] = N ед.» для текущего типа. */
+    getValuePerPx() {
+        return valuePerPxFromUnitPx(this._type.scaleKind, this._params.unitPx);
+    }
+    setValuePerPx(v) {
+        if (!(v > 0))
+            return this;
+        this._valuePerPxInput = v;
+        this._params.unitPx = unitPxFromValuePerPx(this._type.scaleKind, v);
+        this._recompute();
+        return this;
+    }
+    /** Готовое описание масштаба для легенды (или null, если тип не поддерживает). */
+    getScaleInfo() {
+        return this._type.describeScale?.(this._params) ?? null;
     }
     getOrientation() { return this._params.orientation; }
     setOrientation(o) {

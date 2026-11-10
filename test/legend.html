@@ -8,66 +8,99 @@
     html, body { margin: 0; height: 100%; overflow: hidden; }
     #map { position: absolute; inset: 0; }
 
-    /* панель легенд поверх карты */
-    #legends {
+    #diagram-controls {
         position: absolute;
         top: 12px;
-        right: 12px;
+        left: 12px;
         z-index: 1000;
         display: flex;
-        flex-direction: column;
-        gap: 10px;
-        max-width: 240px;
+        flex-wrap: wrap;
+        gap: 4px;
+        max-width: 320px;
+        font: 13px/1.35 system-ui, sans-serif;
+    }
+    #diagram-controls button {
+        padding: 6px 12px;
+        background: #fff;
+        border: 1px solid #ddd;
+        cursor: pointer;
+        font: inherit;
+        border-radius: 3px;
+        transition: background .15s, color .15s, border-color .15s;
+    }
+    #diagram-controls button:hover { background: #f0f0f0; }
+    #diagram-controls button.active {
+        background: #3498db; color: #fff; border-color: #2980b9;
+    }
+
+    #legends {
+        position: absolute;
+        top: 12px; right: 12px;
+        z-index: 1000;
+        display: flex; flex-direction: column;
+        gap: 10px; max-width: 260px;
         font: 13px/1.35 system-ui, sans-serif;
     }
     .legend-card {
-        background: #fff;
-        border: 1px solid #ddd;
-        padding: 10px 12px;
+        background: #fff; border: 1px solid #ddd; padding: 10px 12px;
     }
     .legend-card:empty { display: none; }
-    .legend-card h3 {
-        margin: 0 0 8px;
-        font-size: 13px;
-    }
+    .legend-card h3 { margin: 0 0 8px; font-size: 13px; }
 
-    /* строка легенды: свотч + подпись */
     .legend-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-bottom: 3px;
+        display: flex; align-items: center;
+        gap: 6px; margin-bottom: 3px;
     }
     .legend-row:last-child { margin-bottom: 0; }
 
     .legend-swatch {
-        width: 14px;
-        height: 14px;
+        width: 14px; height: 14px;
         flex-shrink: 0;
         border: 1px solid rgba(0, 0, 0, 0.15);
         box-sizing: border-box;
     }
 
-    /* пример диаграммы */
+    /* монетки: {{html}} — это готовый <img>, обёрнут в span для выравнивания */
+    .legend-coin {
+        display: inline-block;
+        flex-shrink: 0;
+        line-height: 0;
+    }
+    .legend-coin img {
+        display: block;
+        vertical-align: middle;
+    }
+
     .legend-example {
         text-align: center;
-        padding: 8px 0;
-        margin-bottom: 8px;
+        padding: 8px 0; margin-bottom: 8px;
         border-bottom: 1px solid #eee;
     }
     .legend-example canvas { display: block; margin: 0 auto; }
 
     .legend-footer {
-        margin-top: 8px;
-        padding-top: 8px;
+        margin-top: 8px; padding-top: 8px;
         border-top: 1px solid #eee;
-        color: #666;
-        font-size: 12px;
+        color: #666; font-size: 12px;
+    }
+    .legend-footer .legend-row { color: #333; }
+    .legend-coins-intro {
+        margin-bottom: 6px; color: #666; font-size: 11px;
     }
 </style>
 </head>
 <body>
 <div id="map"></div>
+
+<div id="diagram-controls">
+    <button data-type="bar">Столбцы</button>
+    <button data-type="pie">Круговая</button>
+    <button data-type="circle">Круги</button>
+    <button data-type="cube">Кубы</button>
+    <button data-type="vienna">Венский</button>
+    <button data-type="viennaCubes">Венский 3D</button>
+    <button data-type="coin">Монеты</button>
+</div>
 
 <div id="legends">
     <div class="legend-card" id="legend-choropleth"></div>
@@ -89,41 +122,40 @@ const map = new KRB.Map({
     }),
 });
 
-
+// ─────────────────────────────────────────────────────────────────
+// СЛОЙ 1: Choropleth
+// ─────────────────────────────────────────────────────────────────
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
-    crs: 'EPSG:4326',
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
     style: { polygon: { default: { title: '' } } },
 
-   choropleth: {
+    choropleth: {
         value: 'score',
-        classification: 'arithmetic', 
+        classification: 'arithmetic',
         colorRamp: 'Purples',
-        colorRampInvert: true,
+        colorRampReverse: false,
         noDataColor: '#cccccc',
         pretty: true,
-
         legend: {
             target: 'legend-choropleth',
             title: 'Население, чел.',
             template: `
                 <h3>{{title}}</h3>
-                {{#each classes}}
+                {{#each-reverse classes}}
                     <div class="legend-row">
                         <span class="legend-swatch" style="background:{{color}}"></span>
                         <span>{{label}}</span>
                     </div>
-                {{/each}}
+                {{/each-reverse}}
             `,
         },
     },
-
 }).addTo(map);
 
 // ─────────────────────────────────────────────────────────────────
-// СЛОЙ 2: Точки с диаграммами — тот же #each classes
+// СЛОЙ 2: Точки с картодиаграммами
 // ─────────────────────────────────────────────────────────────────
 const cities = [
     { name: 'Москва',   lon: 37.61,  lat: 55.75 },
@@ -138,18 +170,14 @@ const cities = [
     { name: 'Пекин',    lon: 116.40, lat: 39.90 },
 ];
 
+const DIAGRAM_FIELDS = ['score', 'value', 'count'];
+
 const pointsFeatures = [];
-for (let i = 0; i < 40; i++) {
+for (let i = 0; i < 10; i++) {
     const c = cities[Math.floor(Math.random() * cities.length)];
     pointsFeatures.push({
         type: 'Feature',
-        geometry: {
-            type: 'Point',
-            coordinates: [
-                c.lon + (Math.random() - 0.5) * 5,
-                c.lat + (Math.random() - 0.5) * 5,
-            ],
-        },
+        geometry: { type: 'Point', coordinates: [c.lon, c.lat] },
         properties: {
             name:  `${c.name} ${i}`,
             score: Math.floor(Math.random() * 500) + 10,
@@ -159,23 +187,35 @@ for (let i = 0; i < 40; i++) {
     });
 }
 
-new KRB.GeoJSONLayer({
-    data: { type: 'FeatureCollection', features: pointsFeatures },
-    crs: 'EPSG:4326',
-    tooltipOnHover: true,
-    tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}<br>Value: ${p.value}<br>Count: ${p.count}`,
+// ── Пресеты ───────────────────────────────────────────────────────
+// valuePerPx — «цена» одного пикселя:
+//   linear (bar):            1 px высоты     = valuePerPx ед.
+//   area   (pie/circle/coin): 1 px радиуса   = valuePerPx ед.
+//   volume (cube):           1 px стороны    = valuePerPx ед.
+//   discrete (vienna):       unitValue ед. на кубик
+const DIAGRAM_PRESETS = {
+    bar:         { valuePerPx: 5    },                       // бывший unitPx: 0.2
+    pie:         { valuePerPx: 1 },                       // бывший unitPx: 2
+    circle:      { valuePerPx: 0.5,  gap: 6 },               // бывший unitPx: 1.5
+    cube:        { valuePerPx: 0.01, gap: 0 },               // бывший unitPx: 3
+    vienna:      { unitPx: 10, unitValue: 100, gap: 2 },
+    viennaCubes: { unitPx: 10, unitValue: 100, projection: 'oblique' },
+    coin:        { valuePerPx: 1    },
+};
 
-    diagram: {
-        type: 'vienna',
-        fields: ['score', 'value', 'count'],
+/** Декларативный конфиг слоя под заданный тип. */
+function buildDiagramConfig(typeName) {
+    const preset = DIAGRAM_PRESETS[typeName] ?? {};
+
+    return {
+        type: typeName,
+        fields: DIAGRAM_FIELDS,
         colorMap: {
             score: '#e74c3c',
             value: '#3498db',
             count: '#2ecc71',
         },
-        unitPx: 10,
-        gap: 2,
-        unitValue: 100,
+        ...preset,                     // valuePerPx | unitPx | unitValue | projection | gap
         strokeColor: '#fff',
         strokeWidth: 1,
         minZoom: 1,
@@ -193,11 +233,57 @@ new KRB.GeoJSONLayer({
                         <span>{{label}}</span>
                     </div>
                 {{/each}}
-                <div class="legend-footer">Один кубик ≈ {{unitValue}} ед.</div>
+
+                {{#if coins}}
+                    <div class="legend-footer">
+                        <div class="legend-coins-intro">Размер кружка соответствует значению:</div>
+                        {{#each coins}}
+                            <div class="legend-row">
+                                <span class="legend-coin">{{html}}</span>
+                                <span>{{value}} ед.</span>
+                            </div>
+                        {{/each}}
+                    </div>
+                {{/if}}
+
+                {{#unless coins}}
+                    {{#if scale.text}}
+                        <div class="legend-footer">{{scale.text}}</div>
+                    {{/if}}
+                {{/unless}}
             `,
         },
-    },
+    };
+}
+
+// ── Создание слоя и переключение ──────────────────────────────────
+const diagramLayer = new KRB.GeoJSONLayer({
+    data: { type: 'FeatureCollection', features: pointsFeatures },
+    crs: 'EPSG:4326',
+    tooltipOnHover: true,
+    tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}<br>Value: ${p.value}<br>Count: ${p.count}`,
+    diagram: buildDiagramConfig('vienna'),
 }).addTo(map);
+
+const buttons = document.querySelectorAll('#diagram-controls button');
+let currentType = 'vienna';
+
+function setActiveButton(name) {
+    buttons.forEach(b => b.classList.toggle('active', b.dataset.type === name));
+}
+
+function activate(typeName) {
+    if (typeName === currentType) return;
+    currentType = typeName;
+    diagramLayer.setDiagram(buildDiagramConfig(typeName));
+    setActiveButton(typeName);
+}
+
+buttons.forEach(btn => {
+    btn.addEventListener('click', () => activate(btn.dataset.type));
+});
+
+setActiveButton(currentType);
 </script>
 </body>
 </html>

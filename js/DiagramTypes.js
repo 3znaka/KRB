@@ -1,6 +1,6 @@
 // DiagramTypes.ts
-// ── Общие утилиты ──────────────────────────────────────────────────
-const DEFAULT_PALETTE = [
+// ── Общие утилиты ──────────────────────────────────────────────
+export const DEFAULT_PALETTE = [
     '#3498db', '#e74c3c', '#2ecc71', '#f39c12',
     '#9b59b6', '#1abc9c', '#e67e22', '#34495e',
 ];
@@ -17,7 +17,6 @@ function shadeColor(hex, percent) {
     const B = Math.max(0, Math.min(255, (num & 0xff) + amt));
     return `#${((R << 16) | (G << 8) | B).toString(16).padStart(6, '0')}`;
 }
-// Измерение текста для computeSize (доступен только в браузере).
 let _measureCanvas = null;
 let _measureCtx = null;
 function measureText(text, font) {
@@ -37,10 +36,95 @@ function measureText(text, font) {
     }
     return { width: text.length * fontSize * 0.6, height: fontSize * 1.2 };
 }
-// ── Столбчатая ─────────────────────────────────────────────────────
-// ── Столбчатая (с поддержкой делений) ──────────────────────────────
+/** Форматирует число для вставки в легенду. */
+export function formatScaleValue(n) {
+    if (!isFinite(n) || n === 0)
+        return '—';
+    const abs = Math.abs(n);
+    let s;
+    if (abs >= 100)
+        s = n.toFixed(0);
+    else if (abs >= 10)
+        s = n.toFixed(1);
+    else if (abs >= 1)
+        s = n.toFixed(2);
+    else if (abs >= 0.1)
+        s = n.toFixed(2);
+    else if (abs >= 0.01)
+        s = n.toFixed(3);
+    else
+        s = n.toExponential(2);
+    if (s.includes('.'))
+        s = s.replace(/\.?0+$/, '');
+    return s;
+}
+// ── Scale conversion helpers ───────────────────────────────────
+export function unitPxFromValuePerPx(kind, valuePerPx) {
+    if (!(valuePerPx > 0))
+        return 1;
+    switch (kind) {
+        case 'linear': return 1 / valuePerPx;
+        case 'area': return Math.sqrt(1 / valuePerPx);
+        case 'volume': return Math.cbrt(1 / valuePerPx);
+        default: return 1;
+    }
+}
+export function valuePerPxFromUnitPx(kind, unitPx) {
+    if (!(unitPx > 0))
+        return 0;
+    switch (kind) {
+        case 'linear': return 1 / unitPx;
+        case 'area': return 1 / (unitPx * unitPx);
+        case 'volume': return 1 / (unitPx * unitPx * unitPx);
+        default: return 0;
+    }
+}
+const _coinCache = new Map();
+/** Кружок-монетка заданного радиуса (CSS px) как PNG data URL. */
+export function makeCoinDataUrl(radius, color) {
+    if (typeof document === 'undefined')
+        return '';
+    const key = `${Math.round(radius * 10)}_${color}`;
+    const cached = _coinCache.get(key);
+    if (cached !== undefined)
+        return cached;
+    const dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1;
+    const safeR = Math.max(1, Math.min(256, radius));
+    const size = Math.ceil(safeR * 2) + 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(size * dpr);
+    canvas.height = Math.round(size * dpr);
+    const ctx = canvas.getContext('2d');
+    if (!ctx)
+        return '';
+    ctx.scale(dpr, dpr);
+    const c = size / 2;
+    ctx.beginPath();
+    ctx.arc(c, c, safeR, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    const url = canvas.toDataURL();
+    _coinCache.set(key, url);
+    return url;
+}
+/** Готовит CoinSpec: радиус, диаметр, dataURL, готовый HTML. */
+export function buildCoinSpec(value, unitPx, color = '#95a5a6') {
+    const radius = Math.sqrt(value) * unitPx;
+    const diameter = radius * 2;
+    const dataUrl = makeCoinDataUrl(radius, color);
+    const w = Math.max(4, Math.round(diameter));
+    const html = dataUrl
+        ? `<img src="${dataUrl}" width="${w}" height="${w}" alt="${value}" style="vertical-align:middle">`
+        : '';
+    return { value, radius, diameter, dataUrl, html };
+}
+// ── Столбчатая ─────────────────────────────────────────────────
 export const barDiagram = {
     name: 'bar',
+    scaleKind: 'linear',
     computeSize({ data, unitPx, barWidth = 12, gap = 2, padding = 4, strokeWidth = 1, orientation = 'vertical' }) {
         const maxVal = Math.max(0, ...data.map(d => d.value));
         const n = data.length;
@@ -59,7 +143,6 @@ export const barDiagram = {
     },
     render(ctx, { data, width, height, unitPx, barWidth = 12, gap = 2, padding = 4, strokeColor = '#333', strokeWidth = 1, orientation = 'vertical', segmentSizes }) {
         const maxVal = Math.max(0, ...data.map(d => d.value));
-        // Вспомогательная функция для расчета позиций делений
         const getDivisions = (val) => {
             if (!segmentSizes || segmentSizes.length === 0)
                 return [];
@@ -68,7 +151,7 @@ export const barDiagram = {
             for (const size of segmentSizes) {
                 while (rem >= size) {
                     rem -= size;
-                    divs.push(val - rem); // Сохраняем накопленную высоту
+                    divs.push(val - rem);
                 }
             }
             return divs;
@@ -86,7 +169,6 @@ export const barDiagram = {
                     ctx.lineWidth = strokeWidth;
                     ctx.strokeRect(left + strokeWidth / 2, y + strokeWidth / 2, Math.max(0, bw - strokeWidth), barWidth - strokeWidth);
                 }
-                // Отрисовка делений
                 const divs = getDivisions(d.value);
                 if (divs.length > 0 && strokeWidth > 0) {
                     ctx.beginPath();
@@ -116,7 +198,6 @@ export const barDiagram = {
                 ctx.lineWidth = strokeWidth;
                 ctx.strokeRect(x + strokeWidth / 2, y + strokeWidth / 2, barWidth - strokeWidth, Math.max(0, bh - strokeWidth));
             }
-            // Отрисовка делений
             const divs = getDivisions(d.value);
             if (divs.length > 0 && strokeWidth > 0) {
                 ctx.beginPath();
@@ -132,10 +213,21 @@ export const barDiagram = {
             x += barWidth + gap;
         }
     },
+    describeScale({ unitPx }) {
+        const valuePerPx = valuePerPxFromUnitPx('linear', unitPx);
+        return {
+            kind: 'linear',
+            unitLabel: 'высоты столбика',
+            valuePerPx,
+            valueText: formatScaleValue(valuePerPx),
+            text: `1 px высоты столбика ≈ ${formatScaleValue(valuePerPx)} ед.`,
+        };
+    },
 };
-// ── Круговая (секторная) ──────────────────────────────────────────
+// ── Круговая (секторная) ──────────────────────────────────────
 export const pieDiagram = {
     name: 'pie',
+    scaleKind: 'area',
     computeSize({ data, unitPx, padding = 4, strokeWidth = 1 }) {
         const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
         const r = Math.sqrt(total) * unitPx;
@@ -170,10 +262,21 @@ export const pieDiagram = {
             start = end;
         }
     },
+    describeScale({ unitPx }) {
+        const valuePerPx = valuePerPxFromUnitPx('area', unitPx);
+        return {
+            kind: 'area',
+            unitLabel: 'радиуса пая',
+            valuePerPx,
+            valueText: formatScaleValue(valuePerPx),
+            text: `1 px радиуса пая ≈ ${formatScaleValue(valuePerPx)} ед.`,
+        };
+    },
 };
-// ── Кружки ────────────────────────────────────────────────────────
+// ── Кружки ────────────────────────────────────────────────────
 export const circleDiagram = {
     name: 'circle',
+    scaleKind: 'area',
     computeSize({ data, unitPx, gap = 6, padding = 4, strokeWidth = 1, orientation = 'horizontal' }) {
         const diameters = data.map(d => 2 * Math.sqrt(Math.max(0, d.value)) * unitPx);
         const maxD = Math.max(0, ...diameters);
@@ -222,10 +325,21 @@ export const circleDiagram = {
             x += diameter + gap;
         }
     },
+    describeScale({ unitPx }) {
+        const valuePerPx = valuePerPxFromUnitPx('area', unitPx);
+        return {
+            kind: 'area',
+            unitLabel: 'радиуса круга',
+            valuePerPx,
+            valueText: formatScaleValue(valuePerPx),
+            text: `1 px радиуса круга ≈ ${formatScaleValue(valuePerPx)} ед.`,
+        };
+    },
 };
-// ── Кубики ────────────────────────────────────────────────────────
+// ── Кубики ────────────────────────────────────────────────────
 export const cubeDiagram = {
     name: 'cube',
+    scaleKind: 'volume',
     computeSize({ data, unitPx, gap = 6, padding = 4, strokeWidth = 1, orientation = 'horizontal' }) {
         const sides = data.map(d => Math.cbrt(Math.max(0, d.value)) * unitPx);
         const depths = sides.map(s => s * CUBE_DEPTH);
@@ -313,10 +427,21 @@ export const cubeDiagram = {
             cx += sides[i] + gap;
         }
     },
+    describeScale({ unitPx }) {
+        const valuePerPx = valuePerPxFromUnitPx('volume', unitPx);
+        return {
+            kind: 'volume',
+            unitLabel: 'стороны кубика',
+            valuePerPx,
+            valueText: formatScaleValue(valuePerPx),
+            text: `1 px стороны кубика ≈ ${formatScaleValue(valuePerPx)} ед.`,
+        };
+    },
 };
-// ── Венский способ (группа равнозначных фигур) ────────────────────
+// ── Венский способ ────────────────────────────────────────────
 export const viennaDiagram = {
     name: 'vienna',
+    scaleKind: 'discrete',
     computeSize({ data, unitPx, unitValue = 1, maxCols = 5, gap = 1, padding = 4, strokeWidth = 1, showTotal = false, totalFont = 'bold 12px sans-serif' }) {
         const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
         const totalUnits = Math.max(1, Math.round(total / unitValue));
@@ -342,7 +467,6 @@ export const viennaDiagram = {
         const rows = Math.ceil(totalUnits / cols);
         const gridW = cols * unitPx + (cols - 1) * gap;
         const gridH = rows * unitPx + (rows - 1) * gap;
-        // Сколько фигур на каждый ряд данных (с коррекцией до totalUnits)
         const unitsPerSeries = data.map(d => Math.max(0, Math.round(d.value / unitValue)));
         let sum = unitsPerSeries.reduce((s, u) => s + u, 0);
         while (sum < totalUnits && unitsPerSeries.length) {
@@ -419,9 +543,19 @@ export const viennaDiagram = {
             ctx.fillText(text, cx, cy + 0.5);
         }
     },
+    describeScale({ unitValue = 1 }) {
+        return {
+            kind: 'discrete',
+            unitLabel: 'кубик',
+            valuePerPx: 0,
+            valueText: formatScaleValue(unitValue),
+            text: `Один кубик ≈ ${formatScaleValue(unitValue)} ед.`,
+            unitValue,
+        };
+    },
 };
-// ── Вспомогательные функции для 'coin' ──────────────────────────────
-function getAutoCoins(maxVal) {
+// ── Вспомогательные для coin ──────────────────────────────────
+export function getAutoCoins(maxVal) {
     if (maxVal <= 0)
         return [1];
     const res = new Set();
@@ -433,7 +567,6 @@ function getAutoCoins(maxVal) {
     }
     return Array.from(res).filter(v => v <= maxVal).sort((a, b) => b - a).slice(0, 4);
 }
-// Пробует разложить монеты с заданной шириной targetW
 function tryLayout(items, targetW, gap) {
     let x = 0, y = 0, rowH = 0;
     let maxW = 0;
@@ -441,11 +574,11 @@ function tryLayout(items, targetW, gap) {
     for (const item of items) {
         if (x > 0 && x + item.d > targetW) {
             x = 0;
-            y += rowH + gap; // Отступ между строками
+            y += rowH + gap;
             rowH = 0;
         }
         layout.push({ x: x + item.d / 2, y: y + item.d / 2, r: item.r, color: item.color });
-        x += item.d + gap; // Отступ между монетами
+        x += item.d + gap;
         rowH = Math.max(rowH, item.d);
         maxW = Math.max(maxW, x - gap);
     }
@@ -457,13 +590,12 @@ function layoutCoins(coins, unitPx) {
         const r = Math.sqrt(Math.max(0, c.val)) * unitPx;
         return { ...c, r, d: r * 2 };
     });
-    items.sort((a, b) => b.d - a.d); // Сначала крупные
+    items.sort((a, b) => b.d - a.d);
     if (items.length === 0)
         return { layout: [], totalW: 0, totalH: 0 };
     const maxD = items[0].d;
     const totalArea = items.reduce((s, item) => s + Math.PI * item.r * item.r, 0);
     const S = Math.sqrt(totalArea) * 1.2;
-    // Перебираем разные варианты ширины, чтобы bbox стал квадратным
     const candidates = [maxD, S * 0.6, S * 0.8, S * 1.0, S * 1.2, S * 1.5, S * 2.0];
     let best = null;
     for (const targetW of candidates) {
@@ -476,7 +608,6 @@ function layoutCoins(coins, unitPx) {
             const aspectCur = Math.abs(res.totalW - res.totalH);
             const areaBest = best.totalW * best.totalH;
             const areaCur = res.totalW * res.totalH;
-            // Минимизируем разницу сторон, при равенстве — минимизируем площадь
             if (aspectCur < aspectBest || (aspectCur === aspectBest && areaCur < areaBest)) {
                 best = res;
             }
@@ -493,7 +624,6 @@ function layoutGroups(groups, unitPx) {
         return groupLayouts[0];
     const totalArea = groupLayouts.reduce((s, g) => s + g.totalW * g.totalH, 0);
     const S = Math.sqrt(totalArea) * 1.2;
-    // То же самое: перебираем ширину для упаковки групп друг относительно друга
     const candidates = [S * 0.6, S * 0.8, S * 1.0, S * 1.2, S * 1.5, S * 2.0];
     let best = null;
     for (const targetW of candidates) {
@@ -537,6 +667,7 @@ function layoutGroups(groups, unitPx) {
 }
 export const coinDiagram = {
     name: 'coin',
+    scaleKind: 'area',
     computeSize({ data, unitPx, padding = 4, strokeWidth = 1, coins: coinsInput }) {
         const maxVal = Math.max(...data.map(d => d.value), 1);
         const coins = coinsInput && coinsInput.length > 0
@@ -601,12 +732,29 @@ export const coinDiagram = {
                 }
             }
         }
-    }
+    },
+    describeScale({ unitPx, coins: coinsInput, data }) {
+        const valuePerPx = valuePerPxFromUnitPx('area', unitPx);
+        const maxVal = Math.max(1, ...data.map(d => d.value));
+        const denoms = (coinsInput && coinsInput.length > 0)
+            ? [...coinsInput].sort((a, b) => b - a)
+            : getAutoCoins(maxVal);
+        return {
+            kind: 'area',
+            unitLabel: 'радиуса монеты',
+            valuePerPx,
+            valueText: formatScaleValue(valuePerPx),
+            text: `1 px радиуса монеты ≈ ${formatScaleValue(valuePerPx)} ед.`,
+            coins: denoms.map(v => buildCoinSpec(v, unitPx)),
+        };
+    },
 };
-// ── Обёртка: подписи для всех типов ────────────────────────────────
+// ── withLabel: пробрасывает scale metadata ────────────────────
 function withLabel(def) {
     return {
         name: def.name,
+        scaleKind: def.scaleKind,
+        describeScale: def.describeScale,
         computeSize(params) {
             const inner = def.computeSize(params);
             const { label, labelFont = '11px sans-serif', labelPosition = 'bottom' } = params;
@@ -663,7 +811,7 @@ function withLabel(def) {
                 case 'right':
                     tx = innerW + LABEL_GAP + m.width / 2;
                     break;
-                case 'inside': break; // центр — дефолт
+                case 'inside': break;
                 case 'bottom':
                 default: ty = innerH + LABEL_GAP + m.height / 2;
             }
@@ -672,12 +820,11 @@ function withLabel(def) {
         },
     };
 }
+// ── Кубик для vienna_cubes ────────────────────────────────────
 function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
     if (projection === 'oblique') {
-        // Кабинетная проекция: фронтальная грань — квадрат (90°), глубина идет под 45°
         const dx = S * Math.cos(Math.PI / 4);
         const dy = S * Math.sin(Math.PI / 4);
-        // Передняя грань (базовый цвет)
         ctx.beginPath();
         ctx.rect(cx - S / 2, cy - S / 2, S, S);
         ctx.fillStyle = color;
@@ -687,7 +834,6 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
             ctx.lineWidth = strokeWidth;
             ctx.stroke();
         }
-        // Верхняя грань (светлее)
         ctx.beginPath();
         ctx.moveTo(cx - S / 2, cy - S / 2);
         ctx.lineTo(cx + S / 2, cy - S / 2);
@@ -701,7 +847,6 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
             ctx.lineWidth = strokeWidth;
             ctx.stroke();
         }
-        // Правая грань (темнее)
         ctx.beginPath();
         ctx.moveTo(cx + S / 2, cy - S / 2);
         ctx.lineTo(cx + S / 2 + dx, cy - S / 2 - dy);
@@ -717,10 +862,8 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
         }
     }
     else {
-        // Классическая изометрия (оси под 30° к горизонту)
         const dx = S * Math.sqrt(3) / 2;
         const dy = S * 0.5;
-        // Верхняя грань
         ctx.beginPath();
         ctx.moveTo(cx, cy - S);
         ctx.lineTo(cx + dx, cy - S + dy);
@@ -734,7 +877,6 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
             ctx.lineWidth = strokeWidth;
             ctx.stroke();
         }
-        // Левая грань
         ctx.beginPath();
         ctx.moveTo(cx - dx, cy - S + dy);
         ctx.lineTo(cx, cy);
@@ -748,7 +890,6 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
             ctx.lineWidth = strokeWidth;
             ctx.stroke();
         }
-        // Правая грань
         ctx.beginPath();
         ctx.moveTo(cx + dx, cy - S + dy);
         ctx.lineTo(cx, cy);
@@ -766,10 +907,10 @@ function drawCube(ctx, cx, cy, S, color, strokeColor, strokeWidth, projection) {
 }
 export const viennaCubeDiagram = {
     name: 'vienna_cubes',
+    scaleKind: 'discrete',
     computeSize({ data, unitPx, unitValue = 1, padding = 4, strokeWidth = 1, showTotal = false, totalFont = 'bold 12px sans-serif', projection = 'oblique' }) {
         const total = data.reduce((s, d) => s + Math.max(0, d.value), 0);
         const totalUnits = Math.max(1, Math.round(total / unitValue));
-        // Оптимальная упаковка в 3D куб
         let best = { w: 1, d: 1, h: 1, score: Infinity };
         for (let h = 1; h <= Math.ceil(Math.cbrt(totalUnits)) + 1; h++) {
             const w = Math.ceil(Math.sqrt(totalUnits / h));
@@ -863,7 +1004,6 @@ export const viennaCubeDiagram = {
         const gridX = (width - bboxW) / 2;
         const cubes = [];
         let count = 0;
-        // ИСПРАВЛЕНИЕ: Заполняем СЗАДИ ВПЕРЁД (y от d-1 до 0)
         for (let z = 0; z < h; z++) {
             for (let y = d - 1; y >= 0; y--) {
                 for (let x = 0; x < w; x++) {
@@ -874,14 +1014,13 @@ export const viennaCubeDiagram = {
                 }
             }
         }
-        // СОРТИРОВКА
         if (projection === 'oblique') {
             cubes.sort((a, b) => {
                 if (a.y !== b.y)
-                    return b.y - a.y; // Дальние (y=max) первыми
+                    return b.y - a.y;
                 if (a.z !== b.z)
-                    return a.z - b.z; // Нижние (z=0) первыми
-                return a.x - b.x; // Левые (x=0) первыми
+                    return a.z - b.z;
+                return a.x - b.x;
             });
         }
         else {
@@ -890,7 +1029,7 @@ export const viennaCubeDiagram = {
                     return a.z - b.z;
                 const depthA = a.x + a.y;
                 const depthB = b.x + b.y;
-                return depthA - depthB; // Дальние первыми
+                return depthA - depthB;
             });
         }
         ctx.lineJoin = 'round';
@@ -926,8 +1065,18 @@ export const viennaCubeDiagram = {
             ctx.fillText(text, cx, cy + 0.5);
         }
     },
+    describeScale({ unitValue = 1 }) {
+        return {
+            kind: 'discrete',
+            unitLabel: 'кубик',
+            valuePerPx: 0,
+            valueText: formatScaleValue(unitValue),
+            text: `Один кубик ≈ ${formatScaleValue(unitValue)} ед.`,
+            unitValue,
+        };
+    },
 };
-// ── Реестр ────────────────────────────────────────────────────────
+// ── Реестр ────────────────────────────────────────────────────
 export const DIAGRAM_TYPES = {
     bar: withLabel(barDiagram),
     pie: withLabel(pieDiagram),
@@ -945,4 +1094,21 @@ export function getDiagramType(name) {
     if (!t)
         throw new Error(`Diagram: unknown type "${name}". Registered: ${Object.keys(DIAGRAM_TYPES).join(', ')}`);
     return t;
+}
+/** Резолвит unitPx из `unitPx | valuePerPx | autoUnitPx`. */
+export function resolveDiagramUnitPx(typeName, cfg, autoUnitPx) {
+    if (autoUnitPx != null)
+        return autoUnitPx;
+    if (typeof cfg.unitPx === 'number')
+        return cfg.unitPx;
+    if (typeof cfg.valuePerPx === 'number') {
+        try {
+            const type = getDiagramType(typeName);
+            return unitPxFromValuePerPx(type.scaleKind, cfg.valuePerPx);
+        }
+        catch {
+            return 1;
+        }
+    }
+    return 1;
 }

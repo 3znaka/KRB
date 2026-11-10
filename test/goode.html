@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Diagram — Локализованные диаграммы</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    #map { position: absolute; inset: 0; width: 100%; height: 100dvh; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+await KRB.addCrs(['ESRI:54052']);
+
+const map = new KRB.Map({
+    target: 'map',
+    crs: 'ESRI:54052',
+    graticule: { crs: 'EPSG:4326', step: 10, color: '#888', width: 1 },
+    view: new KRB.View({
+        centerLonLat: [10, 20],
+        zoom: 2, minZoom: 0, maxZoom: 8,
+    }),
+});
+
+// ─────────────────────────────────────────────────────────────────
+// СЛОЙ 1: Полигоны с картограммой (Choropleth)
+// ─────────────────────────────────────────────────────────────────
+new KRB.GeoJSONLayer({
+    url: 'world.geojson',
+    crs: 'EPSG:4326',
+    tooltipOnHover: true,
+    tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
+    
+    // Отключаем подписи стран, чтобы не мешали
+    style: { polygon: { default: { title: '' } } },
+
+    choropleth: {
+        value: 'pop', 
+        colorRamp: 'terrain',          
+        classification: 'jenks',    
+        classes: 10,                 
+        noDataColor: '#cccccc'    
+    },
+    
+    defaultFillOpacity: 0.6,
+    defaultStrokeColor: '#333',
+    defaultStrokeWidth: 0.5,
+}).addTo(map);
+
+
+// ─────────────────────────────────────────────────────────────────
+// СЛОЙ 2: Точки с локализованными диаграммами
+// ─────────────────────────────────────────────────────────────────
+
+// Генерируем случайные точки вокруг известных городов
+const cities = [
+    { name: 'Москва', lon: 37.61, lat: 55.75 },
+    { name: 'Лондон', lon: -0.12, lat: 51.50 },
+    { name: 'Нью-Йорк', lon: -74.00, lat: 40.71 },
+    { name: 'Токио', lon: 139.69, lat: 35.68 },
+    { name: 'Сидней', lon: 151.20, lat: -33.86 },
+    { name: 'Каир', lon: 31.23, lat: 30.04 },
+    { name: 'Рио', lon: -43.17, lat: -22.90 },
+    { name: 'Кейптаун', lon: 18.42, lat: -33.92 },
+    { name: 'Дели', lon: 77.20, lat: 28.61 },
+    { name: 'Пекин', lon: 116.40, lat: 39.90 }
+];
+
+const pointsFeatures = [];
+for (let i = 0; i < 40; i++) {
+    const c = cities[Math.floor(Math.random() * cities.length)];
+    // Небольшой разброс вокруг города
+    const lon = c.lon + (Math.random() - 0.5) * 5;
+    const lat = c.lat + (Math.random() - 0.5) * 5;
+    
+    pointsFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [lon, lat] },
+        properties: {
+            name: `${c.name} ${i}`,
+            score: Math.floor(Math.random() * 500) + 10,
+            value: Math.floor(Math.random() * 300) + 10,
+            count: Math.floor(Math.random() * 100) + 1
+        }
+    });
+}
+
+const pointsFC = { type: 'FeatureCollection', features: pointsFeatures };
+
+new KRB.GeoJSONLayer({
+    data: pointsFC,
+    crs: 'EPSG:4326',
+    tooltipOnHover: true,
+    tooltip: (p) => `<b>${p.name}</b><br>Score: ${p.score}<br>Value: ${p.value}`,
+
+    diagram: {
+        type: 'vienna',                   // Для точек хорошо подходят бары или кружки
+        fields: ['score', 'value', 'count'], 
+        colorMap: { 
+            score: '#e74c3c', 
+            value: '#3498db', 
+            count: '#2ecc71' 
+        },
+        unitPx: 10,                  // Масштаб для точек (меньше, чем для полигонов)
+        gap: 2,
+        unitValue: 100,
+        strokeColor: '#fff',
+        strokeWidth: 1,
+        minZoom: 1,
+    },
+}).addTo(map);
+</script>
+</body>
+</html>

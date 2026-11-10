@@ -302,8 +302,14 @@ export class Graticule {
     setRenderOrder(order) {
         this._renderOrder = order;
         for (const info of this._lineInfos) {
-            if (info.line2)
+            if (!info.line2)
+                continue;
+            if (typeof info.line2.traverse === 'function') {
+                info.line2.traverse((obj) => { obj.renderOrder = order; });
+            }
+            else {
                 info.line2.renderOrder = order;
+            }
         }
         return this;
     }
@@ -389,7 +395,8 @@ export class Graticule {
         const stepChanged = step !== this._currentStep;
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
-        const fullWorld = isGeo
+        const hasLobes = this._getLobes() !== null;
+        const fullWorld = (isGeo || hasLobes)
             ? step >= FULL_WORLD_STEP_DEG
             : step >= (2 * crs.halfExtentX) * FULL_WORLD_STEP_FRAC;
         const mode = fullWorld ? 'full-world' : 'viewport';
@@ -436,8 +443,49 @@ export class Graticule {
         return changed;
     }
     // ─────────────────────────────────────────────────────────────────
-    // Внутреннее
+    // Внутреннее: лепестки / материал / viewport
     // ─────────────────────────────────────────────────────────────────
+    /** Лепестки текущей проекции или null, если проекция непрерывна. */
+    _getLobes() {
+        const raw = this._crsRaw;
+        if (!raw)
+            return null;
+        if (this._debug) {
+            console.log('[Graticule] _getLobes:', 'ctor=', raw.constructor?.name, 'code=', raw.code, 'lobes=', raw.lobes, 'options=', raw.options);
+        }
+        const lobes = raw.lobes ?? raw.options?.lobes;
+        return (Array.isArray(lobes) && lobes.length > 0) ? lobes : null;
+    }
+    /** Лепестки, реально «владеющие» данной параллелью (lat). */
+    _getEligibleLobesForLat(lat, lobes) {
+        const out = [];
+        const covered = [];
+        for (const lobe of lobes) {
+            if (lat < lobe.latMin || lat > lobe.latMax)
+                continue;
+            if (_isRangeCovered(lobe.lonMin, lobe.lonMax, covered))
+                continue;
+            out.push(lobe);
+            covered.push([lobe.lonMin, lobe.lonMax]);
+        }
+        return out; // порядок = порядок в LOBES (слева → направо)
+    }
+    /** Лепестки, реально «владеющие» данным меридианом (lon). */
+    _getEligibleLobesForLon(lon, lobes) {
+        const out = [];
+        const covered = [];
+        for (const lobe of lobes) {
+            if (lon < lobe.lonMin || lon > lobe.lonMax)
+                continue;
+            if (_isRangeCovered(lobe.latMin, lobe.latMax, covered))
+                continue;
+            out.push(lobe);
+            covered.push([lobe.latMin, lobe.latMax]);
+        }
+        // для меридианов нужен порядок юг → север (для подписей start/end)
+        out.sort((a, b) => a.latMin - b.latMin);
+        return out;
+    }
     _createMaterial() {
         const canvas = this._map.renderer.domElement;
         const mat = new LineMaterial({
@@ -501,21 +549,22 @@ export class Graticule {
         const canvas = this._map.renderer.domElement;
         const W = canvas.clientWidth || 1;
         const H = canvas.clientHeight || 1;
-        if (this._crsRaw?.isGeographic) {
+        const hasLobes = this._getLobes() !== null;
+        if (this._crsRaw?.isGeographic || hasLobes) {
             const dLon = vp.maxLon - vp.minLon;
             const dLat = vp.maxLat - vp.minLat;
             const degPerPx = Math.max(dLon / W, dLat / H);
             const target = degPerPx * this._targetPixelsBetweenLines;
             return niceDegreeStep(target);
         }
+        // проекционные CRS без лепестков — как раньше
         const crs = this._crsRaw;
         const [x1, y1] = crs.fromLonLat([vp.minLon, vp.minLat]) || [0, 0];
         const [x2, y2] = crs.fromLonLat([vp.maxLon, vp.maxLat]) || [0, 0];
         const spanX = Math.abs(x2 - x1);
         const spanY = Math.abs(y2 - y1);
         const unitsPerPx = Math.max(spanX / W, spanY / H);
-        const target = unitsPerPx * this._targetPixelsBetweenLines;
-        return niceLinearStep(target);
+        return niceLinearStep(unitsPerPx * this._targetPixelsBetweenLines);
     }
     // ─────────────────────────────────────────────────────────────────
     // Генерация линий
@@ -539,9 +588,12 @@ export class Graticule {
     _addMissingLines(viewport, step, mode) {
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
+        const hasLobes = this._getLobes() !== null;
+        // Итерация по долготе/широте, если CRS geographic ИЛИ есть разрывы
+        const useGeoIter = isGeo || hasLobes;
         let genMinX, genMaxX, genMinY, genMaxY;
         if (mode === 'full-world') {
-            if (isGeo) {
+            if (useGeoIter) {
                 genMinX = -180;
                 genMaxX = 180;
                 genMinY = -90;
@@ -555,18 +607,26 @@ export class Graticule {
             }
         }
         else {
-            const p1 = crs.fromLonLat([viewport.minLon, viewport.minLat]);
-            const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
-            if (!p1 || !p2)
-                return;
-            const cx = (p1[0] + p2[0]) * 0.5;
-            const cy = (p1[1] + p2[1]) * 0.5;
-            const hx = Math.abs(p2[0] - p1[0]);
-            const hy = Math.abs(p2[1] - p1[1]);
-            genMinX = cx - hx;
-            genMaxX = cx + hx;
-            genMinY = cy - hy;
-            genMaxY = cy + hy;
+            if (useGeoIter) {
+                genMinX = viewport.minLon;
+                genMaxX = viewport.maxLon;
+                genMinY = viewport.minLat;
+                genMaxY = viewport.maxLat;
+            }
+            else {
+                const p1 = crs.fromLonLat([viewport.minLon, viewport.minLat]);
+                const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
+                if (!p1 || !p2)
+                    return;
+                const cx = (p1[0] + p2[0]) * 0.5;
+                const cy = (p1[1] + p2[1]) * 0.5;
+                const hx = Math.abs(p2[0] - p1[0]);
+                const hy = Math.abs(p2[1] - p1[1]);
+                genMinX = cx - hx;
+                genMaxX = cx + hx;
+                genMinY = cy - hy;
+                genMaxY = cy + hy;
+            }
         }
         const existing = new Set();
         for (const info of this._lineInfos)
@@ -581,17 +641,22 @@ export class Graticule {
             const id = `grid:m:${round6(value)}`;
             if (existing.has(id))
                 continue;
-            const sampled = isGeo
+            const segments = useGeoIter
                 ? this._sampleMeridianGeo(value, N)
                 : this._sampleMeridianProj(value, N);
-            if (sampled.pts.length < 2)
+            if (!segments.length)
                 continue;
+            const pts = concatSegmentsPts(segments);
+            if (pts.length < 2)
+                continue;
+            const crsPts = concatSegmentsCrs(segments);
             const text = this._formatLabel(value, false, step, isGeo);
             const info = {
                 stableId: id, kind: 'meridian', value, text,
-                line2: this._buildLine2(sampled.pts),
-                points3D: sampled.pts,
-                crsSamples: sampled.crs,
+                line2: this._buildLine2(segments),
+                segments,
+                points3D: pts,
+                crsSamples: crsPts,
                 labels: this._buildLabelAnchors(id, 'meridian', text, value, step, isGeo),
             };
             if (this._linesGroup)
@@ -606,17 +671,22 @@ export class Graticule {
             const id = `grid:p:${round6(value)}`;
             if (existing.has(id))
                 continue;
-            const sampled = isGeo
+            const segments = useGeoIter
                 ? this._sampleParallelGeo(value, N)
                 : this._sampleParallelProj(value, N);
-            if (sampled.pts.length < 2)
+            if (!segments.length)
                 continue;
+            const pts = concatSegmentsPts(segments);
+            if (pts.length < 2)
+                continue;
+            const crsPts = concatSegmentsCrs(segments);
             const text = this._formatLabel(value, true, step, isGeo);
             const info = {
                 stableId: id, kind: 'parallel', value, text,
-                line2: this._buildLine2(sampled.pts),
-                points3D: sampled.pts,
-                crsSamples: sampled.crs,
+                line2: this._buildLine2(segments),
+                segments,
+                points3D: pts,
+                crsSamples: crsPts,
                 labels: this._buildLabelAnchors(id, 'parallel', text, value, step, isGeo),
             };
             if (this._linesGroup)
@@ -627,7 +697,7 @@ export class Graticule {
         for (const info of newInfos)
             this._lineInfos.push(info);
         if (this._debug && (addedM || addedP)) {
-            console.log(`[Graticule] mode=${mode} step=${step} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`);
+            console.log(`[Graticule] mode=${mode} step=${step} hasLobes=${hasLobes} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`);
         }
         if (this._lineInfos.length > MAX_CACHED_LINES) {
             this._pruneFarLines(viewport, mode);
@@ -688,34 +758,114 @@ export class Graticule {
         this._lastActiveLabelIds = null;
     }
     // ── Сэмплирование ──
-    _sampleMeridianGeo(lon, N) {
-        const map = this._map;
-        const pts = [];
-        const crs = [];
-        const latMin = -89.99, latMax = 89.99;
-        for (let i = 0; i <= N; i++) {
-            const lat = latMin + (latMax - latMin) * (i / N);
-            const world = map.projectSafe([lon, lat], this._crsRaw);
-            if (!world)
-                continue;
-            pts.push([world[0], this._altitude, world[1]]);
-            crs.push([lon, lat]);
-        }
-        return { pts, crs };
-    }
+    /**
+     * Параллель. Возвращает от 1 до N сегментов: по одному на каждый лепесток,
+     * в котором реально лежит lat. Проекция без разрывов → 1 сегмент.
+     */
     _sampleParallelGeo(lat, N) {
         const map = this._map;
-        const pts = [];
-        const crs = [];
-        for (let i = 0; i <= N; i++) {
-            const lon = -180 + 360 * (i / N);
-            const world = map.projectSafe([lon, lat], this._crsRaw);
-            if (!world)
-                continue;
-            pts.push([world[0], this._altitude, world[1]]);
-            crs.push([lon, lat]);
+        const lobes = this._getLobes();
+        if (this._debug) {
+            console.log(`[Graticule] _sampleParallelGeo lat=${lat} lobes=${lobes ? lobes.length : 'null'}`);
+            if (lobes) {
+                console.log(`[Graticule] lobes:`, lobes.map(l => `${l.lonMin}-${l.lonMax}`));
+            }
         }
-        return { pts, crs };
+        if (!lobes) {
+            const pts = [];
+            const crs = [];
+            for (let i = 0; i <= N; i++) {
+                const lon = -180 + 360 * (i / N);
+                const world = map.projectSafe([lon, lat], this._crsRaw);
+                if (!world)
+                    continue;
+                pts.push([world[0], this._altitude, world[1]]);
+                crs.push([lon, lat]);
+            }
+            return pts.length >= 2 ? [{ pts, crs }] : [];
+        }
+        const eligible = this._getEligibleLobesForLat(lat, lobes);
+        if (!eligible.length)
+            return [];
+        if (this._debug) {
+            console.log(`[Graticule] eligible lobes for lat=${lat}: ${eligible.length}`);
+        }
+        const EPS_LON = 1e-6;
+        const segments = [];
+        for (let li = 0; li < eligible.length; li++) {
+            const lobe = eligible[li];
+            const isFirst = li === 0;
+            // Точка lonMin принадлежит ПЕРВОМУ лепестку, который её содержит
+            // (forward() делает break по первому совпадению), поэтому для
+            // не-первых лепестков отступаем внутрь.
+            const lonStart = lobe.lonMin + (isFirst ? 0 : EPS_LON);
+            const lonEnd = lobe.lonMax;
+            if (lonEnd - lonStart <= 0)
+                continue;
+            const pts = [];
+            const crs = [];
+            for (let i = 0; i <= N; i++) {
+                const lon = lonStart + (lonEnd - lonStart) * (i / N);
+                const world = map.projectSafe([lon, lat], this._crsRaw);
+                if (!world)
+                    continue;
+                pts.push([world[0], this._altitude, world[1]]);
+                crs.push([lon, lat]);
+            }
+            if (pts.length >= 2)
+                segments.push({ pts, crs });
+        }
+        return segments;
+    }
+    /**
+     * Меридиан. Возвращает сегменты по лепесткам, отсортированные юг → север.
+     */
+    _sampleMeridianGeo(lon, N) {
+        const map = this._map;
+        const lobes = this._getLobes();
+        if (!lobes) {
+            const pts = [];
+            const crs = [];
+            const latMin = -89.99, latMax = 89.99;
+            for (let i = 0; i <= N; i++) {
+                const lat = latMin + (latMax - latMin) * (i / N);
+                const world = map.projectSafe([lon, lat], this._crsRaw);
+                if (!world)
+                    continue;
+                pts.push([world[0], this._altitude, world[1]]);
+                crs.push([lon, lat]);
+            }
+            return pts.length >= 2 ? [{ pts, crs }] : [];
+        }
+        const eligible = this._getEligibleLobesForLon(lon, lobes); // уже юг → север
+        if (!eligible.length)
+            return [];
+        const EPS_LAT = 1e-6;
+        const segments = [];
+        for (let li = 0; li < eligible.length; li++) {
+            const lobe = eligible[li];
+            const isFirst = li === 0;
+            const isLast = li === eligible.length - 1;
+            // Держимся в стороне от полюсов (численная устойчивость как в
+            // исходной версии), и не «пересекаем» границу лепестка дважды.
+            const latStart = Math.max(-89.99, lobe.latMin + (isFirst ? 0 : EPS_LAT));
+            const latEnd = Math.min(89.99, lobe.latMax - (isLast ? 0 : EPS_LAT));
+            if (latEnd - latStart <= 0)
+                continue;
+            const pts = [];
+            const crs = [];
+            for (let i = 0; i <= N; i++) {
+                const lat = latStart + (latEnd - latStart) * (i / N);
+                const world = map.projectSafe([lon, lat], this._crsRaw);
+                if (!world)
+                    continue;
+                pts.push([world[0], this._altitude, world[1]]);
+                crs.push([lon, lat]);
+            }
+            if (pts.length >= 2)
+                segments.push({ pts, crs });
+        }
+        return segments;
     }
     _sampleMeridianProj(x, N) {
         const map = this._map;
@@ -731,7 +881,7 @@ export class Graticule {
             pts.push([world[0], this._altitude, world[1]]);
             crsArr.push([x, y]);
         }
-        return { pts, crs: crsArr };
+        return pts.length >= 2 ? [{ pts, crs: crsArr }] : [];
     }
     _sampleParallelProj(y, N) {
         const map = this._map;
@@ -747,40 +897,71 @@ export class Graticule {
             pts.push([world[0], this._altitude, world[1]]);
             crsArr.push([x, y]);
         }
-        return { pts, crs: crsArr };
+        return pts.length >= 2 ? [{ pts, crs: crsArr }] : [];
     }
     // ── Line2 ──
-    _buildLine2(points) {
-        const flat = [];
-        for (const [x, y, z] of points) {
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z))
-                continue;
-            flat.push(x, y, z);
+    _buildLine2(segments) {
+        const group = new THREE.Group();
+        if (this._debug) {
+            console.log(`[Graticule] _buildLine2 segments=${segments.length}`);
         }
-        const geom = new LineGeometry();
-        geom.setPositions(flat);
-        geom.computeBoundingSphere();
-        const line = new Line2(geom, this._material);
-        line.computeLineDistances();
-        line.renderOrder = this._renderOrder;
-        line.frustumCulled = true;
-        return line;
+        for (const seg of segments) {
+            const flat = [];
+            for (const [x, y, z] of seg.pts) {
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z))
+                    continue;
+                flat.push(x, y, z);
+            }
+            if (flat.length < 6)
+                continue;
+            const geom = new LineGeometry();
+            geom.setPositions(flat);
+            geom.computeBoundingSphere();
+            const line = new Line2(geom, this._material);
+            line.computeLineDistances();
+            line.renderOrder = this._renderOrder;
+            line.frustumCulled = true;
+            group.add(line);
+        }
+        if (this._debug) {
+            console.log(`[Graticule] _buildLine2 created ${group.children.length} lines`);
+        }
+        return group;
     }
     _destroyLine(info) {
         if (!info.line2)
             return;
         if (info.line2.parent)
             info.line2.parent.remove(info.line2);
-        try {
-            info.line2.geometry?.dispose();
+        if (typeof info.line2.traverse === 'function') {
+            info.line2.traverse((obj) => {
+                try {
+                    obj.geometry?.dispose();
+                }
+                catch { }
+            });
         }
-        catch { }
+        else {
+            try {
+                info.line2.geometry?.dispose();
+            }
+            catch { }
+        }
         info.line2 = null;
     }
     // ─────────────────────────────────────────────────────────────────
-    // Позиционирование подписей строго по 5 правилам
+    // Позиционирование подписей (с учётом сегментов)
     // ─────────────────────────────────────────────────────────────────
-    _findLineEndLabel(isStart, defaultSide, vx, vy, vz, n, W, H, nearZ, projMatrix) {
+    /**
+     * Ищет позицию подписи начала/конца линии.
+     *
+     * 1. Если крайняя точка (start = самая первая точки первого сегмента;
+     *    end = самая последняя точка последнего сегмента) видна на экране —
+     *    ставим подпись на ней.
+     * 2. Иначе ищем первое/последнее пересечение с границей экрана
+     *    по сегментам (не переходя «прыжок» между лепестками).
+     */
+    _findLineEndLabel(info, isStart, defaultSide, vx, vy, vz, W, H, nearZ, projMatrix) {
         const M = LABEL_MARGIN;
         const clampX = (x) => Math.max(M, Math.min(W - M, x));
         const clampY = (y) => Math.max(M, Math.min(H - M, y));
@@ -799,67 +980,62 @@ export class Graticule {
             const p = projectViewPoint(vx[idx], vy[idx], vz[idx]);
             if (!p)
                 return null;
-            if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H) {
+            if (p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H)
                 return p;
-            }
             return null;
         };
-        if (isStart) {
-            // ПРАВИЛО 1: виден ли её начальный конец? Если ВИДЕН — рисуем на нём
-            const startPt = isEndpointVisible(0);
-            if (startPt) {
-                return {
-                    x: clampX(startPt.x),
-                    y: clampY(startPt.y),
-                    side: defaultSide,
-                    isEdge: false,
-                };
+        // Границы сегментов в конкатенированном массиве точек.
+        const ranges = [];
+        {
+            let idx = 0;
+            for (const seg of info.segments) {
+                ranges.push([idx, idx + seg.pts.length]);
+                idx += seg.pts.length;
             }
-            // ПРАВИЛО 3: если начальный конец НЕ виден — ищем пересечение с экраном, ближайшее к НАЧАЛУ линии
-            for (let i = 0; i < n - 1; i++) {
-                const hit = this._getClippedSegmentScreenIntersection(vx[i], vy[i], vz[i], vx[i + 1], vy[i + 1], vz[i + 1], W, H, nearZ, projMatrix);
-                if (hit) {
-                    return {
-                        x: clampX(hit.x),
-                        y: clampY(hit.y),
-                        side: hit.edge,
-                        isEdge: true,
-                    };
+        }
+        const total = ranges.length ? ranges[ranges.length - 1][1] : 0;
+        if (isStart) {
+            // Правило 1: начальный конец всей линии виден?
+            if (total > 0) {
+                const startPt = isEndpointVisible(0);
+                if (startPt) {
+                    return { x: clampX(startPt.x), y: clampY(startPt.y), side: defaultSide, isEdge: false };
+                }
+            }
+            // Правило 3: первое пересечение с экраном, идя от начала — только
+            // внутри сегментов (без «прыжка» между лепестками).
+            for (const [s, e] of ranges) {
+                for (let i = s; i < e - 1; i++) {
+                    const hit = this._getClippedSegmentScreenIntersection(vx[i], vy[i], vz[i], vx[i + 1], vy[i + 1], vz[i + 1], W, H, nearZ, projMatrix);
+                    if (hit) {
+                        return { x: clampX(hit.x), y: clampY(hit.y), side: hit.edge, isEdge: true };
+                    }
                 }
             }
         }
         else {
-            // ПРАВИЛО 2: виден ли её конечный конец? Если ВИДЕН — рисуем на нём
-            const endPt = isEndpointVisible(n - 1);
-            if (endPt) {
-                return {
-                    x: clampX(endPt.x),
-                    y: clampY(endPt.y),
-                    side: defaultSide,
-                    isEdge: false,
-                };
+            // Правило 2: конечный конец всей линии виден?
+            if (total > 0) {
+                const endPt = isEndpointVisible(total - 1);
+                if (endPt) {
+                    return { x: clampX(endPt.x), y: clampY(endPt.y), side: defaultSide, isEdge: false };
+                }
             }
-            // ПРАВИЛО 4: если конечный конец НЕ виден — ищем пересечение с экраном, ближайшее к КОНЦУ линии
-            // Важно: передаём отрезок в обратном направлении (от i + 1 к i), чтобы minT искал точку ближе к концу!
-            for (let i = n - 2; i >= 0; i--) {
-                const hit = this._getClippedSegmentScreenIntersection(vx[i + 1], vy[i + 1], vz[i + 1], vx[i], vy[i], vz[i], W, H, nearZ, projMatrix);
-                if (hit) {
-                    return {
-                        x: clampX(hit.x),
-                        y: clampY(hit.y),
-                        side: hit.edge,
-                        isEdge: true,
-                    };
+            // Правило 4: последнее пересечение с экраном, идя от конца —
+            // только внутри сегментов (в обратном порядке).
+            for (let k = ranges.length - 1; k >= 0; k--) {
+                const [s, e] = ranges[k];
+                for (let i = e - 2; i >= s; i--) {
+                    const hit = this._getClippedSegmentScreenIntersection(vx[i + 1], vy[i + 1], vz[i + 1], vx[i], vy[i], vz[i], W, H, nearZ, projMatrix);
+                    if (hit) {
+                        return { x: clampX(hit.x), y: clampY(hit.y), side: hit.edge, isEdge: true };
+                    }
                 }
             }
         }
-        // ПРАВИЛО 5: ни конец не виден, ни пересечений с экраном нет — подпись не рисуется
+        // Правило 5: ни край, ни пересечение не найдены.
         return null;
     }
-    /**
-     * Отсекает направленный 3D-отрезок A -> B в пространстве камеры по ближней плоскости (z <= nearZ),
-     * проецирует на экран и возвращает ближайшее к началу A пересечение с границей экрана [0, W] x [0, H].
-     */
     _getClippedSegmentScreenIntersection(vx1, vy1, vz1, vx2, vy2, vz2, W, H, nearZ, projMatrix) {
         if (vz1 > nearZ && vz2 > nearZ)
             return null;
@@ -907,28 +1083,24 @@ export class Graticule {
         };
         const dx = x2 - x1;
         const dy = y2 - y1;
-        // Левый край (x = 0)
         if ((x1 <= 0 && x2 >= 0) || (x1 >= 0 && x2 <= 0)) {
             if (Math.abs(dx) > 1e-12) {
                 const t = (0 - x1) / dx;
                 checkHit(t, 0, y1 + dy * t, 'left');
             }
         }
-        // Правый край (x = W)
         if ((x1 <= W && x2 >= W) || (x1 >= W && x2 <= W)) {
             if (Math.abs(dx) > 1e-12) {
                 const t = (W - x1) / dx;
                 checkHit(t, W, y1 + dy * t, 'right');
             }
         }
-        // Верхний край (y = 0)
         if ((y1 <= 0 && y2 >= 0) || (y1 >= 0 && y2 <= 0)) {
             if (Math.abs(dy) > 1e-12) {
                 const t = (0 - y1) / dy;
                 checkHit(t, x1 + dx * t, 0, 'top');
             }
         }
-        // Нижний край (y = H)
         if ((y1 <= H && y2 >= H) || (y1 >= H && y2 <= H)) {
             if (Math.abs(dy) > 1e-12) {
                 const t = (H - y1) / dy;
@@ -952,7 +1124,6 @@ export class Graticule {
         const W = canvas.clientWidth;
         const H = canvas.clientHeight;
         const tmp = this._tmpVec;
-        // Полная матрица перевода из локальных координат worldGroup в пространство камеры
         const mvMatrix = this._mvMatrix.multiplyMatrices(camera.matrixWorldInverse, map.worldGroup.matrixWorld);
         const projMatrix = camera.projectionMatrix;
         const isOrtho = !!camera.isOrthographicCamera;
@@ -979,7 +1150,7 @@ export class Graticule {
                 vz[i] = tmp.z;
             }
             for (const lbl of info.labels) {
-                const res = this._findLineEndLabel(lbl.isStart, lbl.side, vx, vy, vz, n, W, H, nearZ, projMatrix);
+                const res = this._findLineEndLabel(info, lbl.isStart, lbl.side, vx, vy, vz, W, H, nearZ, projMatrix);
                 if (res && (!res.isEdge || this._labelSides.has(res.side))) {
                     lbl.screenPos = { x: res.x, y: res.y };
                     lbl.renderSide = res.side;
@@ -1060,15 +1231,6 @@ export class Graticule {
     // ─────────────────────────────────────────────────────────────────
     // Публичный API: точки сетки
     // ─────────────────────────────────────────────────────────────────
-    /**
-     * Возвращает точки пересечений меридианов×параллелей и точки
-     * пересечения линий сетки с рёбрами вьюпорта.
-     *
-     * Для каждой точки:
-     *   - `crs`   — координаты в CRS сетки: [lon, lat] или [x, y];
-     *   - `world` — соответствующие world-координаты (worldGroup-local):
-     *               [x, altitude, z].
-     */
     getPoints(options = {}) {
         const includeIntersections = options.includeIntersections ?? true;
         const includeEdges = options.includeEdges ?? true;
@@ -1125,61 +1287,64 @@ export class Graticule {
             }
         }
         // ── 2. Точки на краях ──
+        // Каждый сегмент обрабатываем отдельно: между лепестками нет
+        // реального «отрезка», по которому можно было бы искать пересечение.
         if (includeEdges) {
-            const sx = new Float64Array(SAMPLE_COUNT + 2);
-            const sy = new Float64Array(SAMPLE_COUNT + 2);
-            const vis = new Uint8Array(SAMPLE_COUNT + 2);
+            const CAP = SAMPLE_COUNT + 2;
+            const sx = new Float64Array(CAP);
+            const sy = new Float64Array(CAP);
+            const vis = new Uint8Array(CAP);
             for (const info of this._lineInfos) {
-                const pts = info.points3D;
-                const crsS = info.crsSamples;
-                if (pts.length < 2 || crsS.length !== pts.length)
-                    continue;
-                const n = pts.length;
-                for (let i = 0; i < n; i++) {
-                    const [px, py, pz] = pts[i];
-                    tmp.set(px, py, pz).applyMatrix4(mvMatrix);
-                    vis[i] = tmp.z <= nearZ ? 1 : 0;
-                    tmp.applyMatrix4(projMatrix);
-                    sx[i] = (tmp.x * 0.5 + 0.5) * W;
-                    sy[i] = (-tmp.y * 0.5 + 0.5) * H;
-                }
-                for (const side of sides) {
-                    const crossings = this._findEdgeCrossings(side, sx, sy, vis, n, W, H);
-                    for (const cr of crossings) {
-                        const iA = cr.segment, iB = iA + 1, t = cr.t;
-                        const pA = pts[iA], pB = pts[iB];
-                        const cA = crsS[iA], cB = crsS[iB];
-                        const world = [
-                            pA[0] + (pB[0] - pA[0]) * t,
-                            pA[1] + (pB[1] - pA[1]) * t,
-                            pA[2] + (pB[2] - pA[2]) * t,
-                        ];
-                        const crs = [
-                            cA[0] + (cB[0] - cA[0]) * t,
-                            cA[1] + (cB[1] - cA[1]) * t,
-                        ];
-                        if (visibleOnly && !onScreen(world[0], world[1], world[2]))
-                            continue;
-                        result.push({
-                            id: `${info.stableId}:${side}:${iA}:${t.toFixed(4)}`,
-                            kind: 'edge',
-                            crs,
-                            world,
-                            edge: side,
-                            lineId: info.stableId,
-                            lineKind: info.kind,
-                        });
+                for (let segIdx = 0; segIdx < info.segments.length; segIdx++) {
+                    const seg = info.segments[segIdx];
+                    const pts = seg.pts;
+                    const crsS = seg.crs;
+                    if (pts.length < 2 || crsS.length !== pts.length)
+                        continue;
+                    const n = pts.length;
+                    if (n > CAP)
+                        continue;
+                    for (let i = 0; i < n; i++) {
+                        const [px, py, pz] = pts[i];
+                        tmp.set(px, py, pz).applyMatrix4(mvMatrix);
+                        vis[i] = tmp.z <= nearZ ? 1 : 0;
+                        tmp.applyMatrix4(projMatrix);
+                        sx[i] = (tmp.x * 0.5 + 0.5) * W;
+                        sy[i] = (-tmp.y * 0.5 + 0.5) * H;
+                    }
+                    for (const side of sides) {
+                        const crossings = this._findEdgeCrossings(side, sx, sy, vis, n, W, H);
+                        for (const cr of crossings) {
+                            const iA = cr.segment, iB = iA + 1, t = cr.t;
+                            const pA = pts[iA], pB = pts[iB];
+                            const cA = crsS[iA], cB = crsS[iB];
+                            const world = [
+                                pA[0] + (pB[0] - pA[0]) * t,
+                                pA[1] + (pB[1] - pA[1]) * t,
+                                pA[2] + (pB[2] - pA[2]) * t,
+                            ];
+                            const crs = [
+                                cA[0] + (cB[0] - cA[0]) * t,
+                                cA[1] + (cB[1] - cA[1]) * t,
+                            ];
+                            if (visibleOnly && !onScreen(world[0], world[1], world[2]))
+                                continue;
+                            result.push({
+                                id: `${info.stableId}:${segIdx}:${side}:${iA}:${t.toFixed(4)}`,
+                                kind: 'edge',
+                                crs,
+                                world,
+                                edge: side,
+                                lineId: info.stableId,
+                                lineKind: info.kind,
+                            });
+                        }
                     }
                 }
             }
         }
         return result;
     }
-    /**
-     * То же, что getPoints(), но в виде словаря:
-     *   ключ   — "crsX,crsY"
-     *   значение — GraticulePoint.
-     */
     getPointsMap(options = {}) {
         const out = new Map();
         for (const p of this.getPoints(options)) {
@@ -1277,6 +1442,44 @@ export class Graticule {
             return `${value.toFixed(1)}m`;
         return `${value.toFixed(2)}m`;
     }
+}
+// ─────────────────────────────────────────────────────────────────────
+// Утилиты
+// ─────────────────────────────────────────────────────────────────────
+function concatSegmentsPts(segments) {
+    const out = [];
+    for (const seg of segments)
+        for (const p of seg.pts)
+            out.push(p);
+    return out;
+}
+function concatSegmentsCrs(segments) {
+    const out = [];
+    for (const seg of segments)
+        for (const p of seg.crs)
+            out.push(p);
+    return out;
+}
+/**
+ * Проверяет, полностью ли отрезок [lo, hi] покрыт объединением ranges.
+ * Используется для отсева дублирующихся лепестков.
+ */
+function _isRangeCovered(lo, hi, ranges) {
+    if (lo >= hi)
+        return true;
+    const relevant = ranges
+        .filter(([a, b]) => b > lo && a < hi)
+        .sort((a, b) => a[0] - b[0]);
+    let cur = lo;
+    for (const [a, b] of relevant) {
+        if (a > cur)
+            return false;
+        if (b > cur)
+            cur = b;
+        if (cur >= hi)
+            return true;
+    }
+    return cur >= hi;
 }
 function round6(v) {
     return Math.round(v * 1e6) / 1e6;

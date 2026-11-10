@@ -30,6 +30,8 @@ export class FormulaProjection {
         this.maxLatDeg = options.maxLatDeg ?? null;
         this.maxAbsCoord = options.maxAbsCoord ?? 2.5e7;
         this.wrapsLongitude = options.wrapsLongitude ?? false;
+        this.lobes = options.lobes ?? null;
+        this.options = options;
         this._ellipsoid = options.ellipsoid
             ?? (options.semiMajor != null
                 ? new Ellipsoid({ a: options.semiMajor }) // сфера указанного радиуса
@@ -548,11 +550,16 @@ class ProjectionRegistry {
         if (!spec || typeof spec !== 'object') {
             throw new Error(`addCrs(${code}): ${fileName} не экспортирует default-спек`);
         }
+        // в _loadCustom
         if (spec.formula) {
             if (!Array.isArray(spec.formula) || spec.formula.length !== 4) {
                 throw new Error(`addCrs(${code}): spec.formula должен быть массивом из 4 функций`);
             }
-            const proj = new FormulaProjection(spec.formula, { ...(spec.options || {}), code });
+            const proj = new FormulaProjection(spec.formula, {
+                ...(spec.options || {}),
+                lobes: spec.options?.lobes ?? spec.lobes, // ← fallback на корень spec
+                code,
+            });
             this._formulaRawCache.set(spec.formula, proj);
             this._map.set(code, proj);
             return;

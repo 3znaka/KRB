@@ -1,4 +1,5 @@
 // DiagramTypes.ts
+export const MIN_COIN_DIAMETER_PX = 8;
 // ── Общие утилиты ──────────────────────────────────────────────
 export const DEFAULT_PALETTE = [
     '#3498db', '#e74c3c', '#2ecc71', '#f39c12',
@@ -36,7 +37,35 @@ function measureText(text, font) {
     }
     return { width: text.length * fontSize * 0.6, height: fontSize * 1.2 };
 }
-/** Форматирует число для вставки в легенду. */
+const SUPERSCRIPT = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+    '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '-': '⁻',
+};
+function toSuperscript(s) {
+    return s.split('').map(ch => SUPERSCRIPT[ch] ?? ch).join('');
+}
+/** 0.0001 → "10⁻⁴", 0.0005 → "5·10⁻⁴", 0.000025 → "2.5·10⁻⁵". */
+function formatSci(n) {
+    const abs = Math.abs(n);
+    let e = Math.floor(Math.log10(abs));
+    let m = n / Math.pow(10, e);
+    let mRounded = Math.round(m * 10) / 10;
+    // Округление может «перепрыгнуть» десятку: 9.99 → 10.0 → 1.0·10^(e+1).
+    if (Math.abs(mRounded) >= 10) {
+        e += 1;
+        mRounded /= 10;
+    }
+    if (mRounded === 1 || mRounded === -1) {
+        return `10${toSuperscript(String(e))}`;
+    }
+    const mStr = mRounded.toFixed(1).replace(/\.0$/, '');
+    return `${mStr}·10${toSuperscript(String(e))}`;
+}
+/**
+ * Человекочитаемая запись числа для легенды.
+ *   ≥ 0.001  → обычная запись (0.01, 0.001, 0.0015)
+ *   < 0.001  → степень (10⁻⁴, 5·10⁻⁴, 2.5·10⁻⁵)
+ */
 export function formatScaleValue(n) {
     if (!isFinite(n) || n === 0)
         return '—';
@@ -52,8 +81,10 @@ export function formatScaleValue(n) {
         s = n.toFixed(2);
     else if (abs >= 0.01)
         s = n.toFixed(3);
+    else if (abs >= 0.001)
+        s = n.toFixed(4);
     else
-        s = n.toExponential(2);
+        s = formatSci(n);
     if (s.includes('.'))
         s = s.replace(/\.?0+$/, '');
     return s;
@@ -584,8 +615,7 @@ function tryLayout(items, targetW, gap) {
     }
     return { layout, totalW: maxW, totalH: y + rowH };
 }
-function layoutCoins(coins, unitPx) {
-    const gap = 4;
+function layoutCoins(coins, unitPx, gap) {
     const items = coins.map(c => {
         const r = Math.sqrt(Math.max(0, c.val)) * unitPx;
         return { ...c, r, d: r * 2 };
@@ -615,9 +645,8 @@ function layoutCoins(coins, unitPx) {
     }
     return best;
 }
-function layoutGroups(groups, unitPx) {
-    const gap = 10;
-    const groupLayouts = groups.map(g => layoutCoins(g.coins, unitPx));
+function layoutGroups(groups, unitPx, coinGap, groupGap) {
+    const groupLayouts = groups.map(g => layoutCoins(g.coins, unitPx, coinGap));
     if (groupLayouts.length === 0)
         return { layout: [], totalW: 0, totalH: 0 };
     if (groupLayouts.length === 1)
@@ -633,15 +662,15 @@ function layoutGroups(groups, unitPx) {
         for (const g of groupLayouts) {
             if (x > 0 && x + g.totalW > targetW) {
                 x = 0;
-                y += rowH + gap;
+                y += rowH + groupGap;
                 rowH = 0;
             }
             for (const item of g.layout) {
                 layout.push({ x: x + item.x, y: y + item.y, r: item.r, color: item.color });
             }
-            x += g.totalW + gap;
+            x += g.totalW + groupGap;
             rowH = Math.max(rowH, g.totalH);
-            maxW = Math.max(maxW, x - gap);
+            maxW = Math.max(maxW, x - groupGap);
         }
         const totalH = y + rowH;
         const res = { layout, totalW: maxW, totalH };
@@ -668,7 +697,7 @@ function layoutGroups(groups, unitPx) {
 export const coinDiagram = {
     name: 'coin',
     scaleKind: 'area',
-    computeSize({ data, unitPx, padding = 4, strokeWidth = 1, coins: coinsInput }) {
+    computeSize({ data, unitPx, gap = 2, padding = 4, strokeWidth = 1, coins: coinsInput }) {
         const maxVal = Math.max(...data.map(d => d.value), 1);
         const coins = coinsInput && coinsInput.length > 0
             ? [...coinsInput].sort((a, b) => b - a)
@@ -687,14 +716,16 @@ export const coinDiagram = {
             }
             groups.push({ coins: groupCoins });
         }
-        const { totalW, totalH } = layoutGroups(groups, unitPx);
+        const coinGap = gap;
+        const groupGap = Math.max(gap * 3, 6);
+        const { totalW, totalH } = layoutGroups(groups, unitPx, coinGap, groupGap);
         return {
             width: totalW + padding * 2 + strokeWidth * 2,
             height: totalH + padding * 2 + strokeWidth * 2,
             anchor: [0.5, 0.5]
         };
     },
-    render(ctx, { data, width, height, unitPx, padding = 4, strokeColor = '#333', strokeWidth = 1, coins: coinsInput }) {
+    render(ctx, { data, width, height, unitPx, gap = 2, padding = 4, strokeColor = '#333', strokeWidth = 1, coins: coinsInput }) {
         const maxVal = Math.max(...data.map(d => d.value), 1);
         const coins = coinsInput && coinsInput.length > 0
             ? [...coinsInput].sort((a, b) => b - a)
@@ -713,7 +744,9 @@ export const coinDiagram = {
             }
             groups.push({ coins: groupCoins });
         }
-        const { layout, totalW, totalH } = layoutGroups(groups, unitPx);
+        const coinGap = gap;
+        const groupGap = Math.max(gap * 3, 6);
+        const { layout, totalW, totalH } = layoutGroups(groups, unitPx, coinGap, groupGap);
         const offsetX = (width - totalW) / 2;
         const offsetY = (height - totalH) / 2;
         for (const item of layout) {

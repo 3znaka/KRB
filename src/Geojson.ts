@@ -16,7 +16,11 @@ import { Diagram, type DiagramOptions } from './Diagram.js';
 import { Diagram3D, type Diagram3DSpawnOptions } from './Diagram3D.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
-import { getAutoCoins, resolveDiagramUnitPx } from './DiagramTypes.js';
+import {
+    getAutoCoins,
+    resolveDiagramUnitPx,
+    MIN_COIN_DIAMETER_PX,
+} from './DiagramTypes.js';
 import type { Diagram3DData } from './Diagram3DTypes.js';
 import { calculateBreaks, getClassIndex, makeBreaksPretty } from './Classification.js';
 import { resolveColorRamp, sampleColorRamp, invertColorRamp } from './ColorRamps.js';
@@ -1042,9 +1046,8 @@ export class GeoJSONLayer extends Layer {
  * Один раз на слой для `coin`: единый набор номиналов,
  * чтобы рендер и легенда показывали одинаковые кружки.
  *
- * Оставляем только те номиналы, которые реально используются
- * хотя бы одной диаграммой — иначе легенда показала бы
- * «500 ед.», которого нет на карте.
+ * Отбрасывает номиналы, которые дают слишком маленький кружок
+ * (диаметр < MIN_COIN_DIAMETER_PX), и те, что ни разу не используются.
  */
 private _computeCoinDenoms(geojson: GeoJSONInput): void {
     this._diagramCoins = null;
@@ -1057,12 +1060,11 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
         return;
     }
 
-    // Собираем ВСЕ значения по всем отрисовываемым фичам.
+    // Собираем все значения по отрисовываемым фичам.
     const allValues: number[] = [];
     const scan = (f: GeoJSONFeature) => {
         if (this.featureFilter && !this.featureFilter(f)) return;
         const p = f.properties ?? {};
-        // Синхронизировано с _addPointFeature: такие фичи не дают диаграмм.
         if (p.diagram === false) return;
         for (const k of cfg.fields) {
             const v = Number(p[k]);
@@ -1073,15 +1075,31 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
     else if (geojson.type === 'Feature')       scan(geojson);
     if (!allValues.length) return;
 
+    const unitPx = resolveDiagramUnitPx('coin', cfg, this._diagramAuto?.unitPx);
+    const minValue = unitPx > 0
+        ? (MIN_COIN_DIAMETER_PX / 2 / unitPx) ** 2
+        : Infinity;
+
     const maxVal = Math.max(...allValues);
     const candidates = getAutoCoins(maxVal);
 
-    // Проходим тем же алгоритмом разложения, что и рендер, и отмечаем
-    // номиналы, встретившиеся хотя бы раз.
+    // Отбрасываем слишком маленькие монеты.
+    const visible = candidates.filter(c => c >= minValue);
+    if (!visible.length) {
+        // Все кандидаты ниже порога — оставляем хотя бы самый крупный.
+        console.warn(
+            'GeoJSONLayer: all coin denominations below ' +
+            `${MIN_COIN_DIAMETER_PX}px at unitPx=${unitPx}; keeping the largest.`,
+        );
+        visible.push(candidates[0]);
+    }
+
+    // Симулируем разложение тем же алгоритмом, что и рендер,
+    // и оставляем только реально используемые номиналы.
     const used = new Set<number>();
     for (const v of allValues) {
         let rem = v;
-        for (const c of candidates) {
+        for (const c of visible) {
             if (rem >= c) {
                 used.add(c);
                 rem %= c;
@@ -1089,8 +1107,8 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
         }
     }
 
-    const filtered = candidates.filter(c => used.has(c));
-    this._diagramCoins = filtered.length ? filtered : candidates;
+    const filtered = visible.filter(c => used.has(c));
+    this._diagramCoins = filtered.length ? filtered : visible;
 }
 
     // =================================================================

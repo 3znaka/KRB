@@ -1,21 +1,6 @@
-/**
- * Светлая тема оформления.
- *
- * Содержит ТОЛЬКО визуальные параметры (цвета, ширины, шрифты, порядок
- * отрисовки). Никаких имён спрайтов и цветов по классам POI — они
- * собираются в resolve.ts из TileSpec + poiCategories / poiIconOverrides.
- *
- * Фильтры по классам (`filter`) продублированы из spec — это компромисс:
- * для большинства случаев проще оставить их здесь, чтобы тема была
- * самодостаточной для рендера. При смене тайл-сервера их, скорее всего,
- * придётся править вместе со spec.
- */
 export const LIGHT_THEME = {
     name: 'Light',
     backgroundColor: '#ffffff',
-    // ─────────────────────────────────────────────────────────────────
-    // Палитра категорий POI.
-    // ─────────────────────────────────────────────────────────────────
     poiCategories: {
         food: '#e74c3c',
         health: '#dc3545',
@@ -27,52 +12,19 @@ export const LIGHT_THEME = {
         service: '#546e7a',
         transport: '#1565c0',
         lodging: '#1976d2',
-        nature: '#6d9e3f', // ← NEW
-        religion: '#7e57c2', // ← NEW
+        nature: '#6d9e3f',
+        religion: '#7e57c2',
         other: '#888888',
     },
     poiDefaultIcon: 'marker',
     layers: {
         // ─────────────────────────────────────────────────────────────
-        // LANDCOVER
-        // ─────────────────────────────────────────────────────────────
-        landcover: {
-            filter: { type: 'geometry', in: [3] },
-            color: {
-                type: 'match',
-                by: ['class', 'subclass'],
-                values: {
-                    glacier: 0xffffff,
-                    ice_shelf: 0xffffff,
-                    ice: 0xf0f8ff,
-                    wood: 0x66aa44,
-                    grass: 0xd8e8c8,
-                    sand: 0xf5eebc,
-                    farmland: 0xf0ecdc,
-                    rock: 0xe0ddd8,
-                    wetland: 0xd0e8e0,
-                    _default: 0xffffff,
-                },
-            },
-            opacity: {
-                type: 'match',
-                by: ['class', 'subclass'],
-                values: {
-                    glacier: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
-                    ice_shelf: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
-                    ice: 0.8,
-                    wood: 0.1,
-                    grass: 1,
-                    sand: 1,
-                    farmland: 0.7,
-                    rock: 0.5,
-                    wetland: 0.7,
-                    _default: 0.3,
-                },
-            },
-        },
-        // ─────────────────────────────────────────────────────────────
-        // LANDUSE
+        // LANDUSE — базовая подложка города (z=5, ПОД greenery).
+        //
+        // Медицина/образование → landuse_amenity (z=10).
+        // Спорт/рекреация/парки → landuse_recreation (z=20).
+        // Остальное — жильё, коммерция, промзона, стройка, кладбища,
+        // военные, тюрьмы — здесь.
         // ─────────────────────────────────────────────────────────────
         landuse: {
             filter: { type: 'geometry', in: [3] },
@@ -104,29 +56,28 @@ export const LIGHT_THEME = {
                     cemetery: 0xe0e4dd,
                     military: 0xe8d0cc,
                     prison: 0xe0e0e0,
-                    // медицина/образование
-                    hospital: 0xffddee,
-                    school: 0xf0e8f8,
-                    university: 0xf0e8f8,
-                    college: 0xf0e8f8,
-                    kindergarten: 0xf0e8f8,
-                    // спорт/рекреация
-                    pitch: 0xb8ddb0,
-                    playground: 0xf0e8c8,
-                    stadium: 0xc0dcc0,
-                    track: 0xd8e0c0,
-                    garden: 0xcde8c0,
-                    golf_course: 0xb0d8a0,
-                    village_green: 0xc8e0b8,
-                    recreation_ground: 0xd0e8d0,
-                    zoo: 0xd8e8c0,
-                    theme_park: 0xf0d8e0,
-                    park: 0xd8e8c8,
-                    // сельхоз/природа
-                    orchard: 0xe0f0c8,
-                    vineyard: 0xe0e8d0,
-                    allotments: 0xe8f0d8,
-                    meadow: 0xeef4e0,
+                    // медицина/образование → landuse_amenity
+                    hospital: undefined,
+                    school: undefined,
+                    university: undefined,
+                    college: undefined,
+                    kindergarten: undefined,
+                    // спорт/рекреация/парки → landuse_recreation
+                    pitch: undefined,
+                    playground: undefined,
+                    stadium: undefined,
+                    track: undefined,
+                    garden: undefined,
+                    golf_course: undefined,
+                    village_green: undefined,
+                    recreation_ground: undefined,
+                    zoo: undefined,
+                    theme_park: undefined,
+                    park: undefined,
+                    orchard: undefined,
+                    vineyard: undefined,
+                    allotments: undefined,
+                    meadow: undefined,
                     _default: undefined,
                 },
             },
@@ -153,12 +104,111 @@ export const LIGHT_THEME = {
                     cemetery: 1,
                     military: 0.3,
                     prison: 0.3,
-                    hospital: 1,
-                    school: 1,
-                    university: 0.8,
-                    college: 0.8,
-                    kindergarten: 0.8,
-                    pitch: 0.6,
+                    _default: 1,
+                },
+            },
+        },
+        // ─────────────────────────────────────────────────────────────
+        // LANDUSE_AMENITY (z=10, между landuse и landcover)
+        //
+        // Больницы/вузы/школы/детсады — ПОД greenery, чтобы газоны и лес
+        // отрисовывались поверх заливки. Классы селектируются через
+        // color.match (`_default: undefined` = не рисовать остальную
+        // часть landuse-тайла).
+        // ─────────────────────────────────────────────────────────────
+        landuse_amenity: {
+            sourceLayer: 'landuse',
+            filter: { type: 'geometry', in: [3] },
+            color: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    hospital: 0xffddee,
+                    school: 0xf0e8f8,
+                    university: 0xf0e8f8,
+                    college: 0xf0e8f8,
+                    kindergarten: 0xf0e8f8,
+                    _default: undefined,
+                },
+            },
+            opacity: 1,
+        },
+        // ─────────────────────────────────────────────────────────────
+        // LANDCOVER — greenery (z=15, МЕЖДУ amenity и recreation).
+        // ─────────────────────────────────────────────────────────────
+        landcover: {
+            filter: { type: 'geometry', in: [3] },
+            color: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    glacier: 0xffffff,
+                    ice_shelf: 0xffffff,
+                    ice: 0xf0f8ff,
+                    wood: 0x66aa44,
+                    grass: 0xd8e8c8,
+                    sand: 0xf5eebc,
+                    farmland: 0xf0ecdc,
+                    rock: 0xe0ddd8,
+                    wetland: 0xd0e8e0,
+                    _default: undefined,
+                },
+            },
+            opacity: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    glacier: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
+                    ice_shelf: { type: 'zoom', stops: [[0, 0.9], [10, 0.3]] },
+                    ice: 0.8,
+                    wood: 0.1,
+                    grass: 1,
+                    sand: 1,
+                    farmland: 0.7,
+                    rock: 0.5,
+                    wetland: 0.7,
+                    _default: 0.3,
+                },
+            },
+        },
+        // ─────────────────────────────────────────────────────────────
+        // LANDUSE_RECREATION (z=20, НАД greenery).
+        //
+        // Спорт/рекреация/парки — должны быть ВИДНЫ поверх газонов,
+        // иначе pitch/playground/garden сливаются с grass и «пропадают».
+        // pitch рендерится при opacity 1.0 — иначе blendWithBackground
+        // размывает цвет до почти-белого и он теряется на фоне газона.
+        // ─────────────────────────────────────────────────────────────
+        landuse_recreation: {
+            sourceLayer: 'landuse',
+            filter: { type: 'geometry', in: [3] },
+            color: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    pitch: 0xa8d8a0, // насыщенный газон поля
+                    playground: 0xf0e8c8,
+                    stadium: 0xc0dcc0,
+                    track: 0xd8e0c0,
+                    garden: 0xcde8c0,
+                    golf_course: 0xb0d8a0,
+                    village_green: 0xc8e0b8,
+                    recreation_ground: 0xd0e8d0,
+                    zoo: 0xd8e8c0,
+                    theme_park: 0xf0d8e0,
+                    park: 0xd8e8c8,
+                    orchard: 0xe0f0c8,
+                    vineyard: 0xe0e8d0,
+                    allotments: 0xe8f0d8,
+                    meadow: 0xeef4e0,
+                    _default: undefined,
+                },
+            },
+            opacity: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    pitch: 1.0, // ← прямое наложение, без блендинга
                     playground: 0.7,
                     stadium: 0.6,
                     track: 0.6,
@@ -178,29 +228,24 @@ export const LIGHT_THEME = {
             },
         },
         // ─────────────────────────────────────────────────────────────
-        // PARK (охраняемые природные территории OMT-слоя `park`)
+        // PARK — охраняемые природные территории (OMT-слой `park`)
         // ─────────────────────────────────────────────────────────────
         park: {
-            filter: {
-                type: 'all',
-                of: [
-                    { type: 'geometry', in: [3] },
-                    {
-                        type: 'any',
-                        of: [
-                            { type: 'eq', key: 'class', value: 'national_park' },
-                            { type: 'eq', key: 'class', value: 'nature_reserve' },
-                            { type: 'eq', key: 'class', value: 'protected_area' },
-                        ],
-                    },
-                ],
+            filter: { type: 'geometry', in: [3] },
+            color: {
+                type: 'match',
+                by: 'class',
+                values: {
+                    national_park: 0xc8e0b8,
+                    nature_reserve: 0xc8e0b8,
+                    protected_area: 0xc8e0b8,
+                    _default: undefined,
+                },
             },
-            color: 0xc8e0b8,
             opacity: 0.5,
         },
         // ─────────────────────────────────────────────────────────────
         // WATERWAY
-        // Подписи — НАД линией (textVerticalAlign='top').
         // ─────────────────────────────────────────────────────────────
         waterway: {
             filter: { type: 'geometry', in: [2] },
@@ -248,10 +293,7 @@ export const LIGHT_THEME = {
             opacity: {
                 type: 'match',
                 by: 'intermittent',
-                values: {
-                    1: 0.7,
-                    _default: 1,
-                },
+                values: { 1: 0.7, _default: 1 },
             },
         },
         // ─────────────────────────────────────────────────────────────
@@ -303,10 +345,7 @@ export const LIGHT_THEME = {
                     3: {
                         type: 'match',
                         by: 'class',
-                        values: {
-                            pier: 0xf8f4f0,
-                            _default: 0xe3e3e3,
-                        },
+                        values: { pier: 0xf8f4f0, _default: 0xe3e3e3 },
                     },
                     2: {
                         type: 'match',
@@ -335,7 +374,6 @@ export const LIGHT_THEME = {
                             cable_car: 0x888888,
                             gondola: 0x888888,
                             funicular: 0x888888,
-                            // строительство
                             motorway_construction: 0xffffff,
                             trunk_construction: 0xffffff,
                             primary_construction: 0xffffff,
@@ -378,7 +416,6 @@ export const LIGHT_THEME = {
                     funicular: { type: 'zoom', stops: [[13, 0.5], [20, 1.5]] },
                     ferry: 0.55,
                     pier: { type: 'zoom', stops: [[15, 0.5], [17, 2]] },
-                    // строительство — та же ширина, что у "родителя"
                     motorway_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
                     trunk_construction: { type: 'zoom', stops: [[6.5, 0], [7, 0.25], [20, 9]] },
                     primary_construction: { type: 'zoom', stops: [[8.5, 0], [9, 0.25], [20, 9]] },
@@ -476,11 +513,7 @@ export const LIGHT_THEME = {
             color: {
                 type: 'match',
                 by: ['maritime', 'admin_level'],
-                values: {
-                    1: 0x9abdd6,
-                    2: 0xa4a2b2,
-                    _default: 0x9e9cab,
-                },
+                values: { 1: 0x9abdd6, 2: 0xa4a2b2, _default: 0x9e9cab },
             },
             width: {
                 type: 'match',
@@ -494,11 +527,7 @@ export const LIGHT_THEME = {
             dash: {
                 type: 'match',
                 by: ['maritime', 'admin_level'],
-                values: {
-                    1: undefined,
-                    2: undefined,
-                    _default: [3, 1],
-                },
+                values: { 1: undefined, 2: undefined, _default: [3, 1] },
             },
             opacity: {
                 type: 'match',
@@ -510,7 +539,7 @@ export const LIGHT_THEME = {
             },
         },
         // ─────────────────────────────────────────────────────────────
-        // WATER_NAME — подписи НАД линией.
+        // WATER_NAME
         // ─────────────────────────────────────────────────────────────
         water_name: {
             color: 0xa0c8f0,
@@ -582,7 +611,7 @@ export const LIGHT_THEME = {
             textStroke: '2px #ffffff',
         },
         // ─────────────────────────────────────────────────────────────
-        // TRANSPORTATION_NAME — подписи НА линии.
+        // TRANSPORTATION_NAME
         // ─────────────────────────────────────────────────────────────
         transportation_name: {
             filter: {
@@ -773,8 +802,7 @@ export const LIGHT_THEME = {
                     suburb: [0, -6], quarter: [0, -6], neighbourhood: [0, -6],
                     isolated_dwelling: [0, -4],
                     island: [0, -4], archipelago: [0, -4],
-                    sea: [0, 0], ocean: [0, 0],
-                    bay: [0, 0], strait: [0, 0],
+                    sea: [0, 0], ocean: [0, 0], bay: [0, 0], strait: [0, 0],
                     province: [0, -8],
                     _default: [0, -6],
                 },
@@ -801,11 +829,17 @@ export const LIGHT_THEME = {
         },
     },
     // ─────────────────────────────────────────────────────────────────
-    // Порядок отрисовки слоёв
+    // Порядок отрисовки (bottom → top):
+    //   landuse (5)          — базовая подложка города
+    //   landuse_amenity (10) — больницы/вузы/школы — ПОД зеленью
+    //   landcover (15)       — greenery
+    //   landuse_recreation(20) — pitch/playground/парки — НАД зеленью
     // ─────────────────────────────────────────────────────────────────
     layerOrder: {
-        landcover: 10,
-        landuse: 20,
+        landuse: 5,
+        landuse_amenity: 10,
+        landcover: 15,
+        landuse_recreation: 20,
         park: 110,
         waterway: 120,
         water: 190,

@@ -4,9 +4,12 @@ import type { TileSpec, Theme } from './types.js';
 export function resolveStyle(spec: TileSpec, theme: Theme): Record<string, any> {
   const result: Record<string, any> = {};
 
-  for (const [layerName, layerStyle] of Object.entries(theme.layers)) {
-    result[layerName] = structuredClone(layerStyle);
-  }
+for (const [layerName, layerStyle] of Object.entries(theme.layers)) {
+  const style = structuredClone(layerStyle);
+  const specLayer = spec.layers[layerName];
+  if (specLayer?.sourceLayer) style.sourceLayer = specLayer.sourceLayer;
+  result[layerName] = style;
+}
 
   const poiSpec = spec.layers.poi;
   const poiStyle = result.poi;

@@ -11,7 +11,7 @@ export interface PoiClassSpec {
 
 export interface LayerSpec {
   geometry: GeometryKind | 'mixed';
-  /** Только для poi-слоя: какие классы бывают и к каким категориям. */
+  sourceLayer?: string; 
   poiClasses?: Record<string, PoiClassSpec>;
 }
 

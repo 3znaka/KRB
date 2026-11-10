@@ -789,13 +789,20 @@ function identifyAt(tile, z, x, y, tileSizeX, tileSizeY, localX, localZ,
     const tolSq = tol * tol;
     const results = [];
 
-    for (const layerName in tile.layers) {
-        if (visibleLayers && !visibleLayers.includes(layerName)) continue;
-        if (invisibleLayers && invisibleLayers.includes(layerName)) continue;
-        const layer = tile.layers[layerName];
-        for (let i = 0; i < layer.length; i++) {
-            const feature = layer.feature(i);
-            const props = feature.properties || {};
+for (const styleName in workerStyles) {
+    const layerStyle = workerStyles[styleName];
+    if (!layerStyle) continue;
+
+    const srcName = layerStyle.sourceLayer || styleName;
+    if (visibleLayers && !visibleLayers.includes(styleName) && !visibleLayers.includes(srcName)) continue;
+    if (invisibleLayers && (invisibleLayers.includes(styleName) || invisibleLayers.includes(srcName))) continue;
+
+    const layer = tile.layers[srcName];
+    if (!layer) continue;
+
+    for (let i = 0; i < layer.length; i++) {
+        const feature = layer.feature(i);
+        const props = feature.properties || {};
             const geomType = feature.type;
             const geom = feature.loadGeometry();
             let hit = false;
@@ -831,22 +838,22 @@ function identifyAt(tile, z, x, y, tileSizeX, tileSizeY, localX, localZ,
                 }
             }
             if (!hit) continue;
+   const filterPass = layerStyle.filter
+            ? resolveFilter(layerStyle.filter, feature)
+            : true;
 
-            const filterPass = layerStyle && layerStyle.filter
-                ? resolveFilter(layerStyle.filter, feature)
-                : true;
-
-            results.push({
-                layer: layerName,
-                type: geomType === 1 ? 'Point' : geomType === 2 ? 'LineString' : 'Polygon',
+        results.push({
+            layer: styleName,          // ← отдаём имя стиля, не sourceLayer
+            sourceLayer: srcName,      // ← и исходное имя, для диагностики
+            type: geomType === 1 ? 'Point' : geomType === 2 ? 'LineString' : 'Polygon',
                 featureIndex: i,
                 featureId: feature.id,
                 distance: Math.sqrt(minDistSq),
                 filterPass,
-                style: layerStyle ? snapshotStyle(layerStyle, props, zoom, geomType) : null,
-                renderOrder: LAYER_RENDER_ORDER[layerName] !== undefined
-                    ? LAYER_RENDER_ORDER[layerName] : null,
-                properties: props,
+                style: snapshotStyle(layerStyle, props, zoom, geomType),
+            renderOrder: LAYER_RENDER_ORDER[styleName] !== undefined
+                ? LAYER_RENDER_ORDER[styleName] : null,
+            properties: props,
             });
         }
     }
@@ -1005,17 +1012,31 @@ function processTile(tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is
     const textLines = [];
 
 const processLayer = (name) => {
-    if (visibleLayers && !visibleLayers.includes(name)) return;
-    if (invisibleLayers && invisibleLayers.includes(name)) return;   // ← добавить
-    const layer = tile.layers[name];
-        if (!layer) return;
-        const layerStyle = workerStyles[name];
-        if (!layerStyle) return;
+    // Стиль ищем ВСЕГДА по имени из темы — даже если это виртуальный слой.
+    const layerStyle = workerStyles[name];
+    if (!layerStyle) return;
 
-        if (layerStyle.maxZoom !== undefined && styleZoom >= layerStyle.maxZoom) return;
+    // Имя реального тайл-слоя: для обычных слоёв совпадает с name,
+    // для виртуальных — берётся из sourceLayer.
+    const srcName = layerStyle.sourceLayer || name;
 
-        const isCarrierOnlyLine = CARRIER_ONLY_LINE_LAYERS.has(name);
-        const layerBaseOrder = LAYER_RENDER_ORDER[name] ?? 20;
+    // Видимость: главный поток может фильтровать и по имени стиля,
+    // и по имени source-слоя. Например visibleLayers=['landuse']
+    // не должен случайно отрубать landuse_amenity.
+    if (visibleLayers && !visibleLayers.includes(name) && !visibleLayers.includes(srcName)) return;
+    if (invisibleLayers && (invisibleLayers.includes(name) || invisibleLayers.includes(srcName))) return;
+
+    const layer = tile.layers[srcName];
+    if (!layer) return;
+
+    if (layerStyle.maxZoom !== undefined && styleZoom >= layerStyle.maxZoom) return;
+
+    const isCarrierOnlyLine = CARRIER_ONLY_LINE_LAYERS.has(name);
+    const layerBaseOrder = LAYER_RENDER_ORDER[name] ?? 20;
+
+    // Привязка exclusion-полигонов: exclusionLayers содержит имена
+    // тайл-слоёв, поэтому проверяем оба варианта.
+    const isExclusionLayer = exclusionLayerSet.has(name) || exclusionLayerSet.has(srcName);
 
         for (let i = 0; i < layer.length; i++) {
             const feature = layer.feature(i);
@@ -1038,7 +1059,7 @@ const processLayer = (name) => {
         const worldX = (pt.x / 4095 - 0.5) * tileSizeX;
 const worldZ = (pt.y / 4095 - 0.5) * tileSizeY;
 
-                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                if (isExclusionLayer && localExclusionPolygons.length > 0) {
                     const localPt = { x: worldX, z: worldZ };
                     let excluded = false;
                     for (const exPoly of localExclusionPolygons) {
@@ -1093,7 +1114,7 @@ textPoints.push({
   const rings = toWorldCoords(feature, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, geomType === 2);
 
             if (geomType === 3) {
-                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                if (isExclusionLayer && localExclusionPolygons.length > 0) {
                     if (polygonIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
 
@@ -1199,7 +1220,7 @@ const chains = splitRingByBoundary(ring, halfTileX, halfTileY, eps);
 }
                 }
             } else if (geomType === 2) {
-                if (exclusionLayerSet.has(name) && localExclusionPolygons.length > 0) {
+                if (isExclusionLayer && localExclusionPolygons.length > 0) {
                     if (lineIntersectsAny(rings, localExclusionPolygons)) continue;
                 }
 
@@ -1350,7 +1371,7 @@ renderOrder: semanticOrder - 0.5,
         }
     };
 
-    for (const name in tile.layers) processLayer(name);
+    for (const name in workerStyles) processLayer(name);
 
     textPoints.sort((a, b) => b.priority - a.priority);
     textLines.sort((a, b) => b.priority - a.priority);

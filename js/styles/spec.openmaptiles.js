@@ -3,6 +3,8 @@ export const OPENMAPTILES_SPEC = {
     layers: {
         landcover: { geometry: 'polygon' },
         landuse: { geometry: 'polygon' },
+        landuse_amenity: { geometry: 'polygon', sourceLayer: 'landuse' },
+        landuse_recreation: { geometry: 'polygon', sourceLayer: 'landuse' },
         park: { geometry: 'polygon' },
         waterway: { geometry: 'line' },
         water: { geometry: 'polygon' },

@@ -1,7 +1,11 @@
 export function resolveStyle(spec, theme) {
     const result = {};
     for (const [layerName, layerStyle] of Object.entries(theme.layers)) {
-        result[layerName] = structuredClone(layerStyle);
+        const style = structuredClone(layerStyle);
+        const specLayer = spec.layers[layerName];
+        if (specLayer?.sourceLayer)
+            style.sourceLayer = specLayer.sourceLayer;
+        result[layerName] = style;
     }
     const poiSpec = spec.layers.poi;
     const poiStyle = result.poi;

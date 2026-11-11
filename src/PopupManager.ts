@@ -70,6 +70,11 @@ export interface PopupMapHost {
     camera: any;
     renderer: { domElement: HTMLCanvasElement };
     project(pt: LonLat, crs: any): number[];
+
+    // ── опциональные: есть в KrbMap (CoreInput / CoreCoordinates) ──
+    _raycastToGround?(screenX: number, screenY: number, out: any): any | null;
+    unprojectToLonLat?(x: number, z: number): LonLat;
+    _getCanvasRect?(): { left: number; top: number; width: number; height: number };
 }
 
 // =====================================================================
@@ -183,6 +188,107 @@ show(object: PopupAnchor | null | undefined, html: string): void {
     showAtPoint(point: PopupPoint, html: string): void {
         this.show(this._makeVirtualAnchor(point), html);
     }
+
+    /**
+ * Показать попап в точке клика/тапа (мышь, pointer, touch).
+ *
+ * Делает raycast по рельефу (или плоскости y=0, если рельефа нет),
+ * получает lon/lat + высоту и вызывает showAtPoint(). Дальше попап
+ * ведёт себя как обычный showAt — следует за этой точкой на карте
+ * при панорамировании/зуме.
+ *
+ * @example
+ *   polygon = new Polygon({
+ *       ...,
+ *       onClick: (e) => map.popupManager.showAtEvent(e, '<b>Hi</b>'),
+ *   });
+ */
+showAtEvent(
+    event: MouseEvent | PointerEvent | Touch,
+    html: string,
+): void {
+    const map = this._map;
+    if (!map || !html) { this.hide(); return; }
+
+    const clientX = (event as MouseEvent).clientX;
+    const clientY = (event as MouseEvent).clientY;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+        this.hide();
+        return;
+    }
+
+    // ── 1. Основной путь: raycast по рельефу через KrbMap ──
+    if (typeof map._raycastToGround === 'function'
+        && typeof map.unprojectToLonLat === 'function') {
+
+        // ВАЖНО: _raycastToGround переиспользует _tempMouse/_tempRaycaster
+        // самого KrbMap. Вызов безопасен, потому что onClick полигона
+        // синхронно отрабатывает после того, как InteractionManager уже
+        // сделал свой raycast.
+        const out = new THREE.Vector3();
+        const hit = map._raycastToGround(clientX, clientY, out);
+        if (hit) {
+            const wgPos = map.worldGroup.position;
+            const localX = out.x - wgPos.x;
+            const localZ = out.z - wgPos.z;
+            const lonLat = map.unprojectToLonLat(localX, localZ);
+            if (lonLat
+                && Number.isFinite(lonLat[0])
+                && Number.isFinite(lonLat[1])) {
+                // out.y — абсолютная высота в world-координатах;
+                // вычитаем worldGroup, чтобы получить локальную высоту,
+                // ту же, что ждёт _projectLonLatToScreen.
+                const alt = out.y - wgPos.y;
+                this.showAtPoint(
+                    { lonLat: [lonLat[0], lonLat[1], alt] },
+                    html,
+                );
+                return;
+            }
+        }
+    }
+
+    // ── 2. Fallback: пересечение с плоскостью y=0 без рельефа ──
+    const world = this._screenToWorldOnGroundPlane(clientX, clientY);
+    if (world && typeof map.unprojectToLonLat === 'function') {
+        const wgPos = map.worldGroup.position;
+        const localX = world.x - wgPos.x;
+        const localZ = world.z - wgPos.z;
+        const lonLat = map.unprojectToLonLat(localX, localZ);
+        if (lonLat
+            && Number.isFinite(lonLat[0])
+            && Number.isFinite(lonLat[1])) {
+            this.showAtPoint({ lonLat: [lonLat[0], lonLat[1], 0] }, html);
+            return;
+        }
+    }
+
+    this.hide();
+}
+
+
+private _screenToWorldOnGroundPlane(
+    clientX: number,
+    clientY: number,
+): { x: number; y: number; z: number } | null {
+    const map = this._map;
+    if (!map) return null;
+
+    const rect = typeof map._getCanvasRect === 'function'
+        ? map._getCanvasRect()
+        : map.renderer.domElement.getBoundingClientRect();
+
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    const rc = new THREE.Raycaster();
+    rc.setFromCamera(new THREE.Vector2(ndcX, ndcY), map.camera);
+
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const out = new THREE.Vector3();
+    if (!rc.ray.intersectPlane(plane, out)) return null;
+    return { x: out.x, y: out.y, z: out.z };
+}
 
     hide(): void {
         this._cancelShowAnimation();

@@ -385,7 +385,7 @@
                             titleStyle: { fontSize: '10px', color: '#333', fontWeight: 'bold' },
                             titlePriority: 5,
                             properties: props,
-                            onClick: (_e, poly) => map.popupManager.show(poly, buildRoomPopup(props)),
+                            onClick: (e) => map.popupManager.showAtEvent(e, buildRoomPopup(props)),
                             onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
                         }));
                     });
@@ -498,10 +498,10 @@ function buildBuildingLayer() {
                 depthTest: true,
                 depthWrite: true,
                 properties: props,
-                onClick: (_e, poly) => {
-                    const html = buildBuildingPopup(props);
-                    if (html) map.popupManager.show(poly, html);
-                },
+                onClick: (e) => {
+    const html = buildBuildingPopup(props);
+    if (html) map.popupManager.showAtEvent(e, html);
+},
                 onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
             }));
         });

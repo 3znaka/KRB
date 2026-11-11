@@ -1,9 +1,6 @@
 /**
  * Polygon — полигон с заливкой, обводкой, экструзией, паттерном и подписью.
- * После `addTo()` мутабелен.
- *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
- * onHover, подпись, TextManager-контракт и altitude берутся из базы.
+ * LOD-упрощение по зуму: Douglas–Peucker в world-координатах, кэш по бакетам.
  *
  * @module polygon
  */
@@ -11,14 +8,15 @@ import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
 import earcut from './js_TP/earcut.js';
+import { simplifyRingIndices } from './Simplify.js';
 export const POLYGON_RENDER_ORDER = {
-    BOTTOM: 900,
-    SIDE: 901,
-    TOP: 902,
-    STROKE: 903,
+    BOTTOM: 900, SIDE: 901, TOP: 902, STROKE: 903,
 };
 const INVALID_EDGE_FRACTION = 8;
 const DEFAULT_FILL_PATTERN_SCALE = 64;
+/** Дебаунс пересборки при смене зум-бакета (мс). */
+const REBUILD_DEBOUNCE_MS = 60;
+let _rebuildSlotCounter = 0;
 function crossY(p0, p1, p2) {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
     const dx2 = p2.x - p0.x, dz2 = p2.y - p0.y;
@@ -46,7 +44,20 @@ export class Polygon extends SpatialObject {
     _strokeOpacity;
     _altitudeMode;
     _tooltipOnHover;
+    // ── LOD ──
+    _simplify = true;
+    _simplifyTolerance = 0.5;
+    _simplifyZoomBucket = 1;
+    _simplifyCache = new Map();
+    _renderRings = null;
+    _fullRenderRings = null;
+    _currentSimplifyBucket = -1;
+    _pendingBucket = -1;
+    _rebuildTimer = null;
+    /** Кэш визуального центра, считается один раз за жизнь полигона. */
+    _centroidFromOriginal = null;
     _visualCenterCache = null;
+    // ── Экструзия ──
     _extruded;
     _height;
     _minHeight;
@@ -77,12 +88,7 @@ export class Polygon extends SpatialObject {
     // ── Кэши ──
     _cachedHeights = [];
     _cachedStrokeHeights = [];
-    /**
-     * Кэш индексов триангуляции top-грани. Заполняется в `_buildFillGeometry`
-     * (и при необходимости пересчитывается в `_getBatchGeometryData`).
-     * Переживает `_disposeMeshes()`, чтобы батчер мог пересобраться
-     * после `markDirty()` (например, `setFillColor`) без GPU-геометрии.
-     */
+    /** Индексы триангуляции top-грани. Переживает `_disposeMeshes()`. */
     _cachedTopIndices = null;
     _nodeHeights = [];
     _strokeNodeHeights = [];
@@ -121,6 +127,9 @@ export class Polygon extends SpatialObject {
             throw new Error('Polygon: options.rings required with at least one ring');
         }
         this._rings = options.rings;
+        this._simplify = options.simplify ?? true;
+        this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
+        this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
         this._crs = null;
         this._fillColor = options.fillColor ?? '#3388ff';
@@ -172,13 +181,132 @@ export class Polygon extends SpatialObject {
         this._cachedStrokeHeights = new Array(initialLen).fill(0);
     }
     // =================================================================
+    // LOD-упрощение
+    // =================================================================
+    _worldPerPixel(z) {
+        return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
+    }
+    /** Проецирует все исходные кольца один раз и кэширует результат. */
+    _getFullRenderRings() {
+        if (this._fullRenderRings)
+            return this._fullRenderRings;
+        const map = this._map;
+        if (!map)
+            return [];
+        this._fullRenderRings = this._rings.map(ring => {
+            const n = ring.length;
+            const worldCoords = new Array(n);
+            const heights = new Array(n);
+            for (let i = 0; i < n; i++) {
+                const pt = ring[i];
+                worldCoords[i] = map.project(pt, this._crs);
+                const h = pt?.[2];
+                heights[i] = Number.isFinite(h) ? h : 0;
+            }
+            return { worldCoords, heights };
+        });
+        return this._fullRenderRings;
+    }
+    /**
+     * Возвращает кольца для указанного бакета. Первый вызов бакета
+     * считает DP и кэширует; последующие — O(1). Дырки (ringIdx>0)
+     * упрощаются с половинным допуском, чтобы не вылезли за контур.
+     */
+    _getRenderRings(bucket) {
+        if (!this._simplify || !this._map || bucket < 0) {
+            return this._getFullRenderRings();
+        }
+        if (bucket === this._currentSimplifyBucket && this._renderRings) {
+            return this._renderRings;
+        }
+        const cached = this._simplifyCache.get(bucket);
+        if (cached) {
+            this._renderRings = cached;
+            this._currentSimplifyBucket = bucket;
+            return cached;
+        }
+        const z = bucket * this._simplifyZoomBucket;
+        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+        const full = this._getFullRenderRings();
+        const result = full.map((ring, ringIdx) => {
+            const { worldCoords, heights } = ring;
+            if (worldCoords.length < 4)
+                return ring;
+            const tol = ringIdx === 0 ? tolWorld : tolWorld * 0.5;
+            const keptIdx = simplifyRingIndices(worldCoords, tol);
+            if (keptIdx.length < 3 || keptIdx.length === worldCoords.length) {
+                return ring;
+            }
+            const sWC = new Array(keptIdx.length);
+            const sH = new Array(keptIdx.length);
+            for (let k = 0; k < keptIdx.length; k++) {
+                sWC[k] = worldCoords[keptIdx[k]];
+                sH[k] = heights[keptIdx[k]];
+            }
+            return { worldCoords: sWC, heights: sH };
+        });
+        this._simplifyCache.set(bucket, result);
+        this._renderRings = result;
+        this._currentSimplifyBucket = bucket;
+        return result;
+    }
+    /** Сравнивает только количество вершин — при равенстве геометрия идентична. */
+    _sameRingCounts(a, b) {
+        if (a.length !== b.length)
+            return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i].worldCoords.length !== b[i].worldCoords.length)
+                return false;
+        }
+        return true;
+    }
+    /**
+     * Смена зум-бакета. Если упрощение не срезает ни одной вершины по
+     * сравнению с текущим состоянием — пересборка не нужна.
+     */
+    _onSimplifyBucketChange(bucket) {
+        if (bucket === this._currentSimplifyBucket)
+            return;
+        const oldRings = this._renderRings;
+        const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
+        if (oldRings && this._sameRingCounts(oldRings, newRings)) {
+            return; // визуально ничего не изменится — не тратим кадр на rebuild
+        }
+        if (this._map)
+            this._rebuildGeometry();
+    }
+    _scheduleBucketChange(bucket) {
+        if (this._rebuildTimer) {
+            // Таймер уже тикает. Не сбрасываем — просто обновляем целевой бакет.
+            // Он выстрелит через REBUILD_DEBOUNCE_MS от ПЕРВОГО запроса,
+            // но пересоберёт актуальный (последний) бакет.
+            this._pendingBucket = bucket;
+            return;
+        }
+        this._pendingBucket = bucket;
+        this._rebuildTimer = setTimeout(() => {
+            this._rebuildTimer = null;
+            if (!this._map)
+                return;
+            const b = this._pendingBucket;
+            this._pendingBucket = -1;
+            if (b >= 0 && b !== this._currentSimplifyBucket) {
+                this._onSimplifyBucketChange(b);
+            }
+        }, REBUILD_DEBOUNCE_MS);
+    }
+    // =================================================================
     // Хуки SpatialObject
     // =================================================================
     _onAttached(map) {
-        this._crs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : map.inputCRS;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
         this._loadFillPattern();
+        this._currentSimplifyBucket =
+            Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+        this._centroidFromOriginal = null;
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
@@ -192,6 +320,11 @@ export class Polygon extends SpatialObject {
     }
     _teardown() {
         this._fillPatternGeneration++;
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        this._pendingBucket = -1;
         if (this._batch) {
             const b = this._batch;
             this._batch = null;
@@ -229,6 +362,11 @@ export class Polygon extends SpatialObject {
         this._centroidScreenPos = null;
         this._avgNodeHeightValid = false;
         this._boundsCache.clear();
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+        this._currentSimplifyBucket = -1;
+        this._centroidFromOriginal = null;
         this._crs = null;
     }
     _applyHidden() {
@@ -247,10 +385,12 @@ export class Polygon extends SpatialObject {
         this._lastCentroidHeightUpdateTime = 0;
     }
     getLabelType() { return 'polygon'; }
-    // Polygon.ts
     getScreenPosition() {
         return this._isVisible ? this._centroidScreenPos : null;
     }
+    // =================================================================
+    // Batch hooks
+    // =================================================================
     /** @internal */
     _getBatchStyleKey() {
         if (this._invalidGeometry)
@@ -259,7 +399,9 @@ export class Polygon extends SpatialObject {
             return null;
         if (this._onHover)
             return null;
-        // TODO: убрать, когда PolygonBatcher научится применять zoomInterpolate.
+        // LOD-полигоны не батчим: батчер не умеет пересобираться при смене бакета.
+        if (this._simplify)
+            return null;
         if (this._fillPatternSource != null
             && typeof this._fillPatternSource !== 'string')
             return null;
@@ -287,10 +429,6 @@ export class Polygon extends SpatialObject {
             return null;
         if (!this._worldCoords.length)
             return null;
-        // Индексы триангуляции. Живут дольше, чем _fillGeometry:
-        // _buildFillGeometry кладёт их в _cachedTopIndices, _disposeMeshes
-        // их не трогает. Благодаря этому _getBatchGeometryData работает
-        // и после _onBatchChange(true), и после смены стиля (markDirty).
         let indices;
         if (this._cachedTopIndices) {
             indices = this._cachedTopIndices;
@@ -344,19 +482,7 @@ export class Polygon extends SpatialObject {
             altitudeMode: this._altitudeMode,
         };
     }
-    /**
-     * @internal
-     *
-     * При попадании в батч освобождаем только GPU-ресурсы
-     * (BufferGeometry / Mesh / материалы). Сырые массивы
-     * (`_worldCoords`, `_nodeHeights`, `_ringStartIndices`,
-     * `_strokeWorldCoords`, `_strokeNodeHeights`, `_cachedTopIndices`)
-     * ОСТАВЛЯЕМ: они нужны
-     *   – `_getBatchGeometryData()` для повторного batch-rebuild
-     *     после `markDirty()` (setFillColor и т.п.);
-     *   – `_updateCentroidScreenPos()` (текст батченного полигона);
-     *   – `_updateHeights()` в случае разбатчивания.
-     */
+    /** @internal */
     _onBatchChange(batched, _batch) {
         if (batched) {
             if (this._unregisterInteraction) {
@@ -373,9 +499,6 @@ export class Polygon extends SpatialObject {
                 this._fillPatternTexture = null;
             }
             this._disposeMeshes();
-            // _vertices2D / _cachedHeights зависят от _fillGeometry и
-            // пересчитываются в _buildFillGeometry / _updateHeights,
-            // поэтому их можно освободить.
             this._vertices2D = [];
             this._cachedHeights = [];
             this._cachedStrokeHeights = [];
@@ -386,11 +509,8 @@ export class Polygon extends SpatialObject {
             this._avgNodeHeightValid = false;
         }
         else {
-            // Паттерн нужно восстановить ДО rebuild — иначе _createSurfaceMaterial
-            // создаст материалы без текстуры.
-            if (!this._fillPatternTexture && this._fillPatternSource) {
+            if (!this._fillPatternTexture && this._fillPatternSource)
                 this._loadFillPattern();
-            }
             if (this._map)
                 this._rebuildGeometry();
             if (this._group)
@@ -401,14 +521,12 @@ export class Polygon extends SpatialObject {
             this._heightsFinalized = false;
         }
     }
-    /** @internal — дергаем из каждого сеттера стиля. */
     _invalidateBatch() {
         if (!this._batch)
             return;
         const batcher = this._layer?._polygonBatcher;
-        if (batcher && typeof batcher.markDirty === 'function') {
+        if (batcher && typeof batcher.markDirty === 'function')
             batcher.markDirty();
-        }
     }
     // =================================================================
     // Интерактив
@@ -439,15 +557,12 @@ export class Polygon extends SpatialObject {
             },
             isVisible: () => this._group.visible,
         };
-        if (this._onHover) {
-            callbacks.onHover = (isHovered) => this._onHover(isHovered);
-        }
-        else if (wantTooltip) {
+        if (this._onHover)
+            callbacks.onHover = (h) => this._onHover(h);
+        else if (wantTooltip)
             callbacks.getTooltip = () => this._tooltipText;
-        }
-        if (this._onClick) {
-            callbacks.onClick = (event) => this._onClick(event, this);
-        }
+        if (this._onClick)
+            callbacks.onClick = (e) => this._onClick(e, this);
         this._unregisterInteraction = map.interaction.register(this, callbacks);
     }
     _getRaycastMeshes() {
@@ -473,9 +588,17 @@ export class Polygon extends SpatialObject {
         }
         this._rings = rings;
         this._boundsCache.clear();
-        this._visualCenterCache = null; // ← добавить
-        if (!this._map)
+        this._visualCenterCache = null;
+        this._centroidFromOriginal = null;
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+        if (!this._map) {
+            this._currentSimplifyBucket = -1;
             return this;
+        }
+        this._currentSimplifyBucket =
+            Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket);
         this._rebuildGeometry();
         this._invalidateBatch();
         return this;
@@ -538,7 +661,7 @@ export class Polygon extends SpatialObject {
         this._strokeGeometry = null;
         this._strokeMaterial = null;
         this._raycastMeshesCache = null;
-        // _cachedTopIndices НЕ трогаем — по нему батчер сможет пересобраться.
+        // _cachedTopIndices НЕ трогаем — батчер пересоберётся по нему.
     }
     // =================================================================
     // Fill pattern
@@ -614,7 +737,7 @@ export class Polygon extends SpatialObject {
         }
     }
     // =================================================================
-    // UV-логика
+    // UV
     // =================================================================
     _computeUVParams(patternScale) {
         if (this._fillPatternFit === 'bounds') {
@@ -652,8 +775,7 @@ export class Polygon extends SpatialObject {
         if (!this._fillGeometry)
             return;
         const patternScale = this._fillPatternScale > 0
-            ? this._fillPatternScale
-            : DEFAULT_FILL_PATTERN_SCALE;
+            ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
         const params = this._computeUVParams(patternScale);
         const worldCoords = this._worldCoords;
         const n = worldCoords.length;
@@ -772,8 +894,7 @@ export class Polygon extends SpatialObject {
                 continue;
             const n = ring.length;
             for (let i = 0; i < n; i++) {
-                const a = ring[i];
-                const b = ring[(i + 1) % n];
+                const a = ring[i], b = ring[(i + 1) % n];
                 if (!a || !b || a.length < 2 || b.length < 2)
                     continue;
                 if (Math.abs(b[0] - a[0]) > 180)
@@ -791,8 +912,7 @@ export class Polygon extends SpatialObject {
             if (start === undefined)
                 continue;
             const nextStart = (ringIdx + 1 < ringStartIndices.length)
-                ? ringStartIndices[ringIdx + 1]
-                : wc.length;
+                ? ringStartIndices[ringIdx + 1] : wc.length;
             const count = nextStart - start;
             if (count < 2)
                 continue;
@@ -801,20 +921,13 @@ export class Polygon extends SpatialObject {
                 const b = wc[start + ((i + 1) % count)];
                 if (!a || !b)
                     continue;
-                const dx = b[0] - a[0];
-                const dz = b[1] - a[1];
+                const dx = b[0] - a[0], dz = b[1] - a[1];
                 if (dx * dx + dz * dz > maxEdgeSq)
                     return true;
             }
         }
         return false;
     }
-    /**
-     * Триангулирует top-грань по `_worldCoords` + `_ringStartIndices`.
-     * Нужен, когда GPU-геометрия выгружена (`_fillGeometry = null`), а
-     * батчеру после `markDirty()` индексы снова нужны. По стоимости —
-     * десятки вершин на комнату, вызывается редко (только при rebuild батча).
-     */
     _triangulateFromRings() {
         const wc = this._worldCoords;
         const rs = this._ringStartIndices;
@@ -827,16 +940,14 @@ export class Polygon extends SpatialObject {
             const end = (r + 1 < rs.length) ? rs[r + 1] : wc.length;
             if (r > 0)
                 holeIndices.push(coords.length / 2);
-            for (let i = start; i < end; i++) {
+            for (let i = start; i < end; i++)
                 coords.push(wc[i][0], wc[i][1]);
-            }
         }
         if (coords.length < 6)
             return [];
         const indices = earcut(coords, holeIndices, 2);
         if (!indices.length)
             return [];
-        // Ориентация: crossY в плоскости XZ, точки в абсолютных worldCoords.
         const p2d = new Array(coords.length / 2);
         for (let i = 0, j = 0; i < coords.length; i += 2, j++) {
             p2d[j] = { x: coords[i], y: coords[i + 1] };
@@ -846,8 +957,8 @@ export class Polygon extends SpatialObject {
     }
     _buildFillGeometry(map) {
         this._cachedTopIndices = null;
-        const rings = this._rings;
-        if (!rings || !rings.length || rings[0].length < 3) {
+        const rings = this._getRenderRings(this._currentSimplifyBucket);
+        if (!rings || !rings.length || rings[0].worldCoords.length < 3) {
             console.warn('Polygon: rings[0] must have at least 3 points');
             return;
         }
@@ -864,20 +975,18 @@ export class Polygon extends SpatialObject {
         const holeIndices = [];
         const ringStartIndices = [];
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            const ring = rings[ringIdx];
-            if (ring.length < 3) {
+            const { worldCoords, heights } = rings[ringIdx];
+            if (worldCoords.length < 3) {
                 console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
                 continue;
             }
             ringStartIndices.push(points2D.length);
             this._ringStartIndices.push(points2D.length);
-            if (ringIdx > 0) {
+            if (ringIdx > 0)
                 holeIndices.push(coords.length / 2);
-            }
             let firstPoint = null;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
-                const [absX, absZ] = map.project(pt, this._crs);
+            for (let i = 0; i < worldCoords.length; i++) {
+                const [absX, absZ] = worldCoords[i];
                 if (i === 0)
                     firstPoint = [absX, absZ];
                 if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1])
@@ -885,8 +994,7 @@ export class Polygon extends SpatialObject {
                 coords.push(absX, absZ);
                 points2D.push(new THREE.Vector2(absX, absZ));
                 this._worldCoords.push([absX, absZ]);
-                const h = pt?.[2];
-                this._nodeHeights.push(Number.isFinite(h) ? h : 0);
+                this._nodeHeights.push(heights[i] ?? 0);
             }
         }
         if (points2D.length < 3) {
@@ -912,39 +1020,29 @@ export class Polygon extends SpatialObject {
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
-        // Кэш для батчера — переживёт _disposeMeshes().
         this._cachedTopIndices = topIndices;
-        // Визуальный центр (grid-сканер) вместо среднего по вершинам.
-        // Среднее «уезжает» к плотной стороне: у квадрата со 100 узлами
-        // на одной грани подпись оказывалась почти на этой грани.
-        // `_worldCoords` уже заполнен, `_ringStartIndices` — тоже.
+        // Визуальный центр — один раз на полигон, от исходных колец.
         let cx, cy;
-        {
-            const worldRings = [];
-            for (let r = 0; r < this._ringStartIndices.length; r++) {
-                const start = this._ringStartIndices[r];
-                const end = (r + 1 < this._ringStartIndices.length)
-                    ? this._ringStartIndices[r + 1]
-                    : this._worldCoords.length;
-                worldRings.push(this._worldCoords.slice(start, end));
-            }
-            const vc = _approxVisualCenter(worldRings, 0);
+        if (!this._centroidFromOriginal) {
+            const fullRings = this._getFullRenderRings();
+            const srcRings = fullRings.map(r => r.worldCoords);
+            const vc = _approxVisualCenter(srcRings, 0);
             if (vc) {
-                cx = vc[0];
-                cy = vc[1];
+                this._centroidFromOriginal = { x: vc[0], z: vc[1] };
             }
             else {
-                // Fallback: старое среднее (для крайне вырожденных случаев).
-                cx = 0;
-                cy = 0;
-                for (const pt of points2D) {
-                    cx += pt.x;
-                    cy += pt.y;
-                }
-                cx /= points2D.length;
-                cy /= points2D.length;
+                let sx = 0, sy = 0, cnt = 0;
+                for (const r of srcRings)
+                    for (const p of r) {
+                        sx += p[0];
+                        sy += p[1];
+                        cnt++;
+                    }
+                this._centroidFromOriginal = cnt ? { x: sx / cnt, z: sy / cnt } : { x: 0, z: 0 };
             }
         }
+        cx = this._centroidFromOriginal.x;
+        cy = this._centroidFromOriginal.z;
         this._centroidWorld.set(cx, 0, cy);
         this._group.position.copy(this._centroidWorld);
         for (let i = 0; i < points2D.length; i++) {
@@ -959,8 +1057,7 @@ export class Polygon extends SpatialObject {
         }
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
         const patternScale = this._fillPatternScale > 0
-            ? this._fillPatternScale
-            : DEFAULT_FILL_PATTERN_SCALE;
+            ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
         const uvParams = this._computeUVParams(patternScale);
         const topUVs = new Float32Array(points2D.length * 2);
         for (let i = 0; i < points2D.length; i++) {
@@ -1030,13 +1127,10 @@ export class Polygon extends SpatialObject {
             const sideUVs = [];
             const sideUvScale = patternScale;
             const initialHeight = this._height;
-            for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-                if (ringStartIndices[ringIdx] === undefined)
-                    continue;
-                const start = ringStartIndices[ringIdx];
-                const nextRingStart = (ringIdx + 1 < ringStartIndices.length)
-                    ? ringStartIndices[ringIdx + 1]
-                    : points2D.length;
+            for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+                const start = this._ringStartIndices[ringIdx];
+                const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+                    ? this._ringStartIndices[ringIdx + 1] : points2D.length;
                 const count = nextRingStart - start;
                 if (count < 2)
                     continue;
@@ -1095,13 +1189,16 @@ export class Polygon extends SpatialObject {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0)
             return;
         const canvas = map.renderer.domElement;
-        const outerRing = this._rings[0];
+        const rings = this._getRenderRings(this._currentSimplifyBucket);
+        const outer = rings[0];
+        if (!outer)
+            return;
+        const { worldCoords: outerWC, heights: outerH } = outer;
         this._strokeWorldCoords.length = 0;
         this._strokeNodeHeights.length = 0;
         let firstStrokePoint = null;
-        for (let i = 0; i < outerRing.length; i++) {
-            const pt = outerRing[i];
-            const [absX, absZ] = map.project(pt, this._crs);
+        for (let i = 0; i < outerWC.length; i++) {
+            const [absX, absZ] = outerWC[i];
             if (i === 0) {
                 firstStrokePoint = [absX, absZ];
             }
@@ -1109,8 +1206,7 @@ export class Polygon extends SpatialObject {
                 continue;
             }
             this._strokeWorldCoords.push([absX, absZ]);
-            const h = pt?.[2];
-            this._strokeNodeHeights.push(Number.isFinite(h) ? h : 0);
+            this._strokeNodeHeights.push(outerH[i] ?? 0);
         }
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
         if (this._useSimpleStroke) {
@@ -1171,9 +1267,7 @@ export class Polygon extends SpatialObject {
         this._invalidateBatch();
         return this;
     }
-    getFillColor() {
-        return this._fillColor;
-    }
+    getFillColor() { return this._fillColor; }
     setFillOpacity(opacity) {
         this._fillOpacity = Math.max(0, Math.min(1, opacity));
         const transparent = this._fillOpacity < 1;
@@ -1206,9 +1300,7 @@ export class Polygon extends SpatialObject {
         this._invalidateBatch();
         return this;
     }
-    getFillPattern() {
-        return this._fillPatternSource;
-    }
+    getFillPattern() { return this._fillPatternSource; }
     setFillPatternScale(scale) {
         if (!(scale > 0))
             return this;
@@ -1220,9 +1312,7 @@ export class Polygon extends SpatialObject {
         this._invalidateBatch();
         return this;
     }
-    getFillPatternScale() {
-        return this._fillPatternScale;
-    }
+    getFillPatternScale() { return this._fillPatternScale; }
     setFillPatternFit(fit) {
         if (this._fillPatternFit === fit)
             return this;
@@ -1232,9 +1322,7 @@ export class Polygon extends SpatialObject {
         this._invalidateBatch();
         return this;
     }
-    getFillPatternFit() {
-        return this._fillPatternFit;
-    }
+    getFillPatternFit() { return this._fillPatternFit; }
     setStrokeColor(color) {
         this._strokeColor = color;
         if (this._strokeMaterial?.color)
@@ -1272,23 +1360,16 @@ export class Polygon extends SpatialObject {
     }
     getStrokeOpacity() { return this._strokeOpacity; }
     // =================================================================
-    // Высота
+    // Высота / экструзия / depth
     // =================================================================
-    setAltitudeOffset(offset) {
-        return this.setAltitude(offset);
-    }
-    getAltitudeOffset() {
-        return this.getAltitude();
-    }
+    setAltitudeOffset(offset) { return this.setAltitude(offset); }
+    getAltitudeOffset() { return this.getAltitude(); }
     setAltitudeMode(mode) {
         this._altitudeMode = mode;
         this._onAltitudeChanged();
         return this;
     }
     getAltitudeMode() { return this._altitudeMode; }
-    // =================================================================
-    // Экструзия
-    // =================================================================
     setExtruded(extruded) {
         const next = !!extruded;
         if (this._extruded === next)
@@ -1304,9 +1385,7 @@ export class Polygon extends SpatialObject {
     }
     getExtruded() { return this._extruded; }
     setHeight(height) {
-        if (!(height >= 0))
-            return this;
-        if (this._height === height)
+        if (!(height >= 0) || this._height === height)
             return this;
         this._height = height;
         if (this._extruded) {
@@ -1318,9 +1397,7 @@ export class Polygon extends SpatialObject {
     }
     getHeight() { return this._height; }
     setMinHeight(height) {
-        if (!(height >= 0))
-            return this;
-        if (this._minHeight === height)
+        if (!(height >= 0) || this._minHeight === height)
             return this;
         this._minHeight = height;
         this._heightsDirty = true;
@@ -1329,9 +1406,6 @@ export class Polygon extends SpatialObject {
         return this;
     }
     getMinHeight() { return this._minHeight; }
-    // =================================================================
-    // Depth
-    // =================================================================
     setDepthTest(depthTest) {
         this._depthTest = !!depthTest;
         this._applyDepthFlags();
@@ -1347,13 +1421,7 @@ export class Polygon extends SpatialObject {
     }
     getDepthWrite() { return this._depthWrite; }
     _applyDepthFlags() {
-        const mats = [
-            this._fillMaterial,
-            this._bottomMaterial,
-            this._sideMaterial,
-            this._strokeMaterial,
-        ];
-        for (const mat of mats) {
+        for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial, this._strokeMaterial]) {
             if (!mat)
                 continue;
             let changed = false;
@@ -1368,18 +1436,6 @@ export class Polygon extends SpatialObject {
             if (changed)
                 mat.needsUpdate = true;
         }
-    }
-    // =================================================================
-    // Центр / bounds
-    // =================================================================
-    getCenter() {
-        const b = this.getBounds('EPSG:4326');
-        if (!b)
-            return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
     }
     // =================================================================
     // Обновление на кадре
@@ -1397,6 +1453,13 @@ export class Polygon extends SpatialObject {
             this._isVisible = true;
             this._updateCentroidScreenPos();
             return;
+        }
+        // Смена зум-бакета — только когда зум стабилен.
+        if (this._simplify && !map._zoomActive && !map._cameraAnimation) {
+            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+            if (bucket !== this._currentSimplifyBucket) {
+                this._scheduleBucketChange(bucket);
+            }
         }
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
@@ -1464,49 +1527,45 @@ export class Polygon extends SpatialObject {
         const extrude = this._extruded ? this._height : 0;
         const n = this._vertices2D.length;
         for (let i = 0; i < n; i++) {
-            const worldCoord = this._worldCoords[i];
-            if (!worldCoord)
+            const wc = this._worldCoords[i];
+            if (!wc)
                 continue;
             let base = this._altitude;
             if (isDynamic) {
-                const worldX = worldCoord[0] + wgPos.x;
-                const worldZ = worldCoord[1] + wgPos.z;
+                const worldX = wc[0] + wgPos.x;
+                const worldZ = wc[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
                 base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
-            const nodeH = this._nodeHeights[i] ?? 0;
-            this._cachedHeights[i] = base + nodeH + this._minHeight + extrude;
+            this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
         const strokeLen = this._strokeWorldCoords.length;
         if (this._cachedStrokeHeights.length !== strokeLen) {
             this._cachedStrokeHeights = new Array(strokeLen).fill(0);
         }
         for (let i = 0; i < strokeLen; i++) {
-            const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord)
+            const wc = this._strokeWorldCoords[i];
+            if (!wc)
                 continue;
             let base = this._altitude;
             if (isDynamic) {
-                const worldX = worldCoord[0] + wgPos.x;
-                const worldZ = worldCoord[1] + wgPos.z;
+                const worldX = wc[0] + wgPos.x;
+                const worldZ = wc[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
                 base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
-            const nodeH = this._strokeNodeHeights[i] ?? 0;
-            this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
+            this._cachedStrokeHeights[i] = base + (this._strokeNodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
         const topPos = this._fillGeometry.attributes.position.array;
-        for (let i = 0; i < n; i++) {
+        for (let i = 0; i < n; i++)
             topPos[i * 3 + 1] = this._cachedHeights[i];
-        }
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
             const height = this._height;
-            for (let i = 0; i < n; i++) {
+            for (let i = 0; i < n; i++)
                 bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
-            }
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
@@ -1516,17 +1575,14 @@ export class Polygon extends SpatialObject {
             const edgeCount = this._sideEdgeIJ.length;
             for (let k = 0; k < edgeCount; k++) {
                 const pair = this._sideEdgeIJ[k];
-                const idxI = pair[0];
-                const idxJ = pair[1];
+                const idxI = pair[0], idxJ = pair[1];
                 const upperI = this._cachedHeights[idxI];
                 const upperJ = this._cachedHeights[idxJ];
-                const lowerI = upperI - height;
-                const lowerJ = upperJ - height;
                 const base = k * 4;
                 sidePos[base * 3 + 1] = upperI;
-                sidePos[(base + 1) * 3 + 1] = lowerI;
+                sidePos[(base + 1) * 3 + 1] = upperI - height;
                 sidePos[(base + 2) * 3 + 1] = upperJ;
-                sidePos[(base + 3) * 3 + 1] = lowerJ;
+                sidePos[(base + 3) * 3 + 1] = upperJ - height;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
             if (this._builtSideHeight !== height) {
@@ -1534,8 +1590,7 @@ export class Polygon extends SpatialObject {
                 if (uvAttr) {
                     const sideUVs = uvAttr.array;
                     const patternScale = this._fillPatternScale > 0
-                        ? this._fillPatternScale
-                        : DEFAULT_FILL_PATTERN_SCALE;
+                        ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
                     const vH = height / patternScale;
                     for (let k = 0; k < edgeCount; k++) {
                         const base = k * 8;
@@ -1562,11 +1617,11 @@ export class Polygon extends SpatialObject {
         const groupPos = this._group.position;
         const strokeLen = this._strokeWorldCoords.length;
         for (let i = 0; i < strokeLen; i++) {
-            const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord)
+            const wc = this._strokeWorldCoords[i];
+            if (!wc)
                 continue;
             const y = this._cachedStrokeHeights[i] ?? this._altitude;
-            positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
+            positions.push(wc[0] - groupPos.x, y, wc[1] - groupPos.z);
         }
         if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
@@ -1638,13 +1693,18 @@ export class Polygon extends SpatialObject {
         }
     }
     // =================================================================
-    // KrbMap#fitTo / getBounds
+    // Бounds / visual center / bbox
     // =================================================================
+    getCenter() {
+        const b = this.getBounds('EPSG:4326');
+        if (!b)
+            return null;
+        return [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2];
+    }
     getBounds(crs = 'EPSG:4326') {
         const key = typeof crs === 'string' ? crs : (crs?.code ?? 'custom');
-        if (this._boundsCache.has(key)) {
+        if (this._boundsCache.has(key))
             return this._boundsCache.get(key);
-        }
         const result = this._computeBounds(crs);
         this._boundsCache.set(key, result);
         return result;
@@ -1663,8 +1723,7 @@ export class Polygon extends SpatialObject {
         for (const ring of this._rings) {
             if (!ring)
                 continue;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
+            for (const pt of ring) {
                 if (!pt || pt.length < 2)
                     continue;
                 let x, y;
@@ -1707,14 +1766,13 @@ export class Polygon extends SpatialObject {
             const [lon, lat] = src.toLonLat(pt);
             return [lon, lat];
         }));
-        // precision=0.001° ≈ 100 м на местности — более чем достаточно для подписи.
         const vc = _approxVisualCenter(wgsRings, 0.001);
         if (!vc)
             return null;
         this._visualCenterCache = vc;
         return this._visualCenterCache;
     }
-    /** Экранный bbox полигона в пикселях — для fit-проверки диаграмм. */
+    /** Экранный bbox полигона в пикселях. */
     getScreenBBox() {
         const map = this._map;
         if (!map || !this._worldCoords.length)
@@ -1729,7 +1787,7 @@ export class Polygon extends SpatialObject {
             const y = this._cachedHeights[i] ?? this._altitude;
             v.set(wc[0] + wgPos.x, y + wgPos.y, wc[1] + wgPos.z).project(map.camera);
             if (v.z <= -1 || v.z >= 1)
-                return null; // вырождается
+                return null;
             const px = (v.x * 0.5 + 0.5) * W;
             const py = (-v.y * 0.5 + 0.5) * H;
             if (px < minX)
@@ -1754,15 +1812,10 @@ export class Polygon extends SpatialObject {
             this._registerInteraction(this._map);
         return this;
     }
-    getTooltipOnHover() {
-        return this._tooltipOnHover;
-    }
+    getTooltipOnHover() { return this._tooltipOnHover; }
 }
 // =====================================================================
-// Приближённый visual center (pole of inaccessibility) — grid-сканер.
-// ST_LabelPoint-style: 3 прохода сеткой, без приоритетной очереди.
-// Работает в тех же координатах, что `rings` (lon/lat или worldCoords).
-// Возвращает [x, y] или null. Устойчив к вогнутости и дыркам.
+// Approximate visual center (grid-сканер, ST_LabelPoint-style)
 // =====================================================================
 function _isPointInsideRings(rings, x, y) {
     let inside = false;
@@ -1807,11 +1860,9 @@ function _minDistToRings(rings, x, y) {
 function _approxVisualCenter(rings, precision = 0) {
     if (!rings || !rings.length)
         return null;
-    // ── 1. BBox ──
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const ring of rings) {
-        for (let i = 0; i < ring.length; i++) {
-            const p = ring[i];
+        for (const p of ring) {
             if (!p)
                 continue;
             if (p[0] < minX)
@@ -1829,7 +1880,6 @@ function _approxVisualCenter(rings, precision = 0) {
     const w = maxX - minX, h = maxY - minY;
     if (w < 1e-12 || h < 1e-12)
         return [(minX + maxX) / 2, (minY + maxY) / 2];
-    // ── 2. Coarse-to-fine: ~11×11 → окно 5×5 → окно 5×5 ──
     let step = Math.min(w, h) / 10;
     let bx = (minX + maxX) / 2;
     let by = (minY + maxY) / 2;

@@ -13,6 +13,7 @@
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject, ZoomInterpolation } from './SpatialObject.js';
+import { douglasPeuckerIndices } from './Simplify.js';
 
 // =====================================================================
 // Типы
@@ -62,6 +63,14 @@ userData?: Record<string, any>;
     /** Сдвиг паттерна вдоль линии, world-метры. Default: 0. */
     lineDashOffset?: number;
     zoomInterpolate?: ZoomInterpolation | null;
+
+/** Включать LOD-упрощение по зуму. Default: true. */
+simplify?: boolean;
+/** Допуск в пикселях экрана (OL-подобно). Default: 0.5. */
+simplifyTolerance?: number;
+/** Размер бакета в уровнях зума (1 = каждый целый зум). Default: 1. */
+simplifyZoomBucket?: number;
+
 }
 
 function pointToSegmentDistance(point: any, a: any, b: any): number {
@@ -101,6 +110,12 @@ export class Polyline extends SpatialObject {
     private _absPositions: Array<[number, number]> = [];
     private _nodeHeights: number[] = [];
     private _cachedHeights: number[] | null = null;
+
+    private _simplify = true;
+private _simplifyTolerance = 0.5;
+private _simplifyZoomBucket = 1;
+private _simplifyCache = new Map<number, PolylinePosition[]>();
+private _currentSimplifyBucket = -1;
 
     // ── Подпись: placement + vertical align ──
     private _titlePlacement: PolylineTitlePlacement;
@@ -145,6 +160,9 @@ this._userData = options.userData ?? {};
         }
 
         this._positions = options.positions;
+        this._simplify = options.simplify ?? true;
+this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
+this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
         this._crs = null;
 
@@ -217,8 +235,11 @@ this._userData = options.userData ?? {};
         this._line.renderOrder = 999;
         map.worldGroup.add(this._line);
 
+
+
         this._registerInteraction(map);
         this._isVisible = false;
+        this._simplifyCache.clear(); this._currentSimplifyBucket = -1;
     }
 
     protected _teardown(): void {
@@ -268,6 +289,30 @@ this._userData = options.userData ?? {};
     override getScreenPosition(): { x: number; y: number } | null {
         return this.getScreenPositionAt(this._labelT);
     }
+
+private _worldPerPixel(z: number): number {
+    return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
+}
+
+private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
+    const hit = this._simplifyCache.get(bucket);
+    if (hit) return hit;
+
+    const z = bucket * this._simplifyZoomBucket;
+    const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+
+    const projected: [number, number][] = this._positions.map(
+        pt => this._map.project(pt, this._crs) as [number, number]
+    );
+    const keptIdx = douglasPeuckerIndices(projected, tolWorld);
+    const result: PolylinePosition[] = keptIdx.map(i => {
+        const orig = this._positions[i];
+        return orig.length >= 3 ? [orig[0], orig[1], orig[2]] : [orig[0], orig[1]];
+    });
+
+    this._simplifyCache.set(bucket, result);
+    return result;
+}
 
     // =================================================================
     // Интерактив
@@ -475,6 +520,7 @@ this._userData = options.userData ?? {};
         }
         this._cachedHeights = null;
         this._lastHeightUpdateTime = 0;
+        this._simplifyCache.clear(); this._currentSimplifyBucket = -1;
         return this;
     }
 
@@ -518,7 +564,7 @@ this._userData = options.userData ?? {};
         if (res.x !== canvas.width || res.y !== canvas.height) {
             this._material.resolution.set(canvas.width, canvas.height);
         }
-
+this._applySimplification(map.currentDiscreteZoom);
         this._updateHeights();
 
         if (map.objectRenderDistanceFactor > 0 && this._absPositions.length >= 2) {
@@ -541,6 +587,8 @@ this._userData = options.userData ?? {};
                 return;
             }
         }
+
+
 
         this._applyPositions();
 
@@ -577,6 +625,26 @@ this._userData = options.userData ?? {};
         this._cachedHeights = heights;
         this._lastHeightUpdateTime = now;
     }
+
+private _applySimplification(zoom: number): void {
+    if (!this._simplify || !this._map) return;
+    if (this._map._zoomActive || this._map._cameraAnimation) return;
+    const bucket = Math.floor(zoom / this._simplifyZoomBucket);
+    if (bucket === this._currentSimplifyBucket) return;
+    this._currentSimplifyBucket = bucket;
+
+    const simplified = this._getSimplifiedPositions(bucket);
+    // Пересобираем _absPositions / _nodeHeights из упрощённых.
+    this._absPositions = [];
+    this._nodeHeights = [];
+    for (const pt of simplified) {
+        this._absPositions.push(this._map.project(pt, this._crs));
+        const h = pt?.[2];
+        this._nodeHeights.push(Number.isFinite(h) ? (h as number) : 0);
+    }
+    this._cachedHeights = null;
+    this._screenData.valid = false;
+}
 
     private _applyPositions(): void {
         if (!this._map || !this._cachedHeights) return;

@@ -1,9 +1,6 @@
 /**
  * Polygon — полигон с заливкой, обводкой, экструзией, паттерном и подписью.
- * После `addTo()` мутабелен.
- *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
- * onHover, подпись, TextManager-контракт и altitude берутся из базы.
+ * LOD-упрощение по зуму: Douglas–Peucker в world-координатах, кэш по бакетам.
  *
  * @module polygon
  */
@@ -12,7 +9,7 @@ import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject, TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
 import earcut from './js_TP/earcut.js';
-
+import { simplifyRingIndices } from './Simplify.js';
 
 // =====================================================================
 // Типы
@@ -24,11 +21,7 @@ export type PolygonRing = PolygonCoord[];
 export type TitleAlign = TitleAlignH;
 export type AltitudeMode = 'clampToGround' | 'absolute';
 export type FillPatternFit = 'tile' | 'bounds';
-export type FillPatternSource =
-    | string
-    | HTMLImageElement
-    | HTMLCanvasElement
-    | null;
+export type FillPatternSource = string | HTMLImageElement | HTMLCanvasElement | null;
 
 export interface PolygonOptions {
     rings: PolygonRing[];
@@ -72,24 +65,28 @@ export interface PolygonOptions {
     userData?: Record<string, any>;
     zoomInterpolate?: ZoomInterpolation | null;
     tooltipOnHover?: boolean;
+    /** Включать LOD-упрощение по зуму. Default: true. */
+    simplify?: boolean;
+    /** Допуск в пикселях экрана (OL-подобно). Default: 0.5. */
+    simplifyTolerance?: number;
+    /** Размер бакета в уровнях зума (1 = каждый целый зум). Default: 1. */
+    simplifyZoomBucket?: number;
 }
 
 export interface PolygonRenderOrder {
-    BOTTOM: number;
-    SIDE: number;
-    TOP: number;
-    STROKE: number;
+    BOTTOM: number; SIDE: number; TOP: number; STROKE: number;
 }
 
 export const POLYGON_RENDER_ORDER: PolygonRenderOrder = {
-    BOTTOM: 900,
-    SIDE:   901,
-    TOP:    902,
-    STROKE: 903,
+    BOTTOM: 900, SIDE: 901, TOP: 902, STROKE: 903,
 };
 
 const INVALID_EDGE_FRACTION = 8;
 const DEFAULT_FILL_PATTERN_SCALE = 64;
+/** Дебаунс пересборки при смене зум-бакета (мс). */
+const REBUILD_DEBOUNCE_MS = 60; 
+
+let _rebuildSlotCounter = 0;
 
 function crossY(p0: any, p1: any, p2: any): number {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
@@ -98,10 +95,17 @@ function crossY(p0: any, p1: any, p2: any): number {
 }
 
 interface UVParams {
-    originX: number;
-    originZ: number;
-    scaleX: number;
-    scaleZ: number;
+    originX: number; originZ: number; scaleX: number; scaleZ: number;
+}
+
+/**
+ * Спроецированное кольцо с высотами узлов. Кэшируется по бакету,
+ * используется и для заливки, и для обводки — `map.project` вызывается
+ * ровно один раз на вершину на кольцо.
+ */
+interface RenderRing {
+    worldCoords: [number, number][];
+    heights: number[];
 }
 
 // =====================================================================
@@ -129,8 +133,22 @@ export class Polygon extends SpatialObject {
     private _altitudeMode: AltitudeMode;
     private _tooltipOnHover: boolean;
 
+    // ── LOD ──
+    private _simplify = true;
+    private _simplifyTolerance = 0.5;
+    private _simplifyZoomBucket = 1;
+    private _simplifyCache = new Map<number, RenderRing[]>();
+    private _renderRings: RenderRing[] | null = null;
+    private _fullRenderRings: RenderRing[] | null = null;
+    private _currentSimplifyBucket = -1;
+    private _pendingBucket = -1;
+    private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /** Кэш визуального центра, считается один раз за жизнь полигона. */
+    private _centroidFromOriginal: { x: number; z: number } | null = null;
     private _visualCenterCache: LonLat | null = null;
 
+    // ── Экструзия ──
     private _extruded: boolean;
     private _height: number;
     private _minHeight: number;
@@ -149,7 +167,6 @@ export class Polygon extends SpatialObject {
 
     // ── 3D-объекты ──
     private _group: any;
-
     private _fillMesh: any = null;
     private _fillGeometry: any = null;
     private _fillMaterial: any = null;
@@ -166,12 +183,7 @@ export class Polygon extends SpatialObject {
     // ── Кэши ──
     private _cachedHeights: number[] = [];
     private _cachedStrokeHeights: number[] = [];
-    /**
-     * Кэш индексов триангуляции top-грани. Заполняется в `_buildFillGeometry`
-     * (и при необходимости пересчитывается в `_getBatchGeometryData`).
-     * Переживает `_disposeMeshes()`, чтобы батчер мог пересобраться
-     * после `markDirty()` (например, `setFillColor`) без GPU-геометрии.
-     */
+    /** Индексы триангуляции top-грани. Переживает `_disposeMeshes()`. */
     private _cachedTopIndices: number[] | null = null;
     private _nodeHeights: number[] = [];
     private _strokeNodeHeights: number[] = [];
@@ -184,7 +196,6 @@ export class Polygon extends SpatialObject {
     private _centroidWorld: any;
     private _cachedCentroidHeight = 0;
     private _lastCentroidHeightUpdateTime = 0;
-
     private _avgNodeHeight = 0;
     private _avgNodeHeightValid = false;
 
@@ -224,6 +235,10 @@ export class Polygon extends SpatialObject {
         }
 
         this._rings = options.rings;
+        this._simplify = options.simplify ?? true;
+        this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
+        this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
+
         this._crsCode = options.crs ?? null;
         this._crs = null;
 
@@ -236,7 +251,7 @@ export class Polygon extends SpatialObject {
         this._strokeWidth = options.strokeWidth ?? 2;
         this._strokeOpacity = options.strokeOpacity ?? 1;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
-        this._tooltipOnHover = options.tooltipOnHover ?? false; 
+        this._tooltipOnHover = options.tooltipOnHover ?? false;
 
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
 
@@ -286,15 +301,144 @@ export class Polygon extends SpatialObject {
     }
 
     // =================================================================
+    // LOD-упрощение
+    // =================================================================
+
+    private _worldPerPixel(z: number): number {
+        return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
+    }
+
+    /** Проецирует все исходные кольца один раз и кэширует результат. */
+    private _getFullRenderRings(): RenderRing[] {
+        if (this._fullRenderRings) return this._fullRenderRings;
+        const map = this._map;
+        if (!map) return [];
+
+        this._fullRenderRings = this._rings.map(ring => {
+            const n = ring.length;
+            const worldCoords: [number, number][] = new Array(n);
+            const heights: number[] = new Array(n);
+            for (let i = 0; i < n; i++) {
+                const pt = ring[i];
+                worldCoords[i] = map.project(pt, this._crs) as [number, number];
+                const h = pt?.[2];
+                heights[i] = Number.isFinite(h) ? (h as number) : 0;
+            }
+            return { worldCoords, heights };
+        });
+        return this._fullRenderRings;
+    }
+
+    /**
+     * Возвращает кольца для указанного бакета. Первый вызов бакета
+     * считает DP и кэширует; последующие — O(1). Дырки (ringIdx>0)
+     * упрощаются с половинным допуском, чтобы не вылезли за контур.
+     */
+    private _getRenderRings(bucket: number): RenderRing[] {
+        if (!this._simplify || !this._map || bucket < 0) {
+            return this._getFullRenderRings();
+        }
+        if (bucket === this._currentSimplifyBucket && this._renderRings) {
+            return this._renderRings;
+        }
+
+        const cached = this._simplifyCache.get(bucket);
+        if (cached) {
+            this._renderRings = cached;
+            this._currentSimplifyBucket = bucket;
+            return cached;
+        }
+
+        const z = bucket * this._simplifyZoomBucket;
+        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+        const full = this._getFullRenderRings();
+
+        const result: RenderRing[] = full.map((ring, ringIdx) => {
+            const { worldCoords, heights } = ring;
+            if (worldCoords.length < 4) return ring;
+
+            const tol = ringIdx === 0 ? tolWorld : tolWorld * 0.5;
+            const keptIdx = simplifyRingIndices(worldCoords, tol);
+            if (keptIdx.length < 3 || keptIdx.length === worldCoords.length) {
+                return ring;
+            }
+
+            const sWC: [number, number][] = new Array(keptIdx.length);
+            const sH: number[] = new Array(keptIdx.length);
+            for (let k = 0; k < keptIdx.length; k++) {
+                sWC[k] = worldCoords[keptIdx[k]];
+                sH[k] = heights[keptIdx[k]];
+            }
+            return { worldCoords: sWC, heights: sH };
+        });
+
+        this._simplifyCache.set(bucket, result);
+        this._renderRings = result;
+        this._currentSimplifyBucket = bucket;
+        return result;
+    }
+
+    /** Сравнивает только количество вершин — при равенстве геометрия идентична. */
+    private _sameRingCounts(a: RenderRing[], b: RenderRing[]): boolean {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i].worldCoords.length !== b[i].worldCoords.length) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Смена зум-бакета. Если упрощение не срезает ни одной вершины по
+     * сравнению с текущим состоянием — пересборка не нужна.
+     */
+    private _onSimplifyBucketChange(bucket: number): void {
+        if (bucket === this._currentSimplifyBucket) return;
+
+        const oldRings = this._renderRings;
+        const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
+
+        if (oldRings && this._sameRingCounts(oldRings, newRings)) {
+            return; // визуально ничего не изменится — не тратим кадр на rebuild
+        }
+        if (this._map) this._rebuildGeometry();
+    }
+
+private _scheduleBucketChange(bucket: number): void {
+    if (this._rebuildTimer) {
+        // Таймер уже тикает. Не сбрасываем — просто обновляем целевой бакет.
+        // Он выстрелит через REBUILD_DEBOUNCE_MS от ПЕРВОГО запроса,
+        // но пересоберёт актуальный (последний) бакет.
+        this._pendingBucket = bucket;
+        return;
+    }
+    this._pendingBucket = bucket;
+    this._rebuildTimer = setTimeout(() => {
+        this._rebuildTimer = null;
+        if (!this._map) return;
+        const b = this._pendingBucket;
+        this._pendingBucket = -1;
+        if (b >= 0 && b !== this._currentSimplifyBucket) {
+            this._onSimplifyBucketChange(b);
+        }
+    }, REBUILD_DEBOUNCE_MS);
+}
+
+    // =================================================================
     // Хуки SpatialObject
     // =================================================================
 
     protected _onAttached(map: any): void {
-        this._crs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : map.inputCRS;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
 
         this._loadFillPattern();
+
+        this._currentSimplifyBucket =
+            Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+        this._centroidFromOriginal = null;
+
         this._buildFillGeometry(map);
         this._buildStrokeGeometry(map);
         map.worldGroup.add(this._group);
@@ -311,6 +455,13 @@ export class Polygon extends SpatialObject {
 
     protected _teardown(): void {
         this._fillPatternGeneration++;
+
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        this._pendingBucket = -1;
+
         if (this._batch) {
             const b: any = this._batch;
             this._batch = null;
@@ -347,6 +498,11 @@ export class Polygon extends SpatialObject {
         this._centroidScreenPos = null;
         this._avgNodeHeightValid = false;
         this._boundsCache.clear();
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+        this._currentSimplifyBucket = -1;
+        this._centroidFromOriginal = null;
         this._crs = null;
     }
 
@@ -368,17 +524,21 @@ export class Polygon extends SpatialObject {
 
     getLabelType(): 'polygon' { return 'polygon'; }
 
-// Polygon.ts
-getScreenPosition(): { x: number; y: number } | null {
-    return this._isVisible ? this._centroidScreenPos : null;
-}
+    getScreenPosition(): { x: number; y: number } | null {
+        return this._isVisible ? this._centroidScreenPos : null;
+    }
+
+    // =================================================================
+    // Batch hooks
+    // =================================================================
 
     /** @internal */
     _getBatchStyleKey(): string | null {
         if (this._invalidGeometry) return null;
         if (this._tooltipText) return null;
         if (this._onHover) return null;
-        // TODO: убрать, когда PolygonBatcher научится применять zoomInterpolate.
+        // LOD-полигоны не батчим: батчер не умеет пересобираться при смене бакета.
+        if (this._simplify) return null;
 
         if (this._fillPatternSource != null
             && typeof this._fillPatternSource !== 'string') return null;
@@ -406,10 +566,6 @@ getScreenPosition(): { x: number; y: number } | null {
         if (this._invalidGeometry) return null;
         if (!this._worldCoords.length) return null;
 
-        // Индексы триангуляции. Живут дольше, чем _fillGeometry:
-        // _buildFillGeometry кладёт их в _cachedTopIndices, _disposeMeshes
-        // их не трогает. Благодаря этому _getBatchGeometryData работает
-        // и после _onBatchChange(true), и после смены стиля (markDirty).
         let indices: ArrayLike<number>;
         if (this._cachedTopIndices) {
             indices = this._cachedTopIndices;
@@ -463,19 +619,7 @@ getScreenPosition(): { x: number; y: number } | null {
         };
     }
 
-    /**
-     * @internal
-     *
-     * При попадании в батч освобождаем только GPU-ресурсы
-     * (BufferGeometry / Mesh / материалы). Сырые массивы
-     * (`_worldCoords`, `_nodeHeights`, `_ringStartIndices`,
-     * `_strokeWorldCoords`, `_strokeNodeHeights`, `_cachedTopIndices`)
-     * ОСТАВЛЯЕМ: они нужны
-     *   – `_getBatchGeometryData()` для повторного batch-rebuild
-     *     после `markDirty()` (setFillColor и т.п.);
-     *   – `_updateCentroidScreenPos()` (текст батченного полигона);
-     *   – `_updateHeights()` в случае разбатчивания.
-     */
+    /** @internal */
     _onBatchChange(batched: boolean, _batch: any): void {
         if (batched) {
             if (this._unregisterInteraction) {
@@ -483,16 +627,11 @@ getScreenPosition(): { x: number; y: number } | null {
                 this._unregisterInteraction = null;
             }
             if (this._group) this._group.visible = false;
-
             if (this._fillPatternTexture) {
                 try { this._fillPatternTexture.dispose?.(); } catch { /* swallow */ }
                 this._fillPatternTexture = null;
             }
-
             this._disposeMeshes();
-            // _vertices2D / _cachedHeights зависят от _fillGeometry и
-            // пересчитываются в _buildFillGeometry / _updateHeights,
-            // поэтому их можно освободить.
             this._vertices2D = [];
             this._cachedHeights = [];
             this._cachedStrokeHeights = [];
@@ -502,11 +641,7 @@ getScreenPosition(): { x: number; y: number } | null {
             this._heightsFinalized = false;
             this._avgNodeHeightValid = false;
         } else {
-            // Паттерн нужно восстановить ДО rebuild — иначе _createSurfaceMaterial
-            // создаст материалы без текстуры.
-            if (!this._fillPatternTexture && this._fillPatternSource) {
-                this._loadFillPattern();
-            }
+            if (!this._fillPatternTexture && this._fillPatternSource) this._loadFillPattern();
             if (this._map) this._rebuildGeometry();
             if (this._group) this._group.visible = true;
             if (this._map) this._registerInteraction(this._map);
@@ -515,60 +650,50 @@ getScreenPosition(): { x: number; y: number } | null {
         }
     }
 
-    /** @internal — дергаем из каждого сеттера стиля. */
     private _invalidateBatch(): void {
         if (!this._batch) return;
         const batcher = (this._layer as any)?._polygonBatcher;
-        if (batcher && typeof batcher.markDirty === 'function') {
-            batcher.markDirty();
-        }
+        if (batcher && typeof batcher.markDirty === 'function') batcher.markDirty();
     }
 
     // =================================================================
     // Интерактив
     // =================================================================
 
-private _registerInteraction(map: any): void {
-    if (!map.interaction || typeof map.interaction.register !== 'function') return;
-    if (this._unregisterInteraction) {
-        this._unregisterInteraction();
-        this._unregisterInteraction = null;
+    private _registerInteraction(map: any): void {
+        if (!map.interaction || typeof map.interaction.register !== 'function') return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (this._invalidGeometry) return;
+
+        const wantTooltip = !!this._tooltipText && this._tooltipOnHover;
+        if (!this._onClick && !this._onHover && !wantTooltip) return;
+
+        const callbacks: Record<string, any> = {
+            getMeshes: () => this._getRaycastMeshes(),
+            getBoundingSphere: () => {
+                if (this._boundingSphereRadius <= 0) return null;
+                const wgPos = map.worldGroup.position;
+                this._boundingSphereWorldCenter.set(
+                    this._group.position.x + wgPos.x,
+                    this._group.position.y + wgPos.y,
+                    this._group.position.z + wgPos.z,
+                );
+                return {
+                    center: this._boundingSphereWorldCenter,
+                    radius: this._boundingSphereRadius,
+                };
+            },
+            isVisible: () => this._group.visible,
+        };
+        if (this._onHover) callbacks.onHover = (h: boolean) => this._onHover!(h);
+        else if (wantTooltip) callbacks.getTooltip = () => this._tooltipText;
+        if (this._onClick) callbacks.onClick = (e: MouseEvent) => this._onClick!(e, this);
+
+        this._unregisterInteraction = map.interaction.register(this, callbacks);
     }
-    if (this._invalidGeometry) return;
-
-    const wantTooltip = !!this._tooltipText && this._tooltipOnHover;
-    if (!this._onClick && !this._onHover && !wantTooltip) return;
-
-    const callbacks: Record<string, any> = {
-        getMeshes: () => this._getRaycastMeshes(),
-        getBoundingSphere: () => {
-            if (this._boundingSphereRadius <= 0) return null;
-            const wgPos = map.worldGroup.position;
-            this._boundingSphereWorldCenter.set(
-                this._group.position.x + wgPos.x,
-                this._group.position.y + wgPos.y,
-                this._group.position.z + wgPos.z
-            );
-            return {
-                center: this._boundingSphereWorldCenter,
-                radius: this._boundingSphereRadius,
-            };
-        },
-        isVisible: () => this._group.visible,
-    };
-
-    if (this._onHover) {
-        callbacks.onHover = (isHovered: boolean) => this._onHover!(isHovered);
-    } else if (wantTooltip) {
-        callbacks.getTooltip = () => this._tooltipText;
-    }
-
-    if (this._onClick) {
-        callbacks.onClick = (event: MouseEvent) => this._onClick!(event, this);
-    }
-
-    this._unregisterInteraction = map.interaction.register(this, callbacks);
-}
 
     private _getRaycastMeshes(): any[] {
         if (this._raycastMeshesCache) return this._raycastMeshesCache;
@@ -584,19 +709,30 @@ private _registerInteraction(map: any): void {
     // Кольца
     // =================================================================
 
-setRings(rings: PolygonRing[]): this {
-    if (!rings || !rings.length || rings[0].length < 3) {
-        console.warn('Polygon.setRings: need at least one ring with 3+ points');
+    setRings(rings: PolygonRing[]): this {
+        if (!rings || !rings.length || rings[0].length < 3) {
+            console.warn('Polygon.setRings: need at least one ring with 3+ points');
+            return this;
+        }
+        this._rings = rings;
+        this._boundsCache.clear();
+        this._visualCenterCache = null;
+        this._centroidFromOriginal = null;
+        this._simplifyCache.clear();
+        this._renderRings = null;
+        this._fullRenderRings = null;
+
+        if (!this._map) {
+            this._currentSimplifyBucket = -1;
+            return this;
+        }
+
+        this._currentSimplifyBucket =
+            Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket);
+        this._rebuildGeometry();
+        this._invalidateBatch();
         return this;
     }
-    this._rings = rings;
-    this._boundsCache.clear();
-    this._visualCenterCache = null;          // ← добавить
-    if (!this._map) return this;
-    this._rebuildGeometry();
-    this._invalidateBatch();
-    return this;
-}
 
     getRings(): PolygonRing[] {
         return this._rings.map(ring => ring.map(pt => [...pt] as PolygonCoord));
@@ -631,7 +767,6 @@ setRings(rings: PolygonRing[]): this {
         this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
         this._lastCentroidHeightUpdateTime = 0;
-
         this._visualCenterCache = null;
     }
 
@@ -649,20 +784,12 @@ setRings(rings: PolygonRing[]): this {
         this._sideMaterial?.dispose();
         this._strokeGeometry?.dispose();
         this._strokeMaterial?.dispose();
-        this._fillMesh = null;
-        this._fillGeometry = null;
-        this._fillMaterial = null;
-        this._bottomMesh = null;
-        this._bottomGeometry = null;
-        this._bottomMaterial = null;
-        this._sideMesh = null;
-        this._sideGeometry = null;
-        this._sideMaterial = null;
-        this._strokeLine = null;
-        this._strokeGeometry = null;
-        this._strokeMaterial = null;
+        this._fillMesh = null; this._fillGeometry = null; this._fillMaterial = null;
+        this._bottomMesh = null; this._bottomGeometry = null; this._bottomMaterial = null;
+        this._sideMesh = null; this._sideGeometry = null; this._sideMaterial = null;
+        this._strokeLine = null; this._strokeGeometry = null; this._strokeMaterial = null;
         this._raycastMeshesCache = null;
-        // _cachedTopIndices НЕ трогаем — по нему батчер сможет пересобраться.
+        // _cachedTopIndices НЕ трогаем — батчер пересоберётся по нему.
     }
 
     // =================================================================
@@ -712,7 +839,6 @@ setRings(rings: PolygonRing[]): this {
     private _configureFillPatternTexture(): void {
         const t = this._fillPatternTexture;
         if (!t) return;
-
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
         t.generateMipmaps = false;
@@ -724,12 +850,10 @@ setRings(rings: PolygonRing[]): this {
         if (caps && typeof caps.getMaxAnisotropy === 'function') {
             try { t.anisotropy = Math.min(16, caps.getMaxAnisotropy()); } catch { /* swallow */ }
         }
-
         const Ctor = THREE as any;
         if (Ctor.SRGBColorSpace && !(t as any).colorSpace) {
             (t as any).colorSpace = Ctor.SRGBColorSpace;
         }
-
         t.needsUpdate = true;
     }
 
@@ -743,7 +867,7 @@ setRings(rings: PolygonRing[]): this {
     }
 
     // =================================================================
-    // UV-логика
+    // UV
     // =================================================================
 
     private _computeUVParams(patternScale: number): UVParams {
@@ -777,8 +901,7 @@ setRings(rings: PolygonRing[]): this {
         if (!this._fillGeometry) return;
 
         const patternScale = this._fillPatternScale > 0
-            ? this._fillPatternScale
-            : DEFAULT_FILL_PATTERN_SCALE;
+            ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
         const params = this._computeUVParams(patternScale);
         const worldCoords = this._worldCoords;
         const n = worldCoords.length;
@@ -896,8 +1019,7 @@ setRings(rings: PolygonRing[]): this {
             if (!ring || ring.length < 2) continue;
             const n = ring.length;
             for (let i = 0; i < n; i++) {
-                const a = ring[i];
-                const b = ring[(i + 1) % n];
+                const a = ring[i], b = ring[(i + 1) % n];
                 if (!a || !b || a.length < 2 || b.length < 2) continue;
                 if (Math.abs(b[0] - a[0]) > 180) return true;
             }
@@ -914,29 +1036,20 @@ setRings(rings: PolygonRing[]): this {
             const start = ringStartIndices[ringIdx];
             if (start === undefined) continue;
             const nextStart = (ringIdx + 1 < ringStartIndices.length)
-                ? ringStartIndices[ringIdx + 1]
-                : wc.length;
+                ? ringStartIndices[ringIdx + 1] : wc.length;
             const count = nextStart - start;
             if (count < 2) continue;
-
             for (let i = 0; i < count; i++) {
                 const a = wc[start + i];
                 const b = wc[start + ((i + 1) % count)];
                 if (!a || !b) continue;
-                const dx = b[0] - a[0];
-                const dz = b[1] - a[1];
+                const dx = b[0] - a[0], dz = b[1] - a[1];
                 if (dx * dx + dz * dz > maxEdgeSq) return true;
             }
         }
         return false;
     }
 
-    /**
-     * Триангулирует top-грань по `_worldCoords` + `_ringStartIndices`.
-     * Нужен, когда GPU-геометрия выгружена (`_fillGeometry = null`), а
-     * батчеру после `markDirty()` индексы снова нужны. По стоимости —
-     * десятки вершин на комнату, вызывается редко (только при rebuild батча).
-     */
     private _triangulateFromRings(): number[] {
         const wc = this._worldCoords;
         const rs = this._ringStartIndices;
@@ -948,16 +1061,13 @@ setRings(rings: PolygonRing[]): this {
             const start = rs[r];
             const end = (r + 1 < rs.length) ? rs[r + 1] : wc.length;
             if (r > 0) holeIndices.push(coords.length / 2);
-            for (let i = start; i < end; i++) {
-                coords.push(wc[i][0], wc[i][1]);
-            }
+            for (let i = start; i < end; i++) coords.push(wc[i][0], wc[i][1]);
         }
         if (coords.length < 6) return [];
 
         const indices = earcut(coords, holeIndices, 2);
         if (!indices.length) return [];
 
-        // Ориентация: crossY в плоскости XZ, точки в абсолютных worldCoords.
         const p2d: Array<{ x: number; y: number }> = new Array(coords.length / 2);
         for (let i = 0, j = 0; i < coords.length; i += 2, j++) {
             p2d[j] = { x: coords[i], y: coords[i + 1] };
@@ -969,8 +1079,8 @@ setRings(rings: PolygonRing[]): this {
     private _buildFillGeometry(map: any): void {
         this._cachedTopIndices = null;
 
-        const rings = this._rings;
-        if (!rings || !rings.length || rings[0].length < 3) {
+        const rings = this._getRenderRings(this._currentSimplifyBucket);
+        if (!rings || !rings.length || rings[0].worldCoords.length < 3) {
             console.warn('Polygon: rings[0] must have at least 3 points');
             return;
         }
@@ -990,30 +1100,25 @@ setRings(rings: PolygonRing[]): this {
         const ringStartIndices: number[] = [];
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            const ring = rings[ringIdx];
-            if (ring.length < 3) {
+            const { worldCoords, heights } = rings[ringIdx];
+            if (worldCoords.length < 3) {
                 console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
                 continue;
             }
 
             ringStartIndices.push(points2D.length);
             this._ringStartIndices.push(points2D.length);
-            if (ringIdx > 0) {
-                holeIndices.push(coords.length / 2);
-            }
+            if (ringIdx > 0) holeIndices.push(coords.length / 2);
 
             let firstPoint: [number, number] | null = null;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
-                const [absX, absZ] = map.project(pt, this._crs);
+            for (let i = 0; i < worldCoords.length; i++) {
+                const [absX, absZ] = worldCoords[i];
                 if (i === 0) firstPoint = [absX, absZ];
                 if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1]) continue;
                 coords.push(absX, absZ);
                 points2D.push(new THREE.Vector2(absX, absZ));
                 this._worldCoords.push([absX, absZ]);
-
-                const h = pt?.[2];
-                this._nodeHeights.push(Number.isFinite(h) ? h! : 0);
+                this._nodeHeights.push(heights[i] ?? 0);
             }
         }
 
@@ -1036,7 +1141,6 @@ setRings(rings: PolygonRing[]): this {
         this._cachedHeights = new Array(points2D.length).fill(0);
 
         const indices = earcut(coords, holeIndices, 2);
-
         if (indices.length === 0) {
             console.warn('Polygon: Earcut returned no triangles');
             return;
@@ -1045,36 +1149,24 @@ setRings(rings: PolygonRing[]): this {
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
         const bottomIndices = this._flipIndices(topIndices);
-
-        // Кэш для батчера — переживёт _disposeMeshes().
         this._cachedTopIndices = topIndices;
 
-        // Визуальный центр (grid-сканер) вместо среднего по вершинам.
-        // Среднее «уезжает» к плотной стороне: у квадрата со 100 узлами
-        // на одной грани подпись оказывалась почти на этой грани.
-        // `_worldCoords` уже заполнен, `_ringStartIndices` — тоже.
+        // Визуальный центр — один раз на полигон, от исходных колец.
         let cx: number, cy: number;
-        {
-            const worldRings: [number, number][][] = [];
-            for (let r = 0; r < this._ringStartIndices.length; r++) {
-                const start = this._ringStartIndices[r];
-                const end = (r + 1 < this._ringStartIndices.length)
-                    ? this._ringStartIndices[r + 1]
-                    : this._worldCoords.length;
-                worldRings.push(this._worldCoords.slice(start, end) as [number, number][]);
-            }
-            const vc = _approxVisualCenter(worldRings, 0);
+        if (!this._centroidFromOriginal) {
+            const fullRings = this._getFullRenderRings();
+            const srcRings: [number, number][][] = fullRings.map(r => r.worldCoords);
+            const vc = _approxVisualCenter(srcRings, 0);
             if (vc) {
-                cx = vc[0];
-                cy = vc[1];
+                this._centroidFromOriginal = { x: vc[0], z: vc[1] };
             } else {
-                // Fallback: старое среднее (для крайне вырожденных случаев).
-                cx = 0; cy = 0;
-                for (const pt of points2D) { cx += pt.x; cy += pt.y; }
-                cx /= points2D.length;
-                cy /= points2D.length;
+                let sx = 0, sy = 0, cnt = 0;
+                for (const r of srcRings) for (const p of r) { sx += p[0]; sy += p[1]; cnt++; }
+                this._centroidFromOriginal = cnt ? { x: sx / cnt, z: sy / cnt } : { x: 0, z: 0 };
             }
         }
+        cx = this._centroidFromOriginal.x;
+        cy = this._centroidFromOriginal.z;
 
         this._centroidWorld.set(cx, 0, cy);
         this._group.position.copy(this._centroidWorld);
@@ -1092,8 +1184,7 @@ setRings(rings: PolygonRing[]): this {
         this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
         const patternScale = this._fillPatternScale > 0
-            ? this._fillPatternScale
-            : DEFAULT_FILL_PATTERN_SCALE;
+            ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
         const uvParams = this._computeUVParams(patternScale);
 
         const topUVs = new Float32Array(points2D.length * 2);
@@ -1114,7 +1205,7 @@ setRings(rings: PolygonRing[]): this {
             topPosArray[i * 3 + 2] = pt.y;
         }
         topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-        topGeometry.setAttribute('uv',       new THREE.BufferAttribute(topUVs, 2));
+        topGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs, 2));
         topGeometry.setIndex(topIndices);
 
         const topNormals = new Float32Array(points2D.length * 3);
@@ -1143,7 +1234,7 @@ setRings(rings: PolygonRing[]): this {
                 bottomPosArray[i * 3 + 2] = pt.y;
             }
             bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            bottomGeometry.setAttribute('uv',       new THREE.BufferAttribute(topUVs.slice(), 2));
+            bottomGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs.slice(), 2));
             bottomGeometry.setIndex(bottomIndices);
 
             const bottomNormals = new Float32Array(points2D.length * 3);
@@ -1171,12 +1262,10 @@ setRings(rings: PolygonRing[]): this {
             const sideUvScale = patternScale;
             const initialHeight = this._height;
 
-            for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-                if (ringStartIndices[ringIdx] === undefined) continue;
-                const start = ringStartIndices[ringIdx];
-                const nextRingStart = (ringIdx + 1 < ringStartIndices.length)
-                    ? ringStartIndices[ringIdx + 1]
-                    : points2D.length;
+            for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+                const start = this._ringStartIndices[ringIdx];
+                const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+                    ? this._ringStartIndices[ringIdx + 1] : points2D.length;
                 const count = nextRingStart - start;
                 if (count < 2) continue;
 
@@ -1210,14 +1299,13 @@ setRings(rings: PolygonRing[]): this {
 
                     this._sideEdgeIJ.push([idxI, idxJ]);
                     this._sideEdgeLengths.push(edgeLen);
-
                     cum += edgeLen;
                 }
             }
 
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
-            sideGeometry.setAttribute('uv',       new THREE.BufferAttribute(new Float32Array(sideUVs), 2));
+            sideGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(sideUVs), 2));
             sideGeometry.setIndex(sideIndices);
             sideGeometry.computeVertexNormals();
             sideGeometry.computeBoundingSphere();
@@ -1232,7 +1320,6 @@ setRings(rings: PolygonRing[]): this {
             this._sideGeometry = sideGeometry;
             this._sideMaterial = sideMaterial;
             this._group.add(sideMesh);
-
             this._builtSideHeight = initialHeight;
         }
 
@@ -1244,22 +1331,23 @@ setRings(rings: PolygonRing[]): this {
         if (this._strokeWidth <= 0 || this._strokeOpacity <= 0) return;
 
         const canvas = map.renderer.domElement;
-        const outerRing = this._rings[0];
+        const rings = this._getRenderRings(this._currentSimplifyBucket);
+        const outer = rings[0];
+        if (!outer) return;
+        const { worldCoords: outerWC, heights: outerH } = outer;
 
         this._strokeWorldCoords.length = 0;
         this._strokeNodeHeights.length = 0;
         let firstStrokePoint: [number, number] | null = null;
-        for (let i = 0; i < outerRing.length; i++) {
-            const pt = outerRing[i];
-            const [absX, absZ] = map.project(pt, this._crs);
+        for (let i = 0; i < outerWC.length; i++) {
+            const [absX, absZ] = outerWC[i];
             if (i === 0) {
                 firstStrokePoint = [absX, absZ];
             } else if (firstStrokePoint && absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) {
                 continue;
             }
             this._strokeWorldCoords.push([absX, absZ]);
-            const h = pt?.[2];
-            this._strokeNodeHeights.push(Number.isFinite(h) ? h! : 0);
+            this._strokeNodeHeights.push(outerH[i] ?? 0);
         }
 
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);
@@ -1276,10 +1364,7 @@ setRings(rings: PolygonRing[]): this {
             }
 
             const lineGeometry = new THREE.BufferGeometry();
-            lineGeometry.setAttribute(
-                'position',
-                new THREE.BufferAttribute(new Float32Array(positions), 3)
-            );
+            lineGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
             lineGeometry.computeBoundingSphere();
 
             const lineMaterial = new THREE.LineBasicMaterial({
@@ -1297,7 +1382,6 @@ setRings(rings: PolygonRing[]): this {
             this._group.add(line);
         } else {
             this._strokeGeometry = new LineGeometry();
-
             this._strokeMaterial = new LineMaterial({
                 color: this._strokeColor,
                 linewidth: this._strokeWidth,
@@ -1326,10 +1410,7 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
-    getFillColor(): string | number {
-        return this._fillColor;
-    }
+    getFillColor(): string | number { return this._fillColor; }
 
     setFillOpacity(opacity: number): this {
         this._fillOpacity = Math.max(0, Math.min(1, opacity));
@@ -1345,7 +1426,6 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getFillOpacity(): number { return this._fillOpacity; }
 
     setFillPattern(source: FillPatternSource): this {
@@ -1355,16 +1435,12 @@ setRings(rings: PolygonRing[]): this {
         }
         this._fillPatternSource = source;
         if (!this._map) return this;
-
         this._loadFillPattern();
         this._applyFillPatternToMaterials();
         this._invalidateBatch();
         return this;
     }
-
-    getFillPattern(): FillPatternSource {
-        return this._fillPatternSource;
-    }
+    getFillPattern(): FillPatternSource { return this._fillPatternSource; }
 
     setFillPatternScale(scale: number): this {
         if (!(scale > 0)) return this;
@@ -1374,10 +1450,7 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
-    getFillPatternScale(): number {
-        return this._fillPatternScale;
-    }
+    getFillPatternScale(): number { return this._fillPatternScale; }
 
     setFillPatternFit(fit: FillPatternFit): this {
         if (this._fillPatternFit === fit) return this;
@@ -1386,10 +1459,7 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
-    getFillPatternFit(): FillPatternFit {
-        return this._fillPatternFit;
-    }
+    getFillPatternFit(): FillPatternFit { return this._fillPatternFit; }
 
     setStrokeColor(color: string | number): this {
         this._strokeColor = color;
@@ -1397,7 +1467,6 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getStrokeColor(): string | number { return this._strokeColor; }
 
     setStrokeWidth(width: number): this {
@@ -1411,7 +1480,6 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getStrokeWidth(): number { return this._strokeWidth; }
 
     setStrokeOpacity(opacity: number): this {
@@ -1428,32 +1496,21 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getStrokeOpacity(): number { return this._strokeOpacity; }
 
     // =================================================================
-    // Высота
+    // Высота / экструзия / depth
     // =================================================================
 
-    setAltitudeOffset(offset: number): this {
-        return this.setAltitude(offset);
-    }
-
-    getAltitudeOffset(): number {
-        return this.getAltitude();
-    }
+    setAltitudeOffset(offset: number): this { return this.setAltitude(offset); }
+    getAltitudeOffset(): number { return this.getAltitude(); }
 
     setAltitudeMode(mode: AltitudeMode): this {
         this._altitudeMode = mode;
         this._onAltitudeChanged();
         return this;
     }
-
     getAltitudeMode(): AltitudeMode { return this._altitudeMode; }
-
-    // =================================================================
-    // Экструзия
-    // =================================================================
 
     setExtruded(extruded: boolean): this {
         const next = !!extruded;
@@ -1466,38 +1523,26 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getExtruded(): boolean { return this._extruded; }
 
     setHeight(height: number): this {
-        if (!(height >= 0)) return this;
-        if (this._height === height) return this;
+        if (!(height >= 0) || this._height === height) return this;
         this._height = height;
-        if (this._extruded) {
-            this._heightsDirty = true;
-            this._heightsFinalized = false;
-        }
+        if (this._extruded) { this._heightsDirty = true; this._heightsFinalized = false; }
         this._invalidateBatch();
         return this;
     }
-
     getHeight(): number { return this._height; }
 
     setMinHeight(height: number): this {
-        if (!(height >= 0)) return this;
-        if (this._minHeight === height) return this;
+        if (!(height >= 0) || this._minHeight === height) return this;
         this._minHeight = height;
         this._heightsDirty = true;
         this._heightsFinalized = false;
         this._invalidateBatch();
         return this;
     }
-
     getMinHeight(): number { return this._minHeight; }
-
-    // =================================================================
-    // Depth
-    // =================================================================
 
     setDepthTest(depthTest: boolean): this {
         this._depthTest = !!depthTest;
@@ -1505,7 +1550,6 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getDepthTest(): boolean { return this._depthTest; }
 
     setDepthWrite(depthWrite: boolean): this {
@@ -1514,36 +1558,16 @@ setRings(rings: PolygonRing[]): this {
         this._invalidateBatch();
         return this;
     }
-
     getDepthWrite(): boolean { return this._depthWrite; }
 
     private _applyDepthFlags(): void {
-        const mats = [
-            this._fillMaterial,
-            this._bottomMaterial,
-            this._sideMaterial,
-            this._strokeMaterial,
-        ];
-        for (const mat of mats) {
+        for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial, this._strokeMaterial]) {
             if (!mat) continue;
             let changed = false;
             if (mat.depthTest !== this._depthTest) { mat.depthTest = this._depthTest; changed = true; }
             if (mat.depthWrite !== this._depthWrite) { mat.depthWrite = this._depthWrite; changed = true; }
             if (changed) mat.needsUpdate = true;
         }
-    }
-
-    // =================================================================
-    // Центр / bounds
-    // =================================================================
-
-    getCenter(): LonLat | null {
-        const b = this.getBounds('EPSG:4326');
-        if (!b) return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
     }
 
     // =================================================================
@@ -1563,6 +1587,14 @@ setRings(rings: PolygonRing[]): this {
             this._isVisible = true;
             this._updateCentroidScreenPos();
             return;
+        }
+
+        // Смена зум-бакета — только когда зум стабилен.
+        if (this._simplify && !map._zoomActive && !map._cameraAnimation) {
+            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+            if (bucket !== this._currentSimplifyBucket) {
+                this._scheduleBucketChange(bucket);
+            }
         }
 
         if (this._invalidGeometry || !this._isWithinView()) {
@@ -1607,7 +1639,6 @@ setRings(rings: PolygonRing[]): this {
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;
-
         if (worldGroupPosChanged || discreteZoomChanged) {
             this._heightsDirty = true;
             this._lastWorldGroupPos.copy(map.worldGroup.position);
@@ -1641,17 +1672,16 @@ setRings(rings: PolygonRing[]): this {
         const n = this._vertices2D.length;
 
         for (let i = 0; i < n; i++) {
-            const worldCoord = this._worldCoords[i];
-            if (!worldCoord) continue;
+            const wc = this._worldCoords[i];
+            if (!wc) continue;
             let base = this._altitude;
             if (isDynamic) {
-                const worldX = worldCoord[0] + wgPos.x;
-                const worldZ = worldCoord[1] + wgPos.z;
+                const worldX = wc[0] + wgPos.x;
+                const worldZ = wc[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
                 base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
-            const nodeH = this._nodeHeights[i] ?? 0;
-            this._cachedHeights[i] = base + nodeH + this._minHeight + extrude;
+            this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
 
         const strokeLen = this._strokeWorldCoords.length;
@@ -1659,32 +1689,27 @@ setRings(rings: PolygonRing[]): this {
             this._cachedStrokeHeights = new Array(strokeLen).fill(0);
         }
         for (let i = 0; i < strokeLen; i++) {
-            const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord) continue;
+            const wc = this._strokeWorldCoords[i];
+            if (!wc) continue;
             let base = this._altitude;
             if (isDynamic) {
-                const worldX = worldCoord[0] + wgPos.x;
-                const worldZ = worldCoord[1] + wgPos.z;
+                const worldX = wc[0] + wgPos.x;
+                const worldZ = wc[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
                 base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
-            const nodeH = this._strokeNodeHeights[i] ?? 0;
-            this._cachedStrokeHeights[i] = base + nodeH + this._minHeight + extrude;
+            this._cachedStrokeHeights[i] = base + (this._strokeNodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
 
         const topPos = this._fillGeometry.attributes.position.array as Float32Array;
-        for (let i = 0; i < n; i++) {
-            topPos[i * 3 + 1] = this._cachedHeights[i];
-        }
+        for (let i = 0; i < n; i++) topPos[i * 3 + 1] = this._cachedHeights[i];
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeBoundingSphere();
 
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array as Float32Array;
             const height = this._height;
-            for (let i = 0; i < n; i++) {
-                bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
-            }
+            for (let i = 0; i < n; i++) bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
@@ -1695,17 +1720,14 @@ setRings(rings: PolygonRing[]): this {
             const edgeCount = this._sideEdgeIJ.length;
             for (let k = 0; k < edgeCount; k++) {
                 const pair = this._sideEdgeIJ[k];
-                const idxI = pair[0];
-                const idxJ = pair[1];
+                const idxI = pair[0], idxJ = pair[1];
                 const upperI = this._cachedHeights[idxI];
                 const upperJ = this._cachedHeights[idxJ];
-                const lowerI = upperI - height;
-                const lowerJ = upperJ - height;
                 const base = k * 4;
                 sidePos[base * 3 + 1] = upperI;
-                sidePos[(base + 1) * 3 + 1] = lowerI;
+                sidePos[(base + 1) * 3 + 1] = upperI - height;
                 sidePos[(base + 2) * 3 + 1] = upperJ;
-                sidePos[(base + 3) * 3 + 1] = lowerJ;
+                sidePos[(base + 3) * 3 + 1] = upperJ - height;
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
 
@@ -1714,8 +1736,7 @@ setRings(rings: PolygonRing[]): this {
                 if (uvAttr) {
                     const sideUVs = uvAttr.array as Float32Array;
                     const patternScale = this._fillPatternScale > 0
-                        ? this._fillPatternScale
-                        : DEFAULT_FILL_PATTERN_SCALE;
+                        ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
                     const vH = height / patternScale;
                     for (let k = 0; k < edgeCount; k++) {
                         const base = k * 8;
@@ -1726,15 +1747,12 @@ setRings(rings: PolygonRing[]): this {
                 }
                 this._builtSideHeight = height;
             }
-
             this._sideGeometry.computeBoundingSphere();
         }
 
         if (!isDynamic) this._heightsFinalized = true;
         return true;
     }
-
-
 
     private _updateStroke(): void {
         if (this._invalidGeometry) return;
@@ -1745,12 +1763,11 @@ setRings(rings: PolygonRing[]): this {
         const strokeLen = this._strokeWorldCoords.length;
 
         for (let i = 0; i < strokeLen; i++) {
-            const worldCoord = this._strokeWorldCoords[i];
-            if (!worldCoord) continue;
+            const wc = this._strokeWorldCoords[i];
+            if (!wc) continue;
             const y = this._cachedStrokeHeights[i] ?? this._altitude;
-            positions.push(worldCoord[0] - groupPos.x, y, worldCoord[1] - groupPos.z);
+            positions.push(wc[0] - groupPos.x, y, wc[1] - groupPos.z);
         }
-
         if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
             const fy = this._cachedStrokeHeights[0] ?? this._altitude;
@@ -1766,9 +1783,7 @@ setRings(rings: PolygonRing[]): this {
                 this._strokeGeometry.computeBoundingSphere();
             } else {
                 this._strokeGeometry.setAttribute(
-                    'position',
-                    new THREE.BufferAttribute(new Float32Array(positions), 3)
-                );
+                    'position', new THREE.BufferAttribute(new Float32Array(positions), 3));
                 this._strokeGeometry.computeBoundingSphere();
             }
         } else {
@@ -1778,14 +1793,8 @@ setRings(rings: PolygonRing[]): this {
     }
 
     private _updateCentroidScreenPos(): void {
-        if (this._invalidGeometry) {
-            this._centroidScreenPos = null;
-            return;
-        }
-        if (!this._map || !this._centroidWorld) {
-            this._centroidScreenPos = null;
-            return;
-        }
+        if (this._invalidGeometry) { this._centroidScreenPos = null; return; }
+        if (!this._map || !this._centroidWorld) { this._centroidScreenPos = null; return; }
         const map = this._map;
         const wgPos = map.worldGroup.position;
         const worldX = this._centroidWorld.x + wgPos.x;
@@ -1826,26 +1835,25 @@ setRings(rings: PolygonRing[]): this {
     }
 
     // =================================================================
-    // KrbMap#fitTo / getBounds
+    // Бounds / visual center / bbox
     // =================================================================
+
+    getCenter(): LonLat | null {
+        const b = this.getBounds('EPSG:4326');
+        if (!b) return null;
+        return [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2];
+    }
 
     getBounds(crs: string | any = 'EPSG:4326'): [LonLat, LonLat] | null {
         const key = typeof crs === 'string' ? crs : (crs?.code ?? 'custom');
-        if (this._boundsCache.has(key)) {
-            return this._boundsCache.get(key)!;
-        }
+        if (this._boundsCache.has(key)) return this._boundsCache.get(key)!;
         const result = this._computeBounds(crs);
         this._boundsCache.set(key, result);
         return result;
     }
 
-    
-
-    
-
     private _computeBounds(crs: string | any): [LonLat, LonLat] | null {
         if (!this._rings || !this._rings.length) return null;
-
         const src = this._crs
             ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
         const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
@@ -1857,18 +1865,15 @@ setRings(rings: PolygonRing[]): this {
 
         for (const ring of this._rings) {
             if (!ring) continue;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
+            for (const pt of ring) {
                 if (!pt || pt.length < 2) continue;
                 let x: number, y: number;
                 if (sameProjection) {
-                    x = pt[0];
-                    y = pt[1];
+                    x = pt[0]; y = pt[1];
                 } else {
                     const lonLat = src.toLonLat(pt);
                     const conv = dst.fromLonLat(lonLat);
-                    x = conv[0];
-                    y = conv[1];
+                    x = conv[0]; y = conv[1];
                 }
                 if (x < minX) minX = x;
                 if (x > maxX) maxX = x;
@@ -1880,8 +1885,6 @@ setRings(rings: PolygonRing[]): this {
         if (count === 0 || !isFinite(minX)) return null;
         return [[minX, minY], [maxX, maxY]];
     }
-
-
 
     getVisualCenter(): LonLat | null {
         if (this._visualCenterCache) return this._visualCenterCache;
@@ -1895,60 +1898,49 @@ setRings(rings: PolygonRing[]): this {
             const [lon, lat] = src.toLonLat(pt);
             return [lon, lat] as [number, number];
         }));
-
-        // precision=0.001° ≈ 100 м на местности — более чем достаточно для подписи.
         const vc = _approxVisualCenter(wgsRings, 0.001);
         if (!vc) return null;
         this._visualCenterCache = vc;
         return this._visualCenterCache;
     }
 
-/** Экранный bbox полигона в пикселях — для fit-проверки диаграмм. */
-getScreenBBox(): { minX: number; minY: number; maxX: number; maxY: number;
-                   width: number; height: number } | null {
-    const map = this._map;
-    if (!map || !this._worldCoords.length) return null;
-    const wgPos = map.worldGroup.position;
-    const canvas = map.renderer.domElement;
-    const W = canvas.clientWidth, H = canvas.clientHeight;
-    const v = map.getVec3?.() ?? new THREE.Vector3();
+    /** Экранный bbox полигона в пикселях. */
+    getScreenBBox(): { minX: number; minY: number; maxX: number; maxY: number;
+                       width: number; height: number } | null {
+        const map = this._map;
+        if (!map || !this._worldCoords.length) return null;
+        const wgPos = map.worldGroup.position;
+        const canvas = map.renderer.domElement;
+        const W = canvas.clientWidth, H = canvas.clientHeight;
+        const v = map.getVec3?.() ?? new THREE.Vector3();
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (let i = 0; i < this._worldCoords.length; i++) {
-        const wc = this._worldCoords[i];
-        const y = this._cachedHeights[i] ?? this._altitude;
-        v.set(wc[0] + wgPos.x, y + wgPos.y, wc[1] + wgPos.z).project(map.camera);
-        if (v.z <= -1 || v.z >= 1) return null;  // вырождается
-        const px = (v.x * 0.5 + 0.5) * W;
-        const py = (-v.y * 0.5 + 0.5) * H;
-        if (px < minX) minX = px; if (py < minY) minY = py;
-        if (px > maxX) maxX = px; if (py > maxY) maxY = py;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < this._worldCoords.length; i++) {
+            const wc = this._worldCoords[i];
+            const y = this._cachedHeights[i] ?? this._altitude;
+            v.set(wc[0] + wgPos.x, y + wgPos.y, wc[1] + wgPos.z).project(map.camera);
+            if (v.z <= -1 || v.z >= 1) return null;
+            const px = (v.x * 0.5 + 0.5) * W;
+            const py = (-v.y * 0.5 + 0.5) * H;
+            if (px < minX) minX = px; if (py < minY) minY = py;
+            if (px > maxX) maxX = px; if (py > maxY) maxY = py;
+        }
+        if (!isFinite(minX)) return null;
+        return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
     }
-    if (!isFinite(minX)) return null;
-    return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
-}
 
-setTooltipOnHover(on: boolean): this {
-    const next = !!on;
-    if (this._tooltipOnHover === next) return this;
-    this._tooltipOnHover = next;
-    if (this._map) this._registerInteraction(this._map);
-    return this;
-}
-
-getTooltipOnHover(): boolean {
-    return this._tooltipOnHover;
-}
-
-
-    
+    setTooltipOnHover(on: boolean): this {
+        const next = !!on;
+        if (this._tooltipOnHover === next) return this;
+        this._tooltipOnHover = next;
+        if (this._map) this._registerInteraction(this._map);
+        return this;
+    }
+    getTooltipOnHover(): boolean { return this._tooltipOnHover; }
 }
 
 // =====================================================================
-// Приближённый visual center (pole of inaccessibility) — grid-сканер.
-// ST_LabelPoint-style: 3 прохода сеткой, без приоритетной очереди.
-// Работает в тех же координатах, что `rings` (lon/lat или worldCoords).
-// Возвращает [x, y] или null. Устойчив к вогнутости и дыркам.
+// Approximate visual center (grid-сканер, ST_LabelPoint-style)
 // =====================================================================
 
 function _isPointInsideRings(
@@ -1999,11 +1991,9 @@ function _approxVisualCenter(
 ): [number, number] | null {
     if (!rings || !rings.length) return null;
 
-    // ── 1. BBox ──
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const ring of rings) {
-        for (let i = 0; i < ring.length; i++) {
-            const p = ring[i];
+        for (const p of ring) {
             if (!p) continue;
             if (p[0] < minX) minX = p[0];
             if (p[0] > maxX) maxX = p[0];
@@ -2015,7 +2005,6 @@ function _approxVisualCenter(
     const w = maxX - minX, h = maxY - minY;
     if (w < 1e-12 || h < 1e-12) return [(minX + maxX) / 2, (minY + maxY) / 2];
 
-    // ── 2. Coarse-to-fine: ~11×11 → окно 5×5 → окно 5×5 ──
     let step = Math.min(w, h) / 10;
     let bx = (minX + maxX) / 2;
     let by = (minY + maxY) / 2;
@@ -2039,5 +2028,3 @@ function _approxVisualCenter(
     }
     return [bx, by];
 }
-
-

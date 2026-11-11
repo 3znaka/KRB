@@ -45,6 +45,31 @@ function niceDegreeStep(target) {
     return best;
 }
 // ─────────────────────────────────────────────────────────────────────
+// Нормализация StepValue
+// ─────────────────────────────────────────────────────────────────────
+/** Превращает «сырое» значение шага в число (>0) или `null` (адаптив). */
+function normalizeStep(v) {
+    return v != null && isFinite(v) && v > 0 ? v : null;
+}
+/** Разбирает `StepValue` в пару `{ lat, lon }`, где `null` = адаптив. */
+function parseStepValue(sv) {
+    if (sv == null)
+        return { lat: null, lon: null };
+    if (typeof sv === 'number') {
+        const v = normalizeStep(sv);
+        return { lat: v, lon: v };
+    }
+    if (Array.isArray(sv)) {
+        // Порядок как в OpenLayers: [lon, lat].
+        // Array.isArray не сужает readonly tuples — приводим явно.
+        const arr = sv;
+        return { lat: normalizeStep(arr[1]), lon: normalizeStep(arr[0]) };
+    }
+    // Осталась только объектная форма.
+    const obj = sv;
+    return { lat: normalizeStep(obj.lat), lon: normalizeStep(obj.lon) };
+}
+// ─────────────────────────────────────────────────────────────────────
 // Константы
 // ─────────────────────────────────────────────────────────────────────
 const SAMPLE_COUNT = 32;
@@ -103,10 +128,13 @@ export class Graticule {
     _map = null;
     _crsCode;
     _crsRaw = null;
-    _stepOption;
-    _adaptiveStep;
+    /** Шаг по широте (параллели). `null` — адаптив. */
+    _stepLat;
+    /** Шаг по долготе (меридианы). `null` — адаптив. */
+    _stepLon;
     _targetPixelsBetweenLines;
-    _currentStep = 0;
+    _currentStepLat = 0;
+    _currentStepLon = 0;
     _color;
     _width;
     _opacity;
@@ -140,8 +168,29 @@ export class Graticule {
     _mvMatrix = new THREE.Matrix4();
     constructor(options = {}) {
         this._crsCode = options.crs ?? 'EPSG:4326';
-        this._stepOption = options.step ?? null;
-        this._adaptiveStep = options.adaptiveStep ?? (options.step == null);
+        // ── Шаги по осям ──
+        const parsed = parseStepValue(options.step);
+        this._stepLat = options.stepLat !== undefined
+            ? normalizeStep(options.stepLat)
+            : parsed.lat;
+        this._stepLon = options.stepLon !== undefined
+            ? normalizeStep(options.stepLon)
+            : parsed.lon;
+        // Мастер-переключатель adaptiveStep (для обратной совместимости).
+        if (options.adaptiveStep === true) {
+            this._stepLat = null;
+            this._stepLon = null;
+        }
+        else if (options.adaptiveStep === false) {
+            if (this._stepLat == null) {
+                console.warn('[Graticule] adaptiveStep=false, but stepLat is not set — freezing to 1');
+                this._stepLat = 1;
+            }
+            if (this._stepLon == null) {
+                console.warn('[Graticule] adaptiveStep=false, but stepLon is not set — freezing to 1');
+                this._stepLon = 1;
+            }
+        }
         this._targetPixelsBetweenLines = options.targetPixelsBetweenLines ?? 100;
         this._color = options.color ?? '#666666';
         this._width = options.width ?? 1;
@@ -166,23 +215,61 @@ export class Graticule {
         this._debug = options.debug ?? false;
     }
     // ─────────────────────────────────────────────────────────────────
-    // Сеттеры / геттеры
+    // Сеттеры / геттеры шага
     // ─────────────────────────────────────────────────────────────────
+    /** Задать шаг сразу по обеим осям (или разный — см. `StepValue`). */
     setStep(step) {
-        this._stepOption = step;
-        this._adaptiveStep = step == null;
+        const parsed = parseStepValue(step);
+        this._stepLat = parsed.lat;
+        this._stepLon = parsed.lon;
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         return this;
     }
-    getStep() { return this._currentStep; }
-    isAdaptiveStep() { return this._adaptiveStep; }
+    /** Возвращает lon-шаг (для обратной совместимости). */
+    getStep() { return this._currentStepLon; }
+    /** Задать шаг только для параллелей (широт). `null` — адаптив. */
+    setStepLat(step) {
+        this._stepLat = normalizeStep(step);
+        this._needsRebuild = true;
+        this._lastActiveLabelIds = null;
+        return this;
+    }
+    /** Задать шаг только для меридианов (долгот). `null` — адаптив. */
+    setStepLon(step) {
+        this._stepLon = normalizeStep(step);
+        this._needsRebuild = true;
+        this._lastActiveLabelIds = null;
+        return this;
+    }
+    getStepLat() { return this._currentStepLat; }
+    getStepLon() { return this._currentStepLon; }
+    getSteps() {
+        return { lat: this._currentStepLat, lon: this._currentStepLon };
+    }
+    isAdaptiveStep() {
+        return this._stepLat === null || this._stepLon === null;
+    }
+    isAdaptiveStepLat() { return this._stepLat === null; }
+    isAdaptiveStepLon() { return this._stepLon === null; }
     setAdaptiveStep(on) {
-        this._adaptiveStep = !!on;
+        if (on) {
+            this._stepLat = null;
+            this._stepLon = null;
+        }
+        else {
+            if (this._stepLat === null)
+                this._stepLat = this._currentStepLat || 1;
+            if (this._stepLon === null)
+                this._stepLon = this._currentStepLon || 1;
+        }
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         return this;
     }
+    // ─────────────────────────────────────────────────────────────────
+    // Прочие сеттеры / геттеры
+    // ─────────────────────────────────────────────────────────────────
     setTargetPixelsBetweenLines(px) {
         if (px > 0) {
             this._targetPixelsBetweenLines = px;
@@ -391,24 +478,30 @@ export class Graticule {
         const viewport = this._getViewport();
         if (!viewport)
             return;
-        const step = this._resolveStep(viewport);
-        const stepChanged = step !== this._currentStep;
+        const steps = this._resolveSteps(viewport);
+        const stepChanged = steps.lat !== this._currentStepLat ||
+            steps.lon !== this._currentStepLon;
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
         const hasLobes = this._getLobes() !== null;
-        const fullWorld = (isGeo || hasLobes)
-            ? step >= FULL_WORLD_STEP_DEG
-            : step >= (2 * crs.halfExtentX) * FULL_WORLD_STEP_FRAC;
-        const mode = fullWorld ? 'full-world' : 'viewport';
+        // Per-axis проверка «full-world» (для Y исправлено halfExtentX → halfExtentY).
+        const fullWorldLat = (isGeo || hasLobes)
+            ? steps.lat >= FULL_WORLD_STEP_DEG
+            : steps.lat >= (2 * crs.halfExtentY) * FULL_WORLD_STEP_FRAC;
+        const fullWorldLon = (isGeo || hasLobes)
+            ? steps.lon >= FULL_WORLD_STEP_DEG
+            : steps.lon >= (2 * crs.halfExtentX) * FULL_WORLD_STEP_FRAC;
+        const mode = (fullWorldLat || fullWorldLon) ? 'full-world' : 'viewport';
         const modeChanged = mode !== this._genMode;
         if (stepChanged || modeChanged || this._needsRebuild || this._lineInfos.length === 0) {
-            this._currentStep = step;
+            this._currentStepLat = steps.lat;
+            this._currentStepLon = steps.lon;
             this._genMode = mode;
-            this._rebuildAll(viewport, step, mode);
+            this._rebuildAll(viewport, steps, mode);
             this._needsRebuild = false;
         }
         else if (cameraMoved) {
-            this._addMissingLines(viewport, step, mode);
+            this._addMissingLines(viewport, steps, mode);
         }
         this._updateResolution();
         this._updateLabelPositions(viewport);
@@ -543,28 +636,39 @@ export class Graticule {
             maxLat: Math.min(90, maxLat + dLat),
         };
     }
-    _resolveStep(vp) {
-        if (!this._adaptiveStep && this._stepOption != null)
-            return this._stepOption;
+    /** Разрешает шаги по обеим осям с учётом адаптивности. */
+    _resolveSteps(vp) {
+        return {
+            lat: this._resolveAxisStep(vp, 'lat'),
+            lon: this._resolveAxisStep(vp, 'lon'),
+        };
+    }
+    /**
+     * Шаг по одной оси. При адаптивном шаге каждая ось масштабируется
+     * своим масштабом (`degPerPx` / `unitsPerPx`), чтобы визуальная
+     * плотность линий была одинаковой.
+     */
+    _resolveAxisStep(vp, axis) {
+        const fixed = axis === 'lat' ? this._stepLat : this._stepLon;
+        if (fixed != null)
+            return fixed;
         const canvas = this._map.renderer.domElement;
         const W = canvas.clientWidth || 1;
         const H = canvas.clientHeight || 1;
         const hasLobes = this._getLobes() !== null;
         if (this._crsRaw?.isGeographic || hasLobes) {
-            const dLon = vp.maxLon - vp.minLon;
-            const dLat = vp.maxLat - vp.minLat;
-            const degPerPx = Math.max(dLon / W, dLat / H);
-            const target = degPerPx * this._targetPixelsBetweenLines;
-            return niceDegreeStep(target);
+            const span = axis === 'lat'
+                ? (vp.maxLat - vp.minLat) / H
+                : (vp.maxLon - vp.minLon) / W;
+            return niceDegreeStep(span * this._targetPixelsBetweenLines);
         }
-        // проекционные CRS без лепестков — как раньше
         const crs = this._crsRaw;
         const [x1, y1] = crs.fromLonLat([vp.minLon, vp.minLat]) || [0, 0];
         const [x2, y2] = crs.fromLonLat([vp.maxLon, vp.maxLat]) || [0, 0];
-        const spanX = Math.abs(x2 - x1);
-        const spanY = Math.abs(y2 - y1);
-        const unitsPerPx = Math.max(spanX / W, spanY / H);
-        return niceLinearStep(unitsPerPx * this._targetPixelsBetweenLines);
+        const span = axis === 'lat'
+            ? Math.abs(y2 - y1) / H
+            : Math.abs(x2 - x1) / W;
+        return niceLinearStep(span * this._targetPixelsBetweenLines);
     }
     // ─────────────────────────────────────────────────────────────────
     // Генерация линий
@@ -581,11 +685,11 @@ export class Graticule {
         this._lineInfos = [];
         this._lastActiveLabelIds = null;
     }
-    _rebuildAll(viewport, step, mode) {
+    _rebuildAll(viewport, steps, mode) {
         this._clearAllLines();
-        this._addMissingLines(viewport, step, mode);
+        this._addMissingLines(viewport, steps, mode);
     }
-    _addMissingLines(viewport, step, mode) {
+    _addMissingLines(viewport, steps, mode) {
         const crs = this._crsRaw;
         const isGeo = !!crs.isGeographic;
         const hasLobes = this._getLobes() !== null;
@@ -634,10 +738,11 @@ export class Graticule {
         const N = SAMPLE_COUNT;
         const newInfos = [];
         let addedM = 0, addedP = 0;
-        // ── Меридианы ──
-        const startX = Math.ceil(genMinX / step - 1e-9) * step;
-        for (let v = startX; v <= genMaxX + step * 1e-6; v += step) {
-            const value = Math.abs(v) < step * 1e-9 ? 0 : v;
+        // ── Меридианы (шаг по долготе = steps.lon) ──
+        const stepLon = steps.lon;
+        const startX = Math.ceil(genMinX / stepLon - 1e-9) * stepLon;
+        for (let v = startX; v <= genMaxX + stepLon * 1e-6; v += stepLon) {
+            const value = Math.abs(v) < stepLon * 1e-9 ? 0 : v;
             const id = `grid:m:${round6(value)}`;
             if (existing.has(id))
                 continue;
@@ -650,24 +755,25 @@ export class Graticule {
             if (pts.length < 2)
                 continue;
             const crsPts = concatSegmentsCrs(segments);
-            const text = this._formatLabel(value, false, step, isGeo);
+            const text = this._formatLabel(value, false, stepLon, isGeo);
             const info = {
                 stableId: id, kind: 'meridian', value, text,
                 line2: this._buildLine2(segments),
                 segments,
                 points3D: pts,
                 crsSamples: crsPts,
-                labels: this._buildLabelAnchors(id, 'meridian', text, value, step, isGeo),
+                labels: this._buildLabelAnchors(id, 'meridian', text, value, stepLon, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
             newInfos.push(info);
             addedM++;
         }
-        // ── Параллели ──
-        const startY = Math.ceil(genMinY / step - 1e-9) * step;
-        for (let v = startY; v <= genMaxY + step * 1e-6; v += step) {
-            const value = Math.abs(v) < step * 1e-9 ? 0 : v;
+        // ── Параллели (шаг по широте = steps.lat) ──
+        const stepLat = steps.lat;
+        const startY = Math.ceil(genMinY / stepLat - 1e-9) * stepLat;
+        for (let v = startY; v <= genMaxY + stepLat * 1e-6; v += stepLat) {
+            const value = Math.abs(v) < stepLat * 1e-9 ? 0 : v;
             const id = `grid:p:${round6(value)}`;
             if (existing.has(id))
                 continue;
@@ -680,14 +786,14 @@ export class Graticule {
             if (pts.length < 2)
                 continue;
             const crsPts = concatSegmentsCrs(segments);
-            const text = this._formatLabel(value, true, step, isGeo);
+            const text = this._formatLabel(value, true, stepLat, isGeo);
             const info = {
                 stableId: id, kind: 'parallel', value, text,
                 line2: this._buildLine2(segments),
                 segments,
                 points3D: pts,
                 crsSamples: crsPts,
-                labels: this._buildLabelAnchors(id, 'parallel', text, value, step, isGeo),
+                labels: this._buildLabelAnchors(id, 'parallel', text, value, stepLat, isGeo),
             };
             if (this._linesGroup)
                 this._linesGroup.add(info.line2);
@@ -697,7 +803,8 @@ export class Graticule {
         for (const info of newInfos)
             this._lineInfos.push(info);
         if (this._debug && (addedM || addedP)) {
-            console.log(`[Graticule] mode=${mode} step=${step} hasLobes=${hasLobes} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`);
+            console.log(`[Graticule] mode=${mode} stepLat=${stepLat} stepLon=${stepLon} ` +
+                `hasLobes=${hasLobes} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`);
         }
         if (this._lineInfos.length > MAX_CACHED_LINES) {
             this._pruneFarLines(viewport, mode);

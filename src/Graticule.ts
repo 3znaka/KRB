@@ -8,9 +8,38 @@ import { Projections } from './Projections.js';
 
 export type LabelSide = 'top' | 'bottom' | 'left' | 'right';
 
+/**
+ * Значение шага сетки.
+ *
+ * Допустимые формы:
+ *  - `number` — одинаковый шаг по обеим осям;
+ *  - `null`   — адаптивный шаг по обеим осям;
+ *  - `[lon, lat]` — кортеж (`null` в любой позиции = адаптив для этой оси);
+ *  - `{ lat?, lon? }` — объект (любое отсутствующее поле = адаптив для этой оси).
+ *
+ * Порядок в кортеже — `[lon, lat]` (как в OpenLayers): сначала долгота
+ * (меридианы), потом широта (параллели). Предпочтительна объектная форма —
+ * она самодокументируема.
+ */
+export type StepValue =
+    | number
+    | null
+    | readonly [number | null, number | null]
+    | { lat?: number | null; lon?: number | null };
+
 export interface GraticuleOptions {
     crs?: string;
-    step?: number | null;
+    step?: StepValue;
+    /** Переопределяет `step.lat`. `undefined` — использовать значение из `step`. */
+    stepLat?: number | null;
+    /** Переопределяет `step.lon`. `undefined` — использовать значение из `step`. */
+    stepLon?: number | null;
+    /**
+     * Мастер-переключатель адаптивности.
+     *  - `true`  — обе оси адаптивные (числа из `step` игнорируются);
+     *  - `false` — обе оси фиксированные (null-оси «замерзают» в 1 с warn);
+     *  - `undefined` — решает `step` / `stepLat` / `stepLon`.
+     */
     adaptiveStep?: boolean;
     targetPixelsBetweenLines?: number;
     color?: string | number;
@@ -65,6 +94,38 @@ function niceDegreeStep(target: number): number {
         if (d < bestDiff) { best = v; bestDiff = d; }
     }
     return best;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Нормализация StepValue
+// ─────────────────────────────────────────────────────────────────────
+
+/** Превращает «сырое» значение шага в число (>0) или `null` (адаптив). */
+function normalizeStep(v: number | null | undefined): number | null {
+    return v != null && isFinite(v) && v > 0 ? v : null;
+}
+
+/** Разбирает `StepValue` в пару `{ lat, lon }`, где `null` = адаптив. */
+function parseStepValue(
+    sv: StepValue | undefined,
+): { lat: number | null; lon: number | null } {
+    if (sv == null) return { lat: null, lon: null };
+
+    if (typeof sv === 'number') {
+        const v = normalizeStep(sv);
+        return { lat: v, lon: v };
+    }
+
+    if (Array.isArray(sv)) {
+        // Порядок как в OpenLayers: [lon, lat].
+        // Array.isArray не сужает readonly tuples — приводим явно.
+        const arr = sv as readonly [number | null, number | null];
+        return { lat: normalizeStep(arr[1]), lon: normalizeStep(arr[0]) };
+    }
+
+    // Осталась только объектная форма.
+    const obj = sv as { lat?: number | null; lon?: number | null };
+    return { lat: normalizeStep(obj.lat), lon: normalizeStep(obj.lon) };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -195,10 +256,14 @@ export class Graticule {
     _crsCode: string;
     _crsRaw: any = null;
 
-    _stepOption: number | null;
-    _adaptiveStep: boolean;
+    /** Шаг по широте (параллели). `null` — адаптив. */
+    _stepLat: number | null;
+    /** Шаг по долготе (меридианы). `null` — адаптив. */
+    _stepLon: number | null;
+
     _targetPixelsBetweenLines: number;
-    _currentStep: number = 0;
+    _currentStepLat: number = 0;
+    _currentStepLon: number = 0;
 
     _color: string | number;
     _width: number;
@@ -241,8 +306,35 @@ export class Graticule {
 
     constructor(options: GraticuleOptions = {}) {
         this._crsCode = options.crs ?? 'EPSG:4326';
-        this._stepOption = options.step ?? null;
-        this._adaptiveStep = options.adaptiveStep ?? (options.step == null);
+
+        // ── Шаги по осям ──
+        const parsed = parseStepValue(options.step);
+        this._stepLat = options.stepLat !== undefined
+            ? normalizeStep(options.stepLat)
+            : parsed.lat;
+        this._stepLon = options.stepLon !== undefined
+            ? normalizeStep(options.stepLon)
+            : parsed.lon;
+
+        // Мастер-переключатель adaptiveStep (для обратной совместимости).
+        if (options.adaptiveStep === true) {
+            this._stepLat = null;
+            this._stepLon = null;
+        } else if (options.adaptiveStep === false) {
+            if (this._stepLat == null) {
+                console.warn(
+                    '[Graticule] adaptiveStep=false, but stepLat is not set — freezing to 1',
+                );
+                this._stepLat = 1;
+            }
+            if (this._stepLon == null) {
+                console.warn(
+                    '[Graticule] adaptiveStep=false, but stepLon is not set — freezing to 1',
+                );
+                this._stepLon = 1;
+            }
+        }
+
         this._targetPixelsBetweenLines = options.targetPixelsBetweenLines ?? 100;
 
         this._color = options.color ?? '#666666';
@@ -273,25 +365,64 @@ export class Graticule {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Сеттеры / геттеры
+    // Сеттеры / геттеры шага
     // ─────────────────────────────────────────────────────────────────
 
-    setStep(step: number | null): this {
-        this._stepOption = step;
-        this._adaptiveStep = step == null;
+    /** Задать шаг сразу по обеим осям (или разный — см. `StepValue`). */
+    setStep(step: StepValue): this {
+        const parsed = parseStepValue(step);
+        this._stepLat = parsed.lat;
+        this._stepLon = parsed.lon;
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         return this;
     }
-    getStep(): number { return this._currentStep; }
+    /** Возвращает lon-шаг (для обратной совместимости). */
+    getStep(): number { return this._currentStepLon; }
 
-    isAdaptiveStep(): boolean { return this._adaptiveStep; }
-    setAdaptiveStep(on: boolean): this {
-        this._adaptiveStep = !!on;
+    /** Задать шаг только для параллелей (широт). `null` — адаптив. */
+    setStepLat(step: number | null): this {
+        this._stepLat = normalizeStep(step);
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         return this;
     }
+    /** Задать шаг только для меридианов (долгот). `null` — адаптив. */
+    setStepLon(step: number | null): this {
+        this._stepLon = normalizeStep(step);
+        this._needsRebuild = true;
+        this._lastActiveLabelIds = null;
+        return this;
+    }
+
+    getStepLat(): number { return this._currentStepLat; }
+    getStepLon(): number { return this._currentStepLon; }
+    getSteps(): { lat: number; lon: number } {
+        return { lat: this._currentStepLat, lon: this._currentStepLon };
+    }
+
+    isAdaptiveStep(): boolean {
+        return this._stepLat === null || this._stepLon === null;
+    }
+    isAdaptiveStepLat(): boolean { return this._stepLat === null; }
+    isAdaptiveStepLon(): boolean { return this._stepLon === null; }
+
+    setAdaptiveStep(on: boolean): this {
+        if (on) {
+            this._stepLat = null;
+            this._stepLon = null;
+        } else {
+            if (this._stepLat === null) this._stepLat = this._currentStepLat || 1;
+            if (this._stepLon === null) this._stepLon = this._currentStepLon || 1;
+        }
+        this._needsRebuild = true;
+        this._lastActiveLabelIds = null;
+        return this;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Прочие сеттеры / геттеры
+    // ─────────────────────────────────────────────────────────────────
 
     setTargetPixelsBetweenLines(px: number): this {
         if (px > 0) {
@@ -510,26 +641,35 @@ export class Graticule {
         const viewport = this._getViewport();
         if (!viewport) return;
 
-        const step = this._resolveStep(viewport);
-        const stepChanged = step !== this._currentStep;
+        const steps = this._resolveSteps(viewport);
+        const stepChanged =
+            steps.lat !== this._currentStepLat ||
+            steps.lon !== this._currentStepLon;
 
-const crs = this._crsRaw;
-const isGeo = !!crs.isGeographic;
-const hasLobes = this._getLobes() !== null;
-const fullWorld = (isGeo || hasLobes)
-    ? step >= FULL_WORLD_STEP_DEG
-    : step >= (2 * crs.halfExtentX) * FULL_WORLD_STEP_FRAC;
-const mode: 'full-world' | 'viewport' = fullWorld ? 'full-world' : 'viewport';
+        const crs = this._crsRaw;
+        const isGeo = !!crs.isGeographic;
+        const hasLobes = this._getLobes() !== null;
 
+        // Per-axis проверка «full-world» (для Y исправлено halfExtentX → halfExtentY).
+        const fullWorldLat = (isGeo || hasLobes)
+            ? steps.lat >= FULL_WORLD_STEP_DEG
+            : steps.lat >= (2 * crs.halfExtentY) * FULL_WORLD_STEP_FRAC;
+        const fullWorldLon = (isGeo || hasLobes)
+            ? steps.lon >= FULL_WORLD_STEP_DEG
+            : steps.lon >= (2 * crs.halfExtentX) * FULL_WORLD_STEP_FRAC;
+
+        const mode: 'full-world' | 'viewport' =
+            (fullWorldLat || fullWorldLon) ? 'full-world' : 'viewport';
         const modeChanged = mode !== this._genMode;
 
         if (stepChanged || modeChanged || this._needsRebuild || this._lineInfos.length === 0) {
-            this._currentStep = step;
+            this._currentStepLat = steps.lat;
+            this._currentStepLon = steps.lon;
             this._genMode = mode;
-            this._rebuildAll(viewport, step, mode);
+            this._rebuildAll(viewport, steps, mode);
             this._needsRebuild = false;
         } else if (cameraMoved) {
-            this._addMissingLines(viewport, step, mode);
+            this._addMissingLines(viewport, steps, mode);
         }
 
         this._updateResolution();
@@ -561,23 +701,23 @@ const mode: 'full-world' | 'viewport' = fullWorld ? 'full-world' : 'viewport';
     // ─────────────────────────────────────────────────────────────────
 
     /** Лепестки текущей проекции или null, если проекция непрерывна. */
-private _getLobes(): any[] | null {
-    const raw = this._crsRaw as any;
-    if (!raw) return null;
+    private _getLobes(): any[] | null {
+        const raw = this._crsRaw as any;
+        if (!raw) return null;
 
-    if (this._debug) {
-        console.log(
-            '[Graticule] _getLobes:',
-            'ctor=', raw.constructor?.name,
-            'code=', raw.code,
-            'lobes=', raw.lobes,
-            'options=', raw.options,
-        );
+        if (this._debug) {
+            console.log(
+                '[Graticule] _getLobes:',
+                'ctor=', raw.constructor?.name,
+                'code=', raw.code,
+                'lobes=', raw.lobes,
+                'options=', raw.options,
+            );
+        }
+
+        const lobes = raw.lobes ?? raw.options?.lobes;
+        return (Array.isArray(lobes) && lobes.length > 0) ? lobes : null;
     }
-
-    const lobes = raw.lobes ?? raw.options?.lobes;
-    return (Array.isArray(lobes) && lobes.length > 0) ? lobes : null;
-}
 
     /** Лепестки, реально «владеющие» данной параллелью (lat). */
     private _getEligibleLobesForLat(lat: number, lobes: any[]): any[] {
@@ -666,31 +806,44 @@ private _getLobes(): any[] | null {
         };
     }
 
-private _resolveStep(vp: Viewport): number {
-    if (!this._adaptiveStep && this._stepOption != null) return this._stepOption;
-
-    const canvas = this._map.renderer.domElement;
-    const W = canvas.clientWidth || 1;
-    const H = canvas.clientHeight || 1;
-    const hasLobes = this._getLobes() !== null;
-
-    if (this._crsRaw?.isGeographic || hasLobes) {
-        const dLon = vp.maxLon - vp.minLon;
-        const dLat = vp.maxLat - vp.minLat;
-        const degPerPx = Math.max(dLon / W, dLat / H);
-        const target = degPerPx * this._targetPixelsBetweenLines;
-        return niceDegreeStep(target);
+    /** Разрешает шаги по обеим осям с учётом адаптивности. */
+    private _resolveSteps(vp: Viewport): { lat: number; lon: number } {
+        return {
+            lat: this._resolveAxisStep(vp, 'lat'),
+            lon: this._resolveAxisStep(vp, 'lon'),
+        };
     }
 
-    // проекционные CRS без лепестков — как раньше
-    const crs = this._crsRaw;
-    const [x1, y1] = crs.fromLonLat([vp.minLon, vp.minLat]) || [0, 0];
-    const [x2, y2] = crs.fromLonLat([vp.maxLon, vp.maxLat]) || [0, 0];
-    const spanX = Math.abs(x2 - x1);
-    const spanY = Math.abs(y2 - y1);
-    const unitsPerPx = Math.max(spanX / W, spanY / H);
-    return niceLinearStep(unitsPerPx * this._targetPixelsBetweenLines);
-}
+    /**
+     * Шаг по одной оси. При адаптивном шаге каждая ось масштабируется
+     * своим масштабом (`degPerPx` / `unitsPerPx`), чтобы визуальная
+     * плотность линий была одинаковой.
+     */
+    private _resolveAxisStep(vp: Viewport, axis: 'lat' | 'lon'): number {
+        const fixed = axis === 'lat' ? this._stepLat : this._stepLon;
+        if (fixed != null) return fixed;
+
+        const canvas = this._map.renderer.domElement;
+        const W = canvas.clientWidth || 1;
+        const H = canvas.clientHeight || 1;
+        const hasLobes = this._getLobes() !== null;
+
+        if (this._crsRaw?.isGeographic || hasLobes) {
+            const span = axis === 'lat'
+                ? (vp.maxLat - vp.minLat) / H
+                : (vp.maxLon - vp.minLon) / W;
+            return niceDegreeStep(span * this._targetPixelsBetweenLines);
+        }
+
+        const crs = this._crsRaw;
+        const [x1, y1] = crs.fromLonLat([vp.minLon, vp.minLat]) || [0, 0];
+        const [x2, y2] = crs.fromLonLat([vp.maxLon, vp.maxLat]) || [0, 0];
+        const span = axis === 'lat'
+            ? Math.abs(y2 - y1) / H
+            : Math.abs(x2 - x1) / W;
+        return niceLinearStep(span * this._targetPixelsBetweenLines);
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // Генерация линий
     // ─────────────────────────────────────────────────────────────────
@@ -704,128 +857,137 @@ private _resolveStep(vp: Viewport): number {
         this._lastActiveLabelIds = null;
     }
 
-    private _rebuildAll(viewport: Viewport, step: number, mode: 'full-world' | 'viewport'): void {
+    private _rebuildAll(
+        viewport: Viewport,
+        steps: { lat: number; lon: number },
+        mode: 'full-world' | 'viewport',
+    ): void {
         this._clearAllLines();
-        this._addMissingLines(viewport, step, mode);
+        this._addMissingLines(viewport, steps, mode);
     }
 
-private _addMissingLines(
-    viewport: Viewport,
-    step: number,
-    mode: 'full-world' | 'viewport',
-): void {
-    const crs = this._crsRaw;
-    const isGeo = !!crs.isGeographic;
-    const hasLobes = this._getLobes() !== null;
-    // Итерация по долготе/широте, если CRS geographic ИЛИ есть разрывы
-    const useGeoIter = isGeo || hasLobes;
+    private _addMissingLines(
+        viewport: Viewport,
+        steps: { lat: number; lon: number },
+        mode: 'full-world' | 'viewport',
+    ): void {
+        const crs = this._crsRaw;
+        const isGeo = !!crs.isGeographic;
+        const hasLobes = this._getLobes() !== null;
+        // Итерация по долготе/широте, если CRS geographic ИЛИ есть разрывы
+        const useGeoIter = isGeo || hasLobes;
 
-    let genMinX: number, genMaxX: number, genMinY: number, genMaxY: number;
+        let genMinX: number, genMaxX: number, genMinY: number, genMaxY: number;
 
-    if (mode === 'full-world') {
-        if (useGeoIter) {
-            genMinX = -180; genMaxX = 180;
-            genMinY = -90;  genMaxY = 90;
+        if (mode === 'full-world') {
+            if (useGeoIter) {
+                genMinX = -180; genMaxX = 180;
+                genMinY = -90;  genMaxY = 90;
+            } else {
+                genMinX = -crs.halfExtentX; genMaxX = crs.halfExtentX;
+                genMinY = -crs.halfExtentY; genMaxY = crs.halfExtentY;
+            }
         } else {
-            genMinX = -crs.halfExtentX; genMaxX = crs.halfExtentX;
-            genMinY = -crs.halfExtentY; genMaxY = crs.halfExtentY;
+            if (useGeoIter) {
+                genMinX = viewport.minLon;
+                genMaxX = viewport.maxLon;
+                genMinY = viewport.minLat;
+                genMaxY = viewport.maxLat;
+            } else {
+                const p1 = crs.fromLonLat([viewport.minLon, viewport.minLat]);
+                const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
+                if (!p1 || !p2) return;
+                const cx = (p1[0] + p2[0]) * 0.5;
+                const cy = (p1[1] + p2[1]) * 0.5;
+                const hx = Math.abs(p2[0] - p1[0]);
+                const hy = Math.abs(p2[1] - p1[1]);
+                genMinX = cx - hx; genMaxX = cx + hx;
+                genMinY = cy - hy; genMaxY = cy + hy;
+            }
         }
-    } else {
-        if (useGeoIter) {
-            genMinX = viewport.minLon;
-            genMaxX = viewport.maxLon;
-            genMinY = viewport.minLat;
-            genMaxY = viewport.maxLat;
-        } else {
-            const p1 = crs.fromLonLat([viewport.minLon, viewport.minLat]);
-            const p2 = crs.fromLonLat([viewport.maxLon, viewport.maxLat]);
-            if (!p1 || !p2) return;
-            const cx = (p1[0] + p2[0]) * 0.5;
-            const cy = (p1[1] + p2[1]) * 0.5;
-            const hx = Math.abs(p2[0] - p1[0]);
-            const hy = Math.abs(p2[1] - p1[1]);
-            genMinX = cx - hx; genMaxX = cx + hx;
-            genMinY = cy - hy; genMaxY = cy + hy;
+
+        const existing = new Set<string>();
+        for (const info of this._lineInfos) existing.add(info.stableId);
+
+        const N = SAMPLE_COUNT;
+        const newInfos: LineInfo[] = [];
+        let addedM = 0, addedP = 0;
+
+        // ── Меридианы (шаг по долготе = steps.lon) ──
+        const stepLon = steps.lon;
+        const startX = Math.ceil(genMinX / stepLon - 1e-9) * stepLon;
+        for (let v = startX; v <= genMaxX + stepLon * 1e-6; v += stepLon) {
+            const value = Math.abs(v) < stepLon * 1e-9 ? 0 : v;
+            const id = `grid:m:${round6(value)}`;
+            if (existing.has(id)) continue;
+
+            const segments = useGeoIter
+                ? this._sampleMeridianGeo(value, N)
+                : this._sampleMeridianProj(value, N);
+            if (!segments.length) continue;
+
+            const pts = concatSegmentsPts(segments);
+            if (pts.length < 2) continue;
+            const crsPts = concatSegmentsCrs(segments);
+
+            const text = this._formatLabel(value, false, stepLon, isGeo);
+            const info: LineInfo = {
+                stableId: id, kind: 'meridian', value, text,
+                line2: this._buildLine2(segments),
+                segments,
+                points3D: pts,
+                crsSamples: crsPts,
+                labels: this._buildLabelAnchors(id, 'meridian', text, value, stepLon, isGeo),
+            };
+            if (this._linesGroup) this._linesGroup.add(info.line2);
+            newInfos.push(info);
+            addedM++;
+        }
+
+        // ── Параллели (шаг по широте = steps.lat) ──
+        const stepLat = steps.lat;
+        const startY = Math.ceil(genMinY / stepLat - 1e-9) * stepLat;
+        for (let v = startY; v <= genMaxY + stepLat * 1e-6; v += stepLat) {
+            const value = Math.abs(v) < stepLat * 1e-9 ? 0 : v;
+            const id = `grid:p:${round6(value)}`;
+            if (existing.has(id)) continue;
+
+            const segments = useGeoIter
+                ? this._sampleParallelGeo(value, N)
+                : this._sampleParallelProj(value, N);
+            if (!segments.length) continue;
+
+            const pts = concatSegmentsPts(segments);
+            if (pts.length < 2) continue;
+            const crsPts = concatSegmentsCrs(segments);
+
+            const text = this._formatLabel(value, true, stepLat, isGeo);
+            const info: LineInfo = {
+                stableId: id, kind: 'parallel', value, text,
+                line2: this._buildLine2(segments),
+                segments,
+                points3D: pts,
+                crsSamples: crsPts,
+                labels: this._buildLabelAnchors(id, 'parallel', text, value, stepLat, isGeo),
+            };
+            if (this._linesGroup) this._linesGroup.add(info.line2);
+            newInfos.push(info);
+            addedP++;
+        }
+
+        for (const info of newInfos) this._lineInfos.push(info);
+
+        if (this._debug && (addedM || addedP)) {
+            console.log(
+                `[Graticule] mode=${mode} stepLat=${stepLat} stepLon=${stepLon} ` +
+                `hasLobes=${hasLobes} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`,
+            );
+        }
+
+        if (this._lineInfos.length > MAX_CACHED_LINES) {
+            this._pruneFarLines(viewport, mode);
         }
     }
-
-    const existing = new Set<string>();
-    for (const info of this._lineInfos) existing.add(info.stableId);
-
-    const N = SAMPLE_COUNT;
-    const newInfos: LineInfo[] = [];
-    let addedM = 0, addedP = 0;
-
-    // ── Меридианы ──
-    const startX = Math.ceil(genMinX / step - 1e-9) * step;
-    for (let v = startX; v <= genMaxX + step * 1e-6; v += step) {
-        const value = Math.abs(v) < step * 1e-9 ? 0 : v;
-        const id = `grid:m:${round6(value)}`;
-        if (existing.has(id)) continue;
-
-        const segments = useGeoIter
-            ? this._sampleMeridianGeo(value, N)
-            : this._sampleMeridianProj(value, N);
-        if (!segments.length) continue;
-
-        const pts = concatSegmentsPts(segments);
-        if (pts.length < 2) continue;
-        const crsPts = concatSegmentsCrs(segments);
-
-        const text = this._formatLabel(value, false, step, isGeo);
-        const info: LineInfo = {
-            stableId: id, kind: 'meridian', value, text,
-            line2: this._buildLine2(segments),
-            segments,
-            points3D: pts,
-            crsSamples: crsPts,
-            labels: this._buildLabelAnchors(id, 'meridian', text, value, step, isGeo),
-        };
-        if (this._linesGroup) this._linesGroup.add(info.line2);
-        newInfos.push(info);
-        addedM++;
-    }
-
-    // ── Параллели ──
-    const startY = Math.ceil(genMinY / step - 1e-9) * step;
-    for (let v = startY; v <= genMaxY + step * 1e-6; v += step) {
-        const value = Math.abs(v) < step * 1e-9 ? 0 : v;
-        const id = `grid:p:${round6(value)}`;
-        if (existing.has(id)) continue;
-
-        const segments = useGeoIter
-            ? this._sampleParallelGeo(value, N)
-            : this._sampleParallelProj(value, N);
-        if (!segments.length) continue;
-
-        const pts = concatSegmentsPts(segments);
-        if (pts.length < 2) continue;
-        const crsPts = concatSegmentsCrs(segments);
-
-        const text = this._formatLabel(value, true, step, isGeo);
-        const info: LineInfo = {
-            stableId: id, kind: 'parallel', value, text,
-            line2: this._buildLine2(segments),
-            segments,
-            points3D: pts,
-            crsSamples: crsPts,
-            labels: this._buildLabelAnchors(id, 'parallel', text, value, step, isGeo),
-        };
-        if (this._linesGroup) this._linesGroup.add(info.line2);
-        newInfos.push(info);
-        addedP++;
-    }
-
-    for (const info of newInfos) this._lineInfos.push(info);
-
-    if (this._debug && (addedM || addedP)) {
-        console.log(`[Graticule] mode=${mode} step=${step} hasLobes=${hasLobes} added M=${addedM} P=${addedP} total=${this._lineInfos.length}`);
-    }
-
-    if (this._lineInfos.length > MAX_CACHED_LINES) {
-        this._pruneFarLines(viewport, mode);
-    }
-}
 
     private _buildLabelAnchors(
         lineId: string,
@@ -900,12 +1062,12 @@ private _addMissingLines(
         const map = this._map;
         const lobes = this._getLobes();
 
-         if (this._debug) {
-        console.log(`[Graticule] _sampleParallelGeo lat=${lat} lobes=${lobes ? lobes.length : 'null'}`);
-        if (lobes) {
-            console.log(`[Graticule] lobes:`, lobes.map(l => `${l.lonMin}-${l.lonMax}`));
+        if (this._debug) {
+            console.log(`[Graticule] _sampleParallelGeo lat=${lat} lobes=${lobes ? lobes.length : 'null'}`);
+            if (lobes) {
+                console.log(`[Graticule] lobes:`, lobes.map(l => `${l.lonMin}-${l.lonMax}`));
+            }
         }
-    }
 
         if (!lobes) {
             const pts: Array<[number, number, number]> = [];
@@ -924,8 +1086,8 @@ private _addMissingLines(
         if (!eligible.length) return [];
 
         if (this._debug) {
-        console.log(`[Graticule] eligible lobes for lat=${lat}: ${eligible.length}`);
-    }
+            console.log(`[Graticule] eligible lobes for lat=${lat}: ${eligible.length}`);
+        }
 
         const EPS_LON = 1e-6;
         const segments: SampledLine[] = [];
@@ -1041,36 +1203,36 @@ private _addMissingLines(
 
     // ── Line2 ──
 
-private _buildLine2(segments: SampledLine[]): any {
-    const group = new THREE.Group();
+    private _buildLine2(segments: SampledLine[]): any {
+        const group = new THREE.Group();
 
-if (this._debug) {
-        console.log(`[Graticule] _buildLine2 segments=${segments.length}`);
-    }
-
-    for (const seg of segments) {
-        const flat: number[] = [];
-        for (const [x, y, z] of seg.pts) {
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-            flat.push(x, y, z);
+        if (this._debug) {
+            console.log(`[Graticule] _buildLine2 segments=${segments.length}`);
         }
-        if (flat.length < 6) continue;
-        const geom = new LineGeometry();
-        geom.setPositions(flat);
-        geom.computeBoundingSphere();
-        const line = new Line2(geom, this._material);
-        line.computeLineDistances();
-        line.renderOrder = this._renderOrder;
-        line.frustumCulled = true;
-        group.add(line);
-    }
 
-if (this._debug) {
-        console.log(`[Graticule] _buildLine2 created ${group.children.length} lines`);
-    }
+        for (const seg of segments) {
+            const flat: number[] = [];
+            for (const [x, y, z] of seg.pts) {
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+                flat.push(x, y, z);
+            }
+            if (flat.length < 6) continue;
+            const geom = new LineGeometry();
+            geom.setPositions(flat);
+            geom.computeBoundingSphere();
+            const line = new Line2(geom, this._material);
+            line.computeLineDistances();
+            line.renderOrder = this._renderOrder;
+            line.frustumCulled = true;
+            group.add(line);
+        }
 
-    return group;
-}
+        if (this._debug) {
+            console.log(`[Graticule] _buildLine2 created ${group.children.length} lines`);
+        }
+
+        return group;
+    }
 
     private _destroyLine(info: LineInfo): void {
         if (!info.line2) return;

@@ -1049,13 +1049,32 @@ setRings(rings: PolygonRing[]): this {
         // Кэш для батчера — переживёт _disposeMeshes().
         this._cachedTopIndices = topIndices;
 
-        let cx = 0, cy = 0;
-        for (const pt of points2D) {
-            cx += pt.x;
-            cy += pt.y;
+        // Визуальный центр (grid-сканер) вместо среднего по вершинам.
+        // Среднее «уезжает» к плотной стороне: у квадрата со 100 узлами
+        // на одной грани подпись оказывалась почти на этой грани.
+        // `_worldCoords` уже заполнен, `_ringStartIndices` — тоже.
+        let cx: number, cy: number;
+        {
+            const worldRings: [number, number][][] = [];
+            for (let r = 0; r < this._ringStartIndices.length; r++) {
+                const start = this._ringStartIndices[r];
+                const end = (r + 1 < this._ringStartIndices.length)
+                    ? this._ringStartIndices[r + 1]
+                    : this._worldCoords.length;
+                worldRings.push(this._worldCoords.slice(start, end) as [number, number][]);
+            }
+            const vc = _approxVisualCenter(worldRings, 0);
+            if (vc) {
+                cx = vc[0];
+                cy = vc[1];
+            } else {
+                // Fallback: старое среднее (для крайне вырожденных случаев).
+                cx = 0; cy = 0;
+                for (const pt of points2D) { cx += pt.x; cy += pt.y; }
+                cx /= points2D.length;
+                cy /= points2D.length;
+            }
         }
-        cx /= points2D.length;
-        cy /= points2D.length;
 
         this._centroidWorld.set(cx, 0, cy);
         this._group.position.copy(this._centroidWorld);
@@ -1864,25 +1883,25 @@ setRings(rings: PolygonRing[]): this {
 
 
 
-// ── В классе Polygon ──────────────────────────────────────────────────
-/** Визуальный центр (pole of inaccessibility) в WGS84. */
-getVisualCenter(): LonLat | null {
-    if (this._visualCenterCache) return this._visualCenterCache;   // ← добавить
-    const rings = this._rings;
-    if (!rings || !rings.length) return null;
-    const src = this._crs
-        ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
-    if (!src) return null;
+    getVisualCenter(): LonLat | null {
+        if (this._visualCenterCache) return this._visualCenterCache;
+        const rings = this._rings;
+        if (!rings || !rings.length) return null;
+        const src = this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+        if (!src) return null;
 
-    const wgsRings: number[][][] = rings.map(r => r.map(pt => {
-        const [lon, lat] = src.toLonLat(pt);
-        return [lon, lat];
-    }));
+        const wgsRings: Array<Array<[number, number]>> = rings.map(r => r.map(pt => {
+            const [lon, lat] = src.toLonLat(pt);
+            return [lon, lat] as [number, number];
+        }));
 
-    const [lon, lat] = _polylabel(wgsRings, 0.001);
-    this._visualCenterCache = [lon, lat];                          // ← и это
-    return this._visualCenterCache;
-}
+        // precision=0.001° ≈ 100 м на местности — более чем достаточно для подписи.
+        const vc = _approxVisualCenter(wgsRings, 0.001);
+        if (!vc) return null;
+        this._visualCenterCache = vc;
+        return this._visualCenterCache;
+    }
 
 /** Экранный bbox полигона в пикселях — для fit-проверки диаграмм. */
 getScreenBBox(): { minX: number; minY: number; maxX: number; maxY: number;
@@ -1925,68 +1944,100 @@ getTooltipOnHover(): boolean {
     
 }
 
-interface _PoleCell { x: number; y: number; h: number; d: number; max: number; }
+// =====================================================================
+// Приближённый visual center (pole of inaccessibility) — grid-сканер.
+// ST_LabelPoint-style: 3 прохода сеткой, без приоритетной очереди.
+// Работает в тех же координатах, что `rings` (lon/lat или worldCoords).
+// Возвращает [x, y] или null. Устойчив к вогнутости и дыркам.
+// =====================================================================
 
-function _pointToRingsDistSq(rings: number[][][], x: number, y: number): number {
+function _isPointInsideRings(
+    rings: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+    x: number, y: number,
+): boolean {
     let inside = false;
-    let minDSq = Infinity;
     for (const ring of rings) {
         const n = ring.length;
+        if (n < 2) continue;
         for (let i = 0, j = n - 1; i < n; j = i++) {
             const a = ring[i], b = ring[j];
-            if ((a[1] > y) !== (b[1] > y) &&
-                x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
-            const dx = b[0] - a[0], dy = b[1] - a[1];
-            const l2 = dx*dx + dy*dy;
-            let t = 0;
-            if (l2 > 0) t = Math.max(0, Math.min(1, ((x-a[0])*dx + (y-a[1])*dy) / l2));
-            const px = a[0] + t*dx, py = a[1] + t*dy;
-            const ddx = x - px, ddy = y - py;
-            const dSq = ddx*ddx + ddy*ddy;
-            if (dSq < minDSq) minDSq = dSq;
+            if (((a[1] > y) !== (b[1] > y)) &&
+                x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) {
+                inside = !inside;
+            }
         }
     }
-    return inside ? minDSq : -minDSq;
+    return inside;
 }
 
-function _polylabel(rings: number[][][], precision = 1): [number, number] {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const ring of rings) for (const [x, y] of ring) {
-        if (x < minX) minX = x; if (y < minY) minY = y;
-        if (x > maxX) maxX = x; if (y > maxY) maxY = y;
-    }
-    const w = maxX - minX, h = maxY - minY;
-    const cellSize = Math.min(w, h);
-    if (cellSize === 0) return [minX, minY];
-
-    const queue: _PoleCell[] = [];
-    const makeCell = (x: number, y: number, hh: number): _PoleCell => {
-        const d = _pointToRingsDistSq(rings, x, y);
-        return { x, y, h: hh, d, max: d + hh * Math.SQRT2 };
-    };
-    for (let x = minX; x < maxX; x += cellSize) {
-        for (let y = minY; y < maxY; y += cellSize) {
-            queue.push(makeCell(x + cellSize / 2, y + cellSize / 2, cellSize / 2));
+function _minDistToRings(
+    rings: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+    x: number, y: number,
+): number {
+    let bestSq = Infinity;
+    for (const ring of rings) {
+        const n = ring.length;
+        if (n < 2) continue;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const a = ring[i], b = ring[j];
+            const dx = b[0] - a[0], dy = b[1] - a[1];
+            const l2 = dx * dx + dy * dy;
+            let t = l2 > 0 ? ((x - a[0]) * dx + (y - a[1]) * dy) / l2 : 0;
+            if (t < 0) t = 0; else if (t > 1) t = 1;
+            const px = a[0] + t * dx, py = a[1] + t * dy;
+            const ddx = x - px, ddy = y - py;
+            const dSq = ddx * ddx + ddy * ddy;
+            if (dSq < bestSq) bestSq = dSq;
         }
     }
-    queue.sort((a, b) => b.max - a.max);
-    const bboxCell = makeCell(minX + w / 2, minY + h / 2, 0);
-    let best = bboxCell;
+    return Math.sqrt(bestSq);
+}
 
-    while (queue.length) {
-        const cell = queue.shift()!;
-        if (cell.d > best.d) best = cell;
-        if (cell.max - best.d <= precision) continue;
-        const hh = cell.h / 2;
-        queue.push(
-            makeCell(cell.x - hh, cell.y - hh, hh),
-            makeCell(cell.x + hh, cell.y - hh, hh),
-            makeCell(cell.x - hh, cell.y + hh, hh),
-            makeCell(cell.x + hh, cell.y + hh, hh),
-        );
-        queue.sort((a, b) => b.max - a.max);
+function _approxVisualCenter(
+    rings: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+    precision: number = 0,
+): [number, number] | null {
+    if (!rings || !rings.length) return null;
+
+    // ── 1. BBox ──
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ring of rings) {
+        for (let i = 0; i < ring.length; i++) {
+            const p = ring[i];
+            if (!p) continue;
+            if (p[0] < minX) minX = p[0];
+            if (p[0] > maxX) maxX = p[0];
+            if (p[1] < minY) minY = p[1];
+            if (p[1] > maxY) maxY = p[1];
+        }
     }
-    return [best.x, best.y];
+    if (!isFinite(minX)) return null;
+    const w = maxX - minX, h = maxY - minY;
+    if (w < 1e-12 || h < 1e-12) return [(minX + maxX) / 2, (minY + maxY) / 2];
+
+    // ── 2. Coarse-to-fine: ~11×11 → окно 5×5 → окно 5×5 ──
+    let step = Math.min(w, h) / 10;
+    let bx = (minX + maxX) / 2;
+    let by = (minY + maxY) / 2;
+    let bestD = -1;
+
+    for (let iter = 0; iter < 3; iter++) {
+        const sx = iter === 0 ? minX : bx - step * 2.5;
+        const sy = iter === 0 ? minY : by - step * 2.5;
+        const ex = iter === 0 ? maxX : bx + step * 2.5;
+        const ey = iter === 0 ? maxY : by + step * 2.5;
+
+        for (let x = sx; x <= ex; x += step) {
+            for (let y = sy; y <= ey; y += step) {
+                if (!_isPointInsideRings(rings, x, y)) continue;
+                const d = _minDistToRings(rings, x, y);
+                if (d > bestD) { bestD = d; bx = x; by = y; }
+            }
+        }
+        step /= 4;
+        if (precision > 0 && step < precision) break;
+    }
+    return [bx, by];
 }
 
 

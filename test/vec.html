@@ -36,6 +36,23 @@ const vectorLayer = new KRB.VectorTile({
                     zoomOffset: -2
 }).addTo(map);
 
+const myModel = new KRB.Marker3D({
+    position: [37.662, 55.764],
+    modelUrl: 'model.glb',
+    size: 200,                   
+    altitude: 0,
+    altitudeMode: 'clampToGround',
+    anchor: [0.5, 0, 0.5],
+    onHover: (hovered) => {
+        if (hovered) {
+            myModel.animateSize(300, 500, 'easeOut');
+        } else {
+            myModel.animateSize(200, 500, 'easeIn');
+        }
+    }
+});
+myModel.addTo(map);
+
 
 </script>
 </body>

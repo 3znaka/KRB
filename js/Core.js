@@ -451,6 +451,7 @@ export class KrbMap {
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
         this.scene.add(this.ambientLight);
         this.sunLight = new THREE.DirectionalLight(0xffffff, 3);

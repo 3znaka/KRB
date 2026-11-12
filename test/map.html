@@ -520,7 +520,7 @@ function buildBuildingLayer() {
                 depthWrite: true,
                 properties: props,
 onClick: (e) => map.popupManager.showAtEvent(e, buildRoomPopup(props)),
-                simplify: false,
+            
                  onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
             }));
         });

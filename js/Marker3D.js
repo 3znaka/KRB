@@ -392,6 +392,13 @@ export class Marker3D extends SpatialObject {
                         for (const m of mats) {
                             m.depthTest = this._depthTest;
                             m.depthWrite = this._depthWrite;
+                            const colorMaps = ['map', 'emissiveMap', 'specularColorMap', 'sheenColorMap'];
+                            for (const key of colorMaps) {
+                                const tex = m[key];
+                                if (tex && tex.isTexture) {
+                                    tex.colorSpace = THREE.SRGBColorSpace;
+                                }
+                            }
                             if (!m.transparent) {
                                 m.transparent = true;
                             }

@@ -629,6 +629,8 @@ this.scene.background = new THREE.Color(initialBg);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.targetElement.appendChild(this.renderer.domElement);
 
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
         this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
         this.scene.add(this.ambientLight);
 

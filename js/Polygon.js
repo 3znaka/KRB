@@ -54,6 +54,7 @@ export class Polygon extends SpatialObject {
     _currentSimplifyBucket = -1;
     _pendingBucket = -1;
     _rebuildTimer = null;
+    _pendingRebuild = false;
     /** Кэш визуального центра, считается один раз за жизнь полигона. */
     _centroidFromOriginal = null;
     _visualCenterCache = null;
@@ -270,10 +271,15 @@ export class Polygon extends SpatialObject {
         const oldRings = this._renderRings;
         const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
         if (oldRings && this._sameRingCounts(oldRings, newRings)) {
-            return; // визуально ничего не изменится — не тратим кадр на rebuild
+            return;
         }
-        if (this._map)
-            this._rebuildGeometry();
+        if (!this._map)
+            return;
+        if (!this._isVisible) {
+            this._pendingRebuild = true;
+            return;
+        }
+        this._rebuildGeometry();
     }
     _scheduleBucketChange(bucket) {
         if (this._rebuildTimer) {
@@ -325,6 +331,7 @@ export class Polygon extends SpatialObject {
             this._rebuildTimer = null;
         }
         this._pendingBucket = -1;
+        this._pendingRebuild = false;
         if (this._batch) {
             const b = this._batch;
             this._batch = null;
@@ -609,6 +616,7 @@ export class Polygon extends SpatialObject {
     _rebuildGeometry() {
         if (!this._map)
             return;
+        this._pendingRebuild = false;
         this._disposeMeshes();
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
@@ -829,7 +837,9 @@ export class Polygon extends SpatialObject {
     // Построение геометрии
     // =================================================================
     _createSurfaceMaterial() {
-        const isTransparent = this._fillOpacity < 1;
+        const hasOpacityAnim = !!(this._zoomInterpolations?.fillOpacity &&
+            this._zoomInterpolations.fillOpacity.length >= 2);
+        const isTransparent = hasOpacityAnim || this._fillOpacity < 1;
         const map = this._fillPatternTexture;
         const patternProps = map ? { map } : {};
         if (this._extruded) {
@@ -837,7 +847,7 @@ export class Polygon extends SpatialObject {
                 color: this._fillColor,
                 opacity: this._fillOpacity,
                 transparent: isTransparent,
-                side: THREE.DoubleSide,
+                side: THREE.FrontSide,
                 roughness: this._roughness,
                 metalness: this._metalness,
                 depthTest: this._depthTest,
@@ -852,7 +862,7 @@ export class Polygon extends SpatialObject {
             color: this._fillColor,
             opacity: this._fillOpacity,
             transparent: isTransparent,
-            side: THREE.DoubleSide,
+            side: THREE.FrontSide,
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
             polygonOffset: true,
@@ -1134,6 +1144,17 @@ export class Polygon extends SpatialObject {
                 const count = nextRingStart - start;
                 if (count < 2)
                     continue;
+                // Знак signed area в плоскости XZ (стандартное 2D-векторное произведение).
+                // sa > 0 → против часовой, sa < 0 → по часовой.
+                let sa = 0;
+                for (let i = 0; i < count; i++) {
+                    const j = (i + 1) % count;
+                    const a = points2D[start + i];
+                    const b = points2D[start + j];
+                    sa += a.x * b.y - b.x * a.y;
+                }
+                // Outer (ringIdx=0) хотим CW (sa<0), hole (ringIdx>0) хотим CCW (sa>0).
+                const flipSides = (sa > 0) !== (ringIdx > 0);
                 let cum = 0;
                 for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
@@ -1152,12 +1173,16 @@ export class Polygon extends SpatialObject {
                     const u0 = cum / sideUvScale;
                     const u1 = (cum + edgeLen) / sideUvScale;
                     const vH = initialHeight / sideUvScale;
-                    sideUVs.push(u0, vH);
-                    sideUVs.push(u0, 0);
-                    sideUVs.push(u1, vH);
-                    sideUVs.push(u1, 0);
-                    sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-                    sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+                    sideUVs.push(u0, vH, u0, 0, u1, vH, u1, 0);
+                    if (!flipSides) {
+                        sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+                        sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+                    }
+                    else {
+                        // Тот же quad, но с обратным обходом → нормаль на 180°.
+                        sideIndices.push(baseIndex, baseIndex + 2, baseIndex + 1);
+                        sideIndices.push(baseIndex + 1, baseIndex + 2, baseIndex + 3);
+                    }
                     this._sideEdgeIJ.push([idxI, idxJ]);
                     this._sideEdgeLengths.push(edgeLen);
                     cum += edgeLen;
@@ -1454,8 +1479,8 @@ export class Polygon extends SpatialObject {
             this._updateCentroidScreenPos();
             return;
         }
-        // Смена зум-бакета — только когда зум стабилен.
-        if (this._simplify && !map._zoomActive && !map._cameraAnimation) {
+        // Polygon._update
+        if (this._simplify) {
             const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
             if (bucket !== this._currentSimplifyBucket) {
                 this._scheduleBucketChange(bucket);
@@ -1494,6 +1519,9 @@ export class Polygon extends SpatialObject {
         }
         this._group.visible = true;
         this._isVisible = true;
+        if (this._pendingRebuild) {
+            this._rebuildGeometry();
+        }
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;

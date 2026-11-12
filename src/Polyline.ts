@@ -2,11 +2,6 @@
  * Polyline — полилиния с толстой линией (Line2), высотами узлов,
  * видимостью по зуму и подписью.
  *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
- * подпись, altitude и TextManager-контракт берутся из базового класса.
- * Здесь остаётся только специфика линии: вершины, Line2-геометрия,
- * altitudeMode, экранные данные для подписи, raycast-интерактив.
- *
  * @module polyline
  */
 
@@ -57,21 +52,23 @@ export interface PolylineOptions {
     onClick?: (event: MouseEvent, polyline: Polyline) => void;
     onHover?: (hovered: boolean) => void;
     properties?: Record<string, any>;
-userData?: Record<string, any>;
+    userData?: Record<string, any>;
     /** `[dash, gap]` в world-метрах, либо число (`[n, n]`). */
     lineDasharray?: LineDasharray;
     /** Сдвиг паттерна вдоль линии, world-метры. Default: 0. */
     lineDashOffset?: number;
     zoomInterpolate?: ZoomInterpolation | null;
 
-/** Включать LOD-упрощение по зуму. Default: true. */
-simplify?: boolean;
-/** Допуск в пикселях экрана (OL-подобно). Default: 0.5. */
-simplifyTolerance?: number;
-/** Размер бакета в уровнях зума (1 = каждый целый зум). Default: 1. */
-simplifyZoomBucket?: number;
-
+    /** Включать LOD-упрощение по зуму. Default: true. */
+    simplify?: boolean;
+    /** Допуск в пикселях экрана (OL-подобно). Default: 0.5. */
+    simplifyTolerance?: number;
+    /** Размер бакета в уровнях зума (1 = каждый целый зум). Default: 1. */
+    simplifyZoomBucket?: number;
 }
+
+/** Дебаунс пересборки при смене зум-бакета (мс). */
+const REBUILD_DEBOUNCE_MS = 60;
 
 function pointToSegmentDistance(point: any, a: any, b: any): number {
     const ab = new THREE.Vector3().subVectors(b, a);
@@ -101,7 +98,7 @@ export class Polyline extends SpatialObject {
     private _altitudeMode: PolylineAltitudeMode;
     private _depthTest: boolean;
     private _depthWrite: boolean;
-        private _lineDasharray: LineDasharray | null = null;
+    private _lineDasharray: LineDasharray | null = null;
     private _lineDashOffset: number = 0;
 
     // ── Высоты ──
@@ -111,11 +108,16 @@ export class Polyline extends SpatialObject {
     private _nodeHeights: number[] = [];
     private _cachedHeights: number[] | null = null;
 
+    // ── LOD ──
     private _simplify = true;
-private _simplifyTolerance = 0.5;
-private _simplifyZoomBucket = 1;
-private _simplifyCache = new Map<number, PolylinePosition[]>();
-private _currentSimplifyBucket = -1;
+    private _simplifyTolerance = 0.5;
+    private _simplifyZoomBucket = 1;
+    private _simplifyCache = new Map<number, PolylinePosition[]>();
+    private _currentSimplifyBucket = -1;
+    private _pendingBucket = -1;
+    private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Пересборка отложена до момента, когда полилиния снова попадёт в кадр. */
+    private _pendingRebuild = false;
 
     // ── Подпись: placement + vertical align ──
     private _titlePlacement: PolylineTitlePlacement;
@@ -153,16 +155,16 @@ private _currentSimplifyBucket = -1;
         super();
 
         if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
-this._properties = options.properties ?? {};
-this._userData = options.userData ?? {};
+        this._properties = options.properties ?? {};
+        this._userData = options.userData ?? {};
         if (!options.positions?.length || options.positions.length < 2) {
             throw new Error('Polyline: options.positions required, at least 2 points');
         }
 
         this._positions = options.positions;
         this._simplify = options.simplify ?? true;
-this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
-this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
+        this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
+        this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
         this._crs = null;
 
@@ -171,7 +173,7 @@ this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._width = options.width || 2;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
         this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
-                this._lineDasharray = options.lineDasharray ?? null;
+        this._lineDasharray = options.lineDasharray ?? null;
         this._lineDashOffset = options.lineDashOffset ?? 0;
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
@@ -221,7 +223,7 @@ this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
 
         this._geometry = new LineGeometry();
         const canvas = map.renderer.domElement;
- this._material = new LineMaterial({
+        this._material = new LineMaterial({
             color: this._color,
             linewidth: this._width,
             opacity: this._opacity,
@@ -235,14 +237,22 @@ this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._line.renderOrder = 999;
         map.worldGroup.add(this._line);
 
-
-
         this._registerInteraction(map);
         this._isVisible = false;
-        this._simplifyCache.clear(); this._currentSimplifyBucket = -1;
+
+        // Reset LOD state
+        if (this._rebuildTimer) { clearTimeout(this._rebuildTimer); this._rebuildTimer = null; }
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
     }
 
     protected _teardown(): void {
+        if (this._rebuildTimer) { clearTimeout(this._rebuildTimer); this._rebuildTimer = null; }
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
+
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
@@ -284,35 +294,104 @@ this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         return this._titleVerticalAlign || 'center';
     }
 
-
-
     override getScreenPosition(): { x: number; y: number } | null {
         return this.getScreenPositionAt(this._labelT);
     }
 
-private _worldPerPixel(z: number): number {
-    return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
-}
+    private _worldPerPixel(z: number): number {
+        return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
+    }
 
-private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
-    const hit = this._simplifyCache.get(bucket);
-    if (hit) return hit;
+    private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
+        const hit = this._simplifyCache.get(bucket);
+        if (hit) return hit;
 
-    const z = bucket * this._simplifyZoomBucket;
-    const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+        const z = bucket * this._simplifyZoomBucket;
+        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
 
-    const projected: [number, number][] = this._positions.map(
-        pt => this._map.project(pt, this._crs) as [number, number]
-    );
-    const keptIdx = douglasPeuckerIndices(projected, tolWorld);
-    const result: PolylinePosition[] = keptIdx.map(i => {
-        const orig = this._positions[i];
-        return orig.length >= 3 ? [orig[0], orig[1], orig[2]] : [orig[0], orig[1]];
-    });
+        const projected: [number, number][] = this._positions.map(
+            pt => this._map.project(pt, this._crs) as [number, number]
+        );
+        const keptIdx = douglasPeuckerIndices(projected, tolWorld);
+        const result: PolylinePosition[] = keptIdx.map(i => {
+            const orig = this._positions[i];
+            return orig.length >= 3 ? [orig[0], orig[1], orig[2]] : [orig[0], orig[1]];
+        });
 
-    this._simplifyCache.set(bucket, result);
-    return result;
-}
+        this._simplifyCache.set(bucket, result);
+        return result;
+    }
+
+    // =================================================================
+    // LOD rebuild (debounced)
+    // =================================================================
+
+    /**
+     * Синхронная пересборка LOD под конкретный бакет.
+     * Идемпотентна — можно звать повторно.
+     */
+    private _doRebuildForBucket(bucket: number, simplified?: PolylinePosition[]): void {
+        if (!this._map) return;
+        this._pendingRebuild = false;
+        this._currentSimplifyBucket = bucket;
+
+        const positions = simplified ?? this._getSimplifiedPositions(bucket);
+        this._absPositions = [];
+        this._nodeHeights = [];
+        for (const pt of positions) {
+            this._absPositions.push(this._map.project(pt, this._crs));
+            const h = pt?.[2];
+            this._nodeHeights.push(Number.isFinite(h) ? (h as number) : 0);
+        }
+        this._cachedHeights = null;
+        this._screenData.valid = false;
+    }
+
+    /**
+     * Вызывается из таймера. Полилиния вне кадра — не тратим кадр,
+     * помечаем `_pendingRebuild` и догоним в `_update`, когда вернётся.
+     */
+    private _onSimplifyBucketChange(bucket: number): void {
+        if (bucket === this._currentSimplifyBucket) return;
+
+        const oldCount = this._absPositions.length;
+        const simplified = this._getSimplifiedPositions(bucket);
+        this._currentSimplifyBucket = bucket;
+
+        // Визуально ничего не изменится — не пересобираем.
+        if (oldCount === simplified.length) {
+            this._pendingRebuild = false;
+            return;
+        }
+
+        if (!this._isVisible) {
+            this._pendingRebuild = true;
+            return;
+        }
+
+        this._doRebuildForBucket(bucket, simplified);
+    }
+
+    /**
+     * Дебаунс. Если таймер уже тикает — обновляем целевой бакет,
+     * не сбрасываем отсчёт (аналог «trailing edge»).
+     */
+    private _scheduleBucketChange(bucket: number): void {
+        if (this._rebuildTimer) {
+            this._pendingBucket = bucket;
+            return;
+        }
+        this._pendingBucket = bucket;
+        this._rebuildTimer = setTimeout(() => {
+            this._rebuildTimer = null;
+            if (!this._map) return;
+            const b = this._pendingBucket;
+            this._pendingBucket = -1;
+            if (b >= 0 && b !== this._currentSimplifyBucket) {
+                this._onSimplifyBucketChange(b);
+            }
+        }, REBUILD_DEBOUNCE_MS);
+    }
 
     // =================================================================
     // Интерактив
@@ -402,15 +481,10 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
 
     getOpacity(): number { return this._opacity; }
 
-        // =================================================================
+    // =================================================================
     // Dash
     // =================================================================
 
-    /**
-     * Устанавливает/убирает пунктир. `null` — сплошная линия.
-     * `[dash, gap]` в world-метрах (LineMaterial без `worldUnits: false`).
-     * Изменение дешёвое: не пересобирает геометрию, только uniforms.
-     */
     setLineDasharray(dasharray: LineDasharray | null): this {
         this._lineDasharray = dasharray;
         if (!this._material) return this;
@@ -431,7 +505,6 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
             : this._lineDasharray;
     }
 
-    /** Сдвиг паттерна вдоль линии (world-метры). */
     setLineDashOffset(offset: number): this {
         if (!Number.isFinite(offset)) return this;
         this._lineDashOffset = offset;
@@ -445,7 +518,7 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
     getLineDashOffset(): number { return this._lineDashOffset; }
 
     // =================================================================
-    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // Altitude MODE
     // =================================================================
 
     setAltitudeMode(mode: PolylineAltitudeMode): this {
@@ -498,15 +571,17 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
     // Позиции
     // =================================================================
 
-    /**
-     * Заменяет вершины. Пересчитывает `_absPositions` (если линия уже
-     * на карте). Геометрия пересоберётся на следующем кадре через
-     * `_update` → `_applyPositions`.
-     */
     setPositions(positions: PolylinePosition[]): this {
         if (!positions || positions.length < 2) return this;
         this._positions = positions;
         this._screenData.valid = false;
+
+        // Всегда сбрасываем pending-состояние, даже без карты.
+        if (this._rebuildTimer) { clearTimeout(this._rebuildTimer); this._rebuildTimer = null; }
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
 
         if (!this._map) return this;
 
@@ -520,16 +595,13 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
         }
         this._cachedHeights = null;
         this._lastHeightUpdateTime = 0;
-        this._simplifyCache.clear(); this._currentSimplifyBucket = -1;
         return this;
     }
 
-    /** Возвращает копию исходных координат (в `crs` полилинии). */
     getPositions(): PolylinePosition[] {
         return this._positions.map(p => [...p] as PolylinePosition);
     }
 
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
     getCenter(): LonLat | null {
         const b = this.getBounds('EPSG:4326');
         if (!b) return null;
@@ -564,7 +636,15 @@ private _getSimplifiedPositions(bucket: number): PolylinePosition[] {
         if (res.x !== canvas.width || res.y !== canvas.height) {
             this._material.resolution.set(canvas.width, canvas.height);
         }
-this._applySimplification(map.currentDiscreteZoom);
+
+        // Полилиния снова в кадре — догоняем отложенную LOD-пересборку
+        // (могла быть запланирована, пока полилиния была за фрустумом).
+        if (this._pendingRebuild) {
+            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+            this._doRebuildForBucket(bucket);
+        }
+
+        this._applySimplification(map.currentDiscreteZoom);
         this._updateHeights();
 
         if (map.objectRenderDistanceFactor > 0 && this._absPositions.length >= 2) {
@@ -587,8 +667,6 @@ this._applySimplification(map.currentDiscreteZoom);
                 return;
             }
         }
-
-
 
         this._applyPositions();
 
@@ -626,25 +704,21 @@ this._applySimplification(map.currentDiscreteZoom);
         this._lastHeightUpdateTime = now;
     }
 
-private _applySimplification(zoom: number): void {
-    if (!this._simplify || !this._map) return;
-    if (this._map._zoomActive || this._map._cameraAnimation) return;
-    const bucket = Math.floor(zoom / this._simplifyZoomBucket);
-    if (bucket === this._currentSimplifyBucket) return;
-    this._currentSimplifyBucket = bucket;
+    private _applySimplification(zoom: number): void {
+        if (!this._simplify || !this._map) return;
 
-    const simplified = this._getSimplifiedPositions(bucket);
-    // Пересобираем _absPositions / _nodeHeights из упрощённых.
-    this._absPositions = [];
-    this._nodeHeights = [];
-    for (const pt of simplified) {
-        this._absPositions.push(this._map.project(pt, this._crs));
-        const h = pt?.[2];
-        this._nodeHeights.push(Number.isFinite(h) ? (h as number) : 0);
+        const bucket = Math.floor(zoom / this._simplifyZoomBucket);
+        if (bucket === this._currentSimplifyBucket) return;
+
+        // Во время активного зума/анимации — дебаунсим, но не блокируем
+        // LOD-обновления полностью (в отличие от старого поведения).
+        if (this._map._zoomActive || this._map._cameraAnimation) {
+            this._scheduleBucketChange(bucket);
+            return;
+        }
+
+        this._doRebuildForBucket(bucket);
     }
-    this._cachedHeights = null;
-    this._screenData.valid = false;
-}
 
     private _applyPositions(): void {
         if (!this._map || !this._cachedHeights) return;
@@ -657,7 +731,7 @@ private _applySimplification(zoom: number): void {
         this._line.computeLineDistances();
     }
 
-        private _computeDashUniforms(): {
+    private _computeDashUniforms(): {
         dashed?: boolean;
         dashSize?: number;
         gapSize?: number;
@@ -769,7 +843,7 @@ private _applySimplification(zoom: number): void {
     }
 
     // =================================================================
-    // Подпись: параметры вдоль линии
+    // Подпись
     // =================================================================
 
     getVisibleInterval(): { min: number; max: number } | null {

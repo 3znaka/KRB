@@ -143,6 +143,7 @@ export class Polygon extends SpatialObject {
     private _currentSimplifyBucket = -1;
     private _pendingBucket = -1;
     private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+    private _pendingRebuild = false; 
 
     /** Кэш визуального центра, считается один раз за жизнь полигона. */
     private _centroidFromOriginal: { x: number; z: number } | null = null;
@@ -391,17 +392,23 @@ export class Polygon extends SpatialObject {
      * Смена зум-бакета. Если упрощение не срезает ни одной вершины по
      * сравнению с текущим состоянием — пересборка не нужна.
      */
-    private _onSimplifyBucketChange(bucket: number): void {
-        if (bucket === this._currentSimplifyBucket) return;
+private _onSimplifyBucketChange(bucket: number): void {
+    if (bucket === this._currentSimplifyBucket) return;
 
-        const oldRings = this._renderRings;
-        const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
+    const oldRings = this._renderRings;
+    const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
 
-        if (oldRings && this._sameRingCounts(oldRings, newRings)) {
-            return; // визуально ничего не изменится — не тратим кадр на rebuild
-        }
-        if (this._map) this._rebuildGeometry();
+ if (oldRings && this._sameRingCounts(oldRings, newRings)) {
+        return;
     }
+    if (!this._map) return;
+    if (!this._isVisible) {
+        this._pendingRebuild = true;
+        return;
+    }
+
+    this._rebuildGeometry();
+}
 
 private _scheduleBucketChange(bucket: number): void {
     if (this._rebuildTimer) {
@@ -461,6 +468,7 @@ private _scheduleBucketChange(bucket: number): void {
             this._rebuildTimer = null;
         }
         this._pendingBucket = -1;
+        this._pendingRebuild = false; 
 
         if (this._batch) {
             const b: any = this._batch;
@@ -738,9 +746,10 @@ private _scheduleBucketChange(bucket: number): void {
         return this._rings.map(ring => ring.map(pt => [...pt] as PolygonCoord));
     }
 
-    private _rebuildGeometry(): void {
-        if (!this._map) return;
-        this._disposeMeshes();
+private _rebuildGeometry(): void {
+    if (!this._map) return;
+    this._pendingRebuild = false;    
+    this._disposeMeshes();
 
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
@@ -954,32 +963,24 @@ private _scheduleBucketChange(bucket: number): void {
     // Построение геометрии
     // =================================================================
 
-    private _createSurfaceMaterial(): any {
-        const isTransparent = this._fillOpacity < 1;
-        const map = this._fillPatternTexture;
-        const patternProps = map ? { map } : {};
+private _createSurfaceMaterial(): any {
+    const hasOpacityAnim = !!(
+        this._zoomInterpolations?.fillOpacity &&
+        this._zoomInterpolations.fillOpacity.length >= 2
+    );
+    const isTransparent = hasOpacityAnim || this._fillOpacity < 1;
 
-        if (this._extruded) {
-            return new THREE.MeshStandardMaterial({
-                color: this._fillColor,
-                opacity: this._fillOpacity,
-                transparent: isTransparent,
-                side: THREE.DoubleSide,
-                roughness: this._roughness,
-                metalness: this._metalness,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite,
-                polygonOffset: true,
-                polygonOffsetFactor: -1,
-                polygonOffsetUnits: -1,
-                ...patternProps,
-            });
-        }
-        return new THREE.MeshBasicMaterial({
+    const map = this._fillPatternTexture;
+    const patternProps = map ? { map } : {};
+
+    if (this._extruded) {
+        return new THREE.MeshStandardMaterial({
             color: this._fillColor,
             opacity: this._fillOpacity,
             transparent: isTransparent,
-            side: THREE.DoubleSide,
+            side: THREE.FrontSide,
+            roughness: this._roughness,
+            metalness: this._metalness,
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
             polygonOffset: true,
@@ -988,6 +989,19 @@ private _scheduleBucketChange(bucket: number): void {
             ...patternProps,
         });
     }
+    return new THREE.MeshBasicMaterial({
+        color: this._fillColor,
+        opacity: this._fillOpacity,
+        transparent: isTransparent,
+        side: THREE.FrontSide,
+        depthTest: this._depthTest,
+        depthWrite: this._depthWrite,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+        ...patternProps,
+    });
+}
 
     private _applyShadowFlags(mesh: any): void {
         if (!mesh) return;
@@ -1262,46 +1276,61 @@ private _scheduleBucketChange(bucket: number): void {
             const sideUvScale = patternScale;
             const initialHeight = this._height;
 
-            for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
-                const start = this._ringStartIndices[ringIdx];
-                const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
-                    ? this._ringStartIndices[ringIdx + 1] : points2D.length;
-                const count = nextRingStart - start;
-                if (count < 2) continue;
+for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+    const start = this._ringStartIndices[ringIdx];
+    const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+        ? this._ringStartIndices[ringIdx + 1] : points2D.length;
+    const count = nextRingStart - start;
+    if (count < 2) continue;
 
-                let cum = 0;
-                for (let i = 0; i < count; i++) {
-                    const j = (i + 1) % count;
-                    const idxI = start + i;
-                    const idxJ = start + j;
-                    const topI = points2D[idxI];
-                    const topJ = points2D[idxJ];
-                    const baseIndex = sidePositions.length / 3;
+    // Знак signed area в плоскости XZ (стандартное 2D-векторное произведение).
+    // sa > 0 → против часовой, sa < 0 → по часовой.
+    let sa = 0;
+    for (let i = 0; i < count; i++) {
+        const j = (i + 1) % count;
+        const a = points2D[start + i];
+        const b = points2D[start + j];
+        sa += a.x * b.y - b.x * a.y;
+    }
+    // Outer (ringIdx=0) хотим CW (sa<0), hole (ringIdx>0) хотим CCW (sa>0).
+    const flipSides = (sa > 0) !== (ringIdx > 0);
 
-                    sidePositions.push(topI.x, initialHeight, topI.y);
-                    sidePositions.push(topI.x, 0, topI.y);
-                    sidePositions.push(topJ.x, initialHeight, topJ.y);
-                    sidePositions.push(topJ.x, 0, topJ.y);
+    let cum = 0;
+    for (let i = 0; i < count; i++) {
+        const j = (i + 1) % count;
+        const idxI = start + i;
+        const idxJ = start + j;
+        const topI = points2D[idxI];
+        const topJ = points2D[idxJ];
+        const baseIndex = sidePositions.length / 3;
 
-                    const ddx = topJ.x - topI.x;
-                    const ddz = topJ.y - topI.y;
-                    const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
-                    const u0 = cum / sideUvScale;
-                    const u1 = (cum + edgeLen) / sideUvScale;
-                    const vH = initialHeight / sideUvScale;
-                    sideUVs.push(u0, vH);
-                    sideUVs.push(u0, 0);
-                    sideUVs.push(u1, vH);
-                    sideUVs.push(u1, 0);
+        sidePositions.push(topI.x, initialHeight, topI.y);
+        sidePositions.push(topI.x, 0, topI.y);
+        sidePositions.push(topJ.x, initialHeight, topJ.y);
+        sidePositions.push(topJ.x, 0, topJ.y);
 
-                    sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-                    sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+        const ddx = topJ.x - topI.x;
+        const ddz = topJ.y - topI.y;
+        const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
+        const u0 = cum / sideUvScale;
+        const u1 = (cum + edgeLen) / sideUvScale;
+        const vH = initialHeight / sideUvScale;
+        sideUVs.push(u0, vH, u0, 0, u1, vH, u1, 0);
 
-                    this._sideEdgeIJ.push([idxI, idxJ]);
-                    this._sideEdgeLengths.push(edgeLen);
-                    cum += edgeLen;
-                }
-            }
+        if (!flipSides) {
+            sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+        } else {
+            // Тот же quad, но с обратным обходом → нормаль на 180°.
+            sideIndices.push(baseIndex, baseIndex + 2, baseIndex + 1);
+            sideIndices.push(baseIndex + 1, baseIndex + 2, baseIndex + 3);
+        }
+
+        this._sideEdgeIJ.push([idxI, idxJ]);
+        this._sideEdgeLengths.push(edgeLen);
+        cum += edgeLen;
+    }
+}
 
             const sideGeometry = new THREE.BufferGeometry();
             sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
@@ -1589,13 +1618,13 @@ private _scheduleBucketChange(bucket: number): void {
             return;
         }
 
-        // Смена зум-бакета — только когда зум стабилен.
-        if (this._simplify && !map._zoomActive && !map._cameraAnimation) {
-            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
-            if (bucket !== this._currentSimplifyBucket) {
-                this._scheduleBucketChange(bucket);
-            }
-        }
+// Polygon._update
+if (this._simplify) {
+    const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+    if (bucket !== this._currentSimplifyBucket) {
+        this._scheduleBucketChange(bucket);
+    }
+}
 
         if (this._invalidGeometry || !this._isWithinView()) {
             this._applyHidden();
@@ -1635,6 +1664,11 @@ private _scheduleBucketChange(bucket: number): void {
 
         this._group.visible = true;
         this._isVisible = true;
+
+        if (this._pendingRebuild) {
+            this._rebuildGeometry();
+        }
+
 
         const now = performance.now();
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);

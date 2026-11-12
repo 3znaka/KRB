@@ -613,6 +613,21 @@ function triangulatePolygon(outer, holes, eps) {
     });
     const indices = earcut(vertices, holeIndices.length > 0 ? holeIndices : null, 2);
     if (!indices || indices.length === 0) return null;
+
+    const a = indices[0], b = indices[1], c = indices[2];
+    const ax = vertices[a * 2],     az = vertices[a * 2 + 1];
+    const bx = vertices[b * 2],     bz = vertices[b * 2 + 1];
+    const cx = vertices[c * 2],     cz = vertices[c * 2 + 1];
+    // Y-компонента (B−A)×(C−A):
+    const crossY = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+    if (crossY < 0) {
+        for (let i = 0; i < indices.length; i += 3) {
+            const tmp = indices[i + 1];
+            indices[i + 1] = indices[i + 2];
+            indices[i + 2] = tmp;
+        }
+    }
+
     return { vertices, indices };
 }
 

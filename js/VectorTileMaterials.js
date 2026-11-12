@@ -15,12 +15,12 @@ export const VectorTileMaterialsMixin = {
         const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
         const mat = new THREE.MeshBasicMaterial({
             color,
-            side: THREE.DoubleSide,
+            side: THREE.FrontSide,
             transparent: opacity < 1.0,
             opacity,
-            depthTest: this.depthTest, // true
-            depthWrite: false, // ← ВСЕГДА false, без вариантов
-            polygonOffset: false, // ← отключён, с depthWrite:false бессмыслен
+            depthTest: this.depthTest,
+            depthWrite: false,
+            polygonOffset: false,
         });
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);

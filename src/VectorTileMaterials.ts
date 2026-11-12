@@ -7,29 +7,29 @@ import type { WorkerLine, WidthSpec } from './VectorTileTypes.js';
  * Применяется через applyMixin(VectorTile.prototype, VectorTileMaterialsMixin).
  */
 export const VectorTileMaterialsMixin = {
-    _getFillMaterial(this: any, styleKey: string): THREE.Material {
-        const cached = this._fillMaterialCache.get(styleKey);
-        if (cached) return cached;
+_getFillMaterial(this: any, styleKey: string): THREE.Material {
+    const cached = this._fillMaterialCache.get(styleKey);
+    if (cached) return cached;
 
-        const parts = styleKey.split(':');
-        const color = parseInt(parts[2], 16);
-        const rawOpacity = parseFloat(parts[3]);
-        const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
+    const parts = styleKey.split(':');
+    const color = parseInt(parts[2], 16);
+    const rawOpacity = parseFloat(parts[3]);
+    const opacity = (Number.isNaN(rawOpacity) ? 1 : rawOpacity) * this.fillOpacity;
 
-        const mat = new THREE.MeshBasicMaterial({
-            color,
-            side: THREE.DoubleSide,
-            transparent: opacity < 1.0,
-            opacity,
-            depthTest: this.depthTest,   // true
-            depthWrite: false,           // ← ВСЕГДА false, без вариантов
-            polygonOffset: false,        // ← отключён, с depthWrite:false бессмыслен
-        });
+    const mat = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.FrontSide,      
+        transparent: opacity < 1.0,
+        opacity,
+        depthTest: this.depthTest,
+        depthWrite: false,
+        polygonOffset: false,
+    });
 
-        this._fillMaterialCache.set(styleKey, mat);
-        this._managedMaterials.add(mat);
-        return mat;
-    },
+    this._fillMaterialCache.set(styleKey, mat);
+    this._managedMaterials.add(mat);
+    return mat;
+},
 
     _getFillMaterialFromData(this: any, layerName: string, color: number, opacity: number | undefined): THREE.Material {
         const op = opacity ?? 1;

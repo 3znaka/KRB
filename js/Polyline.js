@@ -2,17 +2,14 @@
  * Polyline — полилиния с толстой линией (Line2), высотами узлов,
  * видимостью по зуму и подписью.
  *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
- * подпись, altitude и TextManager-контракт берутся из базового класса.
- * Здесь остаётся только специфика линии: вершины, Line2-геометрия,
- * altitudeMode, экранные данные для подписи, raycast-интерактив.
- *
  * @module polyline
  */
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
 import { douglasPeuckerIndices } from './Simplify.js';
+/** Дебаунс пересборки при смене зум-бакета (мс). */
+const REBUILD_DEBOUNCE_MS = 60;
 function pointToSegmentDistance(point, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
     const ap = new THREE.Vector3().subVectors(point, a);
@@ -47,11 +44,16 @@ export class Polyline extends SpatialObject {
     _absPositions = [];
     _nodeHeights = [];
     _cachedHeights = null;
+    // ── LOD ──
     _simplify = true;
     _simplifyTolerance = 0.5;
     _simplifyZoomBucket = 1;
     _simplifyCache = new Map();
     _currentSimplifyBucket = -1;
+    _pendingBucket = -1;
+    _rebuildTimer = null;
+    /** Пересборка отложена до момента, когда полилиния снова попадёт в кадр. */
+    _pendingRebuild = false;
     // ── Подпись: placement + vertical align ──
     _titlePlacement;
     _titleVerticalAlign;
@@ -149,10 +151,23 @@ export class Polyline extends SpatialObject {
         map.worldGroup.add(this._line);
         this._registerInteraction(map);
         this._isVisible = false;
+        // Reset LOD state
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
         this._simplifyCache.clear();
         this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
     }
     _teardown() {
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
@@ -210,6 +225,71 @@ export class Polyline extends SpatialObject {
         });
         this._simplifyCache.set(bucket, result);
         return result;
+    }
+    // =================================================================
+    // LOD rebuild (debounced)
+    // =================================================================
+    /**
+     * Синхронная пересборка LOD под конкретный бакет.
+     * Идемпотентна — можно звать повторно.
+     */
+    _doRebuildForBucket(bucket, simplified) {
+        if (!this._map)
+            return;
+        this._pendingRebuild = false;
+        this._currentSimplifyBucket = bucket;
+        const positions = simplified ?? this._getSimplifiedPositions(bucket);
+        this._absPositions = [];
+        this._nodeHeights = [];
+        for (const pt of positions) {
+            this._absPositions.push(this._map.project(pt, this._crs));
+            const h = pt?.[2];
+            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
+        }
+        this._cachedHeights = null;
+        this._screenData.valid = false;
+    }
+    /**
+     * Вызывается из таймера. Полилиния вне кадра — не тратим кадр,
+     * помечаем `_pendingRebuild` и догоним в `_update`, когда вернётся.
+     */
+    _onSimplifyBucketChange(bucket) {
+        if (bucket === this._currentSimplifyBucket)
+            return;
+        const oldCount = this._absPositions.length;
+        const simplified = this._getSimplifiedPositions(bucket);
+        this._currentSimplifyBucket = bucket;
+        // Визуально ничего не изменится — не пересобираем.
+        if (oldCount === simplified.length) {
+            this._pendingRebuild = false;
+            return;
+        }
+        if (!this._isVisible) {
+            this._pendingRebuild = true;
+            return;
+        }
+        this._doRebuildForBucket(bucket, simplified);
+    }
+    /**
+     * Дебаунс. Если таймер уже тикает — обновляем целевой бакет,
+     * не сбрасываем отсчёт (аналог «trailing edge»).
+     */
+    _scheduleBucketChange(bucket) {
+        if (this._rebuildTimer) {
+            this._pendingBucket = bucket;
+            return;
+        }
+        this._pendingBucket = bucket;
+        this._rebuildTimer = setTimeout(() => {
+            this._rebuildTimer = null;
+            if (!this._map)
+                return;
+            const b = this._pendingBucket;
+            this._pendingBucket = -1;
+            if (b >= 0 && b !== this._currentSimplifyBucket) {
+                this._onSimplifyBucketChange(b);
+            }
+        }, REBUILD_DEBOUNCE_MS);
     }
     // =================================================================
     // Интерактив
@@ -299,11 +379,6 @@ export class Polyline extends SpatialObject {
     // =================================================================
     // Dash
     // =================================================================
-    /**
-     * Устанавливает/убирает пунктир. `null` — сплошная линия.
-     * `[dash, gap]` в world-метрах (LineMaterial без `worldUnits: false`).
-     * Изменение дешёвое: не пересобирает геометрию, только uniforms.
-     */
     setLineDasharray(dasharray) {
         this._lineDasharray = dasharray;
         if (!this._material)
@@ -326,7 +401,6 @@ export class Polyline extends SpatialObject {
             ? [this._lineDasharray[0], this._lineDasharray[1]]
             : this._lineDasharray;
     }
-    /** Сдвиг паттерна вдоль линии (world-метры). */
     setLineDashOffset(offset) {
         if (!Number.isFinite(offset))
             return this;
@@ -339,7 +413,7 @@ export class Polyline extends SpatialObject {
     }
     getLineDashOffset() { return this._lineDashOffset; }
     // =================================================================
-    // Altitude MODE (setAltitude/getAltitude — в базе)
+    // Altitude MODE
     // =================================================================
     setAltitudeMode(mode) {
         this._altitudeMode = mode;
@@ -379,16 +453,20 @@ export class Polyline extends SpatialObject {
     // =================================================================
     // Позиции
     // =================================================================
-    /**
-     * Заменяет вершины. Пересчитывает `_absPositions` (если линия уже
-     * на карте). Геометрия пересоберётся на следующем кадре через
-     * `_update` → `_applyPositions`.
-     */
     setPositions(positions) {
         if (!positions || positions.length < 2)
             return this;
         this._positions = positions;
         this._screenData.valid = false;
+        // Всегда сбрасываем pending-состояние, даже без карты.
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
         if (!this._map)
             return this;
         this._absPositions = [];
@@ -401,15 +479,11 @@ export class Polyline extends SpatialObject {
         }
         this._cachedHeights = null;
         this._lastHeightUpdateTime = 0;
-        this._simplifyCache.clear();
-        this._currentSimplifyBucket = -1;
         return this;
     }
-    /** Возвращает копию исходных координат (в `crs` полилинии). */
     getPositions() {
         return this._positions.map(p => [...p]);
     }
-    /** Центр bbox в WGS84: `[lon, lat]`, либо `null`. */
     getCenter() {
         const b = this.getBounds('EPSG:4326');
         if (!b)
@@ -440,6 +514,12 @@ export class Polyline extends SpatialObject {
         const res = this._material.resolution;
         if (res.x !== canvas.width || res.y !== canvas.height) {
             this._material.resolution.set(canvas.width, canvas.height);
+        }
+        // Полилиния снова в кадре — догоняем отложенную LOD-пересборку
+        // (могла быть запланирована, пока полилиния была за фрустумом).
+        if (this._pendingRebuild) {
+            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+            this._doRebuildForBucket(bucket);
         }
         this._applySimplification(map.currentDiscreteZoom);
         this._updateHeights();
@@ -498,23 +578,16 @@ export class Polyline extends SpatialObject {
     _applySimplification(zoom) {
         if (!this._simplify || !this._map)
             return;
-        if (this._map._zoomActive || this._map._cameraAnimation)
-            return;
         const bucket = Math.floor(zoom / this._simplifyZoomBucket);
         if (bucket === this._currentSimplifyBucket)
             return;
-        this._currentSimplifyBucket = bucket;
-        const simplified = this._getSimplifiedPositions(bucket);
-        // Пересобираем _absPositions / _nodeHeights из упрощённых.
-        this._absPositions = [];
-        this._nodeHeights = [];
-        for (const pt of simplified) {
-            this._absPositions.push(this._map.project(pt, this._crs));
-            const h = pt?.[2];
-            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
+        // Во время активного зума/анимации — дебаунсим, но не блокируем
+        // LOD-обновления полностью (в отличие от старого поведения).
+        if (this._map._zoomActive || this._map._cameraAnimation) {
+            this._scheduleBucketChange(bucket);
+            return;
         }
-        this._cachedHeights = null;
-        this._screenData.valid = false;
+        this._doRebuildForBucket(bucket);
     }
     _applyPositions() {
         if (!this._map || !this._cachedHeights)
@@ -633,7 +706,7 @@ export class Polyline extends SpatialObject {
         }
     }
     // =================================================================
-    // Подпись: параметры вдоль линии
+    // Подпись
     // =================================================================
     getVisibleInterval() {
         return this._screenData.valid ? this._screenData.visibleInterval : null;

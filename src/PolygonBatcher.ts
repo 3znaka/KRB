@@ -199,14 +199,23 @@ class BatchedGroup {
 
             // ── SIDES (per-ring) ──
             const ringStarts = (data.ringStarts && data.ringStarts.length > 0) ? data.ringStarts : [0];
-            for (let r = 0; r < ringStarts.length; r++) {
-                const start = ringStarts[r];
-                const end = (r + 1 < ringStarts.length) ? ringStarts[r + 1] : n;
-                const count = end - start;
-                if (count < 2) continue;
+for (let r = 0; r < ringStarts.length; r++) {
+    const start = ringStarts[r];
+    const end = (r + 1 < ringStarts.length) ? ringStarts[r + 1] : n;
+    const count = end - start;
+    if (count < 2) continue;
 
-                let cum = 0;
-                for (let i = 0; i < count; i++) {
+    let sa = 0;
+    for (let i = 0; i < count; i++) {
+        const j = (i + 1) % count;
+        const a = wc[start + i];
+        const b = wc[start + j];
+        sa += a[0] * b[1] - b[0] * a[1];
+    }
+    const flipSides = (sa > 0) !== (r > 0);
+
+    let cum = 0;
+    for (let i = 0; i < count; i++) {
                     const j = (i + 1) % count;
                     const idxI = start + i;
                     const idxJ = start + j;
@@ -230,11 +239,17 @@ class BatchedGroup {
                     uvs.push(u0, vH, u0, 0, u1, vH, u1, 0);
                     cum += edgeLen;
 
-                    indices.push(quadBase, quadBase + 1, quadBase + 2);
-                    indices.push(quadBase + 1, quadBase + 3, quadBase + 2);
-                    triPoly.push(poly, poly);
-                }
-            }
+                
+                    if (!flipSides) {
+            indices.push(quadBase, quadBase + 1, quadBase + 2);
+            indices.push(quadBase + 1, quadBase + 3, quadBase + 2);
+        } else {
+            indices.push(quadBase, quadBase + 2, quadBase + 1);
+            indices.push(quadBase + 1, quadBase + 2, quadBase + 3);
+        }
+        triPoly.push(poly, poly);
+    }
+}
         }
 
         this._trianglesToPolygon = triPoly;
@@ -265,8 +280,8 @@ class BatchedGroup {
                 metalness: d0.metalness,
                 depthTest: d0.depthTest,
                 depthWrite: d0.depthWrite,
-                polygonOffset: true,
                 polygonOffsetFactor: -1,
+                 polygonOffset: false, 
                 polygonOffsetUnits: -1,
                 map: this._patternTexture ?? null,
             });

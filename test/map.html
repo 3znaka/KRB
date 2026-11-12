@@ -17,6 +17,8 @@
     bottom: 0;
     width: 100%;
     height: 100dvh; overflow:hidden;}
+    
+    #search-box {margin-top: 10px;}
 
         /* Попап */
         .krb-popup-tooltip { max-width: 400px; font: 12px/20px 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; }
@@ -126,6 +128,18 @@
         #pause { display: none; }
         #pause::after { content: 'Остановить'; }
         #pause.pause::after { content: 'Продолжить'; }
+        
+        @media (max-width: 600px) {
+        .map-overlay .map-overlay-inner {
+    position: absolute;
+   top: 0;
+   left: 0;
+    margin: 10px;
+    width: calc(100% - 20px);
+    box-sizing: border-box;
+        }
+        }
+        
     </style>
 </head>
 <body>
@@ -133,7 +147,7 @@
 
     <div class="map-overlay top">
         <div class="map-overlay-inner">
-            <label for="search">Ищите номер:</label>
+            <label for="search">Найти номер аудитории:</label>
             <div id="search-box">
                 <input id="search" autocomplete="off">
                 <span id="closebtn" onclick="clear_search()" title="Очистить поиск">×</span>
@@ -141,8 +155,8 @@
             </div>
             <p>
                 <label>
-                    или выберите уровень:
-                    <span data-tooltip="Уровни соответствуют этажам во всех корпусах, кроме Старого и Шестого корпусов (уровни смещены на один этаж: 2-ой уровень соответствует 1-му этажу)">⚠</span>
+                    Выбрать уровень:
+                    <span data-tooltip="Уровни соответствуют этажам во всех корпусах, кроме Исторического и Шестого корпусов (уровни смещены на один этаж: 2-ой уровень соответствует 1-му этажу)">⚠</span>
                 </label>
             </p>
             <div id="floor-control">
@@ -178,9 +192,10 @@
         // =============================================================
         // 1. Карта
         // =============================================================
-        const map = new KRB.Map({
+          const map = new KRB.Map({
             target: 'map',
             layers: [],
+            debug: true,
             view: new KRB.View({
                 centerLonLat: [37.66197, 55.763893],
                 zoom: 17.5,
@@ -207,20 +222,23 @@
         // =============================================================
         // 2. Подложка (OSM PBF)
         // =============================================================
-        const vectorLayer = new KRB.VectorTile({
-            url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
+const vectorLayer = new KRB.VectorTile({
+    url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
             maxNativeZoom: 14,
             minZoom: 2,
             maxZoom: 22,
-            invisibleLayers: ['poi']
-   
-        
-               }).addTo(map);
+            invisibleLayers: ['poi'],
+            zoomOffset: -2
+}).addTo(map);
 
         fetch('exclude.geojson')
             .then(r => r.json())
             .then(col => vectorLayer.addExclusionArea(col, ['building']))
             .catch(e => console.warn('exclude.geojson: ', e));
+            
+
+
+            
 
         // =============================================================
         // 3. Константы
@@ -308,7 +326,7 @@
             }
             if (props.description) str += `<div class="cnn">${props.description}</div>`;
             if (props.web)    str += `<p><span class="cont">➥</span> <a href="${props.web}" target="_blank">Перейти на сайт</a></p>`;
-            if (props.idroom) str += `<p><span class="cont">📅</span> <a href="https://study.miigaik.ru/classroom/${props.idroom}" target="_blank">Расписание</a></p>`;
+            if (props.idroom) str += `<p><span class="cont">📅</span> <a href="https://study.miigaik.ru/classroom/?classroomId=${props.idroom}" target="_blank">Расписание</a></p>`;
             return str;
         }
 
@@ -370,9 +388,9 @@
                         layer.add(new KRB.Polygon({
                             rings,
                             fillColor,
-                            fillOpacity: 1,
+                            fillOpacity: 0.9,
                             fillPattern: usePattern ? 'img/diag-red-104.png' : undefined,
-                            fillPatternScale: 10,
+                            fillPatternScale: 15,
                             strokeColor: 'rgba(0,0,0,0)',
                             strokeWidth: 0,
                             minZoom: ZOOM_THRESHOLD,
@@ -385,7 +403,10 @@
                             titleStyle: { fontSize: '10px', color: '#333', fontWeight: 'bold' },
                             titlePriority: 5,
                             properties: props,
-                            onClick: (e) => map.popupManager.showAtEvent(e, buildRoomPopup(props)),
+                            onClick: (e) => {
+    const html = buildBuildingPopup(props);
+    if (html) map.popupManager.showAtEvent(e, html);
+},
                             onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
                         }));
                     });
@@ -405,7 +426,7 @@
                         layer.add(new KRB.Polygon({
                             rings,
                             fillColor: props.status == 1 ? '#cf554b' : '#e8e8e8',
-                            fillOpacity: 1,
+                            fillOpacity:1,
                             strokeColor: 'rgba(0,0,0,0)',
                             strokeWidth: 0,
                             extruded: true,
@@ -435,7 +456,7 @@
                         position: [lon, lat],
                         iconUrl: poiIconUrl(props.type),
                         iconSize: [32, 32],
-                        anchor: [0.5, 1.0],
+                        anchor: [0.5, 0.5],
                         minZoom: 19,
                         clusterable: false,
                         properties: props
@@ -475,14 +496,14 @@ function buildBuildingLayer() {
     floor_layer.features.forEach(f => {
         const props = f.properties;
         const floor = props.floor;
-        const minH  = 3 * (floor - 1);
-        const height = 3;
+        const minH  = 6 * (floor - 1);
+        const height = 6;
 
         eachRing(f, rings => {
             buildingsLayer.add(new KRB.Polygon({
                 rings,
                 fillColor: props.color || '#cccccc',
-                fillOpacity: 0.9,                              // стартовое, до ZOOM_THRESHOLD
+                fillOpacity: 1,                              // стартовое, до ZOOM_THRESHOLD
                 zoomInterpolate: {
                     // от 1 на 17.5 до 0 на 18.0 — как в оригинале
                     fillOpacity: [[ZOOM_THRESHOLD, 1], [ZOOM_THRESHOLD + 1, 0]]
@@ -495,14 +516,12 @@ function buildBuildingLayer() {
                 altitude: 0,
                 altitudeMode: 'absolute',
                 maxZoom: ZOOM_THRESHOLD + 1,   // жёсткое отсечение после полного затухания
-                depthTest: true,
+                depthTest: true,   
                 depthWrite: true,
                 properties: props,
-                onClick: (e) => {
-    const html = buildBuildingPopup(props);
-    if (html) map.popupManager.showAtEvent(e, html);
-},
-                onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
+onClick: (e) => map.popupManager.showAtEvent(e, buildRoomPopup(props)),
+                simplify: false,
+                 onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
             }));
         });
     });
@@ -639,7 +658,7 @@ function buildBuildingLayer() {
         const searchResults = document.getElementById('search-results');
         const closeBtn = document.getElementById('closebtn');
 
-function selectSearchResult(item) {
+       function selectSearchResult(item) {
     closeBtn.style.display = 'block';
     setFloor(item.floor);
     searchInput.value = item.label || '';
@@ -784,7 +803,7 @@ function selectSearchResult(item) {
             if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
 
             if (userMarker) {
-                userMarker.setLonLat([lon, lat]);
+                userMarker.setLngLat([lon, lat]);
             } else {
                 userMarker = new KRB.Marker({
                     position: [lon, lat],
@@ -977,7 +996,7 @@ function selectSearchResult(item) {
             buildAllFloors();
             buildBuildingLayer();
 
-            // Атрибуция «© Картографический факультет МИИГАиК 2024»
+            // Атрибуция «© Картографический факультет МИИГАиК 2026»
             requestAnimationFrame(() => {
                 const attr = document.querySelector('#krb-ui-pane .krb-attribution');
                 if (!attr) return;
@@ -991,7 +1010,7 @@ function selectSearchResult(item) {
                 link.href = 'https://kartfak.ru/2022/04/15/';
                 link.target = '_blank';
                 link.rel = 'noopener noreferrer';
-                link.textContent = 'Картографический факультет МИИГАиК 2024';
+                link.textContent = 'Картографический факультет МИИГАиК 2026';
                 link.className = 'krb-attribution-link';
                 link.style.pointerEvents = 'all';
                 attr.appendChild(document.createTextNode('© '));
@@ -1008,7 +1027,9 @@ function selectSearchResult(item) {
 
 
 
+
         window.__map = map;
     </script>
+
 </body>
 </html>

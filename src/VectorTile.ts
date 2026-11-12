@@ -111,6 +111,7 @@ private _exclusionCrs: any = null;
     private _fillMaterialCache = new Map<string, THREE.Material>();
     private _lineMaterialCache = new Map<string, THREE.Material>();
     private _lineMaterialsSet = new Set<LineMaterial>();
+    private _dynamicLineMaterialsSet = new Set<LineMaterial>();
     private _managedMaterials = new WeakSet<THREE.Material>();
     private _managedGeometries = new WeakSet<THREE.BufferGeometry>();
     private _pointGeometryCache = new Map<string, THREE.BufferGeometry>();

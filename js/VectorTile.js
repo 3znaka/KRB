@@ -86,6 +86,7 @@ export class VectorTile {
     _fillMaterialCache = new Map();
     _lineMaterialCache = new Map();
     _lineMaterialsSet = new Set();
+    _dynamicLineMaterialsSet = new Set();
     _managedMaterials = new WeakSet();
     _managedGeometries = new WeakSet();
     _pointGeometryCache = new Map();

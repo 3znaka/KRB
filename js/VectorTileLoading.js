@@ -66,6 +66,8 @@ export const VectorTileLoadingMixin = {
         const key = `${z},${xSlippy},${ySlippy}`;
         if (this._pendingLoads.has(key) || this._tileCache.has(key))
             return;
+        if (this._settledKeys.has(key))
+            return;
         const map = this._map;
         if (!map)
             return;
@@ -410,19 +412,19 @@ export const VectorTileLoadingMixin = {
                 }
             }
         }
-        // Fallback — при пустом bbox обходим весь уровень. Поднять до z<=10,
-        // т.к. при 4326 и высоких z bbox может не собираться.
-        if (found.size === 0 && z <= 10) {
-            for (let y = 0; y <= maxTile; y++) {
-                const cz = -tileHalfY + (y + 0.5) * tileSizeTCY;
-                for (let x = 0; x <= maxTile; x++) {
-                    const cx = -tileHalfX + (x + 0.5) * tileSizeTCX;
-                    const m = this._tileToMap(cx, cz);
-                    if (!m)
-                        continue;
-                    const d = (m.x - tX) * (m.x - tX) + (m.z - tZ) * (m.z - tZ);
-                    found.set(`${z},${x},${y}`, d);
-                }
+        if (found.size === 0) {
+            // Просто 5×5 вокруг target в tile-CRS
+            const t = this._mapToTile(tX, tZ);
+            if (t) {
+                const cx = Math.floor((t.x + tileHalfX) / tileSizeTCX);
+                const cy = Math.floor((t.z + tileHalfY) / tileSizeTCY);
+                for (let dy = -2; dy <= 2; dy++)
+                    for (let dx = -2; dx <= 2; dx++) {
+                        const x = cx + dx, y = cy + dy;
+                        if (x < 0 || y < 0 || x > maxTile || y > maxTile)
+                            continue;
+                        found.set(`${z},${x},${y}`, 0);
+                    }
             }
         }
         const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);

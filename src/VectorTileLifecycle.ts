@@ -87,6 +87,7 @@ this._tileCrs = this._crsCode
 
         this._labelsDirty = true;
         this._lastCheckInit = false;
+        this._disposed = false;
         return this;
     },
 
@@ -118,6 +119,7 @@ this._tileCrs = this._crsCode
         this._lineMaterialCache.forEach((m: THREE.Material) => m.dispose());
         this._lineMaterialsSet.clear();
         this._fillMaterialCache.clear();
+        this._dynamicLineMaterialsSet.clear();
         this._lineMaterialCache.clear();
         this._pointGeometryCache.forEach((g: THREE.BufferGeometry) => g.dispose());
         this._pointGeometryCache.clear();
@@ -132,6 +134,7 @@ this._tileCrs = this._crsCode
         this._lastCheckInit = false;
         this._transitionStyleZoom = NaN;
         this._lastLabelState = undefined;
+        this._disposed = true;
     },
 
     addExclusionArea(this: any, collection: any, layers: string[]): any {
@@ -370,10 +373,12 @@ if (this._isDeformed) {
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
         const newKeys = unsortedNewKeys.map((it) => it.key);
         this._sortedLoadQueue = newKeys.concat(
-            this._sortedLoadQueue.filter((key: string) =>
-                !this._tileCache.has(key) && !this._pendingLoads.has(key) && visibleTiles.has(key),
-            ),
-        );
+  this._sortedLoadQueue.filter(key =>
+    !this._tileCache.has(key) &&
+    !this._pendingLoads.has(key) &&
+    !this._settledKeys.has(key) &&    
+    visibleTiles.has(key))
+);
 
         this._processQueue();
     },

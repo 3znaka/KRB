@@ -801,74 +801,108 @@ function identifyAt(tile, z, x, y, tileSizeX, tileSizeY, localX, localZ,
     const tolSq = tol * tol;
     const results = [];
 
-for (const styleName in workerStyles) {
-    const layerStyle = workerStyles[styleName];
-    if (!layerStyle) continue;
+    // ────────────────────────────────────────────────────────────────
+    // 1. Группируем видимые стили по sourceLayer.
+    //    Фильтр visible/invisible применяем здесь — до обхода фич.
+    //    Один sourceLayer → массив стилей, которые на него ссылаются.
+    // ────────────────────────────────────────────────────────────────
+    const stylesByLayer = new Map();
+    for (const styleName in workerStyles) {
+        const layerStyle = workerStyles[styleName];
+        if (!layerStyle) continue;
 
-    const srcName = layerStyle.sourceLayer || styleName;
-    if (visibleLayers && !visibleLayers.includes(styleName) && !visibleLayers.includes(srcName)) continue;
-    if (invisibleLayers && (invisibleLayers.includes(styleName) || invisibleLayers.includes(srcName))) continue;
+        const srcName = layerStyle.sourceLayer || styleName;
+        if (visibleLayers && !visibleLayers.includes(styleName) && !visibleLayers.includes(srcName)) continue;
+        if (invisibleLayers && (invisibleLayers.includes(styleName) || invisibleLayers.includes(srcName))) continue;
 
-    const layer = tile.layers[srcName];
-    if (!layer) continue;
+        let list = stylesByLayer.get(srcName);
+        if (!list) { list = []; stylesByLayer.set(srcName, list); }
+        list.push({ styleName, layerStyle });
+    }
 
-    for (let i = 0; i < layer.length; i++) {
-        const feature = layer.feature(i);
-        const props = feature.properties || {};
+    // ────────────────────────────────────────────────────────────────
+    // 2. Один проход по фичам каждого sourceLayer.
+    //    Геометрия грузится и трансформируется в world-координаты
+    //    РОВНО ОДИН РАЗ на фичу, независимо от количества стилей.
+    // ────────────────────────────────────────────────────────────────
+    for (const [srcName, styles] of stylesByLayer) {
+        const layer = tile.layers[srcName];
+        if (!layer) continue;
+
+        for (let i = 0; i < layer.length; i++) {
+            const feature = layer.feature(i);
             const geomType = feature.type;
             const geom = feature.loadGeometry();
+
+            // 3. Hit-test — тоже один раз на фичу.
             let hit = false;
             let minDistSq = Infinity;
 
             if (geomType === 1) {
                 const pt = geom[0] && geom[0][0];
                 if (pt) {
-                   const fx = (pt.x / 4095 - 0.5) * tileSizeX;
-    const fz = (pt.y / 4095 - 0.5) * tileSizeY;
+                    const fx = (pt.x / 4095 - 0.5) * tileSizeX;
+                    const fz = (pt.y / 4095 - 0.5) * tileSizeY;
                     const d2 = (fx - localX) * (fx - localX) + (fz - localZ) * (fz - localZ);
                     if (d2 < tolSq) { hit = true; minDistSq = d2; }
                 }
             } else if (geomType === 2) {
                 for (const ring of geom) {
                     for (let k = 0; k < ring.length - 1; k++) {
-                      const ax = (ring[k].x   / 4095 - 0.5) * tileSizeX;
-    const az = (ring[k].y   / 4095 - 0.5) * tileSizeY;
-    const bx = (ring[k+1].x / 4095 - 0.5) * tileSizeX;
-    const bz = (ring[k+1].y / 4095 - 0.5) * tileSizeY;
+                        const ax = (ring[k].x   / 4095 - 0.5) * tileSizeX;
+                        const az = (ring[k].y   / 4095 - 0.5) * tileSizeY;
+                        const bx = (ring[k+1].x / 4095 - 0.5) * tileSizeX;
+                        const bz = (ring[k+1].y / 4095 - 0.5) * tileSizeY;
                         const d2 = pointSegDistSq(localX, localZ, ax, az, bx, bz);
                         if (d2 < tolSq && d2 < minDistSq) { hit = true; minDistSq = d2; }
                     }
                 }
             } else if (geomType === 3) {
-               const rings2d = geom.map(ring => ring.map(p => ({
-        x: (p.x / 4095 - 0.5) * tileSizeX,
-        z: (p.y / 4095 - 0.5) * tileSizeY,
-    })));
+                const rings2d = geom.map(ring => ring.map(p => ({
+                    x: (p.x / 4095 - 0.5) * tileSizeX,
+                    z: (p.y / 4095 - 0.5) * tileSizeY,
+                })));
                 if (pointInPolygonRings({ x: localX, z: localZ }, rings2d)) {
                     hit = true;
                     minDistSq = 0;
                 }
             }
-            if (!hit) continue;
-   const filterPass = layerStyle.filter
-            ? resolveFilter(layerStyle.filter, feature)
-            : true;
 
-        results.push({
-            layer: styleName,          // ← отдаём имя стиля, не sourceLayer
-            sourceLayer: srcName,      // ← и исходное имя, для диагностики
-            type: geomType === 1 ? 'Point' : geomType === 2 ? 'LineString' : 'Polygon',
-                featureIndex: i,
-                featureId: feature.id,
-                distance: Math.sqrt(minDistSq),
-                filterPass,
-                style: snapshotStyle(layerStyle, props, zoom, geomType),
-            renderOrder: LAYER_RENDER_ORDER[styleName] !== undefined
-                ? LAYER_RENDER_ORDER[styleName] : null,
-            properties: props,
-            });
+            if (!hit) continue;
+
+            // 4. Общие для всех стилей данные — считаем один раз.
+            const props    = feature.properties || {};
+            const distance = Math.sqrt(minDistSq);
+            const typeStr  = geomType === 1 ? 'Point'
+                           : geomType === 2 ? 'LineString'
+                           : 'Polygon';
+
+            // 5. Размножаем результат на каждый стиль, ссылающийся на слой.
+            //    filterPass считается per-style (у каждого свой filter),
+            //    но НЕ гейтит включение — сохранено исходное поведение
+            //    (поле нужно для диагностики; пользователь решает сам).
+            for (const { styleName, layerStyle } of styles) {
+                const filterPass = layerStyle.filter
+                    ? resolveFilter(layerStyle.filter, feature)
+                    : true;
+
+                results.push({
+                    layer: styleName,          // имя стиля
+                    sourceLayer: srcName,      // исходное имя тайл-слоя (для диагностики)
+                    type: typeStr,
+                    featureIndex: i,
+                    featureId: feature.id,
+                    distance,
+                    filterPass,
+                    style: snapshotStyle(layerStyle, props, zoom, geomType),
+                    renderOrder: LAYER_RENDER_ORDER[styleName] !== undefined
+                        ? LAYER_RENDER_ORDER[styleName] : null,
+                    properties: props,
+                });
+            }
         }
     }
+
     results.sort((a, b) => a.distance - b.distance);
     return { tile: { z, x, y }, features: results };
 }

@@ -29,7 +29,19 @@ export const VectorTileMaterialsMixin = {
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
-        return this._getFillMaterial(key);
+        const mat = this._getFillMaterial(key);
+        // touch LRU
+        this._fillMaterialCache.delete(key);
+        this._fillMaterialCache.set(key, mat);
+        // эвикция
+        while (this._fillMaterialCache.size > (this._fillMaterialCacheMaxSize ?? 256)) {
+            const oldKey = this._fillMaterialCache.keys().next().value;
+            const old = this._fillMaterialCache.get(oldKey);
+            this._fillMaterialCache.delete(oldKey);
+            if (old && !this._managedMaterials.has(old))
+                old.dispose();
+        }
+        return mat;
     },
     _getLineMaterial(styleKey, dash) {
         const cached = this._lineMaterialCache.get(styleKey);
@@ -68,7 +80,7 @@ export const VectorTileMaterialsMixin = {
     _getDynamicLineMaterial(line) {
         if (!this._map)
             return null;
-        const isCasing = (line.widthAdd || 0) > 0; // casing всегда имеет widthAdd > 0
+        const isCasing = (line.widthAdd || 0) > 0;
         const wKey = typeof line.width === 'number'
             ? String(line.width)
             : JSON.stringify((line.width && line.width.stops) || line.width);
@@ -79,19 +91,17 @@ export const VectorTileMaterialsMixin = {
         const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}:${hideKey}:${dzKey}`;
         let mat = this._lineMaterialCache.get(key);
         if (mat)
-            return mat;
+            return mat; // ← НЕ добавляем сюда
         const canvas = this._map.renderer.domElement;
         const opts = {
             color: line.color,
             linewidth: 1,
             resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-            // ── Жёстко непрозрачный материал ────────────────────────────────
             transparent: false,
             opacity: 1,
-            alphaToCoverage: false, // ← ключевое: убираем MSAA-«просвечивание»
+            alphaToCoverage: false,
             depthTest: this.depthTest,
             depthWrite: false,
-            // ── Разный depth-bias: casing назад, fill вперёд ────────────────
             polygonOffset: true,
             polygonOffsetFactor: isCasing ? 2 : -2,
             polygonOffsetUnits: isCasing ? 4 : -4,
@@ -109,13 +119,13 @@ export const VectorTileMaterialsMixin = {
             hideBelow: line.hideBelow ?? null,
             dashZ: line.dashZ ?? null,
             role: isCasing ? 'casing' : 'fill',
-            isCasing, // ← добавить
-            layerName: line.layerName, // ← заодно для диагностики
+            isCasing,
+            layerName: line.layerName,
         };
         this._lineMaterialCache.set(key, mat);
         this._lineMaterialsSet.add(mat);
+        this._dynamicLineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
-        this._lastStyleZoom = NaN;
         return mat;
     },
     _evalCurve(c, z) {
@@ -137,13 +147,13 @@ export const VectorTileMaterialsMixin = {
     _updateDynamicLineMaterials(continuousZoom, discreteZoom) {
         if (!this._map)
             return;
-        // дискретный зум для dash-паттерна — округляем на всякий случай
         const dz = Math.round(discreteZoom);
-        for (const mat of this._lineMaterialsSet) {
-            const d = mat.userData.dyn;
+        for (const mat of this._dynamicLineMaterialsSet) {
+            if (!mat)
+                continue; // ← защита
+            const d = mat.userData?.dyn;
             if (!d)
                 continue;
-            // ── Ширина: плавно от continuous zoom ────────────────────────
             const base = this._evalCurve(d.width, continuousZoom);
             mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
             mat.visible = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);

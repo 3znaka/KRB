@@ -77,6 +77,7 @@ export const VectorTileLifecycleMixin = {
         }
         this._labelsDirty = true;
         this._lastCheckInit = false;
+        this._disposed = false;
         return this;
     },
     removeFromMap() {
@@ -111,6 +112,7 @@ export const VectorTileLifecycleMixin = {
         this._lineMaterialCache.forEach((m) => m.dispose());
         this._lineMaterialsSet.clear();
         this._fillMaterialCache.clear();
+        this._dynamicLineMaterialsSet.clear();
         this._lineMaterialCache.clear();
         this._pointGeometryCache.forEach((g) => g.dispose());
         this._pointGeometryCache.clear();
@@ -125,6 +127,7 @@ export const VectorTileLifecycleMixin = {
         this._lastCheckInit = false;
         this._transitionStyleZoom = NaN;
         this._lastLabelState = undefined;
+        this._disposed = true;
     },
     addExclusionArea(collection, layers) {
         if (!this._map) {
@@ -346,7 +349,10 @@ export const VectorTileLifecycleMixin = {
         });
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
         const newKeys = unsortedNewKeys.map((it) => it.key);
-        this._sortedLoadQueue = newKeys.concat(this._sortedLoadQueue.filter((key) => !this._tileCache.has(key) && !this._pendingLoads.has(key) && visibleTiles.has(key)));
+        this._sortedLoadQueue = newKeys.concat(this._sortedLoadQueue.filter(key => !this._tileCache.has(key) &&
+            !this._pendingLoads.has(key) &&
+            !this._settledKeys.has(key) &&
+            visibleTiles.has(key)));
         this._processQueue();
     },
 };

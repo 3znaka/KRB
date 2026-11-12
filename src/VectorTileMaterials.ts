@@ -31,11 +31,22 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
     return mat;
 },
 
-    _getFillMaterialFromData(this: any, layerName: string, color: number, opacity: number | undefined): THREE.Material {
-        const op = opacity ?? 1;
-        const key = `fill:${layerName}:${color.toString(16)}:${op}`;
-        return this._getFillMaterial(key);
-    },
+_getFillMaterialFromData(layerName, color, opacity) {
+    const op = opacity ?? 1;
+    const key = `fill:${layerName}:${color.toString(16)}:${op}`;
+    const mat = this._getFillMaterial(key);
+    // touch LRU
+    this._fillMaterialCache.delete(key);
+    this._fillMaterialCache.set(key, mat);
+    // эвикция
+    while (this._fillMaterialCache.size > (this._fillMaterialCacheMaxSize ?? 256)) {
+        const oldKey = this._fillMaterialCache.keys().next().value;
+        const old = this._fillMaterialCache.get(oldKey);
+        this._fillMaterialCache.delete(oldKey);
+        if (old && !this._managedMaterials.has(old)) old.dispose();
+    }
+    return mat;
+},
 
     _getLineMaterial(this: any, styleKey: string, dash?: number[]): LineMaterial {
         const cached = this._lineMaterialCache.get(styleKey) as LineMaterial | undefined;
@@ -79,8 +90,7 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
 _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
     if (!this._map) return null;
 
-    const isCasing = (line.widthAdd || 0) > 0;        // casing всегда имеет widthAdd > 0
-    
+    const isCasing = (line.widthAdd || 0) > 0;
 
     const wKey = typeof line.width === 'number'
         ? String(line.width)
@@ -92,23 +102,18 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
     const key = `dline:${line.layerName}:${line.color.toString(16)}:${wKey}+${add}:${dashKey}:${hideKey}:${dzKey}`;
 
     let mat = this._lineMaterialCache.get(key) as LineMaterial | undefined;
-    if (mat) return mat;
+    if (mat) return mat;                                  // ← НЕ добавляем сюда
 
     const canvas = this._map.renderer.domElement;
     const opts: any = {
         color: line.color,
         linewidth: 1,
         resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-
-        // ── Жёстко непрозрачный материал ────────────────────────────────
         transparent: false,
         opacity: 1,
-        alphaToCoverage: false,        // ← ключевое: убираем MSAA-«просвечивание»
-
+        alphaToCoverage: false,
         depthTest: this.depthTest,
         depthWrite: false,
-
-        // ── Разный depth-bias: casing назад, fill вперёд ────────────────
         polygonOffset: true,
         polygonOffsetFactor: isCasing ?  2 : -2,
         polygonOffsetUnits:  isCasing ?  4 : -4,
@@ -120,19 +125,19 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
         opts.dashScale = 1;
     }
     mat = new LineMaterial(opts);
-(mat as any).userData.dyn = {
-    width: line.width,
-    add: line.widthAdd || 0,
-    hideBelow: line.hideBelow ?? null,
-    dashZ: line.dashZ ?? null,
-    role: isCasing ? 'casing' : 'fill',
-    isCasing,                              // ← добавить
-    layerName: line.layerName,             // ← заодно для диагностики
-};
+    (mat as any).userData.dyn = {
+        width: line.width,
+        add: line.widthAdd || 0,
+        hideBelow: line.hideBelow ?? null,
+        dashZ: line.dashZ ?? null,
+        role: isCasing ? 'casing' : 'fill',
+        isCasing,
+        layerName: line.layerName,
+    };
     this._lineMaterialCache.set(key, mat);
     this._lineMaterialsSet.add(mat);
+    this._dynamicLineMaterialsSet.add(mat);             
     this._managedMaterials.add(mat);
-    this._lastStyleZoom = NaN;
     return mat;
 },
 
@@ -152,15 +157,12 @@ _getDynamicLineMaterial(this: any, line: WorkerLine): LineMaterial | null {
 
 _updateDynamicLineMaterials(this: any, continuousZoom: number, discreteZoom: number): void {
     if (!this._map) return;
-
-    // дискретный зум для dash-паттерна — округляем на всякий случай
     const dz = Math.round(discreteZoom);
 
-    for (const mat of this._lineMaterialsSet) {
-        const d = (mat as any).userData.dyn;
+    for (const mat of this._dynamicLineMaterialsSet) {
+        if (!mat) continue;                                // ← защита
+        const d = (mat as any).userData?.dyn;
         if (!d) continue;
-
-        // ── Ширина: плавно от continuous zoom ────────────────────────
         const base = this._evalCurve(d.width, continuousZoom);
         mat.linewidth = (base + (d.add || 0)) * this.lineWidthMultiplier;
         mat.visible  = mat.linewidth > 0 && !(d.hideBelow != null && base <= d.hideBelow);

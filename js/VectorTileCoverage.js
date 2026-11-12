@@ -189,6 +189,6 @@ export const VectorTileCoverageMixin = {
             this._retiredOldKeys.clear();
         }
         if (changed)
-            this._refreshTextLabelsForVisibleTiles();
+            this._labelsDirty = true;
     },
 };

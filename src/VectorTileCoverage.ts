@@ -190,6 +190,6 @@ const newKeys = new Set<string>(required);
             this._oldTileGroups = null;
             this._retiredOldKeys.clear();
         }
-        if (changed) this._refreshTextLabelsForVisibleTiles();
+        if (changed) this._labelsDirty = true;
     },
 };

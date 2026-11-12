@@ -567,7 +567,10 @@ if (deform) {
         styleZoom = this._transitionStyleZoom,
     ): Promise<THREE.Group | null> {
         if (generation !== this._generation || z !== this._lastSourceZoom) return null;
-        await this._workerReady;
+        if (!this._workerReadyResolved) {
+    await this._workerReady;
+    this._workerReadyResolved = true;
+}
         if (generation !== this._generation || z !== this._lastSourceZoom) return null;
         if (!this._worker || !this._map) return null;
 

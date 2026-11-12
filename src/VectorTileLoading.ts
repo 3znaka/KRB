@@ -50,15 +50,12 @@ _processQueue(this: any): void {
 
     this._queueProcessing = true;
     try {
-        const capacity = this._maxConcurrent - this._activeLoads;
-        const toLoad = this._sortedLoadQueue.splice(0, capacity);
-        for (const key of toLoad) {
-            const [z, x, y] = key.split(',').map(Number);
-            this._loadTile(z, x, y);   // синхронная часть выполнится сразу
-        }
-    } finally {
-        this._queueProcessing = false;
+    while (this._activeLoads < this._maxConcurrent && this._sortedLoadQueue.length > 0) {
+        const key = this._sortedLoadQueue.shift()!;
+        const [z, x, y] = key.split(',').map(Number);
+        this._loadTile(z, x, y);
     }
+} finally { this._queueProcessing = false; }
 
     if (this._sortedLoadQueue.length > 0 && !this._queueTimer) {
         this._queueTimer = setTimeout(() => {
@@ -97,7 +94,9 @@ _processQueue(this: any): void {
             countedAsActive = true;
         };
         const finishLoad = () => {
-            if (countedAsActive) { this._activeLoads--; countedAsActive = false; }
+            if (countedAsActive && this._generation === requestGeneration) {
+        this._activeLoads--;
+    }
             if (this._pendingLoadGenerations.get(key) === requestGeneration) {
                 this._pendingLoads.delete(key);
                 this._pendingLoadGenerations.delete(key);

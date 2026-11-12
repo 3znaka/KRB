@@ -103,6 +103,7 @@ export const VectorTileCoverageMixin = {
         this._lastPrefetchZoom = -1;
         this._labelsDirty = true;
         this._coverageDirty = true;
+        this._activeLoads = 0;
     },
 
     _resolveCoverage(this: any): void {

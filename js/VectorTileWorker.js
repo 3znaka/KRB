@@ -522,7 +522,10 @@ export const VectorTileWorkerMixin = {
     async _sendToWorker(buffer, z, x, y, is3d, existingGroup = null, generation = this._generation, styleZoom = this._transitionStyleZoom) {
         if (generation !== this._generation || z !== this._lastSourceZoom)
             return null;
-        await this._workerReady;
+        if (!this._workerReadyResolved) {
+            await this._workerReady;
+            this._workerReadyResolved = true;
+        }
         if (generation !== this._generation || z !== this._lastSourceZoom)
             return null;
         if (!this._worker || !this._map)

@@ -194,7 +194,7 @@ export class VectorTile {
         this._rootGroup.renderOrder = this._tileGroupRenderOrder;
         this._maxConcurrent = options.maxConcurrent ?? 4;
         this._queueInterval = options.queueInterval ?? 250;
-        this._throttle = options.updateThrottle ?? 500;
+        this._throttle = options.updateThrottle ?? 150;
         this._tileDataCacheMaxSize = options.tileDataCacheMaxSize ?? 200;
         this._groupCacheMaxSize = options.groupCacheMaxSize ?? 100;
         this.buildings3dOpacity = options.buildings3dOpacity ?? 0.8;

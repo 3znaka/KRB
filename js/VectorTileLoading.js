@@ -50,11 +50,10 @@ export const VectorTileLoadingMixin = {
             return;
         this._queueProcessing = true;
         try {
-            const capacity = this._maxConcurrent - this._activeLoads;
-            const toLoad = this._sortedLoadQueue.splice(0, capacity);
-            for (const key of toLoad) {
+            while (this._activeLoads < this._maxConcurrent && this._sortedLoadQueue.length > 0) {
+                const key = this._sortedLoadQueue.shift();
                 const [z, x, y] = key.split(',').map(Number);
-                this._loadTile(z, x, y); // синхронная часть выполнится сразу
+                this._loadTile(z, x, y);
             }
         }
         finally {
@@ -94,9 +93,8 @@ export const VectorTileLoadingMixin = {
             countedAsActive = true;
         };
         const finishLoad = () => {
-            if (countedAsActive) {
+            if (countedAsActive && this._generation === requestGeneration) {
                 this._activeLoads--;
-                countedAsActive = false;
             }
             if (this._pendingLoadGenerations.get(key) === requestGeneration) {
                 this._pendingLoads.delete(key);

@@ -356,11 +356,14 @@ export const VectorTileLifecycleMixin = {
             unsortedNewKeys.push({ key, distSq: dx * dx + dz * dz });
         });
         unsortedNewKeys.sort((a, b) => a.distSq - b.distSq);
-        const newKeys = unsortedNewKeys.map((it) => it.key);
-        this._sortedLoadQueue = newKeys.concat(this._sortedLoadQueue.filter(key => !this._tileCache.has(key) &&
+        const newKeys = unsortedNewKeys.map(it => it.key);
+        const newKeySet = new Set(newKeys);
+        const oldKeys = this._sortedLoadQueue.filter(key => !newKeySet.has(key) && // ← дедуп
+            !this._tileCache.has(key) &&
             !this._pendingLoads.has(key) &&
             !this._settledKeys.has(key) &&
-            visibleTiles.has(key)));
+            visibleTiles.has(key));
+        this._sortedLoadQueue = newKeys.concat(oldKeys);
         this._processQueue();
     },
 };

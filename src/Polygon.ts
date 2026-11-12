@@ -350,27 +350,50 @@ export class Polygon extends SpatialObject {
         }
 
         const z = bucket * this._simplifyZoomBucket;
-        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
-        const full = this._getFullRenderRings();
+const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+const full = this._getFullRenderRings();
 
-        const result: RenderRing[] = full.map((ring, ringIdx) => {
-            const { worldCoords, heights } = ring;
-            if (worldCoords.length < 4) return ring;
+const result: RenderRing[] = full.map((ring, ringIdx) => {
+    const { worldCoords, heights } = ring;
+    if (worldCoords.length < 4) return ring;
 
-            const tol = ringIdx === 0 ? tolWorld : tolWorld * 0.5;
-            const keptIdx = simplifyRingIndices(worldCoords, tol);
-            if (keptIdx.length < 3 || keptIdx.length === worldCoords.length) {
-                return ring;
-            }
+    const tol = ringIdx === 0 ? tolWorld : tolWorld * 0.5;
+    const keptIdx = simplifyRingIndices(worldCoords, tol);
 
-            const sWC: [number, number][] = new Array(keptIdx.length);
-            const sH: number[] = new Array(keptIdx.length);
-            for (let k = 0; k < keptIdx.length; k++) {
-                sWC[k] = worldCoords[keptIdx[k]];
-                sH[k] = heights[keptIdx[k]];
-            }
-            return { worldCoords: sWC, heights: sH };
-        });
+    // DP мог вернуть вырожденное кольцо [0, k, 0] — длина 3,
+    // но уникальных вершин 2. Отбрасываем замыкающий дубль и считаем
+    // «эффективное» количество.
+    let effective = keptIdx.length;
+    if (effective >= 2) {
+        const a = worldCoords[keptIdx[0]];
+        const b = worldCoords[keptIdx[effective - 1]];
+        if (a && b && a[0] === b[0] && a[1] === b[1]) effective--;
+    }
+
+    if (effective < 3 || keptIdx.length === worldCoords.length) {
+        return ring; // ← фолбэк на полное кольцо, это нормально
+    }
+
+    // Доп. страховка: площадь меньше квадрата допуска →
+    // на экране это < 1 px², упрощать нет смысла.
+    let area2 = 0;
+    for (let k = 0; k < keptIdx.length - 1; k++) {
+        const a = worldCoords[keptIdx[k]];
+        const b = worldCoords[keptIdx[k + 1]];
+        area2 += a[0] * b[1] - b[0] * a[1];
+    }
+    if (Math.abs(area2) * 0.5 < tolWorld * tolWorld) {
+        return ring;
+    }
+
+    const sWC: [number, number][] = new Array(keptIdx.length);
+    const sH: number[] = new Array(keptIdx.length);
+    for (let k = 0; k < keptIdx.length; k++) {
+        sWC[k] = worldCoords[keptIdx[k]];
+        sH[k] = heights[keptIdx[k]];
+    }
+    return { worldCoords: sWC, heights: sH };
+});
 
         this._simplifyCache.set(bucket, result);
         this._renderRings = result;
@@ -1190,10 +1213,14 @@ private _buildFillGeometry(map: any): void {
         }
     }
 
-    if (points2D.length < 3) {
-        console.warn('Polygon: after processing rings, less than 3 vertices');
-        return;
-    }
+if (points2D.length < 3) {
+    this._invalidGeometry = true;
+    this._group.visible = false;
+    this._worldCoords.length = 0;
+    this._nodeHeights.length = 0;
+    this._ringStartIndices.length = 0;
+    return;
+}
 
     if (!this._hasAntimeridianWrap()
         && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {

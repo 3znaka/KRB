@@ -615,8 +615,9 @@ export const CoreInputMixin = {
                 angleDelta2 += 2 * Math.PI;
             const zoomDelta = Math.log2(curDist / ts.prevDist);
             const target = this.controls.target;
-            const prevCameraDist = this.getTargetDistanceForZoom(this.continuousZoom);
-            const newCameraDist = prevCameraDist * Math.pow(0.5, zoomDelta);
+            const proposedZoom = this.continuousZoom + zoomDelta;
+            const clampedZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, proposedZoom));
+            const newCameraDist = this.getTargetDistanceForZoom(clampedZoom);
             const newAzimuth = this.allowRotate
                 ? ts.prevAzimuth - angleDelta2
                 : ts.prevAzimuth;

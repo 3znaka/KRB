@@ -85,6 +85,7 @@ const result = processTile(
 }
 
 const DEFAULT_STYLES = ${JSON.stringify(DEFAULT_STYLES)};
+const DASH_REFERENCE_ZOOM = 14;
 const LAYER_RENDER_ORDER = ${JSON.stringify(LAYER_RENDER_ORDER)};
 let workerStyles = DEFAULT_STYLES;
 
@@ -1288,8 +1289,8 @@ const chains = splitRingByBoundary(ring, halfTileX, halfTileY, eps);
                         // dash фиксируем на зуме тайла; масштаб по continuousZoom
                         // докручивается в _updateDynamicLineMaterials.
 const dash = dashPx
-? scaleDash(dashPx, Math.min(tileSizeX, tileSizeY), z, z)
-: null;
+  ? scaleDash(dashPx, Math.min(tileSizeX, tileSizeY), z, DASH_REFERENCE_ZOOM)
+  : null;
 
                         const finalColor = opacity < 1
                             ? blendWithBackground(color, opacity)
@@ -1325,7 +1326,7 @@ if (!lineGroup) {
         rings: [],
 renderOrder: semanticOrder,
         dash,
-        dashZ: dash ? z : null,
+        dashZ: dash ? DASH_REFERENCE_ZOOM : null,
         width: widthCurve,
         widthAdd: 0,
         hideBelow: null

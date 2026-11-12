@@ -30,7 +30,7 @@ export const VectorTileLoadingMixin = {
                 .then((r) => (r.ok ? r.arrayBuffer() : null))
                 .then((buf) => {
                 if (buf && this._map && !this._disposed) {
-                    this._setTileDataCache(dataKey, buf.slice(0));
+                    this._setTileDataCache(dataKey, buf); // без slice — владение буфером уходит в кэш
                 }
                 return buf;
             })
@@ -40,22 +40,27 @@ export const VectorTileLoadingMixin = {
         }
     },
     _processQueue() {
-        if (!this.visible)
+        if (this._queueProcessing)
             return;
-        if (this._disposed)
+        if (!this.visible || this._disposed)
             return;
         if (this._activeLoads >= this._maxConcurrent)
             return;
         if (this._sortedLoadQueue.length === 0)
             return;
-        const capacity = this._maxConcurrent - this._activeLoads;
-        const toLoad = this._sortedLoadQueue.splice(0, capacity);
-        for (const key of toLoad) {
-            const [z, x, y] = key.split(',').map(Number);
-            this._loadTile(z, x, y);
+        this._queueProcessing = true;
+        try {
+            const capacity = this._maxConcurrent - this._activeLoads;
+            const toLoad = this._sortedLoadQueue.splice(0, capacity);
+            for (const key of toLoad) {
+                const [z, x, y] = key.split(',').map(Number);
+                this._loadTile(z, x, y); // синхронная часть выполнится сразу
+            }
         }
-        if (this._sortedLoadQueue.length > 0) {
-            clearTimeout(this._queueTimer);
+        finally {
+            this._queueProcessing = false;
+        }
+        if (this._sortedLoadQueue.length > 0 && !this._queueTimer) {
             this._queueTimer = setTimeout(() => {
                 this._queueTimer = null;
                 this._processQueue();
@@ -525,6 +530,7 @@ export const VectorTileLoadingMixin = {
         this._lastIs3d = undefined;
         this._lastPrefetchZoom = -1;
         this._labelsDirty = true;
+        this._lastLabelState = undefined;
         this._lastCheckInit = false;
     },
 };

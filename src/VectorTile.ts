@@ -46,7 +46,8 @@ export class VectorTile {
     fillOpacity: number;
     depthTest: boolean;
     visibleLayers: string[] | null;
-    invisibleLayers: string[] | null; 
+    invisibleLayers: string[] | null;
+     
     zoomOffset: number;
     buildings3d: boolean;
     buildings3dMinZoom: number;
@@ -79,6 +80,8 @@ private _tileCrs: any = null;
 private _exclusionCrs: any = null;
     private _labelIdPrefix: string;
     private _themeRef: any = null;
+
+    private _queueProcessing = false;
 
     private _tileGroupRenderOrder: number;
     private _map: any = null;
@@ -119,7 +122,7 @@ private _exclusionCrs: any = null;
     private _exclusionAreas: Array<Array<{ x: number; z: number }>> = [];
     private _exclusionLayers = new Set<string>();
 
-    private _lastCanvasSize = { width: 0, height: 0 };
+    private _lastCanvasSize = { width: -1, height: -1 };
     private _lastWorldPos = new THREE.Vector3();
     private _lastMovementTime = 0;
     private _lastLabelUpdateTime = 0;

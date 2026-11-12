@@ -224,10 +224,9 @@ _deformArray(pos, df) {
     }
 },
 
-// Точечная версия для textPoints / textLines / points.
-_deformXZ(x, z, df) {
-    const out = { x: 0, z: 0 };
-    if (!this._tileToMapLocal(x, z, df, out)) return { x, z };
+_deformXZ(this: any, x: number, z: number, df: TileDeform) {
+    const out = this._deformScratch || (this._deformScratch = { x: 0, z: 0 });
+    if (!this._tileToMapLocal(x, z, df, out)) { out.x = x; out.z = z; }
     return out;
 },
     _deformGeometry(this: any, geom: THREE.BufferGeometry, df: TileDeform): void {

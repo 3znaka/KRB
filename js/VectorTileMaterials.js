@@ -7,8 +7,12 @@ import { THREE, LineMaterial } from './js_TP/tpb.js';
 export const VectorTileMaterialsMixin = {
     _getFillMaterial(styleKey) {
         const cached = this._fillMaterialCache.get(styleKey);
-        if (cached)
+        if (cached) {
+            // LRU-touch
+            this._fillMaterialCache.delete(styleKey);
+            this._fillMaterialCache.set(styleKey, cached);
             return cached;
+        }
         const parts = styleKey.split(':');
         const color = parseInt(parts[2], 16);
         const rawOpacity = parseFloat(parts[3]);
@@ -24,23 +28,17 @@ export const VectorTileMaterialsMixin = {
         });
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);
+        const maxSize = this._fillMaterialCacheMaxSize ?? 256;
+        while (this._fillMaterialCache.size > maxSize) {
+            const oldKey = this._fillMaterialCache.keys().next().value;
+            this._fillMaterialCache.delete(oldKey);
+        }
         return mat;
     },
     _getFillMaterialFromData(layerName, color, opacity) {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
         const mat = this._getFillMaterial(key);
-        // touch LRU
-        this._fillMaterialCache.delete(key);
-        this._fillMaterialCache.set(key, mat);
-        // эвикция
-        while (this._fillMaterialCache.size > (this._fillMaterialCacheMaxSize ?? 256)) {
-            const oldKey = this._fillMaterialCache.keys().next().value;
-            const old = this._fillMaterialCache.get(oldKey);
-            this._fillMaterialCache.delete(oldKey);
-            if (old && !this._managedMaterials.has(old))
-                old.dispose();
-        }
         return mat;
     },
     _getLineMaterial(styleKey, dash) {

@@ -117,6 +117,7 @@ export const VectorTileLifecycleMixin = {
         this._pointGeometryCache.forEach((g) => g.dispose());
         this._pointGeometryCache.clear();
         this._tileDataCache.clear();
+        this._tileDataCacheBytes = 0;
         this._prefetchInFlight.clear();
         this._lastPrefetchZoom = -1;
         this._clearGroupCache();
@@ -250,10 +251,17 @@ export const VectorTileLifecycleMixin = {
         if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue)
             && (this._tileCache.size > 0 || this._oldTileGroups)) {
             const force = !!this._labelsDirty;
-            this._labelsDirty = false;
-            this._lastLabelUpdateTime = labelNow;
-            this._lastLabelRefreshZoom = zoomNow;
-            this._refreshTextLabelsForVisibleTiles(force);
+            // Не форсим чаще ~8 Гц — обычный refresh и так идёт с settle-задержкой.
+            if (force && labelNow - (this._lastForceRefreshTime ?? 0) < 120) {
+                // оставляем dirty — отработаем позже
+            }
+            else {
+                this._labelsDirty = false;
+                this._lastForceRefreshTime = labelNow;
+                this._lastLabelUpdateTime = labelNow;
+                this._lastLabelRefreshZoom = zoomNow;
+                this._refreshTextLabelsForVisibleTiles(force);
+            }
         }
         const now = performance.now();
         if (now - this._lastUpdateTime < this._throttle) {

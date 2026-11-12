@@ -60,6 +60,7 @@ export class VectorTile {
     _exclusionCrs = null;
     _labelIdPrefix;
     _themeRef = null;
+    _queueProcessing = false;
     _tileGroupRenderOrder;
     _map = null;
     _rootGroup;
@@ -92,7 +93,7 @@ export class VectorTile {
     _pointGeometryCache = new Map();
     _exclusionAreas = [];
     _exclusionLayers = new Set();
-    _lastCanvasSize = { width: 0, height: 0 };
+    _lastCanvasSize = { width: -1, height: -1 };
     _lastWorldPos = new THREE.Vector3();
     _lastMovementTime = 0;
     _lastLabelUpdateTime = 0;

@@ -479,7 +479,7 @@ export class PolygonBatcher {
     private _pendingRebuild = false;
     private _dirtyTime = 0;
     private _lastCheckTime = 0;
-    private _checkInterval = 500;
+    private _checkInterval = 2000;
     private _debounceMs = 100;
     private _disposed = false;
 

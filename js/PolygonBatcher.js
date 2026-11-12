@@ -412,7 +412,7 @@ export class PolygonBatcher {
     _pendingRebuild = false;
     _dirtyTime = 0;
     _lastCheckTime = 0;
-    _checkInterval = 500;
+    _checkInterval = 2000;
     _debounceMs = 100;
     _disposed = false;
     constructor(layer) {

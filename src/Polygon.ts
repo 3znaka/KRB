@@ -85,6 +85,7 @@ const INVALID_EDGE_FRACTION = 8;
 const DEFAULT_FILL_PATTERN_SCALE = 64;
 /** Дебаунс пересборки при смене зум-бакета (мс). */
 const REBUILD_DEBOUNCE_MS = 60; 
+const _sharedPatternTextures = new Map<string, any>();
 
 let _rebuildSlotCounter = 0;
 
@@ -222,8 +223,6 @@ export class Polygon extends SpatialObject {
     private _centroidScreenPos: { x: number; y: number } | null = null;
 
     private _strokePositionsArray: number[] = [];
-    private _sidePositionsArray: number[] = [];
-    private _sideIndicesArray: number[] = [];
 
     constructor(options: PolygonOptions) {
         super();
@@ -388,26 +387,70 @@ export class Polygon extends SpatialObject {
         return true;
     }
 
-    /**
-     * Смена зум-бакета. Если упрощение не срезает ни одной вершины по
-     * сравнению с текущим состоянием — пересборка не нужна.
-     */
 private _onSimplifyBucketChange(bucket: number): void {
     if (bucket === this._currentSimplifyBucket) return;
 
     const oldRings = this._renderRings;
-    const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
+    const newRings = this._getRenderRings(bucket);
+    if (oldRings && this._sameRingCounts(oldRings, newRings)) return;
+    if (!this._map) return;
 
- if (oldRings && this._sameRingCounts(oldRings, newRings)) {
+    // NEW: для батченного полигона просто сбрасываем кэш и инвалидируем батч.
+    // Батчер пересоберётся через markDirty (debounce 100ms), увидит новый
+    // bucket в _getBatchStyleKey и создаст правильную геометрию.
+    if (this._batch) {
+        // нужно пересчитать _worldCoords / _nodeHeights / _cachedTopIndices
+        // под новый бакет — иначе _getBatchGeometryData вернёт старые данные.
+        this._refreshWorldCoordsForBatch();
+        this._invalidateBatch();
         return;
     }
-    if (!this._map) return;
+
     if (!this._isVisible) {
         this._pendingRebuild = true;
         return;
     }
-
     this._rebuildGeometry();
+}
+
+/** Пересчитывает _worldCoords / _nodeHeights / _cachedTopIndices
+ *  без создания мешей/материалов (для батченного полигона). */
+private _refreshWorldCoordsForBatch(): void {
+    if (!this._map) return;
+    const rings = this._getRenderRings(this._currentSimplifyBucket);
+    if (!rings || !rings.length) return;
+
+    this._worldCoords.length = 0;
+    this._nodeHeights.length = 0;
+    this._ringStartIndices.length = 0;
+
+    const coords: number[] = [];
+    const holeIndices: number[] = [];
+
+    for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+        const { worldCoords, heights } = rings[ringIdx];
+        if (worldCoords.length < 3) continue;
+        this._ringStartIndices.push(this._worldCoords.length);
+        if (ringIdx > 0) holeIndices.push(coords.length / 2);
+        let firstPoint: [number, number] | null = null;
+        for (let i = 0; i < worldCoords.length; i++) {
+            const [absX, absZ] = worldCoords[i];
+            if (i === 0) firstPoint = [absX, absZ];
+            if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1]) continue;
+            coords.push(absX - this._centroidWorld.x, absZ - this._centroidWorld.z);
+            this._worldCoords.push([absX, absZ]);
+            this._nodeHeights.push(heights[i] ?? 0);
+        }
+    }
+
+    const indices = earcut(coords, holeIndices.length ? holeIndices : undefined, 2);
+    if (indices.length === 0) { this._cachedTopIndices = null; return; }
+    const p2d = new Array(this._worldCoords.length);
+    for (let i = 0; i < this._worldCoords.length; i++) {
+        p2d[i] = { x: coords[i * 2], y: coords[i * 2 + 1] };
+    }
+    const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
+    this._cachedTopIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
 }
 
 private _scheduleBucketChange(bucket: number): void {
@@ -458,6 +501,8 @@ private _scheduleBucketChange(bucket: number): void {
         this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
         this._lastCentroidHeightUpdateTime = 0;
+
+         (this._layer as any)?._polygonBatcher?.markDirty?.();
     }
 
     protected _teardown(): void {
@@ -469,6 +514,10 @@ private _scheduleBucketChange(bucket: number): void {
         }
         this._pendingBucket = -1;
         this._pendingRebuild = false; 
+
+  if (this._batch) {
+        (this._layer as any)?._polygonBatcher?.markDirty?.();
+    }
 
         if (this._batch) {
             const b: any = this._batch;
@@ -540,21 +589,20 @@ private _scheduleBucketChange(bucket: number): void {
     // Batch hooks
     // =================================================================
 
-    /** @internal */
-    _getBatchStyleKey(): string | null {
-        if (this._invalidGeometry) return null;
-        if (this._tooltipText) return null;
-        if (this._onHover) return null;
-        // LOD-полигоны не батчим: батчер не умеет пересобираться при смене бакета.
-        if (this._simplify) return null;
+_getBatchStyleKey(): string | null {
+    if (this._invalidGeometry) return null;
+    if (this._tooltipText) return null;
+    if (this._onHover) return null;
+    // bucket теперь часть ключа: батчер сам пересоберётся при смене бакета
+    // через свою _shouldRebuild-проверку или через _invalidateBatch ниже.
 
-        if (this._fillPatternSource != null
-            && typeof this._fillPatternSource !== 'string') return null;
-        if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0) return null;
+    if (this._fillPatternSource != null
+        && typeof this._fillPatternSource !== 'string') return null;
+    if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0) return null;
 
-        return [
-            this._extruded ? 'E' : 'NE',
-            this._fillColor, this._fillOpacity,
+    return [
+        this._extruded ? 'E' : 'NE',
+        this._fillColor, this._fillOpacity,
             this._extruded ? this._roughness : '',
             this._extruded ? this._metalness : '',
             this._extruded ? (this._castShadow ? 1 : 0) : '',
@@ -566,8 +614,9 @@ private _scheduleBucketChange(bucket: number): void {
             this._altitudeMode,
             this._fillPatternSource ?? 'nop',
             this._fillPatternScale, this._fillPatternFit,
-        ].join('|');
-    }
+          'b' + (this._simplify ? this._currentSimplifyBucket : 0),
+    ].join('|');
+}
 
     /** @internal */
     _getBatchGeometryData(): any | null {
@@ -805,6 +854,8 @@ private _rebuildGeometry(): void {
     // Fill pattern
     // =================================================================
 
+
+
     private _loadFillPattern(): void {
         const src = this._fillPatternSource;
         const generation = ++this._fillPatternGeneration;
@@ -814,7 +865,9 @@ private _rebuildGeometry(): void {
             return;
         }
 
-        if (typeof src === 'string') {
+  if (typeof src === 'string') {
+    this._fillPatternTexture = _getSharedPatternTexture(src);
+    this._configureFillPatternTexture();
             const loader = new THREE.TextureLoader();
             loader.setCrossOrigin('anonymous');
             const tex = loader.load(
@@ -866,14 +919,15 @@ private _rebuildGeometry(): void {
         t.needsUpdate = true;
     }
 
-    private _applyFillPatternToMaterials(): void {
-        const map = this._fillPatternTexture;
-        for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial]) {
-            if (!mat) continue;
-            mat.map = map;
-            mat.needsUpdate = true;
-        }
+private _applyFillPatternToMaterials(): void {
+    const map = this._fillPatternTexture;
+    if (!map) return;
+    for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial]) {
+        if (!mat) continue;
+        mat.map = map;
+        mat.needsUpdate = true;
     }
+}
 
     // =================================================================
     // UV
@@ -1090,252 +1144,299 @@ private _createSurfaceMaterial(): any {
         return firstCrossY >= 0 ? indices : this._flipIndices(indices);
     }
 
-    private _buildFillGeometry(map: any): void {
-        this._cachedTopIndices = null;
+private _buildFillGeometry(map: any): void {
+    this._cachedTopIndices = null;
 
-        const rings = this._getRenderRings(this._currentSimplifyBucket);
-        if (!rings || !rings.length || rings[0].worldCoords.length < 3) {
-            console.warn('Polygon: rings[0] must have at least 3 points');
-            return;
+    const rings = this._getRenderRings(this._currentSimplifyBucket);
+    if (!rings || !rings.length || rings[0].worldCoords.length < 3) {
+        console.warn('Polygon: rings[0] must have at least 3 points');
+        return;
+    }
+
+    this._worldCoords.length = 0;
+    this._nodeHeights.length = 0;
+    this._ringStartIndices.length = 0;
+    this._sideEdgeIJ.length = 0;
+    this._sideEdgeLengths.length = 0;
+    this._builtSideHeight = -1;
+    this._avgNodeHeightValid = false;
+    this._boundsCache.clear();
+
+    const coords: number[] = [];
+    const points2D: any[] = [];
+    const holeIndices: number[] = [];
+    const ringStartIndices: number[] = [];
+
+    for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+        const { worldCoords, heights } = rings[ringIdx];
+        if (worldCoords.length < 3) {
+            console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
+            continue;
         }
 
+        ringStartIndices.push(points2D.length);
+        this._ringStartIndices.push(points2D.length);
+        if (ringIdx > 0) holeIndices.push(coords.length / 2);
+
+        let firstPoint: [number, number] | null = null;
+        for (let i = 0; i < worldCoords.length; i++) {
+            const [absX, absZ] = worldCoords[i];
+            if (i === 0) firstPoint = [absX, absZ];
+            if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1]) continue;
+            coords.push(absX, absZ);
+            points2D.push(new THREE.Vector2(absX, absZ));
+            this._worldCoords.push([absX, absZ]);
+            this._nodeHeights.push(heights[i] ?? 0);
+        }
+    }
+
+    if (points2D.length < 3) {
+        console.warn('Polygon: after processing rings, less than 3 vertices');
+        return;
+    }
+
+    if (!this._hasAntimeridianWrap()
+        && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {
+        this._invalidGeometry = true;
+        this._group.visible = false;
         this._worldCoords.length = 0;
         this._nodeHeights.length = 0;
-        this._ringStartIndices.length = 0;
-        this._sideEdgeIJ.length = 0;
-        this._sideEdgeLengths.length = 0;
-        this._builtSideHeight = -1;
-        this._avgNodeHeightValid = false;
-        this._boundsCache.clear();
+        return;
+    }
+    this._invalidGeometry = false;
 
-        const coords: number[] = [];
-        const points2D: any[] = [];
-        const holeIndices: number[] = [];
-        const ringStartIndices: number[] = [];
+    this._vertices2D = points2D;
+    this._cachedHeights = new Array(points2D.length).fill(0);
 
-        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            const { worldCoords, heights } = rings[ringIdx];
-            if (worldCoords.length < 3) {
-                console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
-                continue;
-            }
+    const indices = earcut(coords, holeIndices, 2);
+    if (indices.length === 0) {
+        console.warn('Polygon: Earcut returned no triangles');
+        return;
+    }
 
-            ringStartIndices.push(points2D.length);
-            this._ringStartIndices.push(points2D.length);
-            if (ringIdx > 0) holeIndices.push(coords.length / 2);
+    const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
+    const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
+    const bottomIndices = this._flipIndices(topIndices);
+    this._cachedTopIndices = topIndices;
 
-            let firstPoint: [number, number] | null = null;
-            for (let i = 0; i < worldCoords.length; i++) {
-                const [absX, absZ] = worldCoords[i];
-                if (i === 0) firstPoint = [absX, absZ];
-                if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1]) continue;
-                coords.push(absX, absZ);
-                points2D.push(new THREE.Vector2(absX, absZ));
-                this._worldCoords.push([absX, absZ]);
-                this._nodeHeights.push(heights[i] ?? 0);
-            }
+    // Визуальный центр — один раз на полигон, от исходных колец.
+    let cx: number, cy: number;
+    if (!this._centroidFromOriginal) {
+        const fullRings = this._getFullRenderRings();
+        const srcRings: [number, number][][] = fullRings.map(r => r.worldCoords);
+        const vc = _approxVisualCenter(srcRings, 0);
+        if (vc) {
+            this._centroidFromOriginal = { x: vc[0], z: vc[1] };
+        } else {
+            let sx = 0, sy = 0, cnt = 0;
+            for (const r of srcRings) for (const p of r) { sx += p[0]; sy += p[1]; cnt++; }
+            this._centroidFromOriginal = cnt ? { x: sx / cnt, z: sy / cnt } : { x: 0, z: 0 };
         }
+    }
+    cx = this._centroidFromOriginal.x;
+    cy = this._centroidFromOriginal.z;
 
-        if (points2D.length < 3) {
-            console.warn('Polygon: after processing rings, less than 3 vertices');
-            return;
-        }
+    this._centroidWorld.set(cx, 0, cy);
+    this._group.position.copy(this._centroidWorld);
 
-        if (!this._hasAntimeridianWrap()
-            && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {
-            this._invalidGeometry = true;
-            this._group.visible = false;
-            this._worldCoords.length = 0;
-            this._nodeHeights.length = 0;
-            return;
-        }
-        this._invalidGeometry = false;
+    for (let i = 0; i < points2D.length; i++) {
+        points2D[i].x -= cx;
+        points2D[i].y -= cy;
+    }
 
-        this._vertices2D = points2D;
-        this._cachedHeights = new Array(points2D.length).fill(0);
+    let maxRadiusSq = 0;
+    for (const pt of points2D) {
+        const rSq = pt.x * pt.x + pt.y * pt.y;
+        if (rSq > maxRadiusSq) maxRadiusSq = rSq;
+    }
+    this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
 
-        const indices = earcut(coords, holeIndices, 2);
-        if (indices.length === 0) {
-            console.warn('Polygon: Earcut returned no triangles');
-            return;
-        }
+    const patternScale = this._fillPatternScale > 0
+        ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
+    const uvParams = this._computeUVParams(patternScale);
 
-        const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
-        const topIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
-        const bottomIndices = this._flipIndices(topIndices);
-        this._cachedTopIndices = topIndices;
+    const topUVs = new Float32Array(points2D.length * 2);
+    for (let i = 0; i < points2D.length; i++) {
+        const wc = this._worldCoords[i];
+        const wx = wc ? wc[0] : 0;
+        const wz = wc ? wc[1] : 0;
+        topUVs[i * 2]     = (wx - uvParams.originX) / uvParams.scaleX;
+        topUVs[i * 2 + 1] = (wz - uvParams.originZ) / uvParams.scaleZ;
+    }
 
-        // Визуальный центр — один раз на полигон, от исходных колец.
-        let cx: number, cy: number;
-        if (!this._centroidFromOriginal) {
-            const fullRings = this._getFullRenderRings();
-            const srcRings: [number, number][][] = fullRings.map(r => r.worldCoords);
-            const vc = _approxVisualCenter(srcRings, 0);
-            if (vc) {
-                this._centroidFromOriginal = { x: vc[0], z: vc[1] };
-            } else {
-                let sx = 0, sy = 0, cnt = 0;
-                for (const r of srcRings) for (const p of r) { sx += p[0]; sy += p[1]; cnt++; }
-                this._centroidFromOriginal = cnt ? { x: sx / cnt, z: sy / cnt } : { x: 0, z: 0 };
-            }
-        }
-        cx = this._centroidFromOriginal.x;
-        cy = this._centroidFromOriginal.z;
+    const topGeometry = new THREE.BufferGeometry();
+    const topPosArray = new Float32Array(points2D.length * 3);
+    for (let i = 0; i < points2D.length; i++) {
+        const pt = points2D[i];
+        topPosArray[i * 3] = pt.x;
+        topPosArray[i * 3 + 1] = 0;
+        topPosArray[i * 3 + 2] = pt.y;
+    }
+    topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
+    topGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs, 2));
+    topGeometry.setIndex(topIndices);
 
-        this._centroidWorld.set(cx, 0, cy);
-        this._group.position.copy(this._centroidWorld);
+    const topNormals = new Float32Array(points2D.length * 3);
+    for (let i = 0; i < points2D.length; i++) topNormals[i * 3 + 1] = 1;
+    topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
+    topGeometry.computeBoundingSphere();
 
-        for (let i = 0; i < points2D.length; i++) {
-            points2D[i].x -= cx;
-            points2D[i].y -= cy;
-        }
+    const topMaterial = this._createSurfaceMaterial();
+    const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+    topMesh.renderOrder = POLYGON_RENDER_ORDER.TOP;
+    topMesh.frustumCulled = true;
+    topMesh.userData.polygon = this;
+    this._applyShadowFlags(topMesh);
+    this._fillMesh = topMesh;
+    this._fillGeometry = topGeometry;
+    this._fillMaterial = topMaterial;
+    this._group.add(topMesh);
 
-        let maxRadiusSq = 0;
-        for (const pt of points2D) {
-            const rSq = pt.x * pt.x + pt.y * pt.y;
-            if (rSq > maxRadiusSq) maxRadiusSq = rSq;
-        }
-        this._boundingSphereRadius = Math.sqrt(maxRadiusSq);
-
-        const patternScale = this._fillPatternScale > 0
-            ? this._fillPatternScale : DEFAULT_FILL_PATTERN_SCALE;
-        const uvParams = this._computeUVParams(patternScale);
-
-        const topUVs = new Float32Array(points2D.length * 2);
-        for (let i = 0; i < points2D.length; i++) {
-            const wc = this._worldCoords[i];
-            const wx = wc ? wc[0] : 0;
-            const wz = wc ? wc[1] : 0;
-            topUVs[i * 2]     = (wx - uvParams.originX) / uvParams.scaleX;
-            topUVs[i * 2 + 1] = (wz - uvParams.originZ) / uvParams.scaleZ;
-        }
-
-        const topGeometry = new THREE.BufferGeometry();
-        const topPosArray = new Float32Array(points2D.length * 3);
+    if (this._extruded) {
+        const bottomGeometry = new THREE.BufferGeometry();
+        const bottomPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
-            topPosArray[i * 3] = pt.x;
-            topPosArray[i * 3 + 1] = 0;
-            topPosArray[i * 3 + 2] = pt.y;
+            bottomPosArray[i * 3] = pt.x;
+            bottomPosArray[i * 3 + 1] = 0;
+            bottomPosArray[i * 3 + 2] = pt.y;
         }
-        topGeometry.setAttribute('position', new THREE.BufferAttribute(topPosArray, 3));
-        topGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs, 2));
-        topGeometry.setIndex(topIndices);
+        bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
+        bottomGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs.slice(), 2));
+        bottomGeometry.setIndex(bottomIndices);
 
-        const topNormals = new Float32Array(points2D.length * 3);
-        for (let i = 0; i < points2D.length; i++) topNormals[i * 3 + 1] = 1;
-        topGeometry.setAttribute('normal', new THREE.BufferAttribute(topNormals, 3));
-        topGeometry.computeBoundingSphere();
+        const bottomNormals = new Float32Array(points2D.length * 3);
+        for (let i = 0; i < points2D.length; i++) bottomNormals[i * 3 + 1] = -1;
+        bottomGeometry.setAttribute('normal', new THREE.BufferAttribute(bottomNormals, 3));
+        bottomGeometry.computeBoundingSphere();
 
-        const topMaterial = this._createSurfaceMaterial();
-        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-        topMesh.renderOrder = POLYGON_RENDER_ORDER.TOP;
-        topMesh.frustumCulled = true;
-        topMesh.userData.polygon = this;
-        this._applyShadowFlags(topMesh);
-        this._fillMesh = topMesh;
-        this._fillGeometry = topGeometry;
-        this._fillMaterial = topMaterial;
-        this._group.add(topMesh);
+        const bottomMaterial = this._createSurfaceMaterial();
+        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+        bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
+        bottomMesh.frustumCulled = true;
+        bottomMesh.userData.polygon = this;
+        this._applyShadowFlags(bottomMesh);
+        this._bottomMesh = bottomMesh;
+        this._bottomGeometry = bottomGeometry;
+        this._bottomMaterial = bottomMaterial;
+        this._group.add(bottomMesh);
 
-        if (this._extruded) {
-            const bottomGeometry = new THREE.BufferGeometry();
-            const bottomPosArray = new Float32Array(points2D.length * 3);
-            for (let i = 0; i < points2D.length; i++) {
-                const pt = points2D[i];
-                bottomPosArray[i * 3] = pt.x;
-                bottomPosArray[i * 3 + 1] = 0;
-                bottomPosArray[i * 3 + 2] = pt.y;
-            }
-            bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
-            bottomGeometry.setAttribute('uv', new THREE.BufferAttribute(topUVs.slice(), 2));
-            bottomGeometry.setIndex(bottomIndices);
-
-            const bottomNormals = new Float32Array(points2D.length * 3);
-            for (let i = 0; i < points2D.length; i++) bottomNormals[i * 3 + 1] = -1;
-            bottomGeometry.setAttribute('normal', new THREE.BufferAttribute(bottomNormals, 3));
-            bottomGeometry.computeBoundingSphere();
-
-            const bottomMaterial = this._createSurfaceMaterial();
-            const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-            bottomMesh.renderOrder = POLYGON_RENDER_ORDER.BOTTOM;
-            bottomMesh.frustumCulled = true;
-            bottomMesh.userData.polygon = this;
-            this._applyShadowFlags(bottomMesh);
-            this._bottomMesh = bottomMesh;
-            this._bottomGeometry = bottomGeometry;
-            this._bottomMaterial = bottomMaterial;
-            this._group.add(bottomMesh);
-
-            const sidePositions = this._sidePositionsArray;
-            const sideIndices = this._sideIndicesArray;
-            sidePositions.length = 0;
-            sideIndices.length = 0;
-
-            const sideUVs: number[] = [];
-            const sideUvScale = patternScale;
-            const initialHeight = this._height;
-
-for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
-    const start = this._ringStartIndices[ringIdx];
-    const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
-        ? this._ringStartIndices[ringIdx + 1] : points2D.length;
-    const count = nextRingStart - start;
-    if (count < 2) continue;
-
-    // Знак signed area в плоскости XZ (стандартное 2D-векторное произведение).
-    // sa > 0 → против часовой, sa < 0 → по часовой.
-    let sa = 0;
-    for (let i = 0; i < count; i++) {
-        const j = (i + 1) % count;
-        const a = points2D[start + i];
-        const b = points2D[start + j];
-        sa += a.x * b.y - b.x * a.y;
-    }
-    // Outer (ringIdx=0) хотим CW (sa<0), hole (ringIdx>0) хотим CCW (sa>0).
-    const flipSides = (sa > 0) !== (ringIdx > 0);
-
-    let cum = 0;
-    for (let i = 0; i < count; i++) {
-        const j = (i + 1) % count;
-        const idxI = start + i;
-        const idxJ = start + j;
-        const topI = points2D[idxI];
-        const topJ = points2D[idxJ];
-        const baseIndex = sidePositions.length / 3;
-
-        sidePositions.push(topI.x, initialHeight, topI.y);
-        sidePositions.push(topI.x, 0, topI.y);
-        sidePositions.push(topJ.x, initialHeight, topJ.y);
-        sidePositions.push(topJ.x, 0, topJ.y);
-
-        const ddx = topJ.x - topI.x;
-        const ddz = topJ.y - topI.y;
-        const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
-        const u0 = cum / sideUvScale;
-        const u1 = (cum + edgeLen) / sideUvScale;
+        // ── SIDE ─────────────────────────────────────────────────────────
+        // Пред-выделяем типизированные массивы ровно на количество рёбер:
+        // каждое ребро → 4 вершины (topI, bottomI, topJ, bottomJ).
+        // Это исключает реаллокации и финальные копии new Float32Array(...).
+        const sideUvScale = patternScale;
+        const initialHeight = this._height;
         const vH = initialHeight / sideUvScale;
-        sideUVs.push(u0, vH, u0, 0, u1, vH, u1, 0);
 
-        if (!flipSides) {
-            sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-            sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
-        } else {
-            // Тот же quad, но с обратным обходом → нормаль на 180°.
-            sideIndices.push(baseIndex, baseIndex + 2, baseIndex + 1);
-            sideIndices.push(baseIndex + 1, baseIndex + 2, baseIndex + 3);
+        // Сначала посчитаем общее количество рёбер (те же условия, что и в цикле ниже).
+        let totalEdges = 0;
+        for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+            const start = this._ringStartIndices[ringIdx];
+            const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+                ? this._ringStartIndices[ringIdx + 1] : points2D.length;
+            const count = nextRingStart - start;
+            if (count < 2) continue;
+            totalEdges += count;
         }
 
-        this._sideEdgeIJ.push([idxI, idxJ]);
-        this._sideEdgeLengths.push(edgeLen);
-        cum += edgeLen;
-    }
-}
+        const sidePositions = new Float32Array(totalEdges * 4 * 3);
+        const sideUVs      = new Float32Array(totalEdges * 4 * 2);
+        const sideIndices  = new Uint32Array(totalEdges * 6);
 
+        let posK = 0;    // индекс записи в sidePositions (float)
+        let uvK = 0;     // индекс записи в sideUVs (float)
+        let idxK = 0;    // индекс записи в sideIndices (uint32)
+        let vertBase = 0; // текущая база вершин для индексов
+
+        for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+            const start = this._ringStartIndices[ringIdx];
+            const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+                ? this._ringStartIndices[ringIdx + 1] : points2D.length;
+            const count = nextRingStart - start;
+            if (count < 2) continue;
+
+            // Знак signed area в плоскости XZ (стандартное 2D-векторное произведение).
+            // sa > 0 → против часовой, sa < 0 → по часовой.
+            let sa = 0;
+            for (let i = 0; i < count; i++) {
+                const j = (i + 1) % count;
+                const a = points2D[start + i];
+                const b = points2D[start + j];
+                sa += a.x * b.y - b.x * a.y;
+            }
+            // Outer (ringIdx=0) хотим CW (sa<0), hole (ringIdx>0) хотим CCW (sa>0).
+            const flipSides = (sa > 0) !== (ringIdx > 0);
+
+            let cum = 0;
+            for (let i = 0; i < count; i++) {
+                const j = (i + 1) % count;
+                const idxI = start + i;
+                const idxJ = start + j;
+                const topI = points2D[idxI];
+                const topJ = points2D[idxJ];
+
+                // 4 вершины: topI, bottomI, topJ, bottomJ
+                sidePositions[posK++] = topI.x;
+                sidePositions[posK++] = initialHeight;
+                sidePositions[posK++] = topI.y;
+
+                sidePositions[posK++] = topI.x;
+                sidePositions[posK++] = 0;
+                sidePositions[posK++] = topI.y;
+
+                sidePositions[posK++] = topJ.x;
+                sidePositions[posK++] = initialHeight;
+                sidePositions[posK++] = topJ.y;
+
+                sidePositions[posK++] = topJ.x;
+                sidePositions[posK++] = 0;
+                sidePositions[posK++] = topJ.y;
+
+                const ddx = topJ.x - topI.x;
+                const ddz = topJ.y - topI.y;
+                const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
+                const u0 = cum / sideUvScale;
+                const u1 = (cum + edgeLen) / sideUvScale;
+
+                sideUVs[uvK++] = u0;
+                sideUVs[uvK++] = vH;
+                sideUVs[uvK++] = u0;
+                sideUVs[uvK++] = 0;
+                sideUVs[uvK++] = u1;
+                sideUVs[uvK++] = vH;
+                sideUVs[uvK++] = u1;
+                sideUVs[uvK++] = 0;
+
+                if (!flipSides) {
+                    sideIndices[idxK++] = vertBase;
+                    sideIndices[idxK++] = vertBase + 1;
+                    sideIndices[idxK++] = vertBase + 2;
+                    sideIndices[idxK++] = vertBase + 1;
+                    sideIndices[idxK++] = vertBase + 3;
+                    sideIndices[idxK++] = vertBase + 2;
+                } else {
+                    // Тот же quad, но с обратным обходом → нормаль на 180°.
+                    sideIndices[idxK++] = vertBase;
+                    sideIndices[idxK++] = vertBase + 2;
+                    sideIndices[idxK++] = vertBase + 1;
+                    sideIndices[idxK++] = vertBase + 1;
+                    sideIndices[idxK++] = vertBase + 2;
+                    sideIndices[idxK++] = vertBase + 3;
+                }
+                vertBase += 4;
+
+                this._sideEdgeIJ.push([idxI, idxJ]);
+                this._sideEdgeLengths.push(edgeLen);
+                cum += edgeLen;
+            }
+        }
+
+        if (totalEdges > 0) {
             const sideGeometry = new THREE.BufferGeometry();
-            sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
-            sideGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(sideUVs), 2));
-            sideGeometry.setIndex(sideIndices);
+            sideGeometry.setAttribute('position', new THREE.BufferAttribute(sidePositions, 3));
+            sideGeometry.setAttribute('uv', new THREE.BufferAttribute(sideUVs, 2));
+            sideGeometry.setIndex(new THREE.BufferAttribute(sideIndices, 1));
             sideGeometry.computeVertexNormals();
             sideGeometry.computeBoundingSphere();
 
@@ -1351,9 +1452,10 @@ for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
             this._group.add(sideMesh);
             this._builtSideHeight = initialHeight;
         }
-
-        this._raycastMeshesCache = null;
     }
+
+    this._raycastMeshesCache = null;
+}
 
     private _buildStrokeGeometry(map: any): void {
         if (this._invalidGeometry) return;
@@ -1607,16 +1709,24 @@ for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
         const map = this._map;
         if (!map || !this._group) return;
 
-        if (this._batch) {
-            if (this._invalidGeometry || !this._isWithinView()) {
-                this._isVisible = false;
-                this._centroidScreenPos = null;
-                return;
-            }
-            this._isVisible = true;
-            this._updateCentroidScreenPos();
-            return;
+ if (this._batch) {
+    if (this._invalidGeometry || !this._isWithinView()) {
+        this._isVisible = false;
+        this._centroidScreenPos = null;
+        return;
+    }
+    this._isVisible = true;
+
+    // NEW: LOD в батче — тоже работает
+    if (this._simplify) {
+        const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+        if (bucket !== this._currentSimplifyBucket) {
+            this._scheduleBucketChange(bucket);
         }
+    }
+    this._updateCentroidScreenPos();
+    return;
+}
 
 // Polygon._update
 if (this._simplify) {
@@ -1705,16 +1815,24 @@ if (this._simplify) {
         const extrude = this._extruded ? this._height : 0;
         const n = this._vertices2D.length;
 
+        const ensuredTiles = isDynamic ? new Set<string>() : null;
+const ensureFor = (wx: number, wz: number) => {
+    const k = ((wx / 1000) | 0) + ',' + ((wz / 1000) | 0);
+    if (ensuredTiles!.has(k)) return;
+    ensuredTiles!.add(k);
+    map.ensureTileForPoint?.(wx, wz);
+};
+
         for (let i = 0; i < n; i++) {
             const wc = this._worldCoords[i];
             if (!wc) continue;
             let base = this._altitude;
             if (isDynamic) {
-                const worldX = wc[0] + wgPos.x;
-                const worldZ = wc[1] + wgPos.z;
-                map.ensureTileForPoint?.(worldX, worldZ);
-                base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
-            }
+    const worldX = wc[0] + wgPos.x;
+    const worldZ = wc[1] + wgPos.z;
+    ensureFor(worldX, worldZ);
+    base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
+}
             this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
 
@@ -2061,4 +2179,22 @@ function _approxVisualCenter(
         if (precision > 0 && step < precision) break;
     }
     return [bx, by];
+}
+
+
+function _getSharedPatternTexture(url: string): any {
+    let tex = _sharedPatternTextures.get(url);
+    if (tex) return tex;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    tex = loader.load(url, undefined, undefined, (err: any) => {
+        console.warn('Polygon: fillPattern load failed', url, err);
+        _sharedPatternTextures.delete(url);
+    });
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    _sharedPatternTextures.set(url, tex);
+    return tex;
 }

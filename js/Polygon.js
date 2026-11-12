@@ -16,6 +16,7 @@ const INVALID_EDGE_FRACTION = 8;
 const DEFAULT_FILL_PATTERN_SCALE = 64;
 /** Дебаунс пересборки при смене зум-бакета (мс). */
 const REBUILD_DEBOUNCE_MS = 60;
+const _sharedPatternTextures = new Map();
 let _rebuildSlotCounter = 0;
 function crossY(p0, p1, p2) {
     const dx1 = p1.x - p0.x, dz1 = p1.y - p0.y;
@@ -118,8 +119,6 @@ export class Polygon extends SpatialObject {
     _lastDiscreteZoom = -1;
     _centroidScreenPos = null;
     _strokePositionsArray = [];
-    _sidePositionsArray = [];
-    _sideIndicesArray = [];
     constructor(options) {
         super();
         this._properties = options.properties ?? {};
@@ -261,25 +260,74 @@ export class Polygon extends SpatialObject {
         }
         return true;
     }
-    /**
-     * Смена зум-бакета. Если упрощение не срезает ни одной вершины по
-     * сравнению с текущим состоянием — пересборка не нужна.
-     */
     _onSimplifyBucketChange(bucket) {
         if (bucket === this._currentSimplifyBucket)
             return;
         const oldRings = this._renderRings;
-        const newRings = this._getRenderRings(bucket); // обновляет _currentSimplifyBucket и _renderRings
-        if (oldRings && this._sameRingCounts(oldRings, newRings)) {
+        const newRings = this._getRenderRings(bucket);
+        if (oldRings && this._sameRingCounts(oldRings, newRings))
             return;
-        }
         if (!this._map)
             return;
+        // NEW: для батченного полигона просто сбрасываем кэш и инвалидируем батч.
+        // Батчер пересоберётся через markDirty (debounce 100ms), увидит новый
+        // bucket в _getBatchStyleKey и создаст правильную геометрию.
+        if (this._batch) {
+            // нужно пересчитать _worldCoords / _nodeHeights / _cachedTopIndices
+            // под новый бакет — иначе _getBatchGeometryData вернёт старые данные.
+            this._refreshWorldCoordsForBatch();
+            this._invalidateBatch();
+            return;
+        }
         if (!this._isVisible) {
             this._pendingRebuild = true;
             return;
         }
         this._rebuildGeometry();
+    }
+    /** Пересчитывает _worldCoords / _nodeHeights / _cachedTopIndices
+     *  без создания мешей/материалов (для батченного полигона). */
+    _refreshWorldCoordsForBatch() {
+        if (!this._map)
+            return;
+        const rings = this._getRenderRings(this._currentSimplifyBucket);
+        if (!rings || !rings.length)
+            return;
+        this._worldCoords.length = 0;
+        this._nodeHeights.length = 0;
+        this._ringStartIndices.length = 0;
+        const coords = [];
+        const holeIndices = [];
+        for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
+            const { worldCoords, heights } = rings[ringIdx];
+            if (worldCoords.length < 3)
+                continue;
+            this._ringStartIndices.push(this._worldCoords.length);
+            if (ringIdx > 0)
+                holeIndices.push(coords.length / 2);
+            let firstPoint = null;
+            for (let i = 0; i < worldCoords.length; i++) {
+                const [absX, absZ] = worldCoords[i];
+                if (i === 0)
+                    firstPoint = [absX, absZ];
+                if (i > 0 && firstPoint && absX === firstPoint[0] && absZ === firstPoint[1])
+                    continue;
+                coords.push(absX - this._centroidWorld.x, absZ - this._centroidWorld.z);
+                this._worldCoords.push([absX, absZ]);
+                this._nodeHeights.push(heights[i] ?? 0);
+            }
+        }
+        const indices = earcut(coords, holeIndices.length ? holeIndices : undefined, 2);
+        if (indices.length === 0) {
+            this._cachedTopIndices = null;
+            return;
+        }
+        const p2d = new Array(this._worldCoords.length);
+        for (let i = 0; i < this._worldCoords.length; i++) {
+            p2d[i] = { x: coords[i * 2], y: coords[i * 2 + 1] };
+        }
+        const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
+        this._cachedTopIndices = firstCrossY >= 0 ? indices : this._flipIndices(indices);
     }
     _scheduleBucketChange(bucket) {
         if (this._rebuildTimer) {
@@ -323,6 +371,7 @@ export class Polygon extends SpatialObject {
         this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
         this._lastCentroidHeightUpdateTime = 0;
+        this._layer?._polygonBatcher?.markDirty?.();
     }
     _teardown() {
         this._fillPatternGeneration++;
@@ -332,6 +381,9 @@ export class Polygon extends SpatialObject {
         }
         this._pendingBucket = -1;
         this._pendingRebuild = false;
+        if (this._batch) {
+            this._layer?._polygonBatcher?.markDirty?.();
+        }
         if (this._batch) {
             const b = this._batch;
             this._batch = null;
@@ -398,7 +450,6 @@ export class Polygon extends SpatialObject {
     // =================================================================
     // Batch hooks
     // =================================================================
-    /** @internal */
     _getBatchStyleKey() {
         if (this._invalidGeometry)
             return null;
@@ -406,9 +457,8 @@ export class Polygon extends SpatialObject {
             return null;
         if (this._onHover)
             return null;
-        // LOD-полигоны не батчим: батчер не умеет пересобираться при смене бакета.
-        if (this._simplify)
-            return null;
+        // bucket теперь часть ключа: батчер сам пересоберётся при смене бакета
+        // через свою _shouldRebuild-проверку или через _invalidateBatch ниже.
         if (this._fillPatternSource != null
             && typeof this._fillPatternSource !== 'string')
             return null;
@@ -428,6 +478,7 @@ export class Polygon extends SpatialObject {
             this._altitudeMode,
             this._fillPatternSource ?? 'nop',
             this._fillPatternScale, this._fillPatternFit,
+            'b' + (this._simplify ? this._currentSimplifyBucket : 0),
         ].join('|');
     }
     /** @internal */
@@ -682,6 +733,8 @@ export class Polygon extends SpatialObject {
             return;
         }
         if (typeof src === 'string') {
+            this._fillPatternTexture = _getSharedPatternTexture(src);
+            this._configureFillPatternTexture();
             const loader = new THREE.TextureLoader();
             loader.setCrossOrigin('anonymous');
             const tex = loader.load(src, (loaded) => {
@@ -737,6 +790,8 @@ export class Polygon extends SpatialObject {
     }
     _applyFillPatternToMaterials() {
         const map = this._fillPatternTexture;
+        if (!map)
+            return;
         for (const mat of [this._fillMaterial, this._bottomMaterial, this._sideMaterial]) {
             if (!mat)
                 continue;
@@ -1130,13 +1185,31 @@ export class Polygon extends SpatialObject {
             this._bottomGeometry = bottomGeometry;
             this._bottomMaterial = bottomMaterial;
             this._group.add(bottomMesh);
-            const sidePositions = this._sidePositionsArray;
-            const sideIndices = this._sideIndicesArray;
-            sidePositions.length = 0;
-            sideIndices.length = 0;
-            const sideUVs = [];
+            // ── SIDE ─────────────────────────────────────────────────────────
+            // Пред-выделяем типизированные массивы ровно на количество рёбер:
+            // каждое ребро → 4 вершины (topI, bottomI, topJ, bottomJ).
+            // Это исключает реаллокации и финальные копии new Float32Array(...).
             const sideUvScale = patternScale;
             const initialHeight = this._height;
+            const vH = initialHeight / sideUvScale;
+            // Сначала посчитаем общее количество рёбер (те же условия, что и в цикле ниже).
+            let totalEdges = 0;
+            for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
+                const start = this._ringStartIndices[ringIdx];
+                const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
+                    ? this._ringStartIndices[ringIdx + 1] : points2D.length;
+                const count = nextRingStart - start;
+                if (count < 2)
+                    continue;
+                totalEdges += count;
+            }
+            const sidePositions = new Float32Array(totalEdges * 4 * 3);
+            const sideUVs = new Float32Array(totalEdges * 4 * 2);
+            const sideIndices = new Uint32Array(totalEdges * 6);
+            let posK = 0; // индекс записи в sidePositions (float)
+            let uvK = 0; // индекс записи в sideUVs (float)
+            let idxK = 0; // индекс записи в sideIndices (uint32)
+            let vertBase = 0; // текущая база вершин для индексов
             for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {
                 const start = this._ringStartIndices[ringIdx];
                 const nextRingStart = (ringIdx + 1 < this._ringStartIndices.length)
@@ -1162,49 +1235,74 @@ export class Polygon extends SpatialObject {
                     const idxJ = start + j;
                     const topI = points2D[idxI];
                     const topJ = points2D[idxJ];
-                    const baseIndex = sidePositions.length / 3;
-                    sidePositions.push(topI.x, initialHeight, topI.y);
-                    sidePositions.push(topI.x, 0, topI.y);
-                    sidePositions.push(topJ.x, initialHeight, topJ.y);
-                    sidePositions.push(topJ.x, 0, topJ.y);
+                    // 4 вершины: topI, bottomI, topJ, bottomJ
+                    sidePositions[posK++] = topI.x;
+                    sidePositions[posK++] = initialHeight;
+                    sidePositions[posK++] = topI.y;
+                    sidePositions[posK++] = topI.x;
+                    sidePositions[posK++] = 0;
+                    sidePositions[posK++] = topI.y;
+                    sidePositions[posK++] = topJ.x;
+                    sidePositions[posK++] = initialHeight;
+                    sidePositions[posK++] = topJ.y;
+                    sidePositions[posK++] = topJ.x;
+                    sidePositions[posK++] = 0;
+                    sidePositions[posK++] = topJ.y;
                     const ddx = topJ.x - topI.x;
                     const ddz = topJ.y - topI.y;
                     const edgeLen = Math.sqrt(ddx * ddx + ddz * ddz);
                     const u0 = cum / sideUvScale;
                     const u1 = (cum + edgeLen) / sideUvScale;
-                    const vH = initialHeight / sideUvScale;
-                    sideUVs.push(u0, vH, u0, 0, u1, vH, u1, 0);
+                    sideUVs[uvK++] = u0;
+                    sideUVs[uvK++] = vH;
+                    sideUVs[uvK++] = u0;
+                    sideUVs[uvK++] = 0;
+                    sideUVs[uvK++] = u1;
+                    sideUVs[uvK++] = vH;
+                    sideUVs[uvK++] = u1;
+                    sideUVs[uvK++] = 0;
                     if (!flipSides) {
-                        sideIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
-                        sideIndices.push(baseIndex + 1, baseIndex + 3, baseIndex + 2);
+                        sideIndices[idxK++] = vertBase;
+                        sideIndices[idxK++] = vertBase + 1;
+                        sideIndices[idxK++] = vertBase + 2;
+                        sideIndices[idxK++] = vertBase + 1;
+                        sideIndices[idxK++] = vertBase + 3;
+                        sideIndices[idxK++] = vertBase + 2;
                     }
                     else {
                         // Тот же quad, но с обратным обходом → нормаль на 180°.
-                        sideIndices.push(baseIndex, baseIndex + 2, baseIndex + 1);
-                        sideIndices.push(baseIndex + 1, baseIndex + 2, baseIndex + 3);
+                        sideIndices[idxK++] = vertBase;
+                        sideIndices[idxK++] = vertBase + 2;
+                        sideIndices[idxK++] = vertBase + 1;
+                        sideIndices[idxK++] = vertBase + 1;
+                        sideIndices[idxK++] = vertBase + 2;
+                        sideIndices[idxK++] = vertBase + 3;
                     }
+                    vertBase += 4;
                     this._sideEdgeIJ.push([idxI, idxJ]);
                     this._sideEdgeLengths.push(edgeLen);
                     cum += edgeLen;
                 }
             }
-            const sideGeometry = new THREE.BufferGeometry();
-            sideGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(sidePositions), 3));
-            sideGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(sideUVs), 2));
-            sideGeometry.setIndex(sideIndices);
-            sideGeometry.computeVertexNormals();
-            sideGeometry.computeBoundingSphere();
-            const sideMaterial = this._createSurfaceMaterial();
-            const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
-            sideMesh.renderOrder = POLYGON_RENDER_ORDER.SIDE;
-            sideMesh.frustumCulled = true;
-            sideMesh.userData.polygon = this;
-            this._applyShadowFlags(sideMesh);
-            this._sideMesh = sideMesh;
-            this._sideGeometry = sideGeometry;
-            this._sideMaterial = sideMaterial;
-            this._group.add(sideMesh);
-            this._builtSideHeight = initialHeight;
+            if (totalEdges > 0) {
+                const sideGeometry = new THREE.BufferGeometry();
+                sideGeometry.setAttribute('position', new THREE.BufferAttribute(sidePositions, 3));
+                sideGeometry.setAttribute('uv', new THREE.BufferAttribute(sideUVs, 2));
+                sideGeometry.setIndex(new THREE.BufferAttribute(sideIndices, 1));
+                sideGeometry.computeVertexNormals();
+                sideGeometry.computeBoundingSphere();
+                const sideMaterial = this._createSurfaceMaterial();
+                const sideMesh = new THREE.Mesh(sideGeometry, sideMaterial);
+                sideMesh.renderOrder = POLYGON_RENDER_ORDER.SIDE;
+                sideMesh.frustumCulled = true;
+                sideMesh.userData.polygon = this;
+                this._applyShadowFlags(sideMesh);
+                this._sideMesh = sideMesh;
+                this._sideGeometry = sideGeometry;
+                this._sideMaterial = sideMaterial;
+                this._group.add(sideMesh);
+                this._builtSideHeight = initialHeight;
+            }
         }
         this._raycastMeshesCache = null;
     }
@@ -1476,6 +1574,13 @@ export class Polygon extends SpatialObject {
                 return;
             }
             this._isVisible = true;
+            // NEW: LOD в батче — тоже работает
+            if (this._simplify) {
+                const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+                if (bucket !== this._currentSimplifyBucket) {
+                    this._scheduleBucketChange(bucket);
+                }
+            }
             this._updateCentroidScreenPos();
             return;
         }
@@ -1554,6 +1659,14 @@ export class Polygon extends SpatialObject {
         const wgPos = map.worldGroup.position;
         const extrude = this._extruded ? this._height : 0;
         const n = this._vertices2D.length;
+        const ensuredTiles = isDynamic ? new Set() : null;
+        const ensureFor = (wx, wz) => {
+            const k = ((wx / 1000) | 0) + ',' + ((wz / 1000) | 0);
+            if (ensuredTiles.has(k))
+                return;
+            ensuredTiles.add(k);
+            map.ensureTileForPoint?.(wx, wz);
+        };
         for (let i = 0; i < n; i++) {
             const wc = this._worldCoords[i];
             if (!wc)
@@ -1562,7 +1675,7 @@ export class Polygon extends SpatialObject {
             if (isDynamic) {
                 const worldX = wc[0] + wgPos.x;
                 const worldZ = wc[1] + wgPos.z;
-                map.ensureTileForPoint?.(worldX, worldZ);
+                ensureFor(worldX, worldZ);
                 base = map.getSurfaceHeightAt(worldX, worldZ) + this._altitude;
             }
             this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) + this._minHeight + extrude;
@@ -1934,4 +2047,21 @@ function _approxVisualCenter(rings, precision = 0) {
             break;
     }
     return [bx, by];
+}
+function _getSharedPatternTexture(url) {
+    let tex = _sharedPatternTextures.get(url);
+    if (tex)
+        return tex;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    tex = loader.load(url, undefined, undefined, (err) => {
+        console.warn('Polygon: fillPattern load failed', url, err);
+        _sharedPatternTextures.delete(url);
+    });
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    _sharedPatternTextures.set(url, tex);
+    return tex;
 }

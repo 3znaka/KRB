@@ -195,6 +195,7 @@
           const map = new KRB.Map({
             target: 'map',
             layers: [],
+            
             debug: true,
             view: new KRB.View({
                 centerLonLat: [37.66197, 55.763893],
@@ -227,6 +228,8 @@ const vectorLayer = new KRB.VectorTile({
             maxNativeZoom: 14,
             minZoom: 2,
             maxZoom: 22,
+        attributionTitle: 'Картографический факультет МИИГАиК, 2026',
+        attributionUrl: 'https://kartfak.ru/',
             invisibleLayers: ['poi'],
             zoomOffset: -2
 }).addTo(map);
@@ -995,27 +998,6 @@ onClick: (e) => map.popupManager.showAtEvent(e, buildRoomPopup(props)),
         try {
             buildAllFloors();
             buildBuildingLayer();
-
-            // Атрибуция «© Картографический факультет МИИГАиК 2026»
-            requestAnimationFrame(() => {
-                const attr = document.querySelector('#krb-ui-pane .krb-attribution');
-                if (!attr) return;
-                if (attr.textContent.trim()) {
-                    const sep = document.createElement('span');
-                    sep.className = 'krb-attribution-sep';
-                    sep.textContent = ' · ';
-                    attr.appendChild(sep);
-                }
-                const link = document.createElement('a');
-                link.href = 'https://kartfak.ru/2022/04/15/';
-                link.target = '_blank';
-                link.rel = 'noopener noreferrer';
-                link.textContent = 'Картографический факультет МИИГАиК 2026';
-                link.className = 'krb-attribution-link';
-                link.style.pointerEvents = 'all';
-                attr.appendChild(document.createTextNode('© '));
-                attr.appendChild(link);
-            });
 
             const routeHash = getRouteHash();
             if (routeHash) startRoute(parseInt(routeHash, 10) || 1);

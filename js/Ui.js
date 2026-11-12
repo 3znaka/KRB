@@ -10,32 +10,53 @@ import { THREE } from './js_TP/tpb.js';
  * Собирает атрибуцию со всех слоёв карты — как растровых, переданных
  * в `layers`, так и векторных/динамических, добавленных через
  * `addTo(map)` и лежащих в `_dynamicLayers`.
- *
- * Устраняет старую проблему: векторный слой с `attributionTitle`
- * не попадал в `map.layers`, поэтому копирайт не отображался.
  */
 function collectAttributions(map) {
     const result = [];
     const seen = new Set();
     const push = (layer) => {
-        if (!layer || !layer.attributionTitle)
+        if (!layer)
             return;
-        const title = String(layer.attributionTitle).trim();
+        const rawTitle = layer.attributionTitle ??
+            layer.attribution ??
+            layer.attribution_text;
+        if (!rawTitle)
+            return;
+        const title = String(rawTitle).trim();
         if (!title)
             return;
-        const url = layer.attributionUrl || '';
+        const url = layer.attributionUrl ??
+            layer.attribution_url ??
+            '';
         const key = title + '|' + url;
         if (seen.has(key))
             return;
         seen.add(key);
         result.push({ title, url });
     };
-    const staticLayers = Array.isArray(map.layers) ? map.layers : [];
-    for (const layer of staticLayers)
-        push(layer);
-    const dynamicLayers = Array.isArray(map._dynamicLayers) ? map._dynamicLayers : [];
-    for (const layer of dynamicLayers)
-        push(layer);
+    // Сам объект map тоже может нести атрибуцию
+    push(map);
+    // Пробуем разные возможные контейнеры слоёв
+    const candidates = [
+        map.layers,
+        map._layers,
+        map._dynamicLayers,
+        map.overlayLayers,
+        map.vectorLayers,
+        map.rasterLayers,
+    ];
+    try {
+        if (typeof map.getLayers === 'function') {
+            candidates.push(map.getLayers());
+        }
+    }
+    catch { /* ignore */ }
+    for (const arr of candidates) {
+        if (Array.isArray(arr)) {
+            for (const layer of arr)
+                push(layer);
+        }
+    }
     return result;
 }
 /**
@@ -98,11 +119,11 @@ export function initUI(map) {
     logoLink.rel = 'noopener noreferrer';
     logoLink.appendChild(logo);
     leftBottom.appendChild(logoLink);
-    // Правый нижний угол: кнопки и атрибуция
+    // Правый нижний угол: основные кнопки + строка (атрибуция + (i))
     const rightBottom = document.createElement('div');
     rightBottom.className = 'krb-right-bottom';
     pane.appendChild(rightBottom);
-    // Кнопки
+    // Основные кнопки
     const buttons = document.createElement('div');
     buttons.className = 'krb-buttons';
     const btnPlus = document.createElement('button');
@@ -121,13 +142,36 @@ export function initUI(map) {
     buttons.appendChild(btnMinus);
     buttons.appendChild(btnCompass);
     rightBottom.appendChild(buttons);
-    // Атрибуция
+    // ── Строка «атрибуция + кнопка (i)» ────────────────────────────
+    // Атрибуция позиционируется абсолютно слева от кнопки (см. CSS).
+    const infoRow = document.createElement('div');
+    infoRow.className = 'krb-info-row';
+    // Сворачиваемая обёртка атрибуции
+    const attributionWrap = document.createElement('div');
+    attributionWrap.className = 'krb-attribution-wrap';
     const attribution = document.createElement('div');
     attribution.className = 'krb-attribution';
-    rightBottom.appendChild(attribution);
-    const attributions = collectAttributions(map);
-    if (attributions.length > 0) {
-        attributions.forEach((entry, idx) => {
+    attributionWrap.appendChild(attribution);
+    infoRow.appendChild(attributionWrap);
+    // Кнопка (i)
+    const infoBtnGroup = document.createElement('div');
+    infoBtnGroup.className = 'krb-buttons krb-info-btn-group';
+    const btnInfo = document.createElement('button');
+    btnInfo.className = 'krb-btn';
+    btnInfo.innerHTML = `<img src="${getImgUrl('../img/info.svg')}" alt="i">`;
+    btnInfo.setAttribute('aria-label', 'Информация об источниках данных');
+    btnInfo.setAttribute('aria-expanded', 'false');
+    infoBtnGroup.appendChild(btnInfo);
+    infoRow.appendChild(infoBtnGroup);
+    rightBottom.appendChild(infoRow);
+    /**
+     * Пере-рендерит содержимое атрибуции из актуального состояния слоёв.
+     * Возвращает количество записей (0 — нечего показывать).
+     */
+    const renderAttributions = () => {
+        attribution.innerHTML = '';
+        const list = collectAttributions(map);
+        list.forEach((entry, idx) => {
             if (idx > 0) {
                 const sep = document.createElement('span');
                 sep.className = 'krb-attribution-sep';
@@ -152,18 +196,45 @@ export function initUI(map) {
                 attribution.appendChild(attrSpan);
             }
         });
-    }
+        return list.length;
+    };
+    // Первичный рендер — на случай, если слои уже переданы в map.layers
+    renderAttributions();
     // Кэш ссылки на иконку компаса
     const compassSvg = btnCompass.querySelector('img');
-    // ---- Обработчики кнопок ----
+    // ---- Обработчики основных кнопок ----
     const onPlusClick = (e) => { e.stopPropagation(); map.applyZoomDelta(1); };
     const onMinusClick = (e) => { e.stopPropagation(); map.applyZoomDelta(-1); };
     const onCompassClick = (e) => { e.stopPropagation(); map.resetBearing(); };
     btnPlus.addEventListener('click', onPlusClick);
     btnMinus.addEventListener('click', onMinusClick);
     btnCompass.addEventListener('click', onCompassClick);
+    // ---- Тоггл атрибуции (горизонтальное раскрытие через clip-path) ----
+    let attributionOpen = false;
+    const onInfoClick = (e) => {
+        e.stopPropagation();
+        if (attributionOpen) {
+            attributionOpen = false;
+            btnInfo.setAttribute('aria-expanded', 'false');
+            attributionWrap.classList.remove('krb-attribution-wrap--open');
+            return;
+        }
+        const count = renderAttributions();
+        if (count === 0) {
+            attribution.textContent = '© Источники данных не указаны';
+        }
+        attributionOpen = true;
+        btnInfo.setAttribute('aria-expanded', 'true');
+        // rAF — чтобы браузер успел отрисовать новый контент до смены класса,
+        // иначе transition clip-path иногда не срабатывает
+        requestAnimationFrame(() => {
+            if (!attributionOpen)
+                return;
+            attributionWrap.classList.add('krb-attribution-wrap--open');
+        });
+    };
+    btnInfo.addEventListener('click', onInfoClick);
     // ---- Переиспользуемые объекты Three.js ----
-    // Используем any, так как THREE грузится из JS-файла без типов
     const _raycaster = new THREE.Raycaster();
     const _ndc = new THREE.Vector2();
     const _hit1 = new THREE.Vector3();
@@ -273,7 +344,6 @@ export function initUI(map) {
         if (!_raycaster.ray.intersectPlane(_plane, _hit2))
             return;
         // ── углы: safe-путь ──────────────────────────────────────────
-        const safe = map.unprojectToLonLatSafe;
         const h1 = map.unprojectToLonLatSafe
             ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
             : (() => {
@@ -349,6 +419,7 @@ export function initUI(map) {
             btnPlus.removeEventListener('click', onPlusClick);
             btnMinus.removeEventListener('click', onMinusClick);
             btnCompass.removeEventListener('click', onCompassClick);
+            btnInfo.removeEventListener('click', onInfoClick);
             if (pane?.parentNode)
                 pane.parentNode.removeChild(pane);
         }

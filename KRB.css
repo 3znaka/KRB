@@ -119,7 +119,62 @@
 
     pointer-events: auto;
     padding: 4px;
-    background: rgba(255, 255, 255, 0.7);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.9);
+}
+
+/* Строка «атрибуция + кнопка (i)» */
+.krb-info-row {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    margin-right: 8px;
+    margin-bottom: 8px;
+}
+
+/* Сворачиваемая панель атрибуции — слева от кнопки (i) */
+.krb-attribution-wrap {
+    position: absolute;
+    right: 100%;                /* правый край панели = левый край кнопки */
+    bottom: 0;                  /* низ панели по нижнему краю кнопки */
+    margin-right: 6px;          /* зазор между панелью и кнопкой */
+
+    width: max-content;         /* ширина по содержимому… */
+    max-width: min(360px, calc(100vw - 80px)); /* …но не шире экрана */
+
+    clip-path: inset(0 0 0 100%); /* спрятано: обрезано по левому краю */
+    opacity: 0;
+    pointer-events: none;
+
+    transition: clip-path 0.35s ease, opacity 0.25s ease;
+    will-change: clip-path, opacity;
+}
+
+.krb-info-row {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    margin-right: 8px;
+    margin-bottom: 8px;
+}
+
+.krb-attribution-wrap.krb-attribution-wrap--open {
+    clip-path: inset(0 0 0 0);  /* показано полностью */
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Кнопка (i): отключаем внешние отступы, их теперь даёт .krb-info-row */
+.krb-buttons.krb-info-btn-group {
+    margin-bottom: 0;
+    margin-right: 0;
+}
+
+/* Активное состояние кнопки-тоггла */
+.krb-btn[aria-expanded="true"] {
+    background: #e9e9e9;
 }
 
 .krb-attribution-link {
@@ -131,8 +186,31 @@
 
 .krb-btn img {    width: 50%;}
 
-@media (max-width: 900px) {
-.krb-attribution {
-max-width: 22em;
-}
+/* ── Десктоп (≥ 900px): атрибуция всегда видна, без кнопки и анимации ── */
+@media (min-width: 900px) {
+    /* Кнопка (i) не нужна — атрибуция и так всегда видна */
+    .krb-info-btn-group {
+        display: none;
+    }
+
+
+    /* Обёртка — обычный блок в потоке, без clip-path и fade */
+    .krb-attribution-wrap {
+        position: static;
+        right: auto;
+        bottom: auto;
+        margin-right: 0;
+        width: auto;
+        max-width: none;
+        clip-path: none;
+        opacity: 1;
+        pointer-events: auto;
+        transition: none;
+        will-change: auto;
+    }
+
+    /* На десктопе ограничение по ширине тоже снимаем (было только на мобилке) */
+    .krb-attribution {
+        max-width: none;
+    }
 }

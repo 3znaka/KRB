@@ -36,30 +36,53 @@ export interface Attribution {
  * Собирает атрибуцию со всех слоёв карты — как растровых, переданных
  * в `layers`, так и векторных/динамических, добавленных через
  * `addTo(map)` и лежащих в `_dynamicLayers`.
- *
- * Устраняет старую проблему: векторный слой с `attributionTitle`
- * не попадал в `map.layers`, поэтому копирайт не отображался.
  */
-function collectAttributions(map: UIMap): Attribution[] {
+function collectAttributions(map: any): Attribution[] {
     const result: Attribution[] = [];
     const seen = new Set<string>();
 
     const push = (layer: any) => {
-        if (!layer || !layer.attributionTitle) return;
-        const title = String(layer.attributionTitle).trim();
+        if (!layer) return;
+        const rawTitle =
+            layer.attributionTitle ??
+            layer.attribution ??
+            layer.attribution_text;
+        if (!rawTitle) return;
+        const title = String(rawTitle).trim();
         if (!title) return;
-        const url = layer.attributionUrl || '';
+        const url =
+            layer.attributionUrl ??
+            layer.attribution_url ??
+            '';
         const key = title + '|' + url;
         if (seen.has(key)) return;
         seen.add(key);
         result.push({ title, url });
     };
 
-    const staticLayers = Array.isArray(map.layers) ? map.layers : [];
-    for (const layer of staticLayers) push(layer);
+    // Сам объект map тоже может нести атрибуцию
+    push(map);
 
-    const dynamicLayers = Array.isArray(map._dynamicLayers) ? map._dynamicLayers : [];
-    for (const layer of dynamicLayers) push(layer);
+    // Пробуем разные возможные контейнеры слоёв
+    const candidates: any[] = [
+        map.layers,
+        map._layers,
+        map._dynamicLayers,
+        map.overlayLayers,
+        map.vectorLayers,
+        map.rasterLayers,
+    ];
+    try {
+        if (typeof map.getLayers === 'function') {
+            candidates.push(map.getLayers());
+        }
+    } catch { /* ignore */ }
+
+    for (const arr of candidates) {
+        if (Array.isArray(arr)) {
+            for (const layer of arr) push(layer);
+        }
+    }
 
     return result;
 }
@@ -75,12 +98,13 @@ function collectAttributions(map: UIMap): Attribution[] {
 export function initUI(map: UIMap): { destroy: () => void } {
     const container = map.targetElement;
 
-    const getImgUrl = (filename: string): string => new URL(`./img/${filename}`, import.meta.url).href;
+    const getImgUrl = (filename: string): string =>
+        new URL(`./img/${filename}`, import.meta.url).href;
 
-const existing = container.querySelector<HTMLDivElement>('#krb-ui-pane');
-if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    const existing = container.querySelector<HTMLDivElement>('#krb-ui-pane');
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
 
-const pane = document.createElement('div'); 
+    const pane = document.createElement('div');
     pane.id = 'krb-ui-pane';
     pane.className = 'krb-ui-pane';
     container.appendChild(pane);
@@ -97,29 +121,29 @@ const pane = document.createElement('div');
     const scaleLabel = document.createElement('div');
     scaleLabel.className = 'krb-scale-label';
 
-let coordLabel: HTMLSpanElement | null = null;
-let fpsLabel: HTMLSpanElement | null = null;
-let zoomValueLabel: HTMLSpanElement | null = null;
+    let coordLabel: HTMLSpanElement | null = null;
+    let fpsLabel: HTMLSpanElement | null = null;
+    let zoomValueLabel: HTMLSpanElement | null = null;
 
-if (map.debug) {
-    const zoomLabel = document.createElement('div');
-    zoomLabel.className = 'krb-zoom-label';
+    if (map.debug) {
+        const zoomLabel = document.createElement('div');
+        zoomLabel.className = 'krb-zoom-label';
 
-    coordLabel = document.createElement('span');
-    coordLabel.className = 'krb-coord-label';
-    zoomLabel.appendChild(coordLabel);
+        coordLabel = document.createElement('span');
+        coordLabel.className = 'krb-coord-label';
+        zoomLabel.appendChild(coordLabel);
 
-    fpsLabel = document.createElement('span');
-    fpsLabel.className = 'krb-fps-label';
-    fpsLabel.textContent = 'FPS: --';
-    zoomLabel.appendChild(fpsLabel);
+        fpsLabel = document.createElement('span');
+        fpsLabel.className = 'krb-fps-label';
+        fpsLabel.textContent = 'FPS: --';
+        zoomLabel.appendChild(fpsLabel);
 
-    zoomValueLabel = document.createElement('span');
-    zoomValueLabel.className = 'krb-zoom-value';
-    zoomLabel.appendChild(zoomValueLabel);
+        zoomValueLabel = document.createElement('span');
+        zoomValueLabel.className = 'krb-zoom-value';
+        zoomLabel.appendChild(zoomValueLabel);
 
-    pane.appendChild(zoomLabel);
-}
+        pane.appendChild(zoomLabel);
+    }
 
     scaleContainer.appendChild(scaleBar);
     scaleBar.appendChild(scaleLabel);
@@ -137,12 +161,12 @@ if (map.debug) {
     logoLink.appendChild(logo);
     leftBottom.appendChild(logoLink);
 
-    // Правый нижний угол: кнопки и атрибуция
+    // Правый нижний угол: основные кнопки + строка (атрибуция + (i))
     const rightBottom = document.createElement('div');
     rightBottom.className = 'krb-right-bottom';
     pane.appendChild(rightBottom);
 
-    // Кнопки
+    // Основные кнопки
     const buttons = document.createElement('div');
     buttons.className = 'krb-buttons';
 
@@ -166,14 +190,43 @@ if (map.debug) {
     buttons.appendChild(btnCompass);
     rightBottom.appendChild(buttons);
 
-    // Атрибуция
+    // ── Строка «атрибуция + кнопка (i)» ────────────────────────────
+    // Атрибуция позиционируется абсолютно слева от кнопки (см. CSS).
+    const infoRow = document.createElement('div');
+    infoRow.className = 'krb-info-row';
+
+    // Сворачиваемая обёртка атрибуции
+    const attributionWrap = document.createElement('div');
+    attributionWrap.className = 'krb-attribution-wrap';
+
     const attribution = document.createElement('div');
     attribution.className = 'krb-attribution';
-    rightBottom.appendChild(attribution);
+    attributionWrap.appendChild(attribution);
+    infoRow.appendChild(attributionWrap);
 
-    const attributions = collectAttributions(map);
-    if (attributions.length > 0) {
-        attributions.forEach((entry, idx) => {
+    // Кнопка (i)
+    const infoBtnGroup = document.createElement('div');
+    infoBtnGroup.className = 'krb-buttons krb-info-btn-group';
+
+    const btnInfo = document.createElement('button');
+    btnInfo.className = 'krb-btn';
+    btnInfo.innerHTML = `<img src="${getImgUrl('../img/info.svg')}" alt="i">`;
+    btnInfo.setAttribute('aria-label', 'Информация об источниках данных');
+    btnInfo.setAttribute('aria-expanded', 'false');
+    infoBtnGroup.appendChild(btnInfo);
+    infoRow.appendChild(infoBtnGroup);
+
+    rightBottom.appendChild(infoRow);
+
+    /**
+     * Пере-рендерит содержимое атрибуции из актуального состояния слоёв.
+     * Возвращает количество записей (0 — нечего показывать).
+     */
+    const renderAttributions = (): number => {
+        attribution.innerHTML = '';
+
+        const list = collectAttributions(map);
+        list.forEach((entry, idx) => {
             if (idx > 0) {
                 const sep = document.createElement('span');
                 sep.className = 'krb-attribution-sep';
@@ -199,12 +252,17 @@ if (map.debug) {
                 attribution.appendChild(attrSpan);
             }
         });
-    }
+
+        return list.length;
+    };
+
+    // Первичный рендер — на случай, если слои уже переданы в map.layers
+    renderAttributions();
 
     // Кэш ссылки на иконку компаса
     const compassSvg = btnCompass.querySelector<HTMLImageElement>('img');
 
-    // ---- Обработчики кнопок ----
+    // ---- Обработчики основных кнопок ----
     const onPlusClick = (e: MouseEvent) => { e.stopPropagation(); map.applyZoomDelta(1); };
     const onMinusClick = (e: MouseEvent) => { e.stopPropagation(); map.applyZoomDelta(-1); };
     const onCompassClick = (e: MouseEvent) => { e.stopPropagation(); map.resetBearing(); };
@@ -213,8 +271,37 @@ if (map.debug) {
     btnMinus.addEventListener('click', onMinusClick);
     btnCompass.addEventListener('click', onCompassClick);
 
+    // ---- Тоггл атрибуции (горизонтальное раскрытие через clip-path) ----
+    let attributionOpen = false;
+
+    const onInfoClick = (e: MouseEvent) => {
+        e.stopPropagation();
+
+        if (attributionOpen) {
+            attributionOpen = false;
+            btnInfo.setAttribute('aria-expanded', 'false');
+            attributionWrap.classList.remove('krb-attribution-wrap--open');
+            return;
+        }
+
+        const count = renderAttributions();
+        if (count === 0) {
+            attribution.textContent = '© Источники данных не указаны';
+        }
+
+        attributionOpen = true;
+        btnInfo.setAttribute('aria-expanded', 'true');
+
+        // rAF — чтобы браузер успел отрисовать новый контент до смены класса,
+        // иначе transition clip-path иногда не срабатывает
+        requestAnimationFrame(() => {
+            if (!attributionOpen) return;
+            attributionWrap.classList.add('krb-attribution-wrap--open');
+        });
+    };
+    btnInfo.addEventListener('click', onInfoClick);
+
     // ---- Переиспользуемые объекты Three.js ----
-    // Используем any, так как THREE грузится из JS-файла без типов
     const _raycaster: any = new THREE.Raycaster();
     const _ndc: any = new THREE.Vector2();
     const _hit1: any = new THREE.Vector3();
@@ -288,116 +375,115 @@ if (map.debug) {
     /**
      * Обновляет масштабную линейку, координаты и подпись зума.
      */
-function updateScaleBar(): void {
-    if (!map.worldGroup || !map.controls || !map.renderer) return;
-    const worldPos = map.worldGroup.position;
-    const target   = map.controls.target;
+    function updateScaleBar(): void {
+        if (!map.worldGroup || !map.controls || !map.renderer) return;
+        const worldPos = map.worldGroup.position;
+        const target   = map.controls.target;
 
-    const centerX = target.x - worldPos.x;
-    const centerZ = target.z - worldPos.z;
+        const centerX = target.x - worldPos.x;
+        const centerZ = target.z - worldPos.z;
 
-    // ── центр: используем safe, если есть ────────────────────────
-   const centerLL = map.unprojectToLonLatSafe
-    ? map.unprojectToLonLatSafe(centerX, centerZ) 
-        : (() => {
-            const v = map.unprojectToLonLat(centerX, centerZ);
-            if (!v || !Number.isFinite(v[0]) || !Number.isFinite(v[1])) return null;
-            if (Math.abs(v[0]) > 180.0001 || Math.abs(v[1]) > 90.0001) return null;
-            return v;
-        })();
-    if (!centerLL) return;
-    const [lon, lat] = centerLL;
+        // ── центр: используем safe, если есть ────────────────────────
+        const centerLL = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(centerX, centerZ)
+            : (() => {
+                const v = map.unprojectToLonLat(centerX, centerZ);
+                if (!v || !Number.isFinite(v[0]) || !Number.isFinite(v[1])) return null;
+                if (Math.abs(v[0]) > 180.0001 || Math.abs(v[1]) > 90.0001) return null;
+                return v;
+            })();
+        if (!centerLL) return;
+        const [lon, lat] = centerLL;
 
-    if (map.debug && coordLabel) {
-        _dirVec.subVectors(map.camera.position, target);
-        const dist = _dirVec.length();
-        const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
-        const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-        const bearingDeg = computeBearingDeg().toFixed(1);
-        coordLabel.textContent =
-            `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        if (map.debug && coordLabel) {
+            _dirVec.subVectors(map.camera.position, target);
+            const dist = _dirVec.length();
+            const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
+            const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
+            const bearingDeg = computeBearingDeg().toFixed(1);
+            coordLabel.textContent =
+                `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
+        }
+
+        const barLengthPx = 100;
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        _ndc.set(0, 0);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return;
+
+        const ndcOffsetX = (2 * barLengthPx) / rect.width;
+        _ndc.set(ndcOffsetX, 0);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return;
+
+        // ── углы: safe-путь ──────────────────────────────────────────
+        const h1 = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
+            : (() => {
+                const v = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+            })();
+        if (!h1) { scaleLabel.textContent = ''; return; }
+        const [lon1, lat1] = h1;
+
+        const h2 = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z)
+            : (() => {
+                const v = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+            })();
+        if (!h2) { scaleLabel.textContent = ''; return; }
+        const [lon2, lat2] = h2;
+
+        const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
+        const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
+
+        if (distance > 0) {
+            const nice  = niceDistance(distance);
+            const ratio = nice / distance;
+            scaleBar.style.width = (barLengthPx * ratio) + 'px';
+            scaleLabel.textContent = formatDistance(nice);
+        }
+
+        if (map.debug && zoomValueLabel) {
+            zoomValueLabel.textContent =
+                ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
+        }
     }
-
-       const barLengthPx = 100;
-    const rect = map.renderer.domElement.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-
-    _ndc.set(0, 0);
-    _raycaster.setFromCamera(_ndc, map.camera);
-    if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return;
-
-    const ndcOffsetX = (2 * barLengthPx) / rect.width;
-    _ndc.set(ndcOffsetX, 0);
-    _raycaster.setFromCamera(_ndc, map.camera);
-    if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return;
-
-    // ── углы: safe-путь ──────────────────────────────────────────
-    const safe = map.unprojectToLonLatSafe;
-const h1 = map.unprojectToLonLatSafe
-    ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
-    : (() => {
-        const v = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
-        return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-            && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-    })();
-if (!h1) { scaleLabel.textContent = ''; return; }
-const [lon1, lat1] = h1;
-
-const h2 = map.unprojectToLonLatSafe
-    ? map.unprojectToLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z)
-    : (() => {
-        const v = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
-        return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-            && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-    })();
-if (!h2) { scaleLabel.textContent = ''; return; }
-const [lon2, lat2] = h2;
-
-    const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
-    const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
-
-    if (distance > 0) {
-        const nice  = niceDistance(distance);
-        const ratio = nice / distance;
-        scaleBar.style.width = (barLengthPx * ratio) + 'px';
-        scaleLabel.textContent = formatDistance(nice);
-    }
-
-    if (map.debug && zoomValueLabel) {
-        zoomValueLabel.textContent =
-            ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
-    }
-}
 
     let lastFpsUpdate = performance.now();
     let frames = 0;
     let rafId: number | null = null;
     let destroyed = false;
 
-function animateUI(): void {
-    if (destroyed) return;
-    if (!map.worldGroup || !map.controls || !map.renderer) {
-        destroyed = true;
-        return;
-    }
-
-    if (map.debug && fpsLabel) {
-        const now = performance.now();
-        frames++;
-        if (now - lastFpsUpdate >= 500) {
-            const fps = Math.round((frames * 1000) / (now - lastFpsUpdate));
-            fpsLabel.textContent = `FPS: ${fps}`;
-            frames = 0;
-            lastFpsUpdate = now;
+    function animateUI(): void {
+        if (destroyed) return;
+        if (!map.worldGroup || !map.controls || !map.renderer) {
+            destroyed = true;
+            return;
         }
+
+        if (map.debug && fpsLabel) {
+            const now = performance.now();
+            frames++;
+            if (now - lastFpsUpdate >= 500) {
+                const fps = Math.round((frames * 1000) / (now - lastFpsUpdate));
+                fpsLabel.textContent = `FPS: ${fps}`;
+                frames = 0;
+                lastFpsUpdate = now;
+            }
+        }
+        updateScaleBar();
+
+        const bearingDeg = computeBearingDeg();
+        if (compassSvg) compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
+
+        rafId = requestAnimationFrame(animateUI);
     }
-    updateScaleBar();
-
-    const bearingDeg = computeBearingDeg();
-    if (compassSvg) compassSvg.style.transform = `rotate(${-bearingDeg}deg)`;
-
-    rafId = requestAnimationFrame(animateUI);
-}
 
     animateUI();
 
@@ -411,6 +497,7 @@ function animateUI(): void {
             btnPlus.removeEventListener('click', onPlusClick);
             btnMinus.removeEventListener('click', onMinusClick);
             btnCompass.removeEventListener('click', onCompassClick);
+            btnInfo.removeEventListener('click', onInfoClick);
             if (pane?.parentNode) pane.parentNode.removeChild(pane);
         }
     };

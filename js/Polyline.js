@@ -2,34 +2,22 @@
  * Polyline — полилиния с толстой линией (Line2), высотами узлов,
  * видимостью по зуму и подписью.
  *
- * @module polyline
+ * LOD: Douglas–Peucker в world-координатах, кэш по бакетам зума.
+ * Для стабильности Float32 в Line2 геометрия хранится относительно
+ * локального origin (аналогично Polygon); абсолютные координаты
+ * остаются только в `_absPositions` для подписи/интерактива.
  */
 import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
-import { douglasPeuckerIndices } from './Simplify.js';
-/** Дебаунс пересборки при смене зум-бакета (мс). */
+import { douglasPeuckerIndices, simplifyRingIndices } from './Simplify.js';
 const REBUILD_DEBOUNCE_MS = 60;
-function pointToSegmentDistance(point, a, b) {
-    const ab = new THREE.Vector3().subVectors(b, a);
-    const ap = new THREE.Vector3().subVectors(point, a);
-    const abLenSq = ab.lengthSq();
-    if (abLenSq === 0)
-        return point.distanceTo(a);
-    let t = ap.dot(ab) / abLenSq;
-    t = Math.max(0, Math.min(1, t));
-    const closest = new THREE.Vector3().copy(a).addScaledVector(ab, t);
-    return point.distanceTo(closest);
-}
-// =====================================================================
-// Polyline
-// =====================================================================
 export class Polyline extends SpatialObject {
     // ── Данные ──
     _positions;
     _crsCode;
     _crs;
-    // ── Оформление ── (altitude — в базе)
+    // ── Оформление ──
     _color;
     _opacity;
     _width;
@@ -41,6 +29,7 @@ export class Polyline extends SpatialObject {
     // ── Высоты ──
     _heightUpdateInterval;
     _lastHeightUpdateTime = 0;
+    _heightsFinalized = false;
     _absPositions = [];
     _nodeHeights = [];
     _cachedHeights = null;
@@ -49,23 +38,36 @@ export class Polyline extends SpatialObject {
     _simplifyTolerance = 0.5;
     _simplifyZoomBucket = 1;
     _simplifyCache = new Map();
+    _fullLineData = null;
     _currentSimplifyBucket = -1;
     _pendingBucket = -1;
     _rebuildTimer = null;
-    /** Пересборка отложена до момента, когда полилиния снова попадёт в кадр. */
     _pendingRebuild = false;
-    // ── Подпись: placement + vertical align ──
+    // ── Кэши / перфоманс ──
+    _projectedCache = null;
+    _positionsDirty = true;
+    _bsCache = null;
+    /**
+     * Локальный origin геометрии. Line2 хранит вершины во Float32,
+     * поэтому абсолютные world-координаты (~1e9) теряют точность
+     * (ULP ≈ 128) и соседние вершины после LOD-упрощения на высоком
+     * зуме коллапсируют в одну → NaN в шейдере, пропадают сегменты.
+     * Считаем origin один раз от ПОЛНОГО (не-LOD) набора — при смене
+     * бакета origin не меняется.
+     */
+    _localOrigin = new THREE.Vector3(0, 0, 0);
+    _localOriginValid = false;
+    // ── Подпись ──
     _titlePlacement;
     _titleVerticalAlign;
     _labelT = 0.5;
+    _labelPrefixSums = null;
+    _tmpLabelWorld = new THREE.Vector3();
+    _tmpLabelScreen = new THREE.Vector3();
+    _tmpLabelScreen2 = new THREE.Vector3();
     _screenData = {
-        points3D: null,
-        segLengths: null,
-        totalLen: 0,
-        visibleInterval: null,
-        camera: null,
-        map: null,
-        valid: false,
+        points3D: null, segLengths: null, totalLen: 0,
+        visibleInterval: null, camera: null, map: null, valid: false,
     };
     // ── 3D-объекты ──
     _line = null;
@@ -121,19 +123,18 @@ export class Polyline extends SpatialObject {
     // Хуки SpatialObject
     // =================================================================
     _onAttached(map) {
-        this._crs = this._crsCode
-            ? Projections.get(this._crsCode)
-            : map.inputCRS;
-        this._absPositions = [];
-        this._nodeHeights = [];
-        for (let i = 0; i < this._positions.length; i++) {
-            const pt = this._positions[i];
-            this._absPositions.push(map.project(pt, this._crs));
-            const h = pt?.[2];
-            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        this._projectedCache = null;
+        this._fullLineData = null;
+        this._simplifyCache.clear();
+        this._localOriginValid = false;
+        this._ensureLocalOrigin();
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
         }
-        this._cachedHeights = null;
-        this._lastHeightUpdateTime = 0;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
         this._geometry = new LineGeometry();
         const canvas = map.renderer.domElement;
         this._material = new LineMaterial({
@@ -147,19 +148,15 @@ export class Polyline extends SpatialObject {
             ...this._computeDashUniforms(),
         });
         this._line = new Line2(this._geometry, this._material);
+        this._line.position.copy(this._localOrigin);
         this._line.renderOrder = 999;
         map.worldGroup.add(this._line);
+        const initialBucket = this._simplify
+            ? Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket)
+            : -1;
+        this._doRebuildForBucket(initialBucket);
         this._registerInteraction(map);
         this._isVisible = false;
-        // Reset LOD state
-        if (this._rebuildTimer) {
-            clearTimeout(this._rebuildTimer);
-            this._rebuildTimer = null;
-        }
-        this._simplifyCache.clear();
-        this._currentSimplifyBucket = -1;
-        this._pendingBucket = -1;
-        this._pendingRebuild = false;
     }
     _teardown() {
         if (this._rebuildTimer) {
@@ -186,11 +183,24 @@ export class Polyline extends SpatialObject {
         this._screenData.segLengths = null;
         this._screenData.map = null;
         this._screenData.camera = null;
+        this._labelPrefixSums = null;
+        this._projectedCache = null;
+        this._fullLineData = null;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._absPositions = [];
+        this._nodeHeights = [];
+        this._cachedHeights = null;
+        this._heightsFinalized = false;
+        this._positionsDirty = true;
+        this._bsCache = null;
+        this._localOriginValid = false;
     }
     _applyHidden() {
         if (this._line)
             this._line.visible = false;
         this._screenData.valid = false;
+        this._labelPrefixSums = null;
     }
     _onTooltipChanged() {
         if (this._map)
@@ -198,8 +208,12 @@ export class Polyline extends SpatialObject {
     }
     _onAltitudeChanged() {
         this._cachedHeights = null;
+        this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
         this._screenData.valid = false;
+        this._labelPrefixSums = null;
+        this._positionsDirty = true;
+        this._bsCache = null;
     }
     getLabelType() { return 'line'; }
     getTitleVerticalAlign() {
@@ -208,72 +222,142 @@ export class Polyline extends SpatialObject {
     getScreenPosition() {
         return this.getScreenPositionAt(this._labelT);
     }
+    // =================================================================
+    // Локальный origin
+    // =================================================================
     _worldPerPixel(z) {
         return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
     }
-    _getSimplifiedPositions(bucket) {
+    _projectClamped(pt) {
+        const p = this._map.project(pt, this._crs);
+        let x = p[0];
+        let y = p[1];
+        if (!Number.isFinite(x))
+            x = 0;
+        if (!Number.isFinite(y))
+            y = 0;
+        return [x, y];
+    }
+    _getFullProjected() {
+        if (this._projectedCache)
+            return this._projectedCache;
+        const n = this._positions.length;
+        const out = new Array(n);
+        for (let i = 0; i < n; i++)
+            out[i] = this._projectClamped(this._positions[i]);
+        this._projectedCache = out;
+        return out;
+    }
+    /**
+     * Считает среднее исходных проекций как локальный origin.
+     * Идемпотентно; вычисляется один раз до сброса `_localOriginValid`.
+     */
+    _ensureLocalOrigin() {
+        if (this._localOriginValid)
+            return;
+        const projected = this._getFullProjected();
+        if (!projected.length) {
+            this._localOrigin.set(0, 0, 0);
+            this._localOriginValid = true;
+            return;
+        }
+        let sx = 0, sz = 0;
+        for (let i = 0; i < projected.length; i++) {
+            sx += projected[i][0];
+            sz += projected[i][1];
+        }
+        this._localOrigin.set(sx / projected.length, 0, sz / projected.length);
+        this._localOriginValid = true;
+    }
+    // =================================================================
+    // LOD
+    // =================================================================
+    _getFullLineData() {
+        if (this._fullLineData)
+            return this._fullLineData;
+        const projected = this._getFullProjected();
+        const n = this._positions.length;
+        const abs = new Array(n);
+        const nodeH = new Array(n);
+        for (let i = 0; i < n; i++) {
+            abs[i] = projected[i];
+            const h = this._positions[i][2];
+            nodeH[i] = Number.isFinite(h) ? h : 0;
+        }
+        this._fullLineData = { abs, nodeH };
+        return this._fullLineData;
+    }
+    _getSimplifiedData(bucket) {
+        if (!this._simplify || !this._map || bucket < 0) {
+            return this._getFullLineData();
+        }
         const hit = this._simplifyCache.get(bucket);
         if (hit)
             return hit;
+        const full = this._getFullLineData();
+        const pts = full.abs;
+        const n = pts.length;
+        if (n < 3) {
+            this._simplifyCache.set(bucket, full);
+            return full;
+        }
         const z = bucket * this._simplifyZoomBucket;
         const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
-        const projected = this._positions.map(pt => this._map.project(pt, this._crs));
-        const keptIdx = douglasPeuckerIndices(projected, tolWorld);
-        const result = keptIdx.map(i => {
-            const orig = this._positions[i];
-            return orig.length >= 3 ? [orig[0], orig[1], orig[2]] : [orig[0], orig[1]];
-        });
+        const isClosed = n >= 4 &&
+            pts[0][0] === pts[n - 1][0] &&
+            pts[0][1] === pts[n - 1][1];
+        const keptIdx = isClosed
+            ? simplifyRingIndices(pts, tolWorld)
+            : douglasPeuckerIndices(pts, tolWorld);
+        if ((isClosed && keptIdx.length < 3) || keptIdx.length < 2 || keptIdx.length === n) {
+            this._simplifyCache.set(bucket, full);
+            return full;
+        }
+        const abs = new Array(keptIdx.length);
+        const nodeH = new Array(keptIdx.length);
+        for (let k = 0; k < keptIdx.length; k++) {
+            const idx = keptIdx[k];
+            abs[k] = pts[idx];
+            nodeH[k] = full.nodeH[idx];
+        }
+        const result = { abs, nodeH };
         this._simplifyCache.set(bucket, result);
         return result;
     }
-    // =================================================================
-    // LOD rebuild (debounced)
-    // =================================================================
-    /**
-     * Синхронная пересборка LOD под конкретный бакет.
-     * Идемпотентна — можно звать повторно.
-     */
-    _doRebuildForBucket(bucket, simplified) {
+    _doRebuildForBucket(bucket, data) {
         if (!this._map)
             return;
         this._pendingRebuild = false;
         this._currentSimplifyBucket = bucket;
-        const positions = simplified ?? this._getSimplifiedPositions(bucket);
-        this._absPositions = [];
-        this._nodeHeights = [];
-        for (const pt of positions) {
-            this._absPositions.push(this._map.project(pt, this._crs));
-            const h = pt?.[2];
-            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
-        }
+        this._ensureLocalOrigin();
+        if (this._line)
+            this._line.position.copy(this._localOrigin);
+        const resolved = data ?? this._getSimplifiedData(bucket);
+        this._absPositions = resolved.abs;
+        this._nodeHeights = resolved.nodeH;
         this._cachedHeights = null;
+        this._heightsFinalized = false;
+        this._lastHeightUpdateTime = 0;
         this._screenData.valid = false;
+        this._labelPrefixSums = null;
+        this._positionsDirty = true;
+        this._bsCache = null;
     }
-    /**
-     * Вызывается из таймера. Полилиния вне кадра — не тратим кадр,
-     * помечаем `_pendingRebuild` и догоним в `_update`, когда вернётся.
-     */
     _onSimplifyBucketChange(bucket) {
         if (bucket === this._currentSimplifyBucket)
             return;
-        const oldCount = this._absPositions.length;
-        const simplified = this._getSimplifiedPositions(bucket);
-        this._currentSimplifyBucket = bucket;
-        // Визуально ничего не изменится — не пересобираем.
-        if (oldCount === simplified.length) {
-            this._pendingRebuild = false;
+        const prevCount = this._absPositions.length;
+        const data = this._getSimplifiedData(bucket);
+        if (prevCount > 0 && data.abs.length === prevCount && this._currentSimplifyBucket >= 0) {
+            this._currentSimplifyBucket = bucket;
             return;
         }
         if (!this._isVisible) {
             this._pendingRebuild = true;
             return;
         }
-        this._doRebuildForBucket(bucket, simplified);
+        this._doRebuildForBucket(bucket, data);
     }
-    /**
-     * Дебаунс. Если таймер уже тикает — обновляем целевой бакет,
-     * не сбрасываем отсчёт (аналог «trailing edge»).
-     */
     _scheduleBucketChange(bucket) {
         if (this._rebuildTimer) {
             this._pendingBucket = bucket;
@@ -308,31 +392,40 @@ export class Polyline extends SpatialObject {
             getBoundingSphere: () => {
                 if (this._absPositions.length === 0)
                     return null;
-                const wgPos = map.worldGroup.position;
-                let minX = Infinity, minY = Infinity, minZ = Infinity;
-                let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-                for (let i = 0; i < this._absPositions.length; i++) {
-                    const [ax, az] = this._absPositions[i];
-                    const y = this._cachedHeights?.[i] ?? this._altitude;
-                    const x = ax + wgPos.x;
-                    const z = az + wgPos.z;
-                    if (x < minX)
-                        minX = x;
-                    if (x > maxX)
-                        maxX = x;
-                    if (y < minY)
-                        minY = y;
-                    if (y > maxY)
-                        maxY = y;
-                    if (z < minZ)
-                        minZ = z;
-                    if (z > maxZ)
-                        maxZ = z;
+                let c = this._bsCache;
+                if (!c) {
+                    let minX = Infinity, minY = Infinity, minZ = Infinity;
+                    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+                    for (let i = 0; i < this._absPositions.length; i++) {
+                        const [ax, az] = this._absPositions[i];
+                        const y = this._cachedHeights?.[i] ?? this._altitude;
+                        if (ax < minX)
+                            minX = ax;
+                        if (ax > maxX)
+                            maxX = ax;
+                        if (y < minY)
+                            minY = y;
+                        if (y > maxY)
+                            maxY = y;
+                        if (az < minZ)
+                            minZ = az;
+                        if (az > maxZ)
+                            maxZ = az;
+                    }
+                    if (!isFinite(minX))
+                        return null;
+                    const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                    c = this._bsCache = {
+                        cx: (minX + maxX) / 2,
+                        cy: (minY + maxY) / 2,
+                        cz: (minZ + maxZ) / 2,
+                        r: 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz),
+                    };
                 }
-                const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                const wgPos = map.worldGroup.position;
                 return {
-                    center: map.getVec3().set((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
-                    radius: 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz),
+                    center: map.getVec3().set(c.cx + wgPos.x, c.cy + wgPos.y, c.cz + wgPos.z),
+                    radius: c.r,
                 };
             },
             onHover: this._onHover || null,
@@ -413,7 +506,7 @@ export class Polyline extends SpatialObject {
     }
     getLineDashOffset() { return this._lineDashOffset; }
     // =================================================================
-    // Altitude MODE
+    // Altitude / Depth
     // =================================================================
     setAltitudeMode(mode) {
         this._altitudeMode = mode;
@@ -425,9 +518,6 @@ export class Polyline extends SpatialObject {
     setAltitudeOffset(offset) { return this.setAltitude(offset); }
     /** @deprecated Используйте унаследованный `getAltitude`. */
     getAltitudeOffset() { return this.getAltitude(); }
-    // =================================================================
-    // Depth
-    // =================================================================
     setDepthTest(depthTest) {
         this._depthTest = !!depthTest;
         if (this._material) {
@@ -446,9 +536,6 @@ export class Polyline extends SpatialObject {
         return this;
     }
     getDepthWrite() { return this._depthWrite; }
-    // =================================================================
-    // CRS
-    // =================================================================
     getCRS() { return this._crsCode; }
     // =================================================================
     // Позиции
@@ -458,7 +545,11 @@ export class Polyline extends SpatialObject {
             return this;
         this._positions = positions;
         this._screenData.valid = false;
-        // Всегда сбрасываем pending-состояние, даже без карты.
+        this._labelPrefixSums = null;
+        this._projectedCache = null;
+        this._fullLineData = null;
+        this._localOriginValid = false;
+        this._bsCache = null;
         if (this._rebuildTimer) {
             clearTimeout(this._rebuildTimer);
             this._rebuildTimer = null;
@@ -467,18 +558,16 @@ export class Polyline extends SpatialObject {
         this._currentSimplifyBucket = -1;
         this._pendingBucket = -1;
         this._pendingRebuild = false;
+        this._cachedHeights = null;
+        this._heightsFinalized = false;
+        this._lastHeightUpdateTime = 0;
+        this._positionsDirty = true;
         if (!this._map)
             return this;
-        this._absPositions = [];
-        this._nodeHeights = [];
-        for (let i = 0; i < positions.length; i++) {
-            const pt = positions[i];
-            this._absPositions.push(this._map.project(pt, this._crs));
-            const h = pt?.[2];
-            this._nodeHeights.push(Number.isFinite(h) ? h : 0);
-        }
-        this._cachedHeights = null;
-        this._lastHeightUpdateTime = 0;
+        const bucket = this._simplify
+            ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+            : -1;
+        this._doRebuildForBucket(bucket);
         return this;
     }
     getPositions() {
@@ -488,10 +577,7 @@ export class Polyline extends SpatialObject {
         const b = this.getBounds('EPSG:4326');
         if (!b)
             return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
+        return [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2];
     }
     // =================================================================
     // Обновление на кадре
@@ -504,6 +590,7 @@ export class Polyline extends SpatialObject {
             this._line.visible = false;
             this._isVisible = false;
             this._screenData.valid = false;
+            this._labelPrefixSums = null;
             return;
         }
         if (this._line.parent !== this._map.worldGroup) {
@@ -515,65 +602,116 @@ export class Polyline extends SpatialObject {
         if (res.x !== canvas.width || res.y !== canvas.height) {
             this._material.resolution.set(canvas.width, canvas.height);
         }
-        // Полилиния снова в кадре — догоняем отложенную LOD-пересборку
-        // (могла быть запланирована, пока полилиния была за фрустумом).
         if (this._pendingRebuild) {
-            const bucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
+            const bucket = this._simplify
+                ? Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
             this._doRebuildForBucket(bucket);
         }
         this._applySimplification(map.currentDiscreteZoom);
         this._updateHeights();
+        // ── Distance check (голые числа, без Vector3) ──
         if (map.objectRenderDistanceFactor > 0 && this._absPositions.length >= 2) {
             const wgPos = map.worldGroup.position;
-            const points3D = this._absPositions.map(([ax, az], i) => {
-                const height = this._cachedHeights?.[i] ?? this._altitude;
-                return new THREE.Vector3(ax + wgPos.x, height + wgPos.y, az + wgPos.z);
-            });
-            let minDist = Infinity;
-            for (let i = 0; i < points3D.length - 1; i++) {
-                const dist = pointToSegmentDistance(map.camera.position, points3D[i], points3D[i + 1]);
-                if (dist < minDist)
-                    minDist = dist;
+            const cam = map.camera.position;
+            const pts = this._absPositions;
+            const heights = this._cachedHeights;
+            const alt = this._altitude;
+            let prevX = pts[0][0] + wgPos.x;
+            let prevY = (heights ? heights[0] : alt) + wgPos.y;
+            let prevZ = pts[0][1] + wgPos.z;
+            let minDistSq = Infinity;
+            for (let i = 1; i < pts.length; i++) {
+                const curX = pts[i][0] + wgPos.x;
+                const curY = (heights ? heights[i] : alt) + wgPos.y;
+                const curZ = pts[i][1] + wgPos.z;
+                const abx = curX - prevX, aby = curY - prevY, abz = curZ - prevZ;
+                const apx = cam.x - prevX, apy = cam.y - prevY, apz = cam.z - prevZ;
+                const abLenSq = abx * abx + aby * aby + abz * abz;
+                let t = abLenSq > 0 ? (apx * abx + apy * aby + apz * abz) / abLenSq : 0;
+                if (t < 0)
+                    t = 0;
+                else if (t > 1)
+                    t = 1;
+                const dx = prevX + abx * t - cam.x;
+                const dy = prevY + aby * t - cam.y;
+                const dz = prevZ + abz * t - cam.z;
+                const dSq = dx * dx + dy * dy + dz * dz;
+                if (dSq < minDistSq)
+                    minDistSq = dSq;
+                prevX = curX;
+                prevY = curY;
+                prevZ = curZ;
             }
-            if (minDist > map.maxObjectDistance) {
+            if (Math.sqrt(minDistSq) > map.maxObjectDistance) {
                 this._line.visible = false;
                 this._isVisible = false;
                 this._screenData.valid = false;
+                this._labelPrefixSums = null;
                 return;
             }
         }
-        this._applyPositions();
-        if (this._title) {
-            this._computeScreenData();
+        if (!this._applyPositions()) {
+            this._isVisible = false;
+            this._screenData.valid = false;
+            this._labelPrefixSums = null;
+            return;
         }
+        if (this._title)
+            this._computeScreenData();
         this._line.visible = true;
         this._isVisible = true;
     }
     _updateHeights() {
         if (!this._map)
             return;
+        const isDynamic = this._map.hasElevation && this._altitudeMode === 'clampToGround';
+        if (!isDynamic && this._heightsFinalized && this._cachedHeights)
+            return;
         const now = performance.now();
         if (now - this._lastHeightUpdateTime < this._heightUpdateInterval && this._cachedHeights)
             return;
         const wgPos = this._map.worldGroup.position;
-        const heights = new Array(this._absPositions.length);
-        const clamp = this._altitudeMode === 'clampToGround';
-        for (let i = 0; i < this._absPositions.length; i++) {
+        const n = this._absPositions.length;
+        const prev = this._cachedHeights;
+        const heights = new Array(n);
+        const ensured = isDynamic ? new Set() : null;
+        let changed = !prev || prev.length !== n;
+        for (let i = 0; i < n; i++) {
             const [absX, absZ] = this._absPositions[i];
-            const nodeH = this._nodeHeights[i] ?? 0;
+            const nodeH = Number.isFinite(this._nodeHeights[i]) ? this._nodeHeights[i] : 0;
             let y;
-            if (clamp) {
+            if (isDynamic) {
                 const worldX = absX + wgPos.x;
                 const worldZ = absZ + wgPos.z;
-                y = this._map.getSurfaceHeightAt(worldX, worldZ) + this._altitude + nodeH;
+                if (ensured) {
+                    const k = ((worldX / 500) | 0) + ',' + ((worldZ / 500) | 0);
+                    if (!ensured.has(k)) {
+                        ensured.add(k);
+                        this._map.ensureTileForPoint?.(worldX, worldZ);
+                    }
+                }
+                let surfaceY = this._map.getSurfaceHeightAt(worldX, worldZ);
+                if (!Number.isFinite(surfaceY))
+                    surfaceY = 0;
+                y = surfaceY + this._altitude + nodeH;
             }
             else {
                 y = this._altitude + nodeH;
             }
-            heights[i] = y;
+            const finalY = Number.isFinite(y) ? y : this._altitude;
+            heights[i] = finalY;
+            if (!changed && prev[i] !== finalY)
+                changed = true;
         }
         this._cachedHeights = heights;
         this._lastHeightUpdateTime = now;
+        if (!isDynamic)
+            this._heightsFinalized = true;
+        if (changed) {
+            this._positionsDirty = true;
+            this._bsCache = null;
+        }
     }
     _applySimplification(zoom) {
         if (!this._simplify || !this._map)
@@ -581,8 +719,6 @@ export class Polyline extends SpatialObject {
         const bucket = Math.floor(zoom / this._simplifyZoomBucket);
         if (bucket === this._currentSimplifyBucket)
             return;
-        // Во время активного зума/анимации — дебаунсим, но не блокируем
-        // LOD-обновления полностью (в отличие от старого поведения).
         if (this._map._zoomActive || this._map._cameraAnimation) {
             this._scheduleBucketChange(bucket);
             return;
@@ -591,14 +727,59 @@ export class Polyline extends SpatialObject {
     }
     _applyPositions() {
         if (!this._map || !this._cachedHeights)
-            return;
-        const arr = [];
-        for (let i = 0; i < this._absPositions.length; i++) {
-            const [absX, absZ] = this._absPositions[i];
-            arr.push(absX, this._cachedHeights[i], absZ);
+            return false;
+        if (!this._positionsDirty) {
+            return (this._geometry?.attributes?.instanceStart?.count ?? 0) >= 1;
         }
-        this._geometry.setPositions(arr);
+        this._ensureLocalOrigin();
+        const ox = this._localOrigin.x;
+        const oz = this._localOrigin.z;
+        const n = this._absPositions.length;
+        const arr = new Float32Array(n * 3);
+        let k = 0;
+        let lastFx = NaN, lastFy = NaN, lastFz = NaN;
+        for (let i = 0; i < n; i++) {
+            const p = this._absPositions[i];
+            let x = p[0] - ox;
+            let y = this._cachedHeights[i];
+            let z = p[1] - oz;
+            if (!Number.isFinite(x))
+                x = 0;
+            if (!Number.isFinite(y))
+                y = this._altitude;
+            if (!Number.isFinite(z))
+                z = 0;
+            const fx = Math.fround(x);
+            const fy = Math.fround(y);
+            const fz = Math.fround(z);
+            if (fx === lastFx && fy === lastFy && fz === lastFz)
+                continue;
+            arr[k] = fx;
+            arr[k + 1] = fy;
+            arr[k + 2] = fz;
+            k += 3;
+            lastFx = fx;
+            lastFy = fy;
+            lastFz = fz;
+        }
+        if (k < 6) {
+            this._line.visible = false;
+            this._positionsDirty = false;
+            return false;
+        }
+        const finalArr = k === arr.length ? arr : arr.slice(0, k);
+        // КРИТИЧНО: пересоздаём LineGeometry при обновлении буфера.
+        // Иначе Three.js сохраняет старый geometry._maxInstanceCount через Math.min(...),
+        // и при приближении рисует только то число сегментов, которое было на дальнем зуме.
+        if (this._geometry) {
+            this._geometry.dispose();
+        }
+        this._geometry = new LineGeometry();
+        this._geometry.setPositions(finalArr);
+        this._line.geometry = this._geometry;
         this._line.computeLineDistances();
+        this._positionsDirty = false;
+        return true;
     }
     _computeDashUniforms() {
         const da = this._lineDasharray;
@@ -607,12 +788,7 @@ export class Polyline extends SpatialObject {
         const [dashSize, gapSize] = typeof da === 'number'
             ? [da, da]
             : [da[0], da[1]];
-        return {
-            dashed: true,
-            dashSize,
-            gapSize,
-            dashOffset: this._lineDashOffset,
-        };
+        return { dashed: true, dashSize, gapSize, dashOffset: this._lineDashOffset };
     }
     // =================================================================
     // Экранные данные для подписи
@@ -621,50 +797,63 @@ export class Polyline extends SpatialObject {
         const map = this._map;
         if (!map) {
             this._screenData.valid = false;
+            this._labelPrefixSums = null;
             return;
         }
         const wgPos = map.worldGroup.position;
         const camera = map.camera;
         const pts = this._absPositions;
-        if (pts.length < 2) {
+        const n = pts.length;
+        if (n < 2) {
             this._screenData.valid = false;
+            this._labelPrefixSums = null;
             return;
         }
-        const points3D = pts.map(([ax, az], i) => {
+        const points3D = new Array(n);
+        for (let i = 0; i < n; i++) {
+            const [ax, az] = pts[i];
             let y = this._altitude + (this._nodeHeights[i] ?? 0);
             if (this._cachedHeights)
                 y = this._cachedHeights[i];
-            return new THREE.Vector3(ax + wgPos.x, y + wgPos.y, az + wgPos.z);
-        });
-        const segLengths = [];
+            points3D[i] = new THREE.Vector3(ax + wgPos.x, y + wgPos.y, az + wgPos.z);
+        }
+        const segLengths = new Array(n - 1);
+        const prefix = new Array(n - 1);
         let totalLen = 0;
-        for (let i = 0; i < points3D.length - 1; i++) {
+        for (let i = 0; i < n - 1; i++) {
+            prefix[i] = totalLen;
             const d = points3D[i].distanceTo(points3D[i + 1]);
-            segLengths.push(d);
+            segLengths[i] = d;
             totalLen += d;
         }
         if (totalLen < 1e-9) {
             this._screenData.valid = false;
+            this._labelPrefixSums = null;
             return;
         }
-        const pointAtT = (t) => {
-            let target = t * totalLen;
-            let acc = 0;
-            for (let i = 0; i < segLengths.length; i++) {
-                if (target <= acc + segLengths[i]) {
-                    const local = (target - acc) / segLengths[i];
-                    return new THREE.Vector3().lerpVectors(points3D[i], points3D[i + 1], local);
-                }
-                acc += segLengths[i];
+        const world = this._tmpLabelWorld;
+        const scr = this._tmpLabelScreen;
+        const findSeg = (target) => {
+            let lo = 0, hi = segLengths.length - 1;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (prefix[mid] <= target)
+                    lo = mid;
+                else
+                    hi = mid - 1;
             }
-            return points3D[points3D.length - 1].clone();
+            return lo;
         };
         const samples = 200;
         const visibleTs = [];
         for (let i = 0; i < samples; i++) {
             const t = i / (samples - 1);
-            const pt = pointAtT(t);
-            const scr = pt.clone().project(camera);
+            const target = t * totalLen;
+            const segIdx = findSeg(target);
+            const segLen = segLengths[segIdx];
+            const local = segLen > 0 ? (target - prefix[segIdx]) / segLen : 0;
+            world.lerpVectors(points3D[segIdx], points3D[segIdx + 1], local);
+            scr.copy(world).project(camera);
             if (scr.z > 0 && scr.z < 1 &&
                 scr.x >= -1 && scr.x <= 1 &&
                 scr.y >= -1 && scr.y <= 1) {
@@ -673,6 +862,7 @@ export class Polyline extends SpatialObject {
         }
         if (visibleTs.length === 0) {
             this._screenData.valid = false;
+            this._labelPrefixSums = null;
             return;
         }
         const segments = [];
@@ -693,14 +883,10 @@ export class Polyline extends SpatialObject {
                 best = s;
         }
         this._screenData = {
-            points3D,
-            segLengths,
-            totalLen,
-            visibleInterval: best,
-            camera: camera.clone(),
-            map,
-            valid: true,
+            points3D, segLengths, totalLen,
+            visibleInterval: best, camera, map, valid: true,
         };
+        this._labelPrefixSums = prefix;
         if (this._labelT < best.min || this._labelT > best.max) {
             this._labelT = (best.min + best.max) / 2;
         }
@@ -715,23 +901,25 @@ export class Polyline extends SpatialObject {
         const data = this._screenData;
         if (!data.valid || !data.map)
             return null;
-        const totalLen = data.totalLen;
-        const target = t * totalLen;
-        let acc = 0;
-        let pt3D = null;
+        const prefix = this._labelPrefixSums;
+        if (!prefix)
+            return null;
+        const target = t * data.totalLen;
         const segLengths = data.segLengths;
         const points3D = data.points3D;
-        for (let i = 0; i < segLengths.length; i++) {
-            if (target <= acc + segLengths[i]) {
-                const local = (target - acc) / segLengths[i];
-                pt3D = new THREE.Vector3().lerpVectors(points3D[i], points3D[i + 1], local);
-                break;
-            }
-            acc += segLengths[i];
+        let lo = 0, hi = segLengths.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (prefix[mid] <= target)
+                lo = mid;
+            else
+                hi = mid - 1;
         }
-        if (!pt3D)
-            pt3D = points3D[points3D.length - 1].clone();
-        const scr = pt3D.clone().project(data.camera);
+        const segLen = segLengths[lo];
+        const local = segLen > 0 ? (target - prefix[lo]) / segLen : 0;
+        const world = this._tmpLabelWorld;
+        world.lerpVectors(points3D[lo], points3D[lo + 1], local);
+        const scr = this._tmpLabelScreen.copy(world).project(data.camera);
         if (scr.z <= 0 || scr.z >= 1)
             return null;
         const canvas = data.map.renderer.domElement;
@@ -752,8 +940,8 @@ export class Polyline extends SpatialObject {
             return 0;
         const p1 = points3D[segIdx];
         const p2 = points3D[segIdx + 1];
-        const s1 = p1.clone().project(data.camera);
-        const s2 = p2.clone().project(data.camera);
+        const s1 = this._tmpLabelScreen.copy(p1).project(data.camera);
+        const s2 = this._tmpLabelScreen2.copy(p2).project(data.camera);
         if (s1.z <= 0 || s2.z <= 0)
             return 0;
         const W = data.map.renderer.domElement.clientWidth;
@@ -773,25 +961,28 @@ export class Polyline extends SpatialObject {
         const data = this._screenData;
         if (!data.valid)
             return -1;
+        const prefix = this._labelPrefixSums;
+        if (!prefix)
+            return -1;
         const target = t * data.totalLen;
-        let acc = 0;
         const segLengths = data.segLengths;
-        for (let i = 0; i < segLengths.length; i++) {
-            if (target <= acc + segLengths[i] + 1e-9)
-                return i;
-            acc += segLengths[i];
+        let lo = 0, hi = segLengths.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (prefix[mid] <= target)
+                lo = mid;
+            else
+                hi = mid - 1;
         }
-        return segLengths.length - 1;
+        return lo;
     }
     getLabelParameter() { return this._labelT; }
     setLabelParameter(t) {
         const iv = this.getVisibleInterval();
-        if (iv) {
+        if (iv)
             this._labelT = Math.max(iv.min, Math.min(iv.max, t));
-        }
-        else {
+        else
             this._labelT = t;
-        }
     }
     getPlacement() { return this._titlePlacement; }
     // =================================================================
@@ -836,5 +1027,163 @@ export class Polyline extends SpatialObject {
         if (count === 0 || !isFinite(minX))
             return null;
         return [[minX, minY], [maxX, maxY]];
+    }
+    debugDump() {
+        const map = this._map;
+        const line = this._line;
+        const geo = this._geometry;
+        const mat = this._material;
+        const abs = this._absPositions;
+        // ── 1. LOD-состояние ──
+        const lod = {
+            simplify: this._simplify,
+            tolerance: this._simplifyTolerance,
+            zoomBucket: this._simplifyZoomBucket,
+            currentBucket: this._currentSimplifyBucket,
+            pendingBucket: this._pendingBucket,
+            mapZoom: map?.currentDiscreteZoom,
+            mapZoomContinuous: map?.continuousZoom,
+            originalCount: this._positions.length,
+            simplifiedCount: abs.length,
+        };
+        // ── 2. Проверка направления DP ──
+        const dpCheck = {};
+        const dpOrder = {};
+        if (map && this._simplify) {
+            const z0 = Math.max(0, Math.floor(map.currentDiscreteZoom) - 2);
+            const full = this._getFullProjected();
+            const isClosed = full.length >= 4 &&
+                full[0][0] === full[full.length - 1][0] &&
+                full[0][1] === full[full.length - 1][1];
+            for (const b of [z0, z0 + 1, z0 + 2, z0 + 3, z0 + 4, z0 + 5, z0 + 6]) {
+                const tolWorld = this._worldPerPixel(b * this._simplifyZoomBucket) * this._simplifyTolerance;
+                const kept = isClosed
+                    ? simplifyRingIndices(full, tolWorld)
+                    : douglasPeuckerIndices(full, tolWorld);
+                dpCheck['b' + b] = kept.length;
+                dpOrder['b' + b] = kept.slice(0, 12).join(',') +
+                    (kept.length > 12 ? ',…' : '') +
+                    (kept.every((v, i) => i === 0 || v > kept[i - 1]) ? '  [mono✓]' : '  [МОНОТОННОСТЬ НАРУШЕНА ❌]');
+            }
+        }
+        // ── 3. Здоровье _absPositions ──
+        let nanAbs = 0, zeroAbsSeg = 0, minAbsSeg = Infinity, maxAbsSeg = 0, totalLen = 0;
+        for (let i = 0; i < abs.length; i++) {
+            if (!Number.isFinite(abs[i][0]) || !Number.isFinite(abs[i][1]))
+                nanAbs++;
+        }
+        for (let i = 1; i < abs.length; i++) {
+            const d = Math.hypot(abs[i][0] - abs[i - 1][0], abs[i][1] - abs[i - 1][1]);
+            if (d < 1e-9)
+                zeroAbsSeg++;
+            if (d < minAbsSeg)
+                minAbsSeg = d;
+            if (d > maxAbsSeg)
+                maxAbsSeg = d;
+            totalLen += d;
+        }
+        // ── 4. Здоровье Line2-буфера ──
+        let instCount = 0, geoNaN = 0, geoZero = 0, geoMinLen = Infinity;
+        if (geo) {
+            const sA = geo.attributes?.instanceStart, eA = geo.attributes?.instanceEnd;
+            if (sA && eA) {
+                instCount = sA.count;
+                const s = sA.array, e = eA.array;
+                for (let k = 0; k < instCount; k++) {
+                    const sx = s[k * 3], sy = s[k * 3 + 1], sz = s[k * 3 + 2];
+                    const ex = e[k * 3], ey = e[k * 3 + 1], ez = e[k * 3 + 2];
+                    if (![sx, sy, sz, ex, ey, ez].every(Number.isFinite)) {
+                        geoNaN++;
+                        continue;
+                    }
+                    const dx = ex - sx, dy = ey - sy, dz = ez - sz;
+                    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len === 0)
+                        geoZero++;
+                    if (len < geoMinLen)
+                        geoMinLen = len;
+                }
+            }
+        }
+        // ── 5. Материал и объект ──
+        const objInfo = line ? {
+            visible: line.visible,
+            inWorldGroup: line.parent === map?.worldGroup,
+            position: [line.position.x.toFixed(1), line.position.y.toFixed(1), line.position.z.toFixed(1)],
+            frustumCulled: line.frustumCulled,
+            renderOrder: line.renderOrder,
+        } : null;
+        const matInfo = mat ? {
+            opacity: mat.opacity, linewidth: mat.linewidth,
+            dashed: mat.dashed, transparent: mat.transparent,
+            depthTest: mat.depthTest, depthWrite: mat.depthWrite,
+            resolution: mat.resolution ? [mat.resolution.x, mat.resolution.y] : null,
+            visible: mat.visible,
+        } : null;
+        console.groupCollapsed(`%c[Polyline] z=${lod.mapZoom} bucket=${lod.currentBucket} ` +
+            `orig=${lod.originalCount} simp=${lod.simplifiedCount} inst=${instCount}`, 'color:#3af;font-weight:bold');
+        console.log('%c1. LOD state', 'color:#3af;font-weight:bold', lod);
+        console.log('%c2. DP при разных bucket (ОЖИДАНИЕ: с ростом bucket точек БОЛЬШЕ)', 'color:#3af;font-weight:bold', dpCheck);
+        console.log('%c   Порядок индексов DP (первые 12):', 'color:#3af', dpOrder);
+        console.log('%c3. _absPositions', 'color:#3af;font-weight:bold', { nanAbs, zeroAbsSeg, minAbsSeg: +minAbsSeg.toFixed(3), maxAbsSeg: +maxAbsSeg.toFixed(3), totalLen: +totalLen.toFixed(1) });
+        console.log('%c4. Line2 буфер', 'color:#3af;font-weight:bold', {
+            instances: instCount,
+            maxInstanceCount: geo?._maxInstanceCount,
+            expected: abs.length - 1,
+            missing: (abs.length - 1) - instCount,
+            geoNaN,
+            geoZero,
+            geoMinLen: +geoMinLen.toFixed(6),
+        });
+        console.log('%c5. Object', 'color:#3af;font-weight:bold', objInfo);
+        console.log('%c6. Material', 'color:#3af;font-weight:bold', matInfo);
+        // ── Автоматический вердикт ──
+        if (geoNaN > 0)
+            console.error(`❌ ${geoNaN} NaN-сегментов в Line2 — источник «крошек»`);
+        if (geoZero > 0)
+            console.error(`❌ ${geoZero} нулевых сегментов в Line2 → NaN в шейдере`);
+        if (instCount !== abs.length - 1)
+            console.error(`❌ Буфер Line2 рассинхронизирован с _absPositions (${instCount} vs ${abs.length - 1})`);
+        const keys = Object.keys(dpCheck);
+        if (keys.length >= 2) {
+            const first = dpCheck[keys[0]], last = dpCheck[keys[keys.length - 1]];
+            if (last < first)
+                console.error(`❌ ИНВЕРСИЯ DP: b${keys[0]}→${first}, b${keys[keys.length - 1]}→${last}. Чем ближе, тем меньше точек.`);
+            if (Object.values(dpOrder).some(v => v.includes('❌')))
+                console.error(`❌ DP возвращает индексы не по порядку`);
+        }
+        console.groupEnd();
+    }
+    debugToggleSimplify(on) {
+        this._simplify = on;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = on ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket) : -1;
+            this._doRebuildForBucket(b);
+        }
+        console.log(`[Polyline] simplify = ${on}`);
+    }
+    debugSegmentRange(from, to) {
+        const geo = this._geometry;
+        if (!geo)
+            return console.log('no geometry');
+        const sA = geo.attributes?.instanceStart, eA = geo.attributes?.instanceEnd;
+        if (!sA || !eA)
+            return console.log('no instance attributes');
+        const s = sA.array, e = eA.array;
+        const rows = [];
+        for (let k = from; k < Math.min(to, sA.count); k++) {
+            const sx = s[k * 3], sy = s[k * 3 + 1], sz = s[k * 3 + 2];
+            const ex = e[k * 3], ey = e[k * 3 + 1], ez = e[k * 3 + 2];
+            const len = Math.hypot(ex - sx, ey - sy, ez - sz);
+            rows.push({
+                i: k, len: +len.toFixed(4),
+                start: [sx, sy, sz].map(v => v.toFixed(1)).join(','),
+                end: [ex, ey, ez].map(v => v.toFixed(1)).join(','),
+                bad: !Number.isFinite(len) || len === 0,
+            });
+        }
+        console.table(rows);
     }
 }

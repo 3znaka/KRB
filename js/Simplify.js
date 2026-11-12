@@ -21,7 +21,11 @@ export function douglasPeuckerIndices(points, tolerance) {
                 dSq = px * px + py * py;
             }
             else {
-                const t = ((points[i][0] - ax) * dx + (points[i][1] - ay) * dy) / lineLenSq;
+                let t = ((points[i][0] - ax) * dx + (points[i][1] - ay) * dy) / lineLenSq;
+                if (t < 0)
+                    t = 0;
+                else if (t > 1)
+                    t = 1;
                 const cx = ax + t * dx, cy = ay + t * dy;
                 const px = points[i][0] - cx, py = points[i][1] - cy;
                 dSq = px * px + py * py;

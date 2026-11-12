@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Polynomial CRS</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map {
+        position: absolute;
+        left: 0; right: 0; top: 0; bottom: 0;
+        width: 100%; height: 100dvh; overflow: hidden;
+    }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+const { Projections, ELLIPSOIDS } = await import('./../js/Projections.js');
+
+await KRB.addCrs(['ADPKP:0057', 'EPSG:32637', 'EPSG:32601']);
+
+ const map = new KRB.Map({
+        target: 'map',
+debug: true,
+       crs: 'ADPKP:0057',
+        layers: [],
+        graticule: {
+            crs: 'EPSG:4326',
+            step: { lat: 15, lon: 5 },
+            color: '#888',
+            width: 1,
+            opacity: 0.6,
+            showLabels: true,
+        },
+        view: new KRB.View({
+            centerLonLat: [10, 20],
+            zoom: 1,
+            minZoom: 0,
+            maxZoom: 8,
+        }),
+    });
+
+
+  const world = new KRB.GeoJSONLayer({
+        url: 'lines.geojson',
+        defaultFillColor:   '#aa0101',
+      
+        defaultStrokeColor: '#000000',
+        defaultStrokeWidth: 0.3,
+    }).addTo(map);
+// после создания map / world
+window.map = map;
+window.world = world;
+
+// Дамп только тех полилиний, что реально видны на экране
+window.__dumpVisible = () => {
+  const pls = __polylines().filter(p => p._isVisible);
+  console.group(`Visible: ${pls.length}`);
+  pls.slice(0, 30).forEach((p, i) => {
+    const geo = p._geometry;
+    let inst = 0, nan = 0, zero = 0, minLen = Infinity;
+    if (geo?.attributes?.instanceStart) {
+      inst = geo.attributes.instanceStart.count;
+      const s = geo.attributes.instanceStart.array;
+      const e = geo.attributes.instanceEnd.array;
+      for (let k = 0; k < inst; k++) {
+        const dx=e[k*3]-s[k*3], dy=e[k*3+1]-s[k*3+1], dz=e[k*3+2]-s[k*3+2];
+        if (![dx,dy,dz].every(Number.isFinite)) { nan++; continue; }
+        const len = Math.hypot(dx,dy,dz);
+        if (len === 0) zero++;
+        if (len < minLen) minLen = len;
+      }
+    }
+    console.log(i, {
+      z: p._map?.currentDiscreteZoom,
+      bucket: p._currentSimplifyBucket,
+      orig: p._positions.length,
+      abs: p._absPositions.length,
+      inst,
+      nan, zero,
+      minLen: +minLen.toFixed(6),
+      visible: p._line?.visible,
+    });
+  });
+  console.groupEnd();
+};
+
+// Найти полилинию по клику (для «вот эта крошится»)
+window.__pickAt = (clientX, clientY) => {
+  const pls = __polylines().filter(p => p._isVisible);
+  // простая эвристика: у какой bbox-сферы экранная проекция ближе всего к точке
+  const canvas = map.renderer.domElement;
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left, py = clientY - rect.top;
+  let best = null, bestD = Infinity;
+  for (const p of pls) {
+    const sp = p.getScreenPosition?.();
+    if (!sp) continue;
+    const d = Math.hypot(sp.x - px, sp.y - py);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (best && bestD < 300) {
+    console.log(`picked polyline (${bestD.toFixed(0)}px) → window.__pl`);
+    window.__pl = best;
+    best.debugDump();
+  } else {
+    console.log('nothing within 300px');
+  }
+};
+
+</script>
+</body>
+</html>

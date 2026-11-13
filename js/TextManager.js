@@ -424,6 +424,7 @@ export class TextManager {
             _hideTimeout: null,
             _cachedText: initialText,
             _cachedStyle: { ...initialStyle },
+            _lastSourceVisible: source.isVisible ? source.isVisible() : true,
             screenPos: null,
         };
         this.labels.push(label);
@@ -1140,6 +1141,16 @@ export class TextManager {
         this._wasStable = isStable;
         if (isStable && !wasStable)
             this._dirty = true;
+        if (!this._dirty && this.labels.length > 0) {
+            for (let i = 0; i < this.labels.length; i++) {
+                const label = this.labels[i];
+                const srcVisible = label.source.isVisible();
+                if (label._lastSourceVisible !== srcVisible) {
+                    label._lastSourceVisible = srcVisible;
+                    this._dirty = true;
+                }
+            }
+        }
         if (this._dirty) {
             this._updateVisibility(zoom, isStable);
             this._dirty = false;
@@ -1155,12 +1166,14 @@ export class TextManager {
         for (let i = 0; i < this.labels.length; i++) {
             const label = this.labels[i];
             const src = label.source;
+            const srcVisible = src.isVisible();
+            label._lastSourceVisible = srcVisible;
             const zb = src.getTextZoomBounds();
             if (zoom < zb.min || zoom > zb.max) {
                 label.hiddenByPriority = true;
                 continue;
             }
-            if (!src.isVisible()) {
+            if (!srcVisible) {
                 label.hiddenByPriority = true;
                 continue;
             }

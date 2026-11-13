@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>План МИИГАиК</title>
+
+    <link href="../KRB.css" rel="stylesheet">
+    <script src="layers.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+        #map {
+            position: absolute;
+            left: 0; right: 0; top: 0; bottom: 0;
+            width: 100%; height: 100dvh;
+            overflow: hidden;
+        }
+
+        #search-box { margin-top: 10px; }
+
+        /* Попап */
+        .krb-popup-tooltip { max-width: 400px; font: 12px/20px 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; }
+        .krb-popup-tooltip h3 { margin: 6px 0; font-size: 16px; }
+        .krb-popup-tooltip p  { margin: 8px 0; }
+        .krb-popup-tooltip .cnn { margin: 2px 0; }
+        .krb-popup-tooltip .inv { margin-left: 2px; margin-right: 8px; vertical-align: middle; }
+        .krb-popup-tooltip .up  { vertical-align: 4px; }
+        .krb-popup-tooltip .cont { font-size: 18px; }
+
+        /* Оверлей с контролами */
+        .map-overlay .map-overlay-inner {
+            position: absolute;
+            top: 10px; left: 10px;
+            padding: 10px;
+            background-color: #fff;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            border-radius: 3px;
+            z-index: 1000;
+            width: 300px;
+        }
+
+        /* Кастомный автокомплит */
+        #search-box { position: relative; }
+        #search {
+            width: 100%; padding: 8px 28px 8px 12px;
+            border: 1px solid #ccc; border-radius: 4px;
+            font-size: 14px; box-sizing: border-box; outline: none;
+        }
+        #search:focus { border-color: #007bff; }
+        #closebtn {
+            position: absolute;
+            right: 8px; top: 50%;
+            transform: translateY(-50%);
+            color: #000;
+            font-size: 20px;
+            display: none;
+            cursor: pointer;
+            user-select: none;
+            line-height: 1;
+        }
+        #closebtn:hover { color: red; }
+        #search-results {
+            position: absolute;
+            top: 100%; left: 0; right: 0;
+            background: white;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+            max-height: 300px;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            z-index: 1001;
+            display: none;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        #search-results li { padding: 6px 12px; cursor: pointer; font-size: 13px; }
+        #search-results li:hover { background: #f0f0f0; }
+        #search-results li.category {
+            font-weight: bold;
+            background: #f5f5f5;
+            cursor: default;
+            color: #666;
+            padding: 4px 12px;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        #search-results li.category:hover { background: #f5f5f5; }
+        #search-results li.empty { color: #999; cursor: default; }
+        #search-results li.empty:hover { background: white; }
+
+        /* Этажи */
+        #floor-control { margin-top: 8px; margin-bottom: 4px; }
+        #floor-control input[type="radio"] { display: none; }
+        #floor-control label {
+            display: inline-block;
+            padding: 4px 10px; margin: 2px;
+            background: #f0f0f0; border-radius: 20px;
+            cursor: pointer; font-size: 14px;
+        }
+        #floor-control label.active { background: #007bff; color: white; }
+        #floor-control label:hover { background: #e0e0e0; }
+        #floor-control label.active:hover { background: #0069d9; }
+
+        [data-tooltip] { position: relative; cursor: help; }
+        [data-tooltip]::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            width: 300px;
+            left: -150px; top: 100%;
+            background: #3989c9; color: #fff;
+            padding: 0.5em;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+            pointer-events: none;
+            opacity: 0;
+            transition: 0.3s;
+            z-index: 3000;
+            font-size: 12px;
+        }
+        [data-tooltip]:hover::after { opacity: 1; top: 2em; }
+
+        #location-title { font-size: 14px; margin: 8px 0 4px; }
+        #location-description { font-size: 12px; margin: 4px 0; }
+
+        #pause { display: none; }
+        #pause::after { content: 'Остановить'; }
+        #pause.pause::after { content: 'Продолжить'; }
+
+        @media (max-width: 600px) {
+            .map-overlay .map-overlay-inner {
+                position: absolute;
+                top: 0; left: 0;
+                margin: 10px;
+                width: calc(100% - 20px);
+                box-sizing: border-box;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="map-overlay top">
+        <div class="map-overlay-inner">
+            <label for="search">Найти номер аудитории:</label>
+            <div id="search-box">
+                <input id="search" autocomplete="off">
+                <span id="closebtn" onclick="clear_search()" title="Очистить поиск">×</span>
+                <ul id="search-results"></ul>
+            </div>
+            <p>
+                <label>
+                    Выбрать уровень:
+                    <span data-tooltip="Уровни соответствуют этажам во всех корпусах, кроме Исторического и Шестого корпусов (уровни смещены на один этаж: 2-ой уровень соответствует 1-му этажу)">⚠</span>
+                </label>
+            </p>
+            <div id="floor-control">
+                <input type="radio" id="floor1" name="floor" value="1"><label for="floor1">1</label>
+                <input type="radio" id="floor2" name="floor" value="2" checked><label for="floor2">2</label>
+                <input type="radio" id="floor3" name="floor" value="3"><label for="floor3">3</label>
+                <input type="radio" id="floor4" name="floor" value="4"><label for="floor4">4</label>
+                <input type="radio" id="floor5" name="floor" value="5"><label for="floor5">5</label>
+                <input type="radio" id="floor6" name="floor" value="6"><label for="floor6">6</label>
+                <input type="radio" id="floor7" name="floor" value="7"><label for="floor7">7</label>
+            </div>
+            <h2 id="location-title"></h2>
+            <p id="location-description"></p>
+            <button id="pause"></button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as KRB from '../js/KRB.js';
+
+        // =============================================================
+        // 0. Проверка данных из layers.js
+        // =============================================================
+        const REQUIRED = ['corpus_layer', 'room_layer', 'dop_layer', 'poi_layer', 'wall_layer', 'floor_layer', 'search_data'];
+        const missing = REQUIRED.filter(k => typeof window[k] === 'undefined');
+        if (missing.length) {
+            console.error('layers.js: не найдены глобалы: ' + missing.join(', '));
+        }
+
+        const USE_REPAIR_PATTERN = true;
+
+        // Высота одного этажа (м). Уровень N имеет абсолютную высоту
+        // FLOOR_HEIGHT * (N - 1): floor 1 → 0 м, floor 2 → 6 м и т.д.
+        const FLOOR_HEIGHT = 6;
+        const floorAltitude = (floor) => FLOOR_HEIGHT * (floor - 1);
+
+        // =============================================================
+        // 1. Карта
+        // =============================================================
+        const map = new KRB.Map({
+            target: 'map',
+            layers: [],
+            debug: true,
+            view: new KRB.View({
+                centerLonLat: [37.66197, 55.763893],
+                zoom: 17.5,
+                pitch: 48,
+                bearing: 122,
+                maxZoom: 22,
+                minZoom: 15,
+                maxBounds: [
+                    [37.644358, 55.753074],
+                    [37.684699, 55.774887],
+                ],
+            }),
+            antialias: true
+        });
+
+        // Кликабельные ссылки в попапе
+        if (typeof KRB.PopupManager === 'function') {
+            map.popupManager.destroy();
+            map.popupManager = new KRB.PopupManager(map, { pointerEvents: 'auto', zIndex: 1300 });
+        } else if (map.popupManager && map.popupManager._tooltipElement) {
+            map.popupManager._tooltipElement.style.pointerEvents = 'auto';
+        }
+
+        // =============================================================
+        // 2. Подложка (OSM PBF)
+        // =============================================================
+        const vectorLayer = new KRB.VectorTile({
+            url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
+            maxNativeZoom: 14,
+            minZoom: 2,
+            maxZoom: 22,
+            attributionTitle: 'Картографический факультет МИИГАиК, 2026',
+            attributionUrl: 'https://kartfak.ru/',
+            invisibleLayers: ['poi'],
+            zoomOffset: -2
+        }).addTo(map);
+
+        fetch('exclude.geojson')
+            .then(r => r.json())
+            .then(col => vectorLayer.addExclusionArea(col, ['building']))
+            .catch(e => console.warn('exclude.geojson: ', e));
+
+        // =============================================================
+        // 3. Константы
+        // =============================================================
+        const data_inv = [
+            { room: '304к2', chairs: 30, tables: 15, hanger: true,  projector: true,  desk: true, pc: 15 },
+            { room: '101к2', chairs: 29, tables: 16, hanger: false, projector: false, desk: true, pc: 23 }
+        ];
+
+        const roomColors = {
+            'canteen': '#e5ffd5',
+            'public':  '#eadbff',
+            'office':  '#ffffe7',
+            'study':   '#ffd9a8',
+            'wc':      '#a6cee3',
+            'sport':   '#3CB371'
+        };
+
+        const poiImageMap = {
+            'w':     'img/wc.png',
+            'm':     'img/wc.png',
+            'food':  'img/food.png',
+            'main':  'img/main.png',
+            'up':    'img/up.png',
+            'down':  'img/down.png',
+            'start': 'img/Znachok1.png',
+            'finish':'img/finish.png',
+            'snn':   'img/snn.png',
+            'VGiKD': 'img/VGiKD.png',
+            'dod':   'img/kvest.png'
+        };
+        function poiIconUrl(type) { return poiImageMap[type] || `img/${type}.png`; }
+
+        const ZOOM_THRESHOLD = 18;
+
+        // =============================================================
+        // 4. Хелперы
+        // =============================================================
+        function eachRing(feature, cb) {
+            const g = feature.geometry;
+            const polys = g.type === 'MultiPolygon' ? g.coordinates : [g.coordinates];
+            polys.forEach(rings => cb(rings));
+        }
+
+        function getCorpProps(corp) {
+            if (!window.corpus_layer) return null;
+            const f = window.corpus_layer.features.find(x => x.properties.corp === corp);
+            return f ? f.properties : null;
+        }
+
+        function buildRoomPopup(props) {
+            let str = '<h3>';
+            let strtype = 'Помещение';
+            switch (props.type) {
+                case 'hall':   strtype = 'Коридор';   break;
+                case 'office': strtype = 'Кабинет';   break;
+                case 'step':   strtype = 'Лестница';  break;
+                case 'study':  strtype = 'Аудитория'; break;
+                case 'wc':     strtype = 'Туалет';    break;
+            }
+            str += (!props.name) ? `${strtype} ${props.number || ''}` : props.name;
+            str += '</h3><p>';
+
+            const f_corp = getCorpProps(props.corp);
+            if (f_corp) {
+                str += f_corp.name + ', ';
+                str += (props.corp === 1) ? (props.floor - 1) : props.floor;
+                str += ' этаж';
+                if (props.number) str += ', ' + props.number;
+                str += '</p>';
+            }
+
+            if (props.status == 1) str += '<p>🛠 Закрыто на время ремонта</p>';
+
+            const inv = data_inv.find(item => item.room === props.number);
+            if (inv) {
+                str += '<p>' +
+                    `<span class="up">${inv.chairs}</span><img class="inv" src="img/chairs.png" alt="стулья" title="Стулья">` +
+                    `<span class="up">${inv.tables}</span><img class="inv" src="img/table.png" alt="столы" title="Столы">` +
+                    `<span class="up">${inv.pc || 0}</span><img class="inv" src="img/pc.png" alt="ПК" title="ПК">`;
+                if (inv.desk)      str += '<img class="inv" src="img/desk.png" alt="доска" title="Доска">';
+                if (inv.projector) str += '<img class="inv" src="img/projector.png" alt="проектор" title="Проектор">';
+                if (inv.hanger)    str += '<img class="inv" src="img/hanger.png" alt="вешалка" title="Вешалка">';
+                str += '</p>';
+            }
+            if (props.description) str += `<div class="cnn">${props.description}</div>`;
+            if (props.web)    str += `<p><span class="cont">➥</span> <a href="${props.web}" target="_blank">Перейти на сайт</a></p>`;
+            if (props.idroom) str += `<p><span class="cont">📅</span> <a href="https://study.miigaik.ru/classroom/?classroomId=${props.idroom}" target="_blank">Расписание</a></p>`;
+            return str;
+        }
+
+        function buildBuildingPopup(props) {
+            const f_corp = getCorpProps(props.corp);
+            if (!f_corp) return '';
+            let str = `<h3>${f_corp.name}</h3>`;
+            if (f_corp.alt)     str += `<p><i>${f_corp.alt}</i></p>`;
+            if (f_corp.address) str += `<p>${f_corp.address}</p>`;
+            return str;
+        }
+
+        // =============================================================
+        // 5. Объекты по этажам (план поднят на реальную высоту этажа)
+        // =============================================================
+        const floorGroups = {};
+        let currentFloor = 2;
+
+        function makeWallsForFloor(floor) {
+            const layer = new KRB.Layer().addTo(map);
+            if (!window.wall_layer) return layer;
+            const base = floorAltitude(floor);
+
+            wall_layer.features
+                .filter(f => f.properties.floor === floor)
+                .forEach(f => eachRing(f, rings => {
+                    layer.add(new KRB.Polygon({
+                        rings,
+                        fillColor: '#e8e8e8',
+                        fillOpacity: 1,
+                        strokeColor: 'rgba(0,0,0,0)',
+                        strokeWidth: 0,
+                        extruded: true,
+                        height: 1,
+                        minHeight: base,
+                        altitude: 0,
+                        altitudeMode: 'absolute',
+                        minZoom: ZOOM_THRESHOLD,
+                        depthTest: true,
+                        depthWrite: true,
+                        properties: f.properties
+                    }));
+                }));
+            return layer;
+        }
+
+        function makeRoomsForFloor(floor) {
+            const layer = new KRB.Layer().addTo(map);
+            if (!window.room_layer) return layer;
+            const base = floorAltitude(floor);
+
+            room_layer.features
+                .filter(f => f.properties.floor === floor)
+                .forEach(f => {
+                    const props = f.properties;
+                    const isRepair = props.status == 1;
+                    const usePattern = isRepair && USE_REPAIR_PATTERN;
+                    const fillColor = isRepair
+                        ? (usePattern ? '#ffffff' : 'rgba(255,0,0,0.15)')
+                        : (roomColors[props.type] || '#fafafa');
+
+                    eachRing(f, rings => {
+                        layer.add(new KRB.Polygon({
+                            rings,
+                            fillColor,
+                            fillOpacity: 0.9,
+                            fillPattern: usePattern ? 'img/diag-red-104.png' : undefined,
+                            fillPatternScale: 15,
+                            strokeColor: 'rgba(0,0,0,0)',
+                            strokeWidth: 0,
+                            minZoom: ZOOM_THRESHOLD,
+                            altitude: base + 0.02,
+                            altitudeMode: 'absolute',
+                            depthTest: true,
+                            depthWrite: true,
+                            title: props.number || '',
+                            titleMinZoom: 19,
+                            titleStyle: { fontSize: '10px', color: '#333', fontWeight: 'bold' },
+                            titlePriority: 5,
+                            properties: props,
+                            onClick: (e) => {
+                                const html = buildRoomPopup(props);
+                                if (html) map.popupManager.showAtEvent(e, html);
+                            },
+                            onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
+                        }));
+                    });
+                });
+            return layer;
+        }
+
+        function makeDopForFloor(floor) {
+            const layer = new KRB.Layer().addTo(map);
+            if (!window.dop_layer) return layer;
+            const base = floorAltitude(floor);
+
+            dop_layer.features
+                .filter(f => f.properties.floor === floor)
+                .forEach(f => {
+                    const props = f.properties;
+                    const h = Math.max(0.05, (props.step_num || 1) / 10);
+                    eachRing(f, rings => {
+                        layer.add(new KRB.Polygon({
+                            rings,
+                            fillColor: props.status == 1 ? '#cf554b' : '#e8e8e8',
+                            fillOpacity: 1,
+                            strokeColor: 'rgba(0,0,0,0)',
+                            strokeWidth: 0,
+                            extruded: true,
+                            height: h,
+                            minHeight: base,
+                            altitude: 0,
+                            altitudeMode: 'absolute',
+                            minZoom: ZOOM_THRESHOLD,
+                            depthTest: true,
+                            depthWrite: true,
+                            properties: props
+                        }));
+                    });
+                });
+            return layer;
+        }
+
+        function makePoiForFloor(floor) {
+            const layer = new KRB.Layer().addTo(map);
+            if (!window.poi_layer) return layer;
+            const base = floorAltitude(floor);
+
+            poi_layer.features
+                .filter(f => f.properties.floor === floor)
+                .forEach(f => {
+                    const props = f.properties;
+                    const [lon, lat] = f.geometry.coordinates;
+                    layer.add(new KRB.Marker({
+                        // ВАЖНО: Marker принимает position строго [x, y].
+                        // Высота — отдельным полем altitude + altitudeMode: 'absolute'.
+                        position: [lon, lat],
+                        altitude: base + 0.5,
+                        altitudeMode: 'absolute',
+                        iconUrl: poiIconUrl(props.type),
+                        iconSize: [32, 32],
+                        anchor: [0.5, 0.5],
+                        minZoom: 19,
+                        clusterable: false,
+                        properties: props
+                    }));
+                });
+            return layer;
+        }
+
+        function buildAllFloors() {
+            const floors = new Set();
+            ['room_layer', 'wall_layer', 'dop_layer', 'poi_layer'].forEach(name => {
+                if (window[name]) window[name].features.forEach(f => floors.add(f.properties.floor));
+            });
+
+            [...floors].sort().forEach(floor => {
+                const g = {
+                    walls: makeWallsForFloor(floor),
+                    rooms: makeRoomsForFloor(floor),
+                    dop:   makeDopForFloor(floor),
+                    poi:   makePoiForFloor(floor)
+                };
+                g.walls.setVisible(false);
+                g.rooms.setVisible(false);
+                g.dop.setVisible(false);
+                g.poi.setVisible(false);
+                floorGroups[floor] = g;
+            });
+        }
+
+        // =============================================================
+        // 6. 3D-корпуса: слои по этажам, показываем только те, что НИЖЕ
+        //    текущего (они — «пьедестал» для плана этажа).
+        // =============================================================
+        const buildingsByFloor = {};
+
+        function buildBuildingLayer() {
+            if (!window.floor_layer) return;
+
+            floor_layer.features.forEach(f => {
+                const props = f.properties;
+                const floor = props.floor;
+
+                if (!buildingsByFloor[floor]) {
+                    buildingsByFloor[floor] = new KRB.Layer().addTo(map);
+                }
+
+                eachRing(f, rings => {
+                    buildingsByFloor[floor].add(new KRB.Polygon({
+                        rings,
+                        fillColor: props.color || '#cccccc',
+                        fillOpacity: 1,
+                        strokeColor: 'rgba(0,0,0,0)',
+                        strokeWidth: 0,
+                        extruded: true,
+                        height: FLOOR_HEIGHT,
+                        minHeight: floorAltitude(floor),
+                        altitude: 0,
+                        altitudeMode: 'absolute',
+                        depthTest: true,
+                        depthWrite: true,
+                        properties: props,
+                        onClick: (e) => {
+                            const html = buildBuildingPopup(props);
+                            if (html) map.popupManager.showAtEvent(e, html);
+                        },
+                        onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
+                    }));
+                });
+            });
+
+            Object.values(buildingsByFloor).forEach(layer => layer.setVisible(false));
+        }
+
+        function updateBuildingVisibility(floor) {
+            Object.keys(buildingsByFloor).forEach(f => {
+                const bf = parseInt(f, 10);
+                const layer = buildingsByFloor[f];
+                const visible = bf < floor;
+                if (layer.visible !== visible) layer.setVisible(visible);
+            });
+        }
+
+        // =============================================================
+        // 7. Подсветка поиска
+        // =============================================================
+        let searchHighlight = [];
+
+        function clearSearchHighlight() {
+            searchHighlight.forEach(p => { try { p.remove(); } catch (_) {} });
+            searchHighlight = [];
+        }
+
+        function addHighlight(rings, style) {
+            const alt = style.groundLevel
+                ? 0.05
+                : floorAltitude(currentFloor) + 0.05;
+
+            const p = new KRB.Polygon({
+                rings,
+                fillColor: style.fillColor,
+                fillOpacity: style.fillOpacity ?? 0.25,
+                strokeColor: style.strokeColor,
+                strokeWidth: style.strokeWidth ?? 2,
+                strokeOpacity: 1,
+                minZoom: style.minZoom ?? ZOOM_THRESHOLD,
+                altitude: alt,
+                altitudeMode: 'absolute',
+                depthTest: false
+            });
+            p.addTo(map);
+            searchHighlight.push(p);
+        }
+
+        function highlightRoomById(id) {
+            clearSearchHighlight();
+            if (!window.room_layer) return;
+            const f = room_layer.features.find(x => x.properties.id === id);
+            if (!f) return;
+            eachRing(f, rings => addHighlight(rings, {
+                fillColor: 'rgba(0,255,0,0.25)',
+                strokeColor: '#0f0',
+                strokeWidth: 2
+            }));
+        }
+
+        function highlightBuilding(corpId) {
+            clearSearchHighlight();
+            if (!window.corpus_layer) return;
+            const f = corpus_layer.features.find(x => x.properties.corp === corpId);
+            if (!f) return;
+            eachRing(f, rings => addHighlight(rings, {
+                fillColor: 'rgba(255,0,0,0.1)',
+                fillOpacity: 0.1,
+                strokeColor: '#f00',
+                strokeWidth: 5,
+                minZoom: 0,
+                groundLevel: true
+            }));
+        }
+
+        // =============================================================
+        // 8. Хэш URL
+        // =============================================================
+        function parseHash() {
+            return window.location.hash.replace('#', '').split('&').filter(Boolean).reduce((acc, part) => {
+                const [k, v] = part.split('=');
+                acc[k] = v;
+                return acc;
+            }, {});
+        }
+        function getLevelHash() {
+            const h = parseHash();
+            if (h.l !== undefined) {
+                const v = parseInt(h.l, 10);
+                if (!isNaN(v)) return Math.max(1, Math.min(7, v));
+            }
+            return 2;
+        }
+        const getRoomHash   = () => parseHash().room ?? null;
+        const getIDroomHash = () => parseHash().id ?? null;
+        const getMarkerHash = () => parseHash().marker ?? null;
+        const getRouteHash  = () => parseHash().route ?? null;
+
+        function writeHash(changes) {
+            const h = parseHash();
+            Object.keys(changes).forEach(k => {
+                if (changes[k] === null) delete h[k];
+                else h[k] = changes[k];
+            });
+            const out = Object.keys(h).map(k => `${k}=${h[k]}`).join('&');
+            if (window.location.hash !== (out ? '#' + out : '')) {
+                window.location.hash = out;
+            }
+        }
+        const setLevelHash = (f) => writeHash({ l: f });
+        const setRoomHash  = (f) => writeHash({ room: f });
+        const delRoomHash  = () => writeHash({ room: null });
+        const delIDroomHash = () => writeHash({ id: null });
+
+        // =============================================================
+        // 9. Переключение этажа
+        // =============================================================
+        function setFloor(floor) {
+            floor = parseInt(floor, 10);
+            if (!floorGroups[floor]) floor = Object.keys(floorGroups)[0] || 2;
+
+            Object.keys(floorGroups).forEach(f => {
+                const isActive = (parseInt(f, 10) === floor);
+                const g = floorGroups[f];
+                if (g.walls.visible !== isActive) g.walls.setVisible(isActive);
+                if (g.rooms.visible !== isActive) g.rooms.setVisible(isActive);
+                if (g.dop.visible   !== isActive) g.dop.setVisible(isActive);
+                if (g.poi.visible   !== isActive) g.poi.setVisible(isActive);
+            });
+
+            updateBuildingVisibility(floor);
+
+            currentFloor = floor;
+            setLevelHash(floor);
+            updateFloorUI(floor);
+        }
+
+        function updateFloorUI(floor) {
+            document.querySelectorAll('#floor-control input').forEach(inp => {
+                inp.checked = (parseInt(inp.value, 10) === floor);
+            });
+            document.querySelectorAll('#floor-control label').forEach(l => {
+                const inp = l.previousElementSibling;
+                if (inp && inp.tagName === 'INPUT') {
+                    l.classList.toggle('active', parseInt(inp.value, 10) === floor);
+                }
+            });
+        }
+
+        // =============================================================
+        // 10. Поиск
+        // =============================================================
+        const searchInput = document.getElementById('search');
+        const searchResults = document.getElementById('search-results');
+        const closeBtn = document.getElementById('closebtn');
+
+        function selectSearchResult(item) {
+            closeBtn.style.display = 'block';
+            setFloor(item.floor);
+            searchInput.value = item.label || '';
+            setRoomHash(item.label);
+
+            const isRoom = window.room_layer &&
+                room_layer.features.some(x => x.properties.id === item.id);
+
+            if (!isRoom) {
+                highlightBuilding(item.id);
+                map.easeTo({ center: [item.x, item.y], zoom: ZOOM_THRESHOLD, duration: 0.8 });
+            } else {
+                highlightRoomById(item.id);
+                map.easeTo({ center: [item.x, item.y], zoom: 21, duration: 0.8 });
+            }
+        }
+
+        function findRoom(label) {
+            if (!window.search_data) return;
+            const decoded = decodeURI(label);
+            const item = search_data.find(e => e.label === decoded);
+            if (item) selectSearchResult(item);
+        }
+
+        function findIDroom(idRoom) {
+            if (!window.search_data) return;
+            const item = search_data.find(e => e.id_room == idRoom);
+            if (!item) return;
+            selectSearchResult(item);
+            delIDroomHash();
+        }
+
+        function clearSearch() {
+            clearSearchHighlight();
+            closeBtn.style.display = 'none';
+            searchInput.value = '';
+            searchResults.style.display = 'none';
+            delRoomHash();
+        }
+        window.clear_search = clearSearch;
+
+        // =============================================================
+        // 11. Автокомплит
+        // =============================================================
+        let searchDebounceTimer = null;
+
+        function renderSearchResults(query) {
+            if (!window.search_data) return;
+            const q = query.trim().toLowerCase();
+            if (!q) {
+                searchResults.style.display = 'none';
+                return;
+            }
+
+            const matches = search_data.filter(e => {
+                const label = (e.label || '').toLowerCase();
+                const cat = (e.category || '').toLowerCase();
+                return label.includes(q) || cat.includes(q);
+            }).slice(0, 40);
+
+            if (matches.length === 0) {
+                searchResults.innerHTML = '<li class="empty">Ничего не найдено</li>';
+                searchResults.style.display = 'block';
+                return;
+            }
+
+            const byCategory = new Map();
+            matches.forEach(m => {
+                const cat = m.category || '';
+                if (!byCategory.has(cat)) byCategory.set(cat, []);
+                byCategory.get(cat).push(m);
+            });
+
+            let html = '';
+            for (const [cat, items] of byCategory) {
+                if (cat) html += `<li class="category">${cat}</li>`;
+                items.forEach(m => {
+                    const label = m.label || `id ${m.id}`;
+                    const meta = JSON.stringify({
+                        id: m.id, id_room: m.id_room, floor: m.floor,
+                        x: m.x, y: m.y, label: m.label
+                    }).replace(/"/g, '&quot;');
+                    html += `<li data-item="${meta}">${label}</li>`;
+                });
+            }
+            searchResults.innerHTML = html;
+            searchResults.style.display = 'block';
+        }
+
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(() => renderSearchResults(searchInput.value), 80);
+        });
+
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                searchResults.style.display = 'none';
+            }
+        });
+
+        searchResults.addEventListener('click', (e) => {
+            const li = e.target.closest('li[data-item]');
+            if (!li) return;
+            try {
+                const item = JSON.parse(li.dataset.item.replace(/&quot;/g, '"'));
+                selectSearchResult(item);
+            } catch (err) {
+                console.warn('search-results parse failed', err);
+            }
+            searchResults.style.display = 'none';
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('#search-box')) {
+                searchResults.style.display = 'none';
+            }
+        });
+
+        // =============================================================
+        // 12. Radio этажей
+        // =============================================================
+        document.querySelectorAll('#floor-control input').forEach(inp => {
+            inp.addEventListener('change', (e) => {
+                clearSearch();
+                map.popupManager.hide();
+                setFloor(parseInt(e.target.value, 10));
+            });
+        });
+
+        // =============================================================
+        // 13. User marker
+        // =============================================================
+        let userMarker = null;
+
+        function updateUserMarker(markerStr) {
+            if (!markerStr) {
+                if (userMarker) { userMarker.remove(); userMarker = null; }
+                return;
+            }
+            const [lon, lat] = String(markerStr).split(',').map(Number);
+            if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
+            if (userMarker) {
+                userMarker.setLngLat([lon, lat]);
+            } else {
+                userMarker = new KRB.Marker({
+                    position: [lon, lat],
+                    iconUrl: 'img/Znachok1.png',
+                    iconSize: [47, 76],
+                    anchor: [0.5, 1.0],
+                    minZoom: 19,
+                    clusterable: false
+                });
+                userMarker.addTo(map);
+            }
+        }
+
+        // =============================================================
+        // 14. Маршрут
+        // =============================================================
+        const routeLocations = [
+            { id: '0', title: 'Вход в главное здание',            description: 'Начало маршрута',                camera: { center: [37.661877, 55.763536], zoom: 21 }, floor: 2 },
+            { id: '1', title: 'Двигайтесь к лестнице',             description: '51 метр',                        camera: { center: [37.662257, 55.763508], zoom: 19 }, floor: 2 },
+            { id: '2', title: 'Поднимитесь на один этаж',          description: 'три пролёта, 30 ступеней',       camera: { center: [37.662509, 55.763501], zoom: 21 }, floor: 2 },
+            { id: '3', title: 'Пройдите по переходу в Старый корпус', description: '111 метров, 8 ступеней',      camera: { center: [37.662692, 55.763844], zoom: 19 }, floor: 3 },
+            { id: '4', title: 'Розовый зал',                       description: 'Вы на месте!',                    camera: { center: [37.662818, 55.764194], zoom: 21 }, floor: 3 }
+        ];
+
+        const titleEl = document.getElementById('location-title');
+        const descEl = document.getElementById('location-description');
+        const pauseBtn = document.getElementById('pause');
+
+        let routeActive = false;
+        let pendingRouteIndex = null;
+        let routeLayersByFloor = {};
+
+        pauseBtn.addEventListener('click', () => {
+            pauseBtn.classList.toggle('pause');
+            if (!pauseBtn.classList.contains('pause') && pendingRouteIndex !== null) {
+                const next = pendingRouteIndex;
+                pendingRouteIndex = null;
+                routePlayback(next);
+            }
+        });
+
+        function buildRouteLayers(numRoute) {
+            if (!window.route_layer || !window.route_poi_layer) return;
+            const byFloor = {};
+
+            route_layer.features
+                .filter(f => f.properties.route === numRoute)
+                .forEach(f => {
+                    const floor = f.properties.floor;
+                    if (!byFloor[floor]) {
+                        byFloor[floor] = {
+                            lines: new KRB.Layer().addTo(map),
+                            pois: new KRB.Layer().addTo(map)
+                        };
+                    }
+                    const coords = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
+                    coords.forEach(cs => {
+                        byFloor[floor].lines.add(new KRB.Polyline({
+                            positions: cs,
+                            color: '#f00',
+                            width: 3,
+                            opacity: 0.7,
+                            altitude: floorAltitude(floor) + 0.5,
+                            altitudeMode: 'absolute',
+                            depthTest: true,
+                            minZoom: 0
+                        }));
+                    });
+                });
+
+            route_poi_layer.features
+                .filter(f => f.properties.route === numRoute)
+                .forEach(f => {
+                    const props = f.properties;
+                    const floor = props.floor;
+                    if (!byFloor[floor]) {
+                        byFloor[floor] = {
+                            lines: new KRB.Layer().addTo(map),
+                            pois: new KRB.Layer().addTo(map)
+                        };
+                    }
+                    const [lon, lat] = f.geometry.coordinates;
+                    const onFloorLabel = Number.isFinite(props.onFloor) && props.onFloor >= 0
+                        ? String(props.onFloor) : '';
+                    byFloor[floor].pois.add(new KRB.Marker({
+                        // ВАЖНО: position = [x, y]; высота — отдельным полем.
+                        position: [lon, lat],
+                        altitude: floorAltitude(floor) + 0.5,
+                        altitudeMode: 'absolute',
+                        iconUrl: poiIconUrl(props.type),
+                        iconSize: [32, 32],
+                        anchor: [0.5, 1.0],
+                        minZoom: 19,
+                        clusterable: false,
+                        title: onFloorLabel,
+                        titleMinZoom: 19,
+                        titleStyle: {
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            color: '#000',
+                            background: 'rgba(255,255,255,0.85)',
+                            padding: '1px 4px',
+                            borderRadius: '3px'
+                        },
+                        titleOffset: [0, 20]
+                    }));
+                });
+
+            routeLayersByFloor = byFloor;
+
+            Object.values(byFloor).forEach(g => {
+                g.lines.setVisible(false);
+                g.pois.setVisible(false);
+            });
+        }
+
+        function setRouteFloorVisible(floor) {
+            Object.keys(routeLayersByFloor).forEach(f => {
+                const isActive = (parseInt(f, 10) === floor);
+                const g = routeLayersByFloor[f];
+                if (g.lines.visible !== isActive) g.lines.setVisible(isActive);
+                if (g.pois.visible  !== isActive) g.pois.setVisible(isActive);
+            });
+        }
+
+        function routePlayback(index) {
+            if (!routeActive) return;
+            const loc = routeLocations[index];
+            titleEl.textContent = loc.title;
+            descEl.textContent = loc.description;
+            setFloor(loc.floor);
+
+            let fired = false;
+            const advance = () => {
+                if (fired) return;
+                fired = true;
+                if (!routeActive) return;
+                if (pauseBtn.classList.contains('pause')) {
+                    pendingRouteIndex = (index + 1) % routeLocations.length;
+                    return;
+                }
+                setTimeout(() => routePlayback((index + 1) % routeLocations.length), 2500);
+            };
+
+            if (typeof map.once === 'function') {
+                map.once('moveend', advance);
+                setTimeout(advance, 5000);
+            } else {
+                setTimeout(advance, 3500);
+            }
+
+            map.easeTo({
+                center: loc.camera.center,
+                zoom: loc.camera.zoom,
+                duration: 1.0
+            });
+        }
+
+        function startRoute(numRoute) {
+            routeActive = true;
+            pauseBtn.style.display = 'block';
+            buildRouteLayers(numRoute);
+            routePlayback(0);
+        }
+
+        // =============================================================
+        // 15. Обработка hashchange
+        // =============================================================
+        function processHash() {
+            const room   = getRoomHash();
+            const idRoom = getIDroomHash();
+            const lvl    = getLevelHash();
+            const marker = getMarkerHash();
+
+            if (room) findRoom(room);
+            else if (idRoom) findIDroom(idRoom);
+            else setFloor(lvl);
+
+            updateUserMarker(marker);
+        }
+
+        window.addEventListener('hashchange', () => {
+            clearTimeout(window.__hashTimer);
+            window.__hashTimer = setTimeout(processHash, 100);
+        });
+
+        // =============================================================
+        // 16. Старт
+        // =============================================================
+        try {
+            buildAllFloors();
+            buildBuildingLayer();
+
+            const routeHash = getRouteHash();
+            if (routeHash) startRoute(parseInt(routeHash, 10) || 1);
+
+            processHash();
+        } catch (e) {
+            console.error('Инициализация карты упала:', e);
+        }
+
+        window.__map = map;
+    </script>
+</body>
+</html>

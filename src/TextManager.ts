@@ -120,6 +120,7 @@ export interface Label {
     _pendingChosenT: number | null;
     _pendingChosenIsFlipped: boolean;
     _staleAt: number | null;
+     _lastSourceVisible: boolean; 
     _lastAnchor: LabelScreenPoint | null;
     _display: string;
     _hasIcon: boolean;
@@ -600,6 +601,7 @@ _setupIcon(el: HTMLDivElement, iconStyle: any, icon: IconOptions | null): void {
             _hideTimeout: null,
             _cachedText: initialText,
             _cachedStyle: { ...initialStyle },
+             _lastSourceVisible: source.isVisible ? source.isVisible() : true,
             screenPos: null,
         };
 
@@ -1276,6 +1278,19 @@ if (!anchorOverride
 
         if (isStable && !wasStable) this._dirty = true;
 
+
+if (!this._dirty && this.labels.length > 0) {
+    for (let i = 0; i < this.labels.length; i++) {
+        const label = this.labels[i];
+        const srcVisible = label.source.isVisible();
+        if (label._lastSourceVisible !== srcVisible) {
+            label._lastSourceVisible = srcVisible;
+            this._dirty = true;
+            
+        }
+    }
+}
+
         if (this._dirty) {
             this._updateVisibility(zoom, isStable);
             this._dirty = false;
@@ -1289,14 +1304,18 @@ if (!anchorOverride
         return 2 * (1 - Math.abs(dot));
     }
 
-    _updateVisibility(zoom: number, placeLines: boolean): void {
-        const visibleLabels: Label[] = [];
-        for (let i = 0; i < this.labels.length; i++) {
-            const label = this.labels[i];
-            const src = label.source;
-            const zb = src.getTextZoomBounds();
-            if (zoom < zb.min || zoom > zb.max) { label.hiddenByPriority = true; continue; }
-            if (!src.isVisible()) { label.hiddenByPriority = true; continue; }
+_updateVisibility(zoom: number, placeLines: boolean): void {
+    const visibleLabels: Label[] = [];
+    for (let i = 0; i < this.labels.length; i++) {
+        const label = this.labels[i];
+        const src = label.source;
+
+        const srcVisible = src.isVisible();
+        label._lastSourceVisible = srcVisible;   
+
+        const zb = src.getTextZoomBounds();
+        if (zoom < zb.min || zoom > zb.max) { label.hiddenByPriority = true; continue; }
+        if (!srcVisible)                    { label.hiddenByPriority = true; continue; }
 
             const type = src.getLabelType();
             if (type === 'line-curved') continue;

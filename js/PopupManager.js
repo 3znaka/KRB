@@ -130,7 +130,7 @@ export class PopupManager {
  *       onClick: (e) => map.popupManager.showAtEvent(e, '<b>Hi</b>'),
  *   });
  */
-    showAtEvent(event, html) {
+    showAtEvent(event, html, object) {
         const map = this._map;
         if (!map || !html) {
             this.hide();
@@ -142,36 +142,43 @@ export class PopupManager {
             this.hide();
             return;
         }
-        // ── 1. Основной путь: raycast по рельефу через KrbMap ──
+        const wgPos = map.worldGroup.position;
+        // ── 1. Приоритет: raycast против мешей кликнутого объекта. ──
+        // Это даёт правильную (lon, lat, alt) прямо НА поверхности полигона,
+        // даже если он висит над землёй.
+        if (object && typeof map.unprojectToLonLat === 'function') {
+            const hit = this._raycastObjectAt(object, clientX, clientY);
+            if (hit) {
+                const lonLat = map.unprojectToLonLat(hit.localX, hit.localZ);
+                if (lonLat
+                    && Number.isFinite(lonLat[0])
+                    && Number.isFinite(lonLat[1])) {
+                    this.showAtPoint({ lonLat: [lonLat[0], lonLat[1], hit.localY] }, html);
+                    return;
+                }
+            }
+        }
+        // ── 2. Основной путь: raycast по рельефу (как было) ──
         if (typeof map._raycastToGround === 'function'
             && typeof map.unprojectToLonLat === 'function') {
-            // ВАЖНО: _raycastToGround переиспользует _tempMouse/_tempRaycaster
-            // самого KrbMap. Вызов безопасен, потому что onClick полигона
-            // синхронно отрабатывает после того, как InteractionManager уже
-            // сделал свой raycast.
             const out = new THREE.Vector3();
             const hit = map._raycastToGround(clientX, clientY, out);
             if (hit) {
-                const wgPos = map.worldGroup.position;
                 const localX = out.x - wgPos.x;
                 const localZ = out.z - wgPos.z;
                 const lonLat = map.unprojectToLonLat(localX, localZ);
                 if (lonLat
                     && Number.isFinite(lonLat[0])
                     && Number.isFinite(lonLat[1])) {
-                    // out.y — абсолютная высота в world-координатах;
-                    // вычитаем worldGroup, чтобы получить локальную высоту,
-                    // ту же, что ждёт _projectLonLatToScreen.
                     const alt = out.y - wgPos.y;
                     this.showAtPoint({ lonLat: [lonLat[0], lonLat[1], alt] }, html);
                     return;
                 }
             }
         }
-        // ── 2. Fallback: пересечение с плоскостью y=0 без рельефа ──
+        // ── 3. Fallback: плоскость y=0 ──
         const world = this._screenToWorldOnGroundPlane(clientX, clientY);
         if (world && typeof map.unprojectToLonLat === 'function') {
-            const wgPos = map.worldGroup.position;
             const localX = world.x - wgPos.x;
             const localZ = world.z - wgPos.z;
             const lonLat = map.unprojectToLonLat(localX, localZ);
@@ -183,6 +190,40 @@ export class PopupManager {
             }
         }
         this.hide();
+    }
+    /**
+     * Raycast против мешей объекта. Возвращает точку попадания в ЛОКАЛЬНЫХ
+     * координатах (относительно worldGroup), чтобы её можно было передать
+     * в unprojectToLonLat / _projectLonLatToScreen.
+     *
+     * Полигон отдаёт fillMesh/sideMesh/bottomMesh через `_getRaycastMeshes()`
+     * (приватный, поэтому стучимся через any). Для Marker/Marker3D/Polyline
+     * метода нет — вернём null, сработает fallback на ground-raycast.
+     */
+    _raycastObjectAt(object, clientX, clientY) {
+        const map = this._map;
+        if (!map)
+            return null;
+        const meshes = object._getRaycastMeshes?.();
+        if (!meshes || meshes.length === 0)
+            return null;
+        const rect = typeof map._getCanvasRect === 'function'
+            ? map._getCanvasRect()
+            : map.renderer.domElement.getBoundingClientRect();
+        const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+        const rc = new THREE.Raycaster();
+        rc.setFromCamera(new THREE.Vector2(ndcX, ndcY), map.camera);
+        const hits = rc.intersectObjects(meshes, false);
+        if (!hits.length)
+            return null;
+        const p = hits[0].point; // world-space
+        const wgPos = map.worldGroup.position;
+        return {
+            localX: p.x - wgPos.x,
+            localY: p.y - wgPos.y, // ← вот она, правильная высота
+            localZ: p.z - wgPos.z,
+        };
     }
     _screenToWorldOnGroundPlane(clientX, clientY) {
         const map = this._map;

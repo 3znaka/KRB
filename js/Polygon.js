@@ -644,6 +644,7 @@ export class Polygon extends SpatialObject {
             callbacks.onClick = (e) => this._onClick(e, this);
         this._unregisterInteraction = map.interaction.register(this, callbacks);
     }
+    /** @internal */
     _getRaycastMeshes() {
         if (this._raycastMeshesCache)
             return this._raycastMeshesCache;

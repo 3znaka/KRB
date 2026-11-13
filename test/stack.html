@@ -10,16 +10,8 @@
 
     <style>
         body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
-        #map {
-            position: absolute;
-            left: 0; right: 0; top: 0; bottom: 0;
-            width: 100%; height: 100dvh;
-            overflow: hidden;
-        }
-
+        #map { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: 100%; height: 100dvh; overflow: hidden; }
         #search-box { margin-top: 10px; }
-
-        /* Попап */
         .krb-popup-tooltip { max-width: 400px; font: 12px/20px 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; }
         .krb-popup-tooltip h3 { margin: 6px 0; font-size: 16px; }
         .krb-popup-tooltip p  { margin: 8px 0; }
@@ -27,20 +19,11 @@
         .krb-popup-tooltip .inv { margin-left: 2px; margin-right: 8px; vertical-align: middle; }
         .krb-popup-tooltip .up  { vertical-align: 4px; }
         .krb-popup-tooltip .cont { font-size: 18px; }
-
-        /* Оверлей с контролами */
         .map-overlay .map-overlay-inner {
-            position: absolute;
-            top: 10px; left: 10px;
-            padding: 10px;
-            background-color: #fff;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-            border-radius: 3px;
-            z-index: 1000;
-            width: 300px;
+            position: absolute; top: 10px; left: 10px; padding: 10px;
+            background-color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            border-radius: 3px; z-index: 1000; width: 300px;
         }
-
-        /* Кастомный автокомплит */
         #search-box { position: relative; }
         #search {
             width: 100%; padding: 8px 28px 8px 12px;
@@ -49,92 +32,57 @@
         }
         #search:focus { border-color: #007bff; }
         #closebtn {
-            position: absolute;
-            right: 8px; top: 50%;
-            transform: translateY(-50%);
-            color: #000;
-            font-size: 20px;
-            display: none;
-            cursor: pointer;
-            user-select: none;
-            line-height: 1;
+            position: absolute; right: 8px; top: 50%;
+            transform: translateY(-50%); color: #000;
+            font-size: 20px; display: none; cursor: pointer;
+            user-select: none; line-height: 1;
         }
         #closebtn:hover { color: red; }
         #search-results {
-            position: absolute;
-            top: 100%; left: 0; right: 0;
-            background: white;
-            border: 1px solid #ccc;
-            border-top: none;
-            border-radius: 0 0 4px 4px;
-            max-height: 300px;
-            overflow-y: auto;
-            list-style: none;
-            padding: 0;
-            margin: 0;
-            z-index: 1001;
-            display: none;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            position: absolute; top: 100%; left: 0; right: 0;
+            background: white; border: 1px solid #ccc; border-top: none;
+            border-radius: 0 0 4px 4px; max-height: 300px; overflow-y: auto;
+            list-style: none; padding: 0; margin: 0;
+            z-index: 1001; display: none; box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         }
         #search-results li { padding: 6px 12px; cursor: pointer; font-size: 13px; }
         #search-results li:hover { background: #f0f0f0; }
         #search-results li.category {
-            font-weight: bold;
-            background: #f5f5f5;
-            cursor: default;
-            color: #666;
-            padding: 4px 12px;
-            font-size: 12px;
+            font-weight: bold; background: #f5f5f5; cursor: default;
+            color: #666; padding: 4px 12px; font-size: 12px;
             text-transform: uppercase;
         }
         #search-results li.category:hover { background: #f5f5f5; }
         #search-results li.empty { color: #999; cursor: default; }
         #search-results li.empty:hover { background: white; }
-
-        /* Этажи */
         #floor-control { margin-top: 8px; margin-bottom: 4px; }
         #floor-control input[type="radio"] { display: none; }
         #floor-control label {
-            display: inline-block;
-            padding: 4px 10px; margin: 2px;
+            display: inline-block; padding: 4px 10px; margin: 2px;
             background: #f0f0f0; border-radius: 20px;
             cursor: pointer; font-size: 14px;
         }
         #floor-control label.active { background: #007bff; color: white; }
         #floor-control label:hover { background: #e0e0e0; }
         #floor-control label.active:hover { background: #0069d9; }
-
         [data-tooltip] { position: relative; cursor: help; }
         [data-tooltip]::after {
-            content: attr(data-tooltip);
-            position: absolute;
-            width: 300px;
-            left: -150px; top: 100%;
-            background: #3989c9; color: #fff;
-            padding: 0.5em;
-            box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
-            pointer-events: none;
-            opacity: 0;
-            transition: 0.3s;
-            z-index: 3000;
-            font-size: 12px;
+            content: attr(data-tooltip); position: absolute; width: 300px;
+            left: -150px; top: 100%; background: #3989c9; color: #fff;
+            padding: 0.5em; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+            pointer-events: none; opacity: 0; transition: 0.3s;
+            z-index: 3000; font-size: 12px;
         }
         [data-tooltip]:hover::after { opacity: 1; top: 2em; }
-
         #location-title { font-size: 14px; margin: 8px 0 4px; }
         #location-description { font-size: 12px; margin: 4px 0; }
-
         #pause { display: none; }
         #pause::after { content: 'Остановить'; }
         #pause.pause::after { content: 'Продолжить'; }
-
         @media (max-width: 600px) {
             .map-overlay .map-overlay-inner {
-                position: absolute;
-                top: 0; left: 0;
-                margin: 10px;
-                width: calc(100% - 20px);
-                box-sizing: border-box;
+                position: absolute; top: 0; left: 0; margin: 10px;
+                width: calc(100% - 20px); box-sizing: border-box;
             }
         }
     </style>
@@ -174,19 +122,11 @@
     <script type="module">
         import * as KRB from '../js/KRB.js';
 
-        // =============================================================
-        // 0. Проверка данных из layers.js
-        // =============================================================
         const REQUIRED = ['corpus_layer', 'room_layer', 'dop_layer', 'poi_layer', 'wall_layer', 'floor_layer', 'search_data'];
         const missing = REQUIRED.filter(k => typeof window[k] === 'undefined');
-        if (missing.length) {
-            console.error('layers.js: не найдены глобалы: ' + missing.join(', '));
-        }
+        if (missing.length) console.error('layers.js: не найдены глобалы: ' + missing.join(', '));
 
         const USE_REPAIR_PATTERN = true;
-
-        // Высота одного этажа (м). Уровень N имеет абсолютную высоту
-        // FLOOR_HEIGHT * (N - 1): floor 1 → 0 м, floor 2 → 6 м и т.д.
         const FLOOR_HEIGHT = 6;
         const floorAltitude = (floor) => FLOOR_HEIGHT * (floor - 1);
 
@@ -199,20 +139,13 @@
             debug: true,
             view: new KRB.View({
                 centerLonLat: [37.66197, 55.763893],
-                zoom: 17.5,
-                pitch: 48,
-                bearing: 122,
-                maxZoom: 22,
-                minZoom: 15,
-                maxBounds: [
-                    [37.644358, 55.753074],
-                    [37.684699, 55.774887],
-                ],
+                zoom: 17.5, pitch: 48, bearing: 122,
+                maxZoom: 22, minZoom: 15,
+                maxBounds: [[37.644358, 55.753074], [37.684699, 55.774887]],
             }),
             antialias: true
         });
 
-        // Кликабельные ссылки в попапе
         if (typeof KRB.PopupManager === 'function') {
             map.popupManager.destroy();
             map.popupManager = new KRB.PopupManager(map, { pointerEvents: 'auto', zIndex: 1300 });
@@ -221,13 +154,11 @@
         }
 
         // =============================================================
-        // 2. Подложка (OSM PBF)
+        // 2. Подложка
         // =============================================================
         const vectorLayer = new KRB.VectorTile({
             url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
-            maxNativeZoom: 14,
-            minZoom: 2,
-            maxZoom: 22,
+            maxNativeZoom: 14, minZoom: 2, maxZoom: 22,
             attributionTitle: 'Картографический факультет МИИГАиК, 2026',
             attributionUrl: 'https://kartfak.ru/',
             invisibleLayers: ['poi'],
@@ -248,30 +179,20 @@
         ];
 
         const roomColors = {
-            'canteen': '#e5ffd5',
-            'public':  '#eadbff',
-            'office':  '#ffffe7',
-            'study':   '#ffd9a8',
-            'wc':      '#a6cee3',
-            'sport':   '#3CB371'
+            'canteen': '#e5ffd5', 'public': '#eadbff', 'office': '#ffffe7',
+            'study': '#ffd9a8', 'wc': '#a6cee3', 'sport': '#3CB371'
         };
 
         const poiImageMap = {
-            'w':     'img/wc.png',
-            'm':     'img/wc.png',
-            'food':  'img/food.png',
-            'main':  'img/main.png',
-            'up':    'img/up.png',
-            'down':  'img/down.png',
-            'start': 'img/Znachok1.png',
-            'finish':'img/finish.png',
-            'snn':   'img/snn.png',
-            'VGiKD': 'img/VGiKD.png',
-            'dod':   'img/kvest.png'
+            'w': 'img/wc.png', 'm': 'img/wc.png', 'food': 'img/food.png',
+            'main': 'img/main.png', 'up': 'img/up.png', 'down': 'img/down.png',
+            'start': 'img/Znachok1.png', 'finish': 'img/finish.png',
+            'snn': 'img/snn.png', 'VGiKD': 'img/VGiKD.png', 'dod': 'img/kvest.png'
         };
         function poiIconUrl(type) { return poiImageMap[type] || `img/${type}.png`; }
 
         const ZOOM_THRESHOLD = 18;
+        const ZOOM_HARD_CUTOFF = ZOOM_THRESHOLD + 1; // 19 — здесь гарантированно скрываем
 
         // =============================================================
         // 4. Хелперы
@@ -300,7 +221,6 @@
             }
             str += (!props.name) ? `${strtype} ${props.number || ''}` : props.name;
             str += '</h3><p>';
-
             const f_corp = getCorpProps(props.corp);
             if (f_corp) {
                 str += f_corp.name + ', ';
@@ -309,9 +229,7 @@
                 if (props.number) str += ', ' + props.number;
                 str += '</p>';
             }
-
             if (props.status == 1) str += '<p>🛠 Закрыто на время ремонта</p>';
-
             const inv = data_inv.find(item => item.room === props.number);
             if (inv) {
                 str += '<p>' +
@@ -339,7 +257,7 @@
         }
 
         // =============================================================
-        // 5. Объекты по этажам (план поднят на реальную высоту этажа)
+        // 5. Объекты по этажам (план поднят на высоту этажа)
         // =============================================================
         const floorGroups = {};
         let currentFloor = 2;
@@ -348,24 +266,16 @@
             const layer = new KRB.Layer().addTo(map);
             if (!window.wall_layer) return layer;
             const base = floorAltitude(floor);
-
             wall_layer.features
                 .filter(f => f.properties.floor === floor)
                 .forEach(f => eachRing(f, rings => {
                     layer.add(new KRB.Polygon({
-                        rings,
-                        fillColor: '#e8e8e8',
-                        fillOpacity: 1,
-                        strokeColor: 'rgba(0,0,0,0)',
-                        strokeWidth: 0,
-                        extruded: true,
-                        height: 1,
-                        minHeight: base,
-                        altitude: 0,
-                        altitudeMode: 'absolute',
+                        rings, fillColor: '#e8e8e8', fillOpacity: 1,
+                        strokeColor: 'rgba(0,0,0,0)', strokeWidth: 0,
+                        extruded: true, height: 1, minHeight: base,
+                        altitude: 0, altitudeMode: 'absolute',
                         minZoom: ZOOM_THRESHOLD,
-                        depthTest: true,
-                        depthWrite: true,
+                        depthTest: true, depthWrite: true,
                         properties: f.properties
                     }));
                 }));
@@ -376,7 +286,6 @@
             const layer = new KRB.Layer().addTo(map);
             if (!window.room_layer) return layer;
             const base = floorAltitude(floor);
-
             room_layer.features
                 .filter(f => f.properties.floor === floor)
                 .forEach(f => {
@@ -386,30 +295,23 @@
                     const fillColor = isRepair
                         ? (usePattern ? '#ffffff' : 'rgba(255,0,0,0.15)')
                         : (roomColors[props.type] || '#fafafa');
-
                     eachRing(f, rings => {
                         layer.add(new KRB.Polygon({
-                            rings,
-                            fillColor,
-                            fillOpacity: 0.9,
+                            rings, fillColor, fillOpacity: 0.9,
                             fillPattern: usePattern ? 'img/diag-red-104.png' : undefined,
                             fillPatternScale: 15,
-                            strokeColor: 'rgba(0,0,0,0)',
-                            strokeWidth: 0,
+                            strokeColor: 'rgba(0,0,0,0)', strokeWidth: 0,
                             minZoom: ZOOM_THRESHOLD,
-                            altitude: base + 0.02,
-                            altitudeMode: 'absolute',
-                            depthTest: true,
-                            depthWrite: true,
-                            title: props.number || '',
-                            titleMinZoom: 19,
+                            altitude: base + 0.02, altitudeMode: 'absolute',
+                            depthTest: true, depthWrite: true,
+                            title: props.number || '', titleMinZoom: 19,
                             titleStyle: { fontSize: '10px', color: '#333', fontWeight: 'bold' },
                             titlePriority: 5,
                             properties: props,
-                            onClick: (e) => {
-                                const html = buildRoomPopup(props);
-                                if (html) map.popupManager.showAtEvent(e, html);
-                            },
+                            onClick: (e, poly) => {
+    const html = buildRoomPopup(props);
+    if (html) map.popupManager.showAtEvent(e, html, poly);
+},
                             onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
                         }));
                     });
@@ -421,7 +323,6 @@
             const layer = new KRB.Layer().addTo(map);
             if (!window.dop_layer) return layer;
             const base = floorAltitude(floor);
-
             dop_layer.features
                 .filter(f => f.properties.floor === floor)
                 .forEach(f => {
@@ -432,16 +333,11 @@
                             rings,
                             fillColor: props.status == 1 ? '#cf554b' : '#e8e8e8',
                             fillOpacity: 1,
-                            strokeColor: 'rgba(0,0,0,0)',
-                            strokeWidth: 0,
-                            extruded: true,
-                            height: h,
-                            minHeight: base,
-                            altitude: 0,
-                            altitudeMode: 'absolute',
+                            strokeColor: 'rgba(0,0,0,0)', strokeWidth: 0,
+                            extruded: true, height: h, minHeight: base,
+                            altitude: 0, altitudeMode: 'absolute',
                             minZoom: ZOOM_THRESHOLD,
-                            depthTest: true,
-                            depthWrite: true,
+                            depthTest: true, depthWrite: true,
                             properties: props
                         }));
                     });
@@ -453,23 +349,17 @@
             const layer = new KRB.Layer().addTo(map);
             if (!window.poi_layer) return layer;
             const base = floorAltitude(floor);
-
             poi_layer.features
                 .filter(f => f.properties.floor === floor)
                 .forEach(f => {
                     const props = f.properties;
                     const [lon, lat] = f.geometry.coordinates;
                     layer.add(new KRB.Marker({
-                        // ВАЖНО: Marker принимает position строго [x, y].
-                        // Высота — отдельным полем altitude + altitudeMode: 'absolute'.
                         position: [lon, lat],
-                        altitude: base + 0.5,
-                        altitudeMode: 'absolute',
+                        altitude: base + 0.5, altitudeMode: 'absolute',
                         iconUrl: poiIconUrl(props.type),
-                        iconSize: [32, 32],
-                        anchor: [0.5, 0.5],
-                        minZoom: 19,
-                        clusterable: false,
+                        iconSize: [32, 32], anchor: [0.5, 0.5],
+                        minZoom: 19, clusterable: false,
                         properties: props
                     }));
                 });
@@ -481,7 +371,6 @@
             ['room_layer', 'wall_layer', 'dop_layer', 'poi_layer'].forEach(name => {
                 if (window[name]) window[name].features.forEach(f => floors.add(f.properties.floor));
             });
-
             [...floors].sort().forEach(floor => {
                 const g = {
                     walls: makeWallsForFloor(floor),
@@ -498,24 +387,31 @@
         }
 
         // =============================================================
-        // 6. 3D-корпуса: слои по этажам, показываем только те, что НИЖЕ
-        //    текущего (они — «пьедестал» для плана этажа).
+        // 6. 3D-корпуса. Два набора полигонов на каждый этаж:
+        //    - buildingsSolid: без zoomInterpolate → «пьедестал»,
+        //      всегда виден когда слой видим.
+        //    - buildingsFade: с zoomInterpolate [[18,1],[19,0]] и
+        //      maxZoom 19 → плавное затухание при приближении.
+        //    Переключение между наборами — только через setVisible,
+        //    без пересоздания полигонов. Плюс ЯВНЫЙ контроль видимости
+        //    fade-слоёв по зуму (гарантирует, что «крыша» исчезает
+        //    начиная с ZOOM_HARD_CUTOFF, независимо от того, как
+        //    отработал zoomInterpolate).
         // =============================================================
-        const buildingsByFloor = {};
+        const buildingsSolid = {};
+        const buildingsFade = {};
 
-        function buildBuildingLayer() {
+        function buildBuildingLayers() {
             if (!window.floor_layer) return;
-
             floor_layer.features.forEach(f => {
+                const floor = f.properties.floor;
                 const props = f.properties;
-                const floor = props.floor;
 
-                if (!buildingsByFloor[floor]) {
-                    buildingsByFloor[floor] = new KRB.Layer().addTo(map);
-                }
+                if (!buildingsSolid[floor]) buildingsSolid[floor] = new KRB.Layer().addTo(map);
+                if (!buildingsFade[floor])  buildingsFade[floor]  = new KRB.Layer().addTo(map);
 
                 eachRing(f, rings => {
-                    buildingsByFloor[floor].add(new KRB.Polygon({
+                    const baseOpts = {
                         rings,
                         fillColor: props.color || '#cccccc',
                         fillOpacity: 1,
@@ -529,42 +425,85 @@
                         depthTest: true,
                         depthWrite: true,
                         properties: props,
-                        onClick: (e) => {
-                            const html = buildBuildingPopup(props);
-                            if (html) map.popupManager.showAtEvent(e, html);
-                        },
+                        onClick: (e, poly) => {
+    const html = buildBuildingPopup(props);
+    if (html) map.popupManager.showAtEvent(e, html, poly);
+},
                         onHover: (h) => { map.renderer.domElement.style.cursor = h ? 'pointer' : ''; }
+                    };
+
+                    buildingsSolid[floor].add(new KRB.Polygon(baseOpts));
+
+                    buildingsFade[floor].add(new KRB.Polygon({
+                        ...baseOpts,
+                        zoomInterpolate: {
+                            fillOpacity: [[ZOOM_THRESHOLD, 1], [ZOOM_HARD_CUTOFF, 0]]
+                        },
+                        maxZoom: ZOOM_HARD_CUTOFF
                     }));
                 });
             });
 
-            Object.values(buildingsByFloor).forEach(layer => layer.setVisible(false));
+            Object.values(buildingsSolid).forEach(l => l.setVisible(false));
+            Object.values(buildingsFade).forEach(l => l.setVisible(false));
         }
 
-        function updateBuildingVisibility(floor) {
-            Object.keys(buildingsByFloor).forEach(f => {
+        function getContinuousZoom() {
+            if (map.continuousZoom != null) return map.continuousZoom;
+            if (map.currentDiscreteZoom != null) return map.currentDiscreteZoom;
+            if (map.getZoom) return map.getZoom();
+            return 17.5;
+        }
+
+        function updateBuildingsVisibility() {
+            const z = getContinuousZoom();
+            const isHighZoom = z >= ZOOM_HARD_CUTOFF;
+
+            Object.keys(buildingsSolid).forEach(f => {
                 const bf = parseInt(f, 10);
-                const layer = buildingsByFloor[f];
-                const visible = bf < floor;
-                if (layer.visible !== visible) layer.setVisible(visible);
+                const layer = buildingsSolid[f];
+                const isPedestal = bf < currentFloor;
+                if (layer.visible !== isPedestal) layer.setVisible(isPedestal);
+            });
+
+            Object.keys(buildingsFade).forEach(f => {
+                const bf = parseInt(f, 10);
+                const layer = buildingsFade[f];
+                const isPedestal = bf < currentFloor;
+                // Не пьедестал: виден только при низком зуме; начиная
+                // с ZOOM_HARD_CUTOFF — жёстко скрыт (страховка от того,
+                // что maxZoom/zoomInterpolate могут не сработать).
+                const shouldShow = !isPedestal && !isHighZoom;
+                if (layer.visible !== shouldShow) layer.setVisible(shouldShow);
             });
         }
+
+        // Прокидываем на события зума, если они есть, + страхуемся поллингом
+        if (typeof map.on === 'function') {
+            try { map.on('zoom', updateBuildingsVisibility); } catch (_) {}
+            try { map.on('zoomend', updateBuildingsVisibility); } catch (_) {}
+        }
+        let __lastZoom = -1;
+        function pollZoom() {
+            const z = getContinuousZoom();
+            if (z !== __lastZoom) {
+                __lastZoom = z;
+                updateBuildingsVisibility();
+            }
+            requestAnimationFrame(pollZoom);
+        }
+        requestAnimationFrame(pollZoom);
 
         // =============================================================
         // 7. Подсветка поиска
         // =============================================================
         let searchHighlight = [];
-
         function clearSearchHighlight() {
             searchHighlight.forEach(p => { try { p.remove(); } catch (_) {} });
             searchHighlight = [];
         }
-
         function addHighlight(rings, style) {
-            const alt = style.groundLevel
-                ? 0.05
-                : floorAltitude(currentFloor) + 0.05;
-
+            const alt = style.groundLevel ? 0.05 : floorAltitude(currentFloor) + 0.05;
             const p = new KRB.Polygon({
                 rings,
                 fillColor: style.fillColor,
@@ -573,14 +512,12 @@
                 strokeWidth: style.strokeWidth ?? 2,
                 strokeOpacity: 1,
                 minZoom: style.minZoom ?? ZOOM_THRESHOLD,
-                altitude: alt,
-                altitudeMode: 'absolute',
+                altitude: alt, altitudeMode: 'absolute',
                 depthTest: false
             });
             p.addTo(map);
             searchHighlight.push(p);
         }
-
         function highlightRoomById(id) {
             clearSearchHighlight();
             if (!window.room_layer) return;
@@ -588,23 +525,18 @@
             if (!f) return;
             eachRing(f, rings => addHighlight(rings, {
                 fillColor: 'rgba(0,255,0,0.25)',
-                strokeColor: '#0f0',
-                strokeWidth: 2
+                strokeColor: '#0f0', strokeWidth: 2
             }));
         }
-
         function highlightBuilding(corpId) {
             clearSearchHighlight();
             if (!window.corpus_layer) return;
             const f = corpus_layer.features.find(x => x.properties.corp === corpId);
             if (!f) return;
             eachRing(f, rings => addHighlight(rings, {
-                fillColor: 'rgba(255,0,0,0.1)',
-                fillOpacity: 0.1,
-                strokeColor: '#f00',
-                strokeWidth: 5,
-                minZoom: 0,
-                groundLevel: true
+                fillColor: 'rgba(255,0,0,0.1)', fillOpacity: 0.1,
+                strokeColor: '#f00', strokeWidth: 5,
+                minZoom: 0, groundLevel: true
             }));
         }
 
@@ -612,11 +544,8 @@
         // 8. Хэш URL
         // =============================================================
         function parseHash() {
-            return window.location.hash.replace('#', '').split('&').filter(Boolean).reduce((acc, part) => {
-                const [k, v] = part.split('=');
-                acc[k] = v;
-                return acc;
-            }, {});
+            return window.location.hash.replace('#', '').split('&').filter(Boolean)
+                .reduce((acc, part) => { const [k, v] = part.split('='); acc[k] = v; return acc; }, {});
         }
         function getLevelHash() {
             const h = parseHash();
@@ -630,7 +559,6 @@
         const getIDroomHash = () => parseHash().id ?? null;
         const getMarkerHash = () => parseHash().marker ?? null;
         const getRouteHash  = () => parseHash().route ?? null;
-
         function writeHash(changes) {
             const h = parseHash();
             Object.keys(changes).forEach(k => {
@@ -638,9 +566,7 @@
                 else h[k] = changes[k];
             });
             const out = Object.keys(h).map(k => `${k}=${h[k]}`).join('&');
-            if (window.location.hash !== (out ? '#' + out : '')) {
-                window.location.hash = out;
-            }
+            if (window.location.hash !== (out ? '#' + out : '')) window.location.hash = out;
         }
         const setLevelHash = (f) => writeHash({ l: f });
         const setRoomHash  = (f) => writeHash({ room: f });
@@ -663,9 +589,9 @@
                 if (g.poi.visible   !== isActive) g.poi.setVisible(isActive);
             });
 
-            updateBuildingVisibility(floor);
-
             currentFloor = floor;
+            updateBuildingsVisibility();
+
             setLevelHash(floor);
             updateFloorUI(floor);
         }
@@ -694,10 +620,8 @@
             setFloor(item.floor);
             searchInput.value = item.label || '';
             setRoomHash(item.label);
-
             const isRoom = window.room_layer &&
                 room_layer.features.some(x => x.properties.id === item.id);
-
             if (!isRoom) {
                 highlightBuilding(item.id);
                 map.easeTo({ center: [item.x, item.y], zoom: ZOOM_THRESHOLD, duration: 0.8 });
@@ -713,7 +637,6 @@
             const item = search_data.find(e => e.label === decoded);
             if (item) selectSearchResult(item);
         }
-
         function findIDroom(idRoom) {
             if (!window.search_data) return;
             const item = search_data.find(e => e.id_room == idRoom);
@@ -721,7 +644,6 @@
             selectSearchResult(item);
             delIDroomHash();
         }
-
         function clearSearch() {
             clearSearchHighlight();
             closeBtn.style.display = 'none';
@@ -735,14 +657,10 @@
         // 11. Автокомплит
         // =============================================================
         let searchDebounceTimer = null;
-
         function renderSearchResults(query) {
             if (!window.search_data) return;
             const q = query.trim().toLowerCase();
-            if (!q) {
-                searchResults.style.display = 'none';
-                return;
-            }
+            if (!q) { searchResults.style.display = 'none'; return; }
 
             const matches = search_data.filter(e => {
                 const label = (e.label || '').toLowerCase();
@@ -762,7 +680,6 @@
                 if (!byCategory.has(cat)) byCategory.set(cat, []);
                 byCategory.get(cat).push(m);
             });
-
             let html = '';
             for (const [cat, items] of byCategory) {
                 if (cat) html += `<li class="category">${cat}</li>`;
@@ -783,29 +700,20 @@
             clearTimeout(searchDebounceTimer);
             searchDebounceTimer = setTimeout(() => renderSearchResults(searchInput.value), 80);
         });
-
         searchInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                searchResults.style.display = 'none';
-            }
+            if (e.key === 'Escape') searchResults.style.display = 'none';
         });
-
         searchResults.addEventListener('click', (e) => {
             const li = e.target.closest('li[data-item]');
             if (!li) return;
             try {
                 const item = JSON.parse(li.dataset.item.replace(/&quot;/g, '"'));
                 selectSearchResult(item);
-            } catch (err) {
-                console.warn('search-results parse failed', err);
-            }
+            } catch (err) { console.warn('search-results parse failed', err); }
             searchResults.style.display = 'none';
         });
-
         document.addEventListener('click', (e) => {
-            if (!e.target.closest('#search-box')) {
-                searchResults.style.display = 'none';
-            }
+            if (!e.target.closest('#search-box')) searchResults.style.display = 'none';
         });
 
         // =============================================================
@@ -823,7 +731,6 @@
         // 13. User marker
         // =============================================================
         let userMarker = null;
-
         function updateUserMarker(markerStr) {
             if (!markerStr) {
                 if (userMarker) { userMarker.remove(); userMarker = null; }
@@ -831,17 +738,14 @@
             }
             const [lon, lat] = String(markerStr).split(',').map(Number);
             if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
-
             if (userMarker) {
                 userMarker.setLngLat([lon, lat]);
             } else {
                 userMarker = new KRB.Marker({
                     position: [lon, lat],
                     iconUrl: 'img/Znachok1.png',
-                    iconSize: [47, 76],
-                    anchor: [0.5, 1.0],
-                    minZoom: 19,
-                    clusterable: false
+                    iconSize: [47, 76], anchor: [0.5, 1.0],
+                    minZoom: 19, clusterable: false
                 });
                 userMarker.addTo(map);
             }
@@ -884,22 +788,14 @@
                 .forEach(f => {
                     const floor = f.properties.floor;
                     if (!byFloor[floor]) {
-                        byFloor[floor] = {
-                            lines: new KRB.Layer().addTo(map),
-                            pois: new KRB.Layer().addTo(map)
-                        };
+                        byFloor[floor] = { lines: new KRB.Layer().addTo(map), pois: new KRB.Layer().addTo(map) };
                     }
                     const coords = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
                     coords.forEach(cs => {
                         byFloor[floor].lines.add(new KRB.Polyline({
-                            positions: cs,
-                            color: '#f00',
-                            width: 3,
-                            opacity: 0.7,
-                            altitude: floorAltitude(floor) + 0.5,
-                            altitudeMode: 'absolute',
-                            depthTest: true,
-                            minZoom: 0
+                            positions: cs, color: '#f00', width: 3, opacity: 0.7,
+                            altitude: floorAltitude(floor) + 0.5, altitudeMode: 'absolute',
+                            depthTest: true, minZoom: 0
                         }));
                     });
                 });
@@ -910,52 +806,31 @@
                     const props = f.properties;
                     const floor = props.floor;
                     if (!byFloor[floor]) {
-                        byFloor[floor] = {
-                            lines: new KRB.Layer().addTo(map),
-                            pois: new KRB.Layer().addTo(map)
-                        };
+                        byFloor[floor] = { lines: new KRB.Layer().addTo(map), pois: new KRB.Layer().addTo(map) };
                     }
                     const [lon, lat] = f.geometry.coordinates;
                     const onFloorLabel = Number.isFinite(props.onFloor) && props.onFloor >= 0
                         ? String(props.onFloor) : '';
                     byFloor[floor].pois.add(new KRB.Marker({
-                        // ВАЖНО: position = [x, y]; высота — отдельным полем.
                         position: [lon, lat],
-                        altitude: floorAltitude(floor) + 0.5,
-                        altitudeMode: 'absolute',
+                        altitude: floorAltitude(floor) + 0.5, altitudeMode: 'absolute',
                         iconUrl: poiIconUrl(props.type),
-                        iconSize: [32, 32],
-                        anchor: [0.5, 1.0],
-                        minZoom: 19,
-                        clusterable: false,
-                        title: onFloorLabel,
-                        titleMinZoom: 19,
+                        iconSize: [32, 32], anchor: [0.5, 1.0],
+                        minZoom: 19, clusterable: false,
+                        title: onFloorLabel, titleMinZoom: 19,
                         titleStyle: {
-                            fontSize: '11px',
-                            fontWeight: 'bold',
-                            color: '#000',
+                            fontSize: '11px', fontWeight: 'bold', color: '#000',
                             background: 'rgba(255,255,255,0.85)',
-                            padding: '1px 4px',
-                            borderRadius: '3px'
+                            padding: '1px 4px', borderRadius: '3px'
                         },
                         titleOffset: [0, 20]
                     }));
                 });
 
             routeLayersByFloor = byFloor;
-
             Object.values(byFloor).forEach(g => {
                 g.lines.setVisible(false);
                 g.pois.setVisible(false);
-            });
-        }
-
-        function setRouteFloorVisible(floor) {
-            Object.keys(routeLayersByFloor).forEach(f => {
-                const isActive = (parseInt(f, 10) === floor);
-                const g = routeLayersByFloor[f];
-                if (g.lines.visible !== isActive) g.lines.setVisible(isActive);
-                if (g.pois.visible  !== isActive) g.pois.setVisible(isActive);
             });
         }
 
@@ -985,11 +860,7 @@
                 setTimeout(advance, 3500);
             }
 
-            map.easeTo({
-                center: loc.camera.center,
-                zoom: loc.camera.zoom,
-                duration: 1.0
-            });
+            map.easeTo({ center: loc.camera.center, zoom: loc.camera.zoom, duration: 1.0 });
         }
 
         function startRoute(numRoute) {
@@ -1000,7 +871,7 @@
         }
 
         // =============================================================
-        // 15. Обработка hashchange
+        // 15. Hash
         // =============================================================
         function processHash() {
             const room   = getRoomHash();
@@ -1025,7 +896,7 @@
         // =============================================================
         try {
             buildAllFloors();
-            buildBuildingLayer();
+            buildBuildingLayers();
 
             const routeHash = getRouteHash();
             if (routeHash) startRoute(parseInt(routeHash, 10) || 1);

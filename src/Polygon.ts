@@ -775,15 +775,16 @@ _getBatchStyleKey(): string | null {
         this._unregisterInteraction = map.interaction.register(this, callbacks);
     }
 
-    private _getRaycastMeshes(): any[] {
-        if (this._raycastMeshesCache) return this._raycastMeshesCache;
-        const meshes: any[] = [];
-        if (this._fillMesh) meshes.push(this._fillMesh);
-        if (this._sideMesh) meshes.push(this._sideMesh);
-        if (this._bottomMesh) meshes.push(this._bottomMesh);
-        this._raycastMeshesCache = meshes;
-        return meshes;
-    }
+/** @internal */
+_getRaycastMeshes(): any[] {          // было: private
+    if (this._raycastMeshesCache) return this._raycastMeshesCache;
+    const meshes: any[] = [];
+    if (this._fillMesh) meshes.push(this._fillMesh);
+    if (this._sideMesh) meshes.push(this._sideMesh);
+    if (this._bottomMesh) meshes.push(this._bottomMesh);
+    this._raycastMeshesCache = meshes;
+    return meshes;
+}
 
     // =================================================================
     // Кольца

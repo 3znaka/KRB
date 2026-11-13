@@ -355,7 +355,6 @@ export class Projection {
             return lonLat;
         return [lon, Math.sign(lat) * this.maxLatDeg];
     }
-    convertTo(other, coord) { return proj4(this.def, other.def, coord); }
     _getConv() {
         return this._conv ?? (this._conv = proj4(HARDCODED['EPSG:4326'], this.def));
     }

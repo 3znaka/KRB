@@ -6,8 +6,9 @@
  * Фильтр: строка-выражение, объект-спецификация, предикат или null.
  */
 import { Layer } from './Layers.js';
-import { Marker, type MarkerOptions, type LonLat, type IconSize } from './Marker.js';
-import { Marker3D, type Marker3DOptions, type Vec3, type SizeSpec, type PrimitiveType } from './Marker3D.js';
+import { Marker, type MarkerOptions, type MarkerPosition, type LonLat, type IconSize } from './Marker.js';
+import { Marker3D, type Marker3DOptions, type Marker3DPosition,
+         type Vec3, type SizeSpec, type PrimitiveType } from './Marker3D.js';
 import { Area3D, type Area3DOptions, type Area3DRing, type Area3DFit } from './Area3D.js';
 import { Polyline, type PolylineOptions } from './Polyline.js';
 import { Polygon, type PolygonOptions } from './Polygon.js';
@@ -1327,33 +1328,39 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
     // Points
     // =================================================================
 
-    private _addPointFeature(feature: GeoJSONFeature): void {
-        const geom = feature.geometry;
-        if (geom.type !== 'Point') return;
-        const props = feature.properties ?? {};
+private _addPointFeature(feature: GeoJSONFeature): void {
+    const geom = feature.geometry;
+    if (geom.type !== 'Point') return;
+    const props = feature.properties ?? {};
 
-        const [lon, lat, alt] = geom.coordinates;
-        const lonLat: LonLat = [lon, lat];
-        const altFromCoords = alt !== undefined ? alt : undefined;
+    const [lon, lat, altRaw] = geom.coordinates;
+const lonLat: LonLat = [lon, lat];
+const altFromCoords = typeof altRaw === 'number' && Number.isFinite(altRaw)
+    ? altRaw
+    : undefined;
 
-        if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
-            this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
-            return;
-        }
-        if ((this.diagram || this.diagramToOptions) && props.diagram !== false) {
-            this._addPointDiagram(feature, props, lonLat);
-            return;
-        }
+const markerPos: MarkerPosition = altFromCoords !== undefined
+    ? [lon, lat, altFromCoords] : [lon, lat];
+const marker3DPos: Marker3DPosition = altFromCoords !== undefined
+    ? [lon, lat, altFromCoords] : [lon, lat];
 
-        const cb3D = this.point3DToOptions?.(feature, props) ?? null;
-        const is3D = cb3D != null
-            || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
-
-        if (is3D) this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
-        else      this._createMarker(feature, props, lonLat, altFromCoords,
-                                     this.pointToOptions?.(feature, props) ?? null);
+    if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
+        this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
+        return;
+    }
+    if ((this.diagram || this.diagramToOptions) && props.diagram !== false) {
+        this._addPointDiagram(feature, props, lonLat);
+        return;
     }
 
+    const cb3D = this.point3DToOptions?.(feature, props) ?? null;
+    const is3D = cb3D != null
+        || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
+
+   if (is3D) this._createMarker3D(feature, props, marker3DPos, cb3D);
+else      this._createMarker(feature, props, markerPos,
+                             this.pointToOptions?.(feature, props) ?? null);
+}
     private _addPointDiagram3D(
         feature: GeoJSONFeature, props: Props, lonLat: LonLat, altFromCoords?: number,
     ): void {
@@ -1393,55 +1400,55 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
         this.onEachDiagram?.(feature, d);
     }
 
-    private _createMarker(
-        feature: GeoJSONFeature, props: Props, lonLat: LonLat,
-        altFromCoords: number | undefined,
-        cb: (Partial<MarkerOptions> & PointStyleAliases) | null,
-    ): void {
-        const defaults: MarkerOptions = {
-            position: lonLat,
-            crs: this.crs ?? undefined,
-            title: this._getTitle(props),
-            tooltip: this._getTooltip(props),
-            iconUrl: props.icon || this.defaultIconUrl,
-            iconSize: this._parseIconSize(props.iconSize) ?? this.defaultIconSize,
-            anchor: this._parsePair(props.anchor) ?? this.defaultAnchor,
-            altitude: this._asNumber(props.altitude) ?? altFromCoords ?? 0,
-            altitudeMode: props.altitudeMode || 'ground',
-            clusterable: props.clusterable ?? true,
-            minZoom: this._asNumber(props.minZoom),
-            maxZoom: this._asNumber(props.maxZoom),
-            titleAlign: props.titleAlign,
-            titleStyle: props.titleStyle,
-            titleMinZoom: this._asNumber(props.titleMinZoom),
-            titleMaxZoom: this._asNumber(props.titleMaxZoom),
-            titleOffset: this._parsePair(props.titleOffset) ?? undefined,
-            titleAllowOverflow: props.titleAllowOverflow,
-            titlePriority: this._asNumber(props.titlePriority),
-        };
-        const style = this._normalizeStyle<MarkerOptions>(this._resolveStyle(props, 'point'), POINT_ALIASES);
-        const cbNorm = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
-        const marker = new Marker({
-            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
-        });
-        this.add(marker);
-        this.onEachFeature?.(feature, marker);
-    }
+private _createMarker(
+    feature: GeoJSONFeature, props: Props,
+    position: MarkerPosition,
+    cb: (Partial<MarkerOptions> & PointStyleAliases) | null,
+): void {
+    const defaults: MarkerOptions = {
+        position,
+        crs: this.crs ?? undefined,
+        title: this._getTitle(props),
+        tooltip: this._getTooltip(props),
+        iconUrl: props.icon || this.defaultIconUrl,
+        iconSize: this._parseIconSize(props.iconSize) ?? this.defaultIconSize,
+        anchor: this._parsePair(props.anchor) ?? this.defaultAnchor,
+        altitude: this._asNumber(props.altitude) ?? 0,
+        altitudeMode: props.altitudeMode || 'ground',
+        clusterable: props.clusterable ?? true,
+        minZoom: this._asNumber(props.minZoom),
+        maxZoom: this._asNumber(props.maxZoom),
+        titleAlign: props.titleAlign,
+        titleStyle: props.titleStyle,
+        titleMinZoom: this._asNumber(props.titleMinZoom),
+        titleMaxZoom: this._asNumber(props.titleMaxZoom),
+        titleOffset: this._parsePair(props.titleOffset) ?? undefined,
+        titleAllowOverflow: props.titleAllowOverflow,
+        titlePriority: this._asNumber(props.titlePriority),
+    };
+    const style = this._normalizeStyle<MarkerOptions>(this._resolveStyle(props, 'point'), POINT_ALIASES);
+    const cbNorm = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
+    const marker = new Marker({
+        ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
+    });
+    this.add(marker);
+    this.onEachFeature?.(feature, marker);
+}
 
-    private _createMarker3D(
-        feature: GeoJSONFeature, props: Props, lonLat: LonLat,
-        altFromCoords: number | undefined,
-        cb: (Partial<Marker3DOptions> & Marker3DStyleAliases) | null,
-    ): void {
-        const defaults: Marker3DOptions = {
-            position: lonLat,
-            crs: this.crs ?? undefined,
+private _createMarker3D(
+  feature: GeoJSONFeature, props: Props,
+  position: Marker3DPosition,
+  cb: (Partial<Marker3DOptions> & Marker3DStyleAliases) | null,
+): void {
+    const defaults: Marker3DOptions = {
+        position,                      
+        crs: this.crs ?? undefined,
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             primitiveType: props.primitiveType || this.default3DPrimitiveType,
             size: this._parseSizeSpec(props.size) ?? this.default3DSize,
             anchor: this._parseTriple(props.anchor) ?? this.default3DAnchor,
-            altitude: this._asNumber(props.altitude) ?? altFromCoords ?? this.default3DAltitude,
+            altitude: this._asNumber(props.altitude) ?? this.default3DAltitude,
             altitudeMode: props.altitudeMode || this.default3DAltitudeMode,
             rotation: this._parseTriple(props.rotation) ?? [0, 0, 0],
             modelUrl: props.modelUrl,
@@ -1462,7 +1469,7 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
         const style = this._normalizeStyle<Marker3DOptions>(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
         const cbNorm = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
         const marker = new Marker3D({
-            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}),  position,     
         });
         this.add(marker);
         this.onEachFeature?.(feature, marker);

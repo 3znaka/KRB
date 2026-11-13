@@ -1,15 +1,9 @@
 /**
- * Marker — маркер на карте с поддержкой мутации после addTo().
+ * Marker — маркер на карте. Иконка рендерится через TextManager.
  *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
- * onHover, подпись, altitude и TextManager-контракт берутся из базового
- * класса. Здесь остаётся только то, что специфично для маркера:
- * CRS/позиция, иконка (размер / anchor / поворот), altitudeMode,
- * кластеризация.
- *
- * Иконка маркера рендерится через TextManager — тем же путём, что и
- * иконки POI векторных тайлов. Это даёт единый collision-check и
- * приоритезацию между маркерами и POI (см. getPriority()).
+ * Позиция принимает `[x, y]` или `[x, y, altitude]`: третья координата
+ * складывается с базовым `altitude` (по аналогии с Polyline/Polygon,
+ * где высота узла — отдельная добавка к высоте поверхности).
  *
  * @module marker
  */
@@ -18,10 +12,7 @@ import { THREE } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
 const _mapPanes = new WeakMap();
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
-/**
- * @deprecated Панель маркеров больше не используется — иконки
- * рендерятся через TextManager. Оставлено для совместимости.
- */
+/** @deprecated Иконки рендерятся через TextManager. */
 export function _getPanes(map) {
     let panes = _mapPanes.get(map);
     if (!panes) {
@@ -44,7 +35,7 @@ export function _getPanes(map) {
     return panes;
 }
 const _elementToMarker = new WeakMap();
-/** Возвращает Marker по DOM-элементу (label или .krb-icon) или null. */
+/** Marker по DOM-элементу (label или .krb-icon) или null. */
 export function _getMarkerFromElement(el) {
     if (!el)
         return null;
@@ -54,7 +45,6 @@ export function _getMarkerFromElement(el) {
 // Marker
 // =====================================================================
 export class Marker extends SpatialObject {
-    /** Счётчик для внутренних нужд (оставлен для обратной совместимости). */
     static _idCounter = 0;
     // ── Данные позиции ──
     _coord;
@@ -63,13 +53,15 @@ export class Marker extends SpatialObject {
     _lon = null;
     _lat = null;
     _positionSetAsLonLat = false;
+    /** Высота из 3-й координаты `position`. Складывается с `_altitude`. */
+    _nodeHeight = 0;
     // ── Оформление ──
     _iconSize;
     _anchor;
     _rotation;
     _iconUrl;
     _iconPriority = null;
-    // ── Поведение ── (altitude — в базе)
+    // ── Поведение ──
     _altitudeMode;
     _clusterable;
     // ── Состояние ──
@@ -82,10 +74,12 @@ export class Marker extends SpatialObject {
             this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
-        if (!options.position || options.position.length !== 2) {
-            throw new Error('Marker: options.position is required [x, y]');
+        if (!options.position || options.position.length < 2) {
+            throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
         }
         this._coord = [options.position[0], options.position[1]];
+        const posZ = options.position[2];
+        this._nodeHeight = Number.isFinite(posZ) ? posZ : 0;
         this._crsCode = options.crs ?? null;
         this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._iconSize = options.iconSize ?? [16, 16];
@@ -112,8 +106,7 @@ export class Marker extends SpatialObject {
         this._resolveTitleOffset();
     }
     // =================================================================
-    // Override _attach: label создаётся всегда, даже при пустом title
-    // (иконка маркера рендерится через TextManager).
+    // _attach / _onAttached
     // =================================================================
     _attach(map, layer) {
         if (this._map === map && this._layer === layer)
@@ -128,9 +121,6 @@ export class Marker extends SpatialObject {
             this._bindLabelDomEvents();
         }
     }
-    // =================================================================
-    // Хуки SpatialObject
-    // =================================================================
     _onAttached(map) {
         const newCrs = this._crsCode
             ? Projections.get(this._crsCode)
@@ -166,12 +156,8 @@ export class Marker extends SpatialObject {
         this._isVisible = false;
     }
     _defaultTitleOffset() {
-        // Позиционирование относительно иконки обеспечивает
-        // _computeAnchor через _iconAnchorX/Y. Дополнительный offset
-        // по умолчанию не нужен.
         return [0, 0];
     }
-    /** Смена высоты должна пересчитать кэши позиции. */
     _onAltitudeChanged() {
         this._afterPositionChange();
     }
@@ -179,15 +165,22 @@ export class Marker extends SpatialObject {
     // =================================================================
     // Позиция / CRS / bounds
     // =================================================================
+    /**
+     * Устанавливает позицию. Принимает `[x, y]` (высота узла сохранится)
+     * или `[x, y, altitude]` (высота узла обновится).
+     */
     setLonLat(lonLat) {
-        if (!lonLat || lonLat.length !== 2)
+        if (!lonLat || lonLat.length < 2)
             return this;
         const crs = this._resolveCrs() ?? Projections.get('EPSG:4326');
-        const conv = crs.fromLonLat(lonLat);
+        const conv = crs.fromLonLat([lonLat[0], lonLat[1]]);
         this._coord[0] = conv[0];
         this._coord[1] = conv[1];
         this._lon = lonLat[0];
         this._lat = lonLat[1];
+        if (lonLat.length >= 3 && Number.isFinite(lonLat[2])) {
+            this._nodeHeight = lonLat[2];
+        }
         this._positionSetAsLonLat = !this._crs && !this._crsCode;
         this._afterPositionChange();
         return this;
@@ -202,6 +195,7 @@ export class Marker extends SpatialObject {
         const ll = crs.toLonLat(this._coord);
         return [ll[0], ll[1]];
     }
+    /** Плоские координаты [x, y] в CRS маркера (без высоты). */
     getPosition() {
         return [this._coord[0], this._coord[1]];
     }
@@ -211,15 +205,24 @@ export class Marker extends SpatialObject {
     getCenter() {
         return this.getLonLat();
     }
+    // ── Высота узла (3-я координата) ──
+    getNodeHeight() {
+        return this._nodeHeight;
+    }
+    setNodeHeight(height) {
+        if (!Number.isFinite(height))
+            return this;
+        this._nodeHeight = height;
+        this._afterPositionChange();
+        return this;
+    }
     // =================================================================
-    // Иконка: URL / размер / anchor / поворот
+    // Иконка
     // =================================================================
     setIconUrl(url) {
         const wasNull = this._iconUrl === null;
         const willBeNull = url === null;
         this._iconUrl = url;
-        // Смена "иконка ↔ без иконки" меняет структуру DOM-узла внутри
-        // label, поэтому требует пересоздания label.
         if (wasNull !== willBeNull)
             this._rebuildLabel();
         else
@@ -254,7 +257,6 @@ export class Marker extends SpatialObject {
     getRotation() {
         return this._rotation;
     }
-    /** Приоритет иконки для разрешения коллизий. */
     getIconPriority() {
         return this._iconPriority ?? this._titlePriority;
     }
@@ -280,7 +282,7 @@ export class Marker extends SpatialObject {
         return this._clusterable;
     }
     // =================================================================
-    // TextManager-контракт: иконка + позиция подписи + приоритет
+    // TextManager-контракт
     // =================================================================
     getIcon() {
         if (!this._iconUrl)
@@ -303,13 +305,9 @@ export class Marker extends SpatialObject {
         };
     }
     getLabelPosition() {
-        // Текст — под иконкой (соответствует старому titleOffset
-        // [0, iconH/2 + 4] в горизонтальной компоновке).
         return 'bottom';
     }
     getPriority() {
-        // Маркеры всегда выше POI: POI обычно имеют priority 0..20,
-        // а маркеры получают +1000.
         return this.getIconPriority() + 1000;
     }
     // =================================================================
@@ -328,8 +326,6 @@ export class Marker extends SpatialObject {
         this._lastScreenPos = null;
         this._cachedWorldY = 0;
         this._lastHeightUpdateTime = 0;
-        // Позиция изменилась — просим TextManager пересчитать визибилити
-        // (иначе при неподвижной камере коллизии останутся устаревшими).
         const tm = this._map?.textManager;
         if (tm && this._textLabel) {
             tm.updateLabel(this._textLabel);
@@ -344,22 +340,12 @@ export class Marker extends SpatialObject {
             this._map.popupManager.show(this, this._tooltipText);
         }
     }
-    /**
-     * Обновляет содержимое label через TextManager, не пересоздавая
-     * DOM. `refreshIcon = true` нужен, когда поменялись `_iconUrl`,
-     * `_iconSize`, `_anchor` или `_rotation` — они упакованы в
-     * `getIcon().cssStyle`.
-     */
     _refreshLabel(refreshIcon = false) {
         const tm = this._map?.textManager;
         if (!tm || !this._textLabel)
             return;
         tm.updateLabel(this._textLabel, refreshIcon);
     }
-    /**
-     * Пересоздаёт label с нуля. Нужно, только если меняется структура
-     * DOM внутри label (например, "появилась/исчезла иконка").
-     */
     _rebuildLabel() {
         const tm = this._map?.textManager;
         if (!tm)
@@ -371,7 +357,6 @@ export class Marker extends SpatialObject {
         this._textLabel = tm.addLabel(this);
         this._bindLabelDomEvents();
     }
-    // Marker.ts
     _onLabelWheel = (e) => {
         const canvas = this._map?.renderer?.domElement;
         if (!canvas)
@@ -437,7 +422,7 @@ export class Marker extends SpatialObject {
         }
     }
     // =================================================================
-    // Обновление на кадре: только расчёт _lastScreenPos и _isVisible
+    // Обновление на кадре
     // =================================================================
     _update(_map) {
         const map = this._map;
@@ -446,7 +431,6 @@ export class Marker extends SpatialObject {
         this._applyZoomInterpolations(map.continuousZoom);
         if (!this._textLabel)
             return;
-        // Кластерная видимость — особенность Marker.
         if (this._layer && this._layer._clusterActive) {
             const vis = this._layer._clusterVisibleMarkers;
             if (!vis || !vis.has(this)) {
@@ -482,6 +466,8 @@ export class Marker extends SpatialObject {
                 worldY = this._altitude;
                 break;
         }
+        // Высота узла (3-я координата) — аддитивно, как в Polyline/Polygon.
+        worldY += this._nodeHeight;
         const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
         if (map.view.objectRenderDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(worldPos);

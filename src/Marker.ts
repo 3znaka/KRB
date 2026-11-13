@@ -1,15 +1,9 @@
 /**
- * Marker — маркер на карте с поддержкой мутации после addTo().
+ * Marker — маркер на карте. Иконка рендерится через TextManager.
  *
- * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick,
- * onHover, подпись, altitude и TextManager-контракт берутся из базового
- * класса. Здесь остаётся только то, что специфично для маркера:
- * CRS/позиция, иконка (размер / anchor / поворот), altitudeMode,
- * кластеризация.
- *
- * Иконка маркера рендерится через TextManager — тем же путём, что и
- * иконки POI векторных тайлов. Это даёт единый collision-check и
- * приоритезацию между маркерами и POI (см. getPriority()).
+ * Позиция принимает `[x, y]` или `[x, y, altitude]`: третья координата
+ * складывается с базовым `altitude` (по аналогии с Polyline/Polygon,
+ * где высота узла — отдельная добавка к высоте поверхности).
  *
  * @module marker
  */
@@ -24,26 +18,25 @@ import { SpatialObject, TitleAlignH, ZoomInterpolation } from './SpatialObject.j
 
 export type LonLat = [number, number];
 export type CoordXY = [number, number];
+/** Позиция маркера: `[x, y]` или `[x, y, altitude]`. */
+export type MarkerPosition = [number, number] | [number, number, number];
 export type IconSize = [number, number];
 export type Anchor = [number, number];
 export type TitleAlign = TitleAlignH;
 export type AltitudeMode = 'ground' | 'clampToGround' | 'absolute';
 
 export interface MarkerOptions {
-    /** Координаты [x, y] в СК `crs` (по умолчанию — lon/lat WGS84). */
-    position: LonLat;
-    /** Код СК для `position`. По умолчанию — `map.inputCRS`. */
+    /** `[x, y]` или `[x, y, altitude]` в СК `crs` (по умолчанию — WGS84). */
+    position: MarkerPosition;
     crs?: string;
     iconSize?: IconSize;
     anchor?: Anchor;
-    /** Поворот иконки в градусах (CSS `rotate`). */
     rotation?: number;
     minZoom?: number;
     maxZoom?: number;
     altitudeMode?: AltitudeMode;
     altitude?: number;
     tooltip?: string;
-    /** URL иконки. `null` — маркер без иконки. */
     iconUrl?: string | null;
     onHover?: (hovered: boolean) => void;
     onClick?: (event: MouseEvent, marker: Marker) => void;
@@ -55,15 +48,7 @@ export interface MarkerOptions {
     titleOffset?: Anchor | null;
     clusterable?: boolean;
     titleAllowOverflow?: boolean;
-    /** Приоритет подписи. Используется как fallback для приоритета иконки. */
     titlePriority?: number;
-    /**
-     * Приоритет иконки при разрешении коллизий с иконками POI и других
-     * маркеров. Если не задан — берётся `titlePriority`.
-     *
-     * Итоговый приоритет маркера в TextManager = `getIconPriority() + 1000`,
-     * поэтому маркеры по умолчанию всегда выше POI.
-     */
     iconPriority?: number;
     properties?: Record<string, any>;
     userData?: Record<string, any>;
@@ -71,7 +56,7 @@ export interface MarkerOptions {
 }
 
 // =====================================================================
-// Устаревшая панель (оставлено для обратной совместимости импортов)
+// Устаревшая панель (для обратной совместимости импортов)
 // =====================================================================
 
 interface MapPanes {
@@ -82,10 +67,7 @@ const _mapPanes = new WeakMap<object, MapPanes>();
 
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 
-/**
- * @deprecated Панель маркеров больше не используется — иконки
- * рендерятся через TextManager. Оставлено для совместимости.
- */
+/** @deprecated Иконки рендерятся через TextManager. */
 export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
     let panes = _mapPanes.get(map);
     if (!panes) {
@@ -110,7 +92,7 @@ export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
 
 const _elementToMarker = new WeakMap<HTMLElement, Marker>();
 
-/** Возвращает Marker по DOM-элементу (label или .krb-icon) или null. */
+/** Marker по DOM-элементу (label или .krb-icon) или null. */
 export function _getMarkerFromElement(el: HTMLElement | null | undefined): Marker | null {
     if (!el) return null;
     return _elementToMarker.get(el) ?? null;
@@ -121,7 +103,6 @@ export function _getMarkerFromElement(el: HTMLElement | null | undefined): Marke
 // =====================================================================
 
 export class Marker extends SpatialObject {
-    /** Счётчик для внутренних нужд (оставлен для обратной совместимости). */
     static _idCounter = 0;
 
     // ── Данные позиции ──
@@ -131,6 +112,8 @@ export class Marker extends SpatialObject {
     private _lon: number | null = null;
     private _lat: number | null = null;
     private _positionSetAsLonLat = false;
+    /** Высота из 3-й координаты `position`. Складывается с `_altitude`. */
+    private _nodeHeight = 0;
 
     // ── Оформление ──
     private _iconSize: IconSize;
@@ -139,7 +122,7 @@ export class Marker extends SpatialObject {
     private _iconUrl: string | null;
     private _iconPriority: number | null = null;
 
-    // ── Поведение ── (altitude — в базе)
+    // ── Поведение ──
     private _altitudeMode: AltitudeMode;
     private _clusterable: boolean;
 
@@ -156,10 +139,13 @@ export class Marker extends SpatialObject {
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
 
-        if (!options.position || options.position.length !== 2) {
-            throw new Error('Marker: options.position is required [x, y]');
+        if (!options.position || options.position.length < 2) {
+            throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
         }
         this._coord = [options.position[0], options.position[1]];
+        const posZ = options.position[2];
+        this._nodeHeight = Number.isFinite(posZ) ? (posZ as number) : 0;
+
         this._crsCode = options.crs ?? null;
         this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
@@ -189,8 +175,7 @@ export class Marker extends SpatialObject {
     }
 
     // =================================================================
-    // Override _attach: label создаётся всегда, даже при пустом title
-    // (иконка маркера рендерится через TextManager).
+    // _attach / _onAttached
     // =================================================================
 
     _attach(map: any, layer: any): void {
@@ -207,10 +192,6 @@ export class Marker extends SpatialObject {
             this._bindLabelDomEvents();
         }
     }
-
-    // =================================================================
-    // Хуки SpatialObject
-    // =================================================================
 
     protected _onAttached(map: any): void {
         const newCrs: any = this._crsCode
@@ -235,30 +216,26 @@ export class Marker extends SpatialObject {
         this._isMobile = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
     }
 
-protected _teardown(): void {
-    const el = this._textLabel?.element as HTMLElement | undefined;
-    if (el) {
-        el.removeEventListener('wheel', this._onLabelWheel);
-        _elementToMarker.delete(el);
-        const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
-        if (iconEl) _elementToMarker.delete(iconEl);
+    protected _teardown(): void {
+        const el = this._textLabel?.element as HTMLElement | undefined;
+        if (el) {
+            el.removeEventListener('wheel', this._onLabelWheel);
+            _elementToMarker.delete(el);
+            const iconEl = el.querySelector('.krb-icon') as HTMLElement | null;
+            if (iconEl) _elementToMarker.delete(iconEl);
+        }
+        this._isVisible = false;
+        this._lastScreenPos = null;
     }
-    this._isVisible = false;
-    this._lastScreenPos = null;
-}
 
     protected _applyHidden(): void {
         this._isVisible = false;
     }
 
     protected _defaultTitleOffset(): [number, number] {
-        // Позиционирование относительно иконки обеспечивает
-        // _computeAnchor через _iconAnchorX/Y. Дополнительный offset
-        // по умолчанию не нужен.
         return [0, 0];
     }
 
-    /** Смена высоты должна пересчитать кэши позиции. */
     protected _onAltitudeChanged(): void {
         this._afterPositionChange();
     }
@@ -269,14 +246,21 @@ protected _teardown(): void {
     // Позиция / CRS / bounds
     // =================================================================
 
-    setLonLat(lonLat: LonLat): this {
-        if (!lonLat || lonLat.length !== 2) return this;
+    /**
+     * Устанавливает позицию. Принимает `[x, y]` (высота узла сохранится)
+     * или `[x, y, altitude]` (высота узла обновится).
+     */
+    setLonLat(lonLat: MarkerPosition): this {
+        if (!lonLat || lonLat.length < 2) return this;
         const crs = this._resolveCrs() ?? Projections.get('EPSG:4326');
-        const conv = crs.fromLonLat(lonLat);
+        const conv = crs.fromLonLat([lonLat[0], lonLat[1]]);
         this._coord[0] = conv[0];
         this._coord[1] = conv[1];
         this._lon = lonLat[0];
         this._lat = lonLat[1];
+        if (lonLat.length >= 3 && Number.isFinite(lonLat[2])) {
+            this._nodeHeight = lonLat[2] as number;
+        }
         this._positionSetAsLonLat = !this._crs && !this._crsCode;
         this._afterPositionChange();
         return this;
@@ -292,6 +276,7 @@ protected _teardown(): void {
         return [ll[0], ll[1]];
     }
 
+    /** Плоские координаты [x, y] в CRS маркера (без высоты). */
     getPosition(): CoordXY {
         return [this._coord[0], this._coord[1]];
     }
@@ -304,8 +289,21 @@ protected _teardown(): void {
         return this.getLonLat();
     }
 
+    // ── Высота узла (3-я координата) ──
+
+    getNodeHeight(): number {
+        return this._nodeHeight;
+    }
+
+    setNodeHeight(height: number): this {
+        if (!Number.isFinite(height)) return this;
+        this._nodeHeight = height;
+        this._afterPositionChange();
+        return this;
+    }
+
     // =================================================================
-    // Иконка: URL / размер / anchor / поворот
+    // Иконка
     // =================================================================
 
     setIconUrl(url: string | null): this {
@@ -313,8 +311,6 @@ protected _teardown(): void {
         const willBeNull = url === null;
         this._iconUrl = url;
 
-        // Смена "иконка ↔ без иконки" меняет структуру DOM-узла внутри
-        // label, поэтому требует пересоздания label.
         if (wasNull !== willBeNull) this._rebuildLabel();
         else this._refreshLabel(true);
         return this;
@@ -352,7 +348,6 @@ protected _teardown(): void {
         return this._rotation;
     }
 
-    /** Приоритет иконки для разрешения коллизий. */
     getIconPriority(): number {
         return this._iconPriority ?? this._titlePriority;
     }
@@ -385,7 +380,7 @@ protected _teardown(): void {
     }
 
     // =================================================================
-    // TextManager-контракт: иконка + позиция подписи + приоритет
+    // TextManager-контракт
     // =================================================================
 
     getIcon(): {
@@ -413,14 +408,10 @@ protected _teardown(): void {
     }
 
     getLabelPosition(): 'bottom' {
-        // Текст — под иконкой (соответствует старому titleOffset
-        // [0, iconH/2 + 4] в горизонтальной компоновке).
         return 'bottom';
     }
 
     getPriority(): number {
-        // Маркеры всегда выше POI: POI обычно имеют priority 0..20,
-        // а маркеры получают +1000.
         return this.getIconPriority() + 1000;
     }
 
@@ -442,8 +433,6 @@ protected _teardown(): void {
         this._cachedWorldY = 0;
         this._lastHeightUpdateTime = 0;
 
-        // Позиция изменилась — просим TextManager пересчитать визибилити
-        // (иначе при неподвижной камере коллизии останутся устаревшими).
         const tm = this._map?.textManager;
         if (tm && this._textLabel) {
             tm.updateLabel(this._textLabel);
@@ -460,22 +449,12 @@ protected _teardown(): void {
         }
     }
 
-    /**
-     * Обновляет содержимое label через TextManager, не пересоздавая
-     * DOM. `refreshIcon = true` нужен, когда поменялись `_iconUrl`,
-     * `_iconSize`, `_anchor` или `_rotation` — они упакованы в
-     * `getIcon().cssStyle`.
-     */
-protected _refreshLabel(refreshIcon = false): void { 
+    protected _refreshLabel(refreshIcon = false): void {
         const tm = this._map?.textManager;
         if (!tm || !this._textLabel) return;
         tm.updateLabel(this._textLabel, refreshIcon);
     }
 
-    /**
-     * Пересоздаёт label с нуля. Нужно, только если меняется структура
-     * DOM внутри label (например, "появилась/исчезла иконка").
-     */
     private _rebuildLabel(): void {
         const tm = this._map?.textManager;
         if (!tm) return;
@@ -487,45 +466,43 @@ protected _refreshLabel(refreshIcon = false): void {
         this._bindLabelDomEvents();
     }
 
-// Marker.ts
+    private _onLabelWheel = (e: WheelEvent): void => {
+        const canvas = this._map?.renderer?.domElement as HTMLElement | null;
+        if (!canvas) return;
+        e.preventDefault();
+        e.stopPropagation();
+        canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaX: e.deltaX,
+            deltaY: e.deltaY,
+            deltaZ: e.deltaZ,
+            deltaMode: e.deltaMode,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            screenX: e.screenX,
+            screenY: e.screenY,
+            ctrlKey: e.ctrlKey,
+            shiftKey: e.shiftKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+            bubbles: true,
+            cancelable: true,
+        }));
+    };
 
-private _onLabelWheel = (e: WheelEvent): void => {
-    const canvas = this._map?.renderer?.domElement as HTMLElement | null;
-    if (!canvas) return;
-    e.preventDefault();
-    e.stopPropagation();
-    canvas.dispatchEvent(new WheelEvent('wheel', {
-        deltaX: e.deltaX,
-        deltaY: e.deltaY,
-        deltaZ: e.deltaZ,
-        deltaMode: e.deltaMode,
-        clientX: e.clientX,
-        clientY: e.clientY,
-        screenX: e.screenX,
-        screenY: e.screenY,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        bubbles: true,
-        cancelable: true,
-    }));
-};
+    private _bindLabelDomEvents(): void {
+        if (!this._textLabel) return;
+        const labelEl = this._textLabel.element as HTMLElement | null;
+        if (!labelEl) return;
 
-private _bindLabelDomEvents(): void {
-    if (!this._textLabel) return;
-    const labelEl = this._textLabel.element as HTMLElement | null;
-    if (!labelEl) return;
+        _elementToMarker.set(labelEl, this);
+        labelEl.addEventListener('wheel', this._onLabelWheel, { passive: false });
 
-    _elementToMarker.set(labelEl, this);
-    labelEl.addEventListener('wheel', this._onLabelWheel, { passive: false });
-
-    const iconEl = labelEl.querySelector('.krb-icon') as HTMLElement | null;
-    if (iconEl) {
-        _elementToMarker.set(iconEl, this);
-        this._attachPointerHandlers(iconEl);
+        const iconEl = labelEl.querySelector('.krb-icon') as HTMLElement | null;
+        if (iconEl) {
+            _elementToMarker.set(iconEl, this);
+            this._attachPointerHandlers(iconEl);
+        }
     }
-}
 
     private _attachPointerHandlers(target: HTMLElement): void {
         target.addEventListener('click', (e) => {
@@ -553,7 +530,7 @@ private _bindLabelDomEvents(): void {
     }
 
     // =================================================================
-    // Обновление на кадре: только расчёт _lastScreenPos и _isVisible
+    // Обновление на кадре
     // =================================================================
 
     _update(_map?: any): void {
@@ -562,7 +539,6 @@ private _bindLabelDomEvents(): void {
         this._applyZoomInterpolations(map.continuousZoom);
         if (!this._textLabel) return;
 
-        // Кластерная видимость — особенность Marker.
         if (this._layer && (this._layer as any)._clusterActive) {
             const vis = (this._layer as any)._clusterVisibleMarkers as Set<Marker> | undefined;
             if (!vis || !vis.has(this)) {
@@ -601,6 +577,9 @@ private _bindLabelDomEvents(): void {
                 worldY = this._altitude;
                 break;
         }
+
+        // Высота узла (3-я координата) — аддитивно, как в Polyline/Polygon.
+        worldY += this._nodeHeight;
 
         const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
 

@@ -26,6 +26,7 @@ export class Marker3D extends SpatialObject {
     _lon = null;
     _lat = null;
     _positionSetAsLonLat = false;
+    _nodeHeight = 0;
     // ── Оформление ── (altitude — в базе)
     _primitiveType;
     _size;
@@ -75,10 +76,12 @@ export class Marker3D extends SpatialObject {
             this.setZoomInterpolations(options.zoomInterpolate);
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
-        if (!options.position || options.position.length !== 2) {
-            throw new Error('Marker3D: options.position is required [x, y]');
+        if (!options.position || options.position.length < 2) {
+            throw new Error('Marker3D: options.position is required [x, y] or [x, y, altitude]');
         }
         this._coord = [options.position[0], options.position[1]];
+        const posZ = options.position[2];
+        this._nodeHeight = Number.isFinite(posZ) ? posZ : 0;
         this._crsCode = options.crs ?? null;
         this._crs = null;
         this._primitiveType = options.primitiveType ?? 'box';
@@ -472,19 +475,19 @@ export class Marker3D extends SpatialObject {
     // Позиция / CRS
     // =================================================================
     setLonLat(lonLat) {
-        if (!lonLat || lonLat.length !== 2)
+        if (!lonLat || lonLat.length < 2)
             return this;
         this._lon = lonLat[0];
         this._lat = lonLat[1];
         if (this._map && this._crs) {
-            const conv = this._crs.fromLonLat(lonLat);
+            const conv = this._crs.fromLonLat([lonLat[0], lonLat[1]]);
             this._coord[0] = conv[0];
             this._coord[1] = conv[1];
             this._positionSetAsLonLat = false;
         }
         else if (this._crsCode) {
             const crs = Projections.get(this._crsCode);
-            const conv = crs.fromLonLat(lonLat);
+            const conv = crs.fromLonLat([lonLat[0], lonLat[1]]);
             this._coord[0] = conv[0];
             this._coord[1] = conv[1];
             this._positionSetAsLonLat = false;
@@ -493,6 +496,9 @@ export class Marker3D extends SpatialObject {
             this._coord[0] = lonLat[0];
             this._coord[1] = lonLat[1];
             this._positionSetAsLonLat = true;
+        }
+        if (lonLat.length >= 3 && Number.isFinite(lonLat[2])) {
+            this._nodeHeight = lonLat[2];
         }
         this._lastHeightUpdateTime = 0;
         return this;
@@ -526,6 +532,16 @@ export class Marker3D extends SpatialObject {
     setAltitudeMode(mode) {
         this._altitudeMode = mode;
         this._onAltitudeChanged();
+        return this;
+    }
+    getNodeHeight() {
+        return this._nodeHeight;
+    }
+    setNodeHeight(height) {
+        if (!Number.isFinite(height))
+            return this;
+        this._nodeHeight = height;
+        this._lastHeightUpdateTime = 0;
         return this;
     }
     getAltitudeMode() { return this._altitudeMode; }
@@ -738,6 +754,8 @@ export class Marker3D extends SpatialObject {
         else {
             worldY = this._altitude;
         }
+        // 3-я координата — аддитивно, как nodeH у Polyline/Polygon и у Marker.
+        worldY += this._nodeHeight;
         this._object3D.position.set(absWorldX, worldY, absWorldZ);
         this._worldPosition.set(worldX, worldY, worldZ);
         if (map.view.objectRenderDistanceFactor > 0) {

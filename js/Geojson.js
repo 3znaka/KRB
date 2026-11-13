@@ -998,9 +998,15 @@ export class GeoJSONLayer extends Layer {
         if (geom.type !== 'Point')
             return;
         const props = feature.properties ?? {};
-        const [lon, lat, alt] = geom.coordinates;
+        const [lon, lat, altRaw] = geom.coordinates;
         const lonLat = [lon, lat];
-        const altFromCoords = alt !== undefined ? alt : undefined;
+        const altFromCoords = typeof altRaw === 'number' && Number.isFinite(altRaw)
+            ? altRaw
+            : undefined;
+        const markerPos = altFromCoords !== undefined
+            ? [lon, lat, altFromCoords] : [lon, lat];
+        const marker3DPos = altFromCoords !== undefined
+            ? [lon, lat, altFromCoords] : [lon, lat];
         if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
             this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
             return;
@@ -1013,9 +1019,9 @@ export class GeoJSONLayer extends Layer {
         const is3D = cb3D != null
             || props['3d'] === true || props.type === '3d' || props.markerType === '3d';
         if (is3D)
-            this._createMarker3D(feature, props, lonLat, altFromCoords, cb3D);
+            this._createMarker3D(feature, props, marker3DPos, cb3D);
         else
-            this._createMarker(feature, props, lonLat, altFromCoords, this.pointToOptions?.(feature, props) ?? null);
+            this._createMarker(feature, props, markerPos, this.pointToOptions?.(feature, props) ?? null);
     }
     _addPointDiagram3D(feature, props, lonLat, altFromCoords) {
         const raw = this.diagram3DToOptions
@@ -1052,16 +1058,16 @@ export class GeoJSONLayer extends Layer {
         this.add(d);
         this.onEachDiagram?.(feature, d);
     }
-    _createMarker(feature, props, lonLat, altFromCoords, cb) {
+    _createMarker(feature, props, position, cb) {
         const defaults = {
-            position: lonLat,
+            position,
             crs: this.crs ?? undefined,
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             iconUrl: props.icon || this.defaultIconUrl,
             iconSize: this._parseIconSize(props.iconSize) ?? this.defaultIconSize,
             anchor: this._parsePair(props.anchor) ?? this.defaultAnchor,
-            altitude: this._asNumber(props.altitude) ?? altFromCoords ?? 0,
+            altitude: this._asNumber(props.altitude) ?? 0,
             altitudeMode: props.altitudeMode || 'ground',
             clusterable: props.clusterable ?? true,
             minZoom: this._asNumber(props.minZoom),
@@ -1077,21 +1083,21 @@ export class GeoJSONLayer extends Layer {
         const style = this._normalizeStyle(this._resolveStyle(props, 'point'), POINT_ALIASES);
         const cbNorm = this._normalizeStyle(cb, POINT_ALIASES);
         const marker = new Marker({
-            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
         });
         this.add(marker);
         this.onEachFeature?.(feature, marker);
     }
-    _createMarker3D(feature, props, lonLat, altFromCoords, cb) {
+    _createMarker3D(feature, props, position, cb) {
         const defaults = {
-            position: lonLat,
+            position,
             crs: this.crs ?? undefined,
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             primitiveType: props.primitiveType || this.default3DPrimitiveType,
             size: this._parseSizeSpec(props.size) ?? this.default3DSize,
             anchor: this._parseTriple(props.anchor) ?? this.default3DAnchor,
-            altitude: this._asNumber(props.altitude) ?? altFromCoords ?? this.default3DAltitude,
+            altitude: this._asNumber(props.altitude) ?? this.default3DAltitude,
             altitudeMode: props.altitudeMode || this.default3DAltitudeMode,
             rotation: this._parseTriple(props.rotation) ?? [0, 0, 0],
             modelUrl: props.modelUrl,
@@ -1112,7 +1118,7 @@ export class GeoJSONLayer extends Layer {
         const style = this._normalizeStyle(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
         const cbNorm = this._normalizeStyle(cb, MARKER3D_ALIASES);
         const marker = new Marker3D({
-            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position: lonLat,
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
         });
         this.add(marker);
         this.onEachFeature?.(feature, marker);

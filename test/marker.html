@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [
+        new KRB.Tile({
+            texture: 'demo',
+            heightScale: 2.0
+        })
+    ],
+    view: new KRB.View({
+        centerLonLat: [94.805, 30.646],
+        zoom: 12,
+        pitch: 50
+    })
+});
+
+const lon = 94.7, lat = 30.6;
+
+// clampToGround: третья координата — высота над поверхностью рельефа.
+new KRB.Marker({
+    position: [lon, lat, 100],
+    altitudeMode: 'clampToGround',
+    title: 'clampToGround +100 м',
+    titleStyle: { color: '#00ff00', textShadow: '0 1px 2px #000' }
+}).addTo(map);
+
+// ground: третья координата — просто абсолютная высота (поверхность игнорируется).
+new KRB.Marker({
+    position: [lon + 0.15, lat, 1000],
+    altitudeMode: 'ground',
+    title: 'ground +1000 м',
+    titleStyle: { color: '#ff4444', textShadow: '0 1px 2px #000' }
+}).addTo(map);
+
+// absolute: третья координата прибавляется к базовому altitude.
+// Итоговая высота = 1000 + 500 = 1500 м над уровнем моря.
+new KRB.Marker({
+    position: [lon + 0.30, lat, 1000],
+    altitudeMode: 'absolute',
+    altitude: 500,
+    title: 'absolute 1000 + 500 = 1500 м',
+    titleStyle: { color: '#33aaff', textShadow: '0 1px 2px #000' }
+}).addTo(map);
+
+// Тот же синтаксис у 3D-маркера:
+new KRB.Marker3D({
+    position: [lon + 0.45, lat, 2000],
+    altitudeMode: 'absolute',
+    primitiveType: 'cone',
+    size: [200, 400, 200],
+    color: 0xffaa00,
+    title: 'Marker3D · 2000 м'
+}).addTo(map);
+
+new KRB.Polyline({
+    positions: [[lon, lat, 1500], [lon + 0.2, lat + 0.1, 800]],
+    altitudeMode: 'absolute'
+}).addTo(map);
+
+new KRB.Polygon({
+    rings: [[
+        [lon - 0.1, lat + 0.1, 500],
+        [lon + 0.1, lat + 0.1, 500],
+        [lon + 0.1, lat - 0.1, 500],
+        [lon - 0.1, lat - 0.1, 500]
+    ]],
+    altitudeMode: 'absolute',
+    extruded: true,
+    height: 800
+}).addTo(map);
+
+
+</script>
+</body>
+</html>

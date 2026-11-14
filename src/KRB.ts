@@ -30,3 +30,4 @@ export { Diagram } from './Diagram.js';
 export { Graticule } from './Graticule.js';
 import './PolygonBatcher.js';
 export { setDracoDecoderPath, getDracoDecoderPath } from './Defaults.js';
+export { PathFollower, createPrimitiveVisual } from './PathFollower.js';

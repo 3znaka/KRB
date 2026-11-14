@@ -146,6 +146,19 @@ export interface Vector3DOptions {
     simplifyZoomBucket?: number;
 }
 
+export interface PathAdapter {
+    /** Полный (не-LOD) набор точек в локальных координатах worldGroup. */
+    getPathPoints(): ReadonlyArray<Vector3DPosition>;
+    /** Полная длина пути в world-метрах. */
+    getPathLength(): number;
+    /** t ∈ [0..1] от длины; outPos/outTangent пишутся в переданные векторы. */
+    samplePathAt(t: number, outPos: any, outTangent: any): boolean;
+    /** Подписка на перестройку пути; возвращает unsubscribe. */
+    onPathRebuild(cb: () => void): () => void;
+    /** Подписка на удаление пути с карты; возвращает unsubscribe. */
+    onPathDestroy(cb: () => void): () => void;
+}
+
 interface ParsedAnimation {
     type: AnimationType;
     period: number;
@@ -281,6 +294,10 @@ export class Vector3D extends SpatialObject {
 
     // ── Две подписи ──
     private _titles: { start: Vector3DTitleOptions; end: Vector3DTitleOptions };
+
+
+private _pathRebuildListeners = new Set<() => void>();
+private _pathDestroyListeners = new Set<() => void>();
 
     // ── Интерактив ──
     private _unregisterInteraction: (() => void) | null = null;
@@ -472,6 +489,7 @@ export class Vector3D extends SpatialObject {
         this._positionsDirty = true;
         this._bsCache = null;
         this._animPolyline = null;
+        for (const cb of this._pathDestroyListeners) cb();
     }
 
     protected _applyHidden(): void {
@@ -494,6 +512,51 @@ export class Vector3D extends SpatialObject {
     }
 
     getLabelType(): 'point' { return 'point'; }
+
+/** Точки в локальных координатах worldGroup. Считать immutable. */
+getPathPoints(): ReadonlyArray<Vector3DPosition> {
+    return this._worldPoints;
+}
+
+getPathLength(): number {
+    return this._animPolyline?.total ?? 0;
+}
+
+/** Публичная обёртка над `_getPointAtT`. */
+samplePathAt(t: number, outPos: any, outTangent: any): boolean {
+    return this._getPointAtT(t, outPos, outTangent);
+}
+
+onPathRebuild(cb: () => void): () => void {
+    this._pathRebuildListeners.add(cb);
+    return () => this._pathRebuildListeners.delete(cb);
+}
+
+onPathDestroy(cb: () => void): () => void {
+    this._pathDestroyListeners.add(cb);
+    return () => this._pathDestroyListeners.delete(cb);
+}
+
+private _emitPathDestroy(): void {
+    if (this._pathDestroyListeners.size === 0) return;
+    const cbs = [...this._pathDestroyListeners];
+    this._pathDestroyListeners.clear();
+    for (const cb of cbs) {
+        try { cb(); } catch (e) {
+            console.error('[Vector3D] pathDestroy listener threw', e);
+        }
+    }
+}
+
+private _emitPathRebuild(): void {
+    if (this._pathRebuildListeners.size === 0) return;
+    for (const cb of [...this._pathRebuildListeners]) {
+        try { cb(); } catch (e) {
+            console.error('[Vector3D] pathRebuild listener threw', e);
+        }
+    }
+}
+
 
     // =================================================================
     // Подписи: start/end через фасады
@@ -999,6 +1062,7 @@ export class Vector3D extends SpatialObject {
 
     private _setupAnimations(map: any): void {
         this._animPolyline = this._computePolylineData();
+        this._emitPathRebuild();
         if (!this._animPolyline) return;
 
         for (const anim of this._animList) {
@@ -1736,6 +1800,7 @@ export class Vector3D extends SpatialObject {
 
         this._resetStaticConePosition();
         this._animPolyline = this._computePolylineData();
+        this._emitPathRebuild();
 
         this._positionsDirty = false;
         return true;

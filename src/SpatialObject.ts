@@ -90,19 +90,20 @@ addTo(map: any): this {
     return this;
 }
 
-    _attach(map: any, layer: Layer): void {
-        if (this._map === map && this._layer === layer) return;
-        this.remove();
-        this._map = map;
-        this._layer = layer;
+_attach(map: any, layer: Layer): void {
+    if (this._map === map && this._layer === layer) return;
 
-        this._resolveTitleOffset();
-        this._onAttached(map);
+    if (this._map || this._layer) this.remove();
+    this._map = map;
+    this._layer = layer;
 
-        if (this._title && map.textManager) {
-            this._textLabel = map.textManager.addLabel(this);
-        }
+    this._resolveTitleOffset();
+    this._onAttached(map);
+
+    if (this._title && map.textManager) {
+        this._textLabel = map.textManager.addLabel(this);
     }
+}
 
     remove(): void {
         this._teardown();

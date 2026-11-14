@@ -82,6 +82,8 @@ export class Vector3D extends SpatialObject {
     _altitudeMode;
     // ── Две подписи ──
     _titles;
+    _pathRebuildListeners = new Set();
+    _pathDestroyListeners = new Set();
     // ── Интерактив ──
     _unregisterInteraction = null;
     // ── 3D-объекты ──
@@ -249,6 +251,8 @@ export class Vector3D extends SpatialObject {
         this._positionsDirty = true;
         this._bsCache = null;
         this._animPolyline = null;
+        for (const cb of this._pathDestroyListeners)
+            cb();
     }
     _applyHidden() {
         if (this._group)
@@ -269,6 +273,51 @@ export class Vector3D extends SpatialObject {
         this._invalidateGeometryAndAnimations();
     }
     getLabelType() { return 'point'; }
+    /** Точки в локальных координатах worldGroup. Считать immutable. */
+    getPathPoints() {
+        return this._worldPoints;
+    }
+    getPathLength() {
+        return this._animPolyline?.total ?? 0;
+    }
+    /** Публичная обёртка над `_getPointAtT`. */
+    samplePathAt(t, outPos, outTangent) {
+        return this._getPointAtT(t, outPos, outTangent);
+    }
+    onPathRebuild(cb) {
+        this._pathRebuildListeners.add(cb);
+        return () => this._pathRebuildListeners.delete(cb);
+    }
+    onPathDestroy(cb) {
+        this._pathDestroyListeners.add(cb);
+        return () => this._pathDestroyListeners.delete(cb);
+    }
+    _emitPathDestroy() {
+        if (this._pathDestroyListeners.size === 0)
+            return;
+        const cbs = [...this._pathDestroyListeners];
+        this._pathDestroyListeners.clear();
+        for (const cb of cbs) {
+            try {
+                cb();
+            }
+            catch (e) {
+                console.error('[Vector3D] pathDestroy listener threw', e);
+            }
+        }
+    }
+    _emitPathRebuild() {
+        if (this._pathRebuildListeners.size === 0)
+            return;
+        for (const cb of [...this._pathRebuildListeners]) {
+            try {
+                cb();
+            }
+            catch (e) {
+                console.error('[Vector3D] pathRebuild listener threw', e);
+            }
+        }
+    }
     // =================================================================
     // Подписи: start/end через фасады
     // =================================================================
@@ -770,6 +819,7 @@ export class Vector3D extends SpatialObject {
     // =================================================================
     _setupAnimations(map) {
         this._animPolyline = this._computePolylineData();
+        this._emitPathRebuild();
         if (!this._animPolyline)
             return;
         for (const anim of this._animList) {
@@ -1462,6 +1512,7 @@ export class Vector3D extends SpatialObject {
         this._line.visible = true;
         this._resetStaticConePosition();
         this._animPolyline = this._computePolylineData();
+        this._emitPathRebuild();
         this._positionsDirty = false;
         return true;
     }

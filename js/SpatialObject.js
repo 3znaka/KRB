@@ -77,7 +77,8 @@ export class SpatialObject {
     _attach(map, layer) {
         if (this._map === map && this._layer === layer)
             return;
-        this.remove();
+        if (this._map || this._layer)
+            this.remove();
         this._map = map;
         this._layer = layer;
         this._resolveTitleOffset();

@@ -404,6 +404,8 @@ case 'cone': {
         this._raycastMeshesCache = null;
     }
 
+
+
     private _normalizePrimitiveSize(size: SizeSpec | null): [number, number, number] {
         if (!size) return [100, 100, 100];
         if (typeof size === 'number') return [size, size, size];
@@ -1061,4 +1063,87 @@ this._worldPosition.set(worldX, worldY, worldZ);
         }
         return [[x, y], [x, y]];
     }
+}
+
+    // =====================================================================
+// Экспортируемый конструктор примитивов (переиспользуется, например,
+// в PathFollower.ts как «машинка» на маршруте). Логика идентична
+// _createPrimitive() у Marker3D, но без инкапсуляции в SpatialObject:
+// возвращает чистый THREE.Mesh — его можно вставить в чужую группу.
+// =====================================================================
+
+export function createPrimitiveMesh(opts: {
+    primitiveType?: PrimitiveType;
+    /** Размеры «сырой» геометрии. По умолчанию 1×1×1 (юнит). */
+    size?: SizeSpec | null;
+    color?: string | number;
+    depthTest?: boolean;
+    depthWrite?: boolean;
+    /** Точка привязки в [0..1]^3. По умолчанию [0.5, 0, 0.5] — bottom-center. */
+    anchor?: Vec3;
+} = {}): any {
+    const {
+        primitiveType = 'box',
+        size = 1,
+        color = 0x3388ff,
+        depthTest = true,
+        depthWrite = true,
+        anchor = [0.5, 0, 0.5],
+    } = opts;
+
+    const [w, h, d] = normalizePrimitiveSizeForMesh(size);
+
+    let geometry: any;
+    switch (primitiveType) {
+        case 'sphere': {
+            geometry = new THREE.SphereGeometry(0.5, 32, 32);
+            geometry.scale(w, h, d);
+            break;
+        }
+        case 'cylinder': {
+            geometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+            geometry.scale(w, h, d);
+            break;
+        }
+        case 'cone': {
+            geometry = new THREE.ConeGeometry(0.5, 1, 32);
+            geometry.scale(w, h, d);
+            break;
+        }
+        case 'box':
+        default:
+            geometry = new THREE.BoxGeometry(w, h, d);
+            break;
+    }
+
+    const offX = (0.5 - anchor[0]) * w;
+    const offY = (0.5 - anchor[1]) * h;
+    const offZ = (0.5 - anchor[2]) * d;
+    geometry.translate(offX, offY, offZ);
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+
+   const material = new THREE.MeshBasicMaterial({
+    color,
+    depthTest,
+    depthWrite,
+    transparent: false,
+});
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = MARKER_RENDER_ORDER;
+    return mesh;
+}
+
+function normalizePrimitiveSizeForMesh(size: SizeSpec | null): [number, number, number] {
+    if (size == null) return [1, 1, 1];
+    if (typeof size === 'number') return [size, size, size];
+    if (Array.isArray(size)) {
+        switch (size.length) {
+            case 1: return [size[0], size[0], size[0]];
+            case 2: return [size[0], size[1], size[0]];
+            case 3: return [size[0], size[1], size[2]];
+        }
+    }
+    return [1, 1, 1];
 }

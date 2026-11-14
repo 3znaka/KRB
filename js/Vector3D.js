@@ -3,17 +3,18 @@
  * анимацией. После `addTo()` мутабелен.
  *
  * Наследует SpatialObject: zoom bounds, видимость, tooltip, onClick/onHover,
- * altitude, zoom bounds и TextManager-контракт берутся из базового класса.
- * Здесь остаётся специфика: ECEF, Line2-геометрия, статическая стрелка,
- * анимации, две подписи (start/end) через фасады.
+ * altitude и TextManager-контракт — из базового класса.
+ * Специфика: ECEF, Line2-геометрия, статическая стрелка, анимации,
+ * две подписи (start/end), LOD через Douglas–Peucker.
  *
  * @module Vector3D
  */
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
 import { THREE, Line2, LineMaterial, LineGeometry, LineSegments2, LineSegmentsGeometry, } from './js_TP/tpb.js';
+import { douglasPeuckerIndices, simplifyRingIndices } from './Simplify.js';
 // =====================================================================
-// Константы и утилиты ECEF
+// ECEF
 // =====================================================================
 const _A = 6378137.0;
 const _F = 1 / 298.257222101;
@@ -59,6 +60,7 @@ const CONE_RADIUS_RATIO = 0.35;
 const FLOW_MAX_CONES = 50;
 const MAX_DASH_SEGMENTS = 500;
 const MAX_HEAD_CONES = 100;
+const REBUILD_DEBOUNCE_MS = 60;
 // =====================================================================
 // Vector3D
 // =====================================================================
@@ -98,6 +100,27 @@ export class Vector3D extends SpatialObject {
     // ── clampToGround ──
     _lastSurfaceUpdateTime = 0;
     _lastWorldGroupPos;
+    // ── LOD ──
+    _simplify = true;
+    _simplifyTolerance = 0.5;
+    _simplifyZoomBucket = 1;
+    _simplifyCache = new Map();
+    _simplifiedPoints = [];
+    _currentSimplifyBucket = -1;
+    _pendingBucket = -1;
+    _rebuildTimer = null;
+    _pendingRebuild = false;
+    // ── Кэши / перфоманс ──
+    _positionsDirty = true;
+    _bsCache = null;
+    /**
+     * Локальный origin геометрии. Line2 / LineSegments2 хранят вершины во
+     * Float32 — абсолютные world-координаты (~1e9) теряют точность,
+     * соседние вершины после DP-упрощения на высоком зуме коллапсируют
+     * в одну → NaN в шейдере. Считаем origin один раз от ПОЛНОГО набора.
+     */
+    _localOrigin = new THREE.Vector3(0, 0, 0);
+    _localOriginValid = false;
     // ── Временные ──
     _tempVecA;
     _tempVecB;
@@ -127,6 +150,9 @@ export class Vector3D extends SpatialObject {
         this._heightScale = options.heightScale ?? 1;
         this._altitude = options.altitude ?? options.altitudeOffset ?? 0;
         this._altitudeMode = options.altitudeMode ?? 'absolute';
+        this._simplify = options.simplify ?? true;
+        this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
+        this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._titles = {
             start: this._parseTitleOptions(options, 'start'),
             end: this._parseTitleOptions(options, 'end'),
@@ -149,6 +175,20 @@ export class Vector3D extends SpatialObject {
         this._recomputeWorldPoints();
         if (this._worldPoints.length < 2)
             return;
+        this._localOriginValid = false;
+        this._ensureLocalOrigin();
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        const initialBucket = this._simplify
+            ? Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket)
+            : -1;
+        this._doRebuildForBucket(initialBucket);
         this._buildLine(map);
         this._buildStaticCone();
         if (this._animList.length)
@@ -158,8 +198,16 @@ export class Vector3D extends SpatialObject {
         this._attachLabels(map);
         this._lastWorldGroupPos.copy(map.worldGroup.position);
         this._lastSurfaceUpdateTime = 0;
+        this._lastUpdateTime = 0;
+        this._positionsDirty = true;
     }
     _teardown() {
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
         if (this._unregisterInteraction) {
             this._unregisterInteraction();
             this._unregisterInteraction = null;
@@ -193,6 +241,14 @@ export class Vector3D extends SpatialObject {
         this._lastUpdateTime = 0;
         this._lastSurfaceUpdateTime = 0;
         this._crs = null;
+        this._worldPoints = [];
+        this._simplifiedPoints = [];
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._localOriginValid = false;
+        this._positionsDirty = true;
+        this._bsCache = null;
+        this._animPolyline = null;
     }
     _applyHidden() {
         if (this._group)
@@ -203,18 +259,20 @@ export class Vector3D extends SpatialObject {
             this._registerInteraction(this._map);
     }
     _onAltitudeChanged() {
-        if (!this._map)
+        if (!this._map) {
+            this._positionsDirty = true;
             return;
+        }
         this._recomputeWorldPoints();
-        this._refreshGeometryAfterPositionsChange();
+        this._localOriginValid = false;
+        this._ensureLocalOrigin();
+        this._invalidateGeometryAndAnimations();
     }
     getLabelType() { return 'point'; }
     // =================================================================
-    // Подписи: start/end через фасады, getText делегирует к start
+    // Подписи: start/end через фасады
     // =================================================================
-    setTitle(text) {
-        return this.setTitleStart(text);
-    }
+    setTitle(text) { return this.setTitleStart(text); }
     getText() { return this._titles.start.text; }
     getTextStyle() {
         return Object.assign({
@@ -242,12 +300,10 @@ export class Vector3D extends SpatialObject {
         const placement = options.titlePlacement;
         let text;
         if (isStart) {
-            text = options.titleStart
-                ?? (placement === 'end' ? '' : (options.title ?? ''));
+            text = options.titleStart ?? (placement === 'end' ? '' : (options.title ?? ''));
         }
         else {
-            text = options.titleEnd
-                ?? (placement === 'end' ? (options.title ?? '') : '');
+            text = options.titleEnd ?? (placement === 'end' ? (options.title ?? '') : '');
         }
         const pick = (common, specific, def) => options[specific] ?? options[common] ?? def;
         return {
@@ -310,12 +366,8 @@ export class Vector3D extends SpatialObject {
             y: (-vec.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
-    setTitleStart(text) {
-        return this._setTitleText('start', text ?? '');
-    }
-    setTitleEnd(text) {
-        return this._setTitleText('end', text ?? '');
-    }
+    setTitleStart(text) { return this._setTitleText('start', text ?? ''); }
+    setTitleEnd(text) { return this._setTitleText('end', text ?? ''); }
     _setTitleText(role, text) {
         this._titles[role].text = text;
         const tm = this._map?.textManager;
@@ -368,9 +420,7 @@ export class Vector3D extends SpatialObject {
     _parseOneAnimation(anim) {
         if (!anim)
             return null;
-        const src = (typeof anim === 'string')
-            ? { type: anim }
-            : anim;
+        const src = (typeof anim === 'string') ? { type: anim } : anim;
         const type = src.type ?? 'none';
         if (type === 'none')
             return null;
@@ -442,14 +492,12 @@ export class Vector3D extends SpatialObject {
         if (easing === 'easeOut')
             return 1 - (1 - phase) * (1 - phase);
         if (easing === 'easeInOut') {
-            return phase < 0.5
-                ? 2 * phase * phase
-                : 1 - 2 * (1 - phase) * (1 - phase);
+            return phase < 0.5 ? 2 * phase * phase : 1 - 2 * (1 - phase) * (1 - phase);
         }
         return 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
     }
     // =================================================================
-    // Геометрия маршрута (для анимаций)
+    // Путь анимации — ВСЕГДА полный (не-LOD)
     // =================================================================
     _computePolylineData() {
         const pts = this._worldPoints;
@@ -522,6 +570,198 @@ export class Vector3D extends SpatialObject {
             }
             i++;
         }
+    }
+    // =================================================================
+    // LOD
+    // =================================================================
+    _worldPerPixel(z) {
+        return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
+    }
+    _getSimplifiedData(bucket) {
+        if (!this._simplify || !this._map || bucket < 0)
+            return this._worldPoints;
+        const hit = this._simplifyCache.get(bucket);
+        if (hit)
+            return hit;
+        const pts = this._worldPoints;
+        const n = pts.length;
+        if (n < 3) {
+            this._simplifyCache.set(bucket, pts);
+            return pts;
+        }
+        const z = bucket * this._simplifyZoomBucket;
+        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+        const pts2D = new Array(n);
+        for (let i = 0; i < n; i++)
+            pts2D[i] = [pts[i][0], pts[i][2]];
+        const isClosed = n >= 4 &&
+            pts2D[0][0] === pts2D[n - 1][0] &&
+            pts2D[0][1] === pts2D[n - 1][1];
+        const keptIdx = isClosed
+            ? simplifyRingIndices(pts2D, tolWorld)
+            : douglasPeuckerIndices(pts2D, tolWorld);
+        if ((isClosed && keptIdx.length < 3) || keptIdx.length < 2 || keptIdx.length === n) {
+            this._simplifyCache.set(bucket, pts);
+            return pts;
+        }
+        const simplified = new Array(keptIdx.length);
+        for (let k = 0; k < keptIdx.length; k++)
+            simplified[k] = pts[keptIdx[k]];
+        this._simplifyCache.set(bucket, simplified);
+        return simplified;
+    }
+    _doRebuildForBucket(bucket, data) {
+        if (!this._map)
+            return;
+        this._pendingRebuild = false;
+        this._currentSimplifyBucket = bucket;
+        this._ensureLocalOrigin();
+        const resolved = data ?? this._getSimplifiedData(bucket);
+        this._simplifiedPoints = resolved;
+        this._positionsDirty = true;
+        this._bsCache = null;
+    }
+    _onSimplifyBucketChange(bucket) {
+        if (bucket === this._currentSimplifyBucket)
+            return;
+        const prevCount = this._simplifiedPoints.length;
+        const data = this._getSimplifiedData(bucket);
+        if (prevCount > 0 && data.length === prevCount && this._currentSimplifyBucket >= 0) {
+            this._currentSimplifyBucket = bucket;
+            return;
+        }
+        if (!this._isVisible) {
+            this._pendingRebuild = true;
+            return;
+        }
+        this._doRebuildForBucket(bucket, data);
+    }
+    _scheduleBucketChange(bucket) {
+        if (this._rebuildTimer) {
+            this._pendingBucket = bucket;
+            return;
+        }
+        this._pendingBucket = bucket;
+        this._rebuildTimer = setTimeout(() => {
+            this._rebuildTimer = null;
+            if (!this._map)
+                return;
+            const b = this._pendingBucket;
+            this._pendingBucket = -1;
+            if (b >= 0 && b !== this._currentSimplifyBucket)
+                this._onSimplifyBucketChange(b);
+        }, REBUILD_DEBOUNCE_MS);
+    }
+    _applySimplification(zoom) {
+        if (!this._simplify || !this._map)
+            return;
+        const bucket = Math.floor(zoom / this._simplifyZoomBucket);
+        if (bucket === this._currentSimplifyBucket)
+            return;
+        if (this._map._zoomActive || this._map._cameraAnimation) {
+            this._scheduleBucketChange(bucket);
+            return;
+        }
+        this._doRebuildForBucket(bucket);
+    }
+    // =================================================================
+    // Локальный origin
+    // =================================================================
+    _ensureLocalOrigin() {
+        if (this._localOriginValid)
+            return;
+        const pts = this._worldPoints;
+        if (!pts.length) {
+            this._localOrigin.set(0, 0, 0);
+            this._localOriginValid = true;
+            return;
+        }
+        let sx = 0, sz = 0;
+        for (let i = 0; i < pts.length; i++) {
+            sx += pts[i][0];
+            sz += pts[i][2];
+        }
+        this._localOrigin.set(sx / pts.length, 0, sz / pts.length);
+        this._localOriginValid = true;
+    }
+    // =================================================================
+    // Интерактив
+    // =================================================================
+    _registerInteraction(map) {
+        if (!map.interaction)
+            return;
+        if (this._unregisterInteraction) {
+            this._unregisterInteraction();
+            this._unregisterInteraction = null;
+        }
+        if (!this._onClick && !this._onHover && !this._tooltipText)
+            return;
+        this._unregisterInteraction = map.interaction.register(this, {
+            getMeshes: () => {
+                const meshes = [];
+                if (this._line && this._line.visible)
+                    meshes.push(this._line);
+                if (this._cone && this._cone.visible)
+                    meshes.push(this._cone);
+                for (const anim of this._animList) {
+                    if (anim.config.type === 'flowArrows' && anim.cones) {
+                        for (const c of anim.cones)
+                            if (c.visible)
+                                meshes.push(c);
+                    }
+                    if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
+                        meshes.push(anim.cone);
+                    }
+                    if (anim.config.type === 'part' && anim.headConePool) {
+                        for (const c of anim.headConePool)
+                            if (c.visible)
+                                meshes.push(c);
+                    }
+                }
+                return meshes;
+            },
+            getBoundingSphere: () => {
+                if (this._worldPoints.length < 2)
+                    return null;
+                let c = this._bsCache;
+                if (!c) {
+                    let minX = Infinity, minY = Infinity, minZ = Infinity;
+                    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+                    for (const p of this._worldPoints) {
+                        if (p[0] < minX)
+                            minX = p[0];
+                        if (p[0] > maxX)
+                            maxX = p[0];
+                        if (p[1] < minY)
+                            minY = p[1];
+                        if (p[1] > maxY)
+                            maxY = p[1];
+                        if (p[2] < minZ)
+                            minZ = p[2];
+                        if (p[2] > maxZ)
+                            maxZ = p[2];
+                    }
+                    if (!isFinite(minX))
+                        return null;
+                    const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                    c = this._bsCache = {
+                        cx: (minX + maxX) / 2,
+                        cy: (minY + maxY) / 2,
+                        cz: (minZ + maxZ) / 2,
+                        r: 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz),
+                    };
+                }
+                const wgPos = map.worldGroup.position;
+                return {
+                    center: map.getVec3().set(c.cx + wgPos.x, c.cy + wgPos.y, c.cz + wgPos.z),
+                    radius: c.r,
+                };
+            },
+            onClick: this._onClick || null,
+            onHover: this._onHover || null,
+            getTooltip: this._tooltipText ? () => this._tooltipText : null,
+            isVisible: () => this._isVisible,
+        });
     }
     // =================================================================
     // Setup / teardown анимаций
@@ -603,6 +843,7 @@ export class Vector3D extends SpatialObject {
             overlay.renderOrder = 999;
             overlay.visible = false;
             overlay.frustumCulled = false;
+            overlay.position.copy(this._localOrigin);
             this._group.add(overlay);
             anim.overlay = overlay;
             anim.overlayGeo = geo;
@@ -795,9 +1036,7 @@ export class Vector3D extends SpatialObject {
         if (!this._animPolyline)
             return [];
         const L = this._animPolyline.total;
-        const dashLen = o.dashLengthMode === 'fraction'
-            ? o.dashLength * L
-            : o.dashLength;
+        const dashLen = o.dashLengthMode === 'fraction' ? o.dashLength * L : o.dashLength;
         const gapLen = dashLen * (o.gapRatio ?? 1);
         const step = dashLen + gapLen;
         if (step <= 0)
@@ -828,6 +1067,15 @@ export class Vector3D extends SpatialObject {
             anim.overlay.visible = false;
             return;
         }
+        // Сдвигаем в локальный origin (Float32-стабильность LineSegments2).
+        this._ensureLocalOrigin();
+        const ox = this._localOrigin.x;
+        const oz = this._localOrigin.z;
+        for (let i = 0; i < positions.length; i += 3) {
+            positions[i] -= ox;
+            positions[i + 2] -= oz;
+        }
+        anim.overlay.position.copy(this._localOrigin);
         const instanceCount = positions.length / 6;
         anim.overlayGeo.setPositions(positions);
         anim.overlayGeo._maxInstanceCount = undefined;
@@ -904,9 +1152,8 @@ export class Vector3D extends SpatialObject {
     setAnimation(animation) {
         this._teardownAnimations();
         this._parseAnimationsInto(animation);
-        if (this._map && this._line) {
+        if (this._map && this._line)
             this._setupAnimations(this._map);
-        }
         return this;
     }
     pauseAnimation(index = -1) {
@@ -929,48 +1176,6 @@ export class Vector3D extends SpatialObject {
         else if (this._animList[index])
             this._animList[index].config.speed = speed;
         return this;
-    }
-    // =================================================================
-    // Интерактив
-    // =================================================================
-    _registerInteraction(map) {
-        if (!map.interaction)
-            return;
-        if (this._unregisterInteraction) {
-            this._unregisterInteraction();
-            this._unregisterInteraction = null;
-        }
-        if (!this._onClick && !this._onHover && !this._tooltipText)
-            return;
-        this._unregisterInteraction = map.interaction.register(this, {
-            getMeshes: () => {
-                const meshes = [];
-                if (this._line && this._line.visible)
-                    meshes.push(this._line);
-                if (this._cone && this._cone.visible)
-                    meshes.push(this._cone);
-                for (const anim of this._animList) {
-                    if (anim.config.type === 'flowArrows' && anim.cones) {
-                        for (const c of anim.cones)
-                            if (c.visible)
-                                meshes.push(c);
-                    }
-                    if (anim.config.type === 'movingArrow' && anim.cone && anim.cone.visible) {
-                        meshes.push(anim.cone);
-                    }
-                    if (anim.config.type === 'part' && anim.headConePool) {
-                        for (const c of anim.headConePool)
-                            if (c.visible)
-                                meshes.push(c);
-                    }
-                }
-                return meshes;
-            },
-            onClick: this._onClick || null,
-            onHover: this._onHover || null,
-            getTooltip: this._tooltipText ? () => this._tooltipText : null,
-            isVisible: () => this._isVisible,
-        });
     }
     // =================================================================
     // Точки / геометрия
@@ -1009,11 +1214,7 @@ export class Vector3D extends SpatialObject {
         this._worldPoints = worldPts;
     }
     _buildLine(map) {
-        const flat = [];
-        for (const wp of this._worldPoints)
-            flat.push(wp[0], wp[1], wp[2]);
         this._geometry = new LineGeometry();
-        this._geometry.setPositions(flat);
         const canvas = map.renderer.domElement;
         this._material = new LineMaterial({
             color: this._color,
@@ -1025,7 +1226,7 @@ export class Vector3D extends SpatialObject {
             resolution: new THREE.Vector2(canvas.width, canvas.height),
         });
         this._line = new Line2(this._geometry, this._material);
-        this._line.computeLineDistances();
+        this._line.position.copy(this._localOrigin);
         this._line.renderOrder = 999;
         this._group.add(this._line);
     }
@@ -1091,6 +1292,7 @@ export class Vector3D extends SpatialObject {
             this._isVisible = false;
             return;
         }
+        // ── deltaTime ──
         if (typeof deltaTime !== 'number' || !isFinite(deltaTime) || deltaTime < 0) {
             const now = performance.now();
             deltaTime = this._lastUpdateTime
@@ -1100,36 +1302,12 @@ export class Vector3D extends SpatialObject {
         if (deltaTime > 0.1)
             deltaTime = 0.1;
         this._lastUpdateTime = performance.now();
-        // clampToGround: периодически обновляем высоты по рельефу.
-        if (this._altitudeMode === 'clampToGround' && this._worldPoints.length >= 2) {
-            const now = performance.now();
-            const posChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
-            if (now - this._lastSurfaceUpdateTime > 500 || posChanged) {
-                this._recomputeWorldPoints();
-                this._updateGeometryOnly();
-                this._lastSurfaceUpdateTime = now;
-                this._lastWorldGroupPos.copy(map.worldGroup.position);
-            }
+        // ── group в worldGroup ──
+        if (this._group.parent !== map.worldGroup) {
+            this._group.parent?.remove(this._group);
+            map.worldGroup.add(this._group);
         }
-        if (map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
-            const mid = this._worldPoints[this._worldPoints.length >> 1];
-            const wgPos = map.worldGroup.position;
-            const d = map.camera.position.distanceTo(map.getVec3().set(mid[0] + wgPos.x, mid[1] + wgPos.y, mid[2] + wgPos.z));
-            if (d > map.maxObjectDistance) {
-                this._applyHidden();
-                this._isVisible = false;
-                return;
-            }
-        }
-        this._group.visible = true;
-        this._isVisible = true;
-        if (this._animList.length > 0 && this._animPolyline) {
-            this._stepAllAnimations(map, deltaTime);
-        }
-        const hasPulse = this._animList.some(a => a.config.type === 'pulse');
-        if (!hasPulse && this._arrowSizeMode === 'px' && this._cone && this._cone.visible) {
-            this._applyConeScale(map);
-        }
+        // ── resolution ──
         const cv = map.renderer.domElement;
         if (this._material) {
             const res = this._material.resolution;
@@ -1143,6 +1321,157 @@ export class Vector3D extends SpatialObject {
                     res.set(cv.width, cv.height);
             }
         }
+        // ── отложенный ребілд для невидимых ──
+        if (this._pendingRebuild) {
+            const bucket = this._simplify
+                ? Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(bucket);
+        }
+        // ── LOD ──
+        this._applySimplification(map.currentDiscreteZoom);
+        // ── clampToGround: периодически обновляем высоты ──
+        if (this._altitudeMode === 'clampToGround' && this._worldPoints.length >= 2) {
+            const now = performance.now();
+            const posChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
+            if (now - this._lastSurfaceUpdateTime > 500 || posChanged) {
+                this._recomputeWorldPoints();
+                this._localOriginValid = false;
+                this._ensureLocalOrigin();
+                this._simplifyCache.clear();
+                this._currentSimplifyBucket = -1; // force re-simplify for new points
+                this._doRebuildForBucket(this._simplify
+                    ? Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket)
+                    : -1);
+                this._lastSurfaceUpdateTime = now;
+                this._lastWorldGroupPos.copy(map.worldGroup.position);
+            }
+        }
+        // ── distance check ──
+        if (map.objectRenderDistanceFactor > 0 && this._worldPoints.length >= 2) {
+            const wgPos = map.worldGroup.position;
+            const cam = map.camera.position;
+            const pts = this._worldPoints;
+            let minDistSq = Infinity;
+            let prevX = pts[0][0] + wgPos.x;
+            let prevY = pts[0][1] + wgPos.y;
+            let prevZ = pts[0][2] + wgPos.z;
+            for (let i = 1; i < pts.length; i++) {
+                const curX = pts[i][0] + wgPos.x;
+                const curY = pts[i][1] + wgPos.y;
+                const curZ = pts[i][2] + wgPos.z;
+                const abx = curX - prevX, aby = curY - prevY, abz = curZ - prevZ;
+                const apx = cam.x - prevX, apy = cam.y - prevY, apz = cam.z - prevZ;
+                const abLenSq = abx * abx + aby * aby + abz * abz;
+                let t = abLenSq > 0 ? (apx * abx + apy * aby + apz * abz) / abLenSq : 0;
+                if (t < 0)
+                    t = 0;
+                else if (t > 1)
+                    t = 1;
+                const dx = prevX + abx * t - cam.x;
+                const dy = prevY + aby * t - cam.y;
+                const dz = prevZ + abz * t - cam.z;
+                const dSq = dx * dx + dy * dy + dz * dz;
+                if (dSq < minDistSq)
+                    minDistSq = dSq;
+                prevX = curX;
+                prevY = curY;
+                prevZ = curZ;
+            }
+            if (Math.sqrt(minDistSq) > map.maxObjectDistance) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
+        }
+        // ── apply positions (rebuild Line2 if dirty) ──
+        if (!this._applyPositions()) {
+            this._isVisible = false;
+            return;
+        }
+        this._group.visible = true;
+        this._isVisible = true;
+        // ── анимации ──
+        if (this._animList.length > 0 && this._animPolyline) {
+            this._stepAllAnimations(map, deltaTime);
+        }
+        // ── cone scale для px-режима (если не управляется pulse) ──
+        const hasPulse = this._animList.some(a => a.config.type === 'pulse');
+        if (!hasPulse && this._arrowSizeMode === 'px' && this._cone && this._cone.visible) {
+            this._applyConeScale(map);
+        }
+    }
+    /**
+     * Пересоздаёт Line2-геометрию из `_simplifiedPoints`, сдвигая вершины
+     * в локальный origin. КРИТИЧНО: dispose+new LineGeometry, иначе three.js
+     * сохраняет `_maxInstanceCount` через `Math.min(...)` и не перерисовывает
+     * больше сегментов, чем было на дальнем зуме.
+     */
+    _applyPositions() {
+        if (!this._map || !this._line)
+            return false;
+        if (!this._positionsDirty)
+            return this._line.visible;
+        this._ensureLocalOrigin();
+        this._line.position.copy(this._localOrigin);
+        const pts = this._simplifiedPoints;
+        const ox = this._localOrigin.x;
+        const oz = this._localOrigin.z;
+        const n = pts.length;
+        const arr = new Float32Array(n * 3);
+        let k = 0;
+        let lastFx = NaN, lastFy = NaN, lastFz = NaN;
+        for (let i = 0; i < n; i++) {
+            const p = pts[i];
+            let x = p[0] - ox;
+            let y = p[1];
+            let z = p[2] - oz;
+            if (!Number.isFinite(x))
+                x = 0;
+            if (!Number.isFinite(y))
+                y = 0;
+            if (!Number.isFinite(z))
+                z = 0;
+            const fx = Math.fround(x);
+            const fy = Math.fround(y);
+            const fz = Math.fround(z);
+            if (fx === lastFx && fy === lastFy && fz === lastFz)
+                continue;
+            arr[k] = fx;
+            arr[k + 1] = fy;
+            arr[k + 2] = fz;
+            k += 3;
+            lastFx = fx;
+            lastFy = fy;
+            lastFz = fz;
+        }
+        if (k < 6) {
+            this._line.visible = false;
+            this._positionsDirty = false;
+            return false;
+        }
+        const finalArr = k === arr.length ? arr : arr.slice(0, k);
+        if (this._geometry)
+            this._geometry.dispose();
+        this._geometry = new LineGeometry();
+        this._geometry.setPositions(finalArr);
+        this._line.geometry = this._geometry;
+        this._line.computeLineDistances();
+        this._line.visible = true;
+        this._resetStaticConePosition();
+        this._animPolyline = this._computePolylineData();
+        this._positionsDirty = false;
+        return true;
+    }
+    /** Помечает геометрию грязной и пересоздаёт анимации. */
+    _invalidateGeometryAndAnimations() {
+        this._positionsDirty = true;
+        this._bsCache = null;
+        if (!this._map || !this._line)
+            return;
+        this._teardownAnimations();
+        if (this._animList.length)
+            this._setupAnimations(this._map);
     }
     // =================================================================
     // Мутабельность
@@ -1158,10 +1487,9 @@ export class Vector3D extends SpatialObject {
             if (o.color == null) {
                 if (anim.cone?.material?.color)
                     anim.cone.material.color.set(color);
-                if (anim.cones) {
+                if (anim.cones)
                     for (const c of anim.cones)
                         c.material.color.set(color);
-                }
                 if (anim.overlayMat?.color)
                     anim.overlayMat.color.set(color);
                 if (anim.headConePool && o.headConeColor == null) {
@@ -1285,10 +1613,19 @@ export class Vector3D extends SpatialObject {
     // =================================================================
     setHeightScale(scale) {
         this._heightScale = scale;
-        if (!this._map)
+        if (!this._map) {
+            this._positionsDirty = true;
             return this;
+        }
         this._recomputeWorldPoints();
-        this._refreshGeometryAfterPositionsChange();
+        this._localOriginValid = false;
+        this._ensureLocalOrigin();
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._doRebuildForBucket(this._simplify
+            ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+            : -1);
+        this._invalidateGeometryAndAnimations();
         return this;
     }
     getHeightScale() { return this._heightScale; }
@@ -1309,12 +1646,30 @@ export class Vector3D extends SpatialObject {
         if (!positions || positions.length < 2)
             return this;
         this._positions = positions;
+        this._positionsDirty = true;
+        this._bsCache = null;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
         if (!this._map)
             return this;
         this._recomputeWorldPoints();
         if (this._worldPoints.length < 2)
             return this;
-        this._refreshGeometryAfterPositionsChange();
+        this._localOriginValid = false;
+        this._ensureLocalOrigin();
+        const bucket = this._simplify
+            ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+            : -1;
+        this._doRebuildForBucket(bucket);
+        this._teardownAnimations();
+        if (this._animList.length)
+            this._setupAnimations(this._map);
         return this;
     }
     getPositions() {
@@ -1325,46 +1680,7 @@ export class Vector3D extends SpatialObject {
         const b = this.getBounds('EPSG:4326');
         if (!b)
             return null;
-        return [
-            (b[0][0] + b[1][0]) / 2,
-            (b[0][1] + b[1][1]) / 2,
-        ];
-    }
-    // =================================================================
-    // Пересборка после изменения _worldPoints
-    // =================================================================
-    /** Обновляет только геометрию линии/конуса/_animPolyline, не трогая анимации. */
-    _updateGeometryOnly() {
-        if (!this._map || !this._line || !this._geometry)
-            return;
-        const flat = [];
-        for (const wp of this._worldPoints)
-            flat.push(wp[0], wp[1], wp[2]);
-        this._geometry.setPositions(flat);
-        this._line.computeLineDistances();
-        if (this._cone && this._worldPoints.length >= 2) {
-            const last = this._worldPoints.length - 1;
-            const pFrom = new THREE.Vector3(...this._worldPoints[last - 1]);
-            const pTo = new THREE.Vector3(...this._worldPoints[last]);
-            const dir = new THREE.Vector3().subVectors(pTo, pFrom);
-            const len = dir.length();
-            if (len > 1e-6) {
-                this._cone.position.copy(pTo);
-                this._cone.quaternion.setFromUnitVectors(this._Y_AXIS, dir.normalize());
-                this._lastSegLen = len;
-                this._applyConeScale(this._map);
-            }
-        }
-        this._animPolyline = this._computePolylineData();
-    }
-    /** Полная пересборка: геометрия + пересоздание анимаций. */
-    _refreshGeometryAfterPositionsChange() {
-        if (!this._map || !this._line)
-            return;
-        this._teardownAnimations();
-        this._updateGeometryOnly();
-        if (this._animList.length)
-            this._setupAnimations(this._map);
+        return [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2];
     }
     // =================================================================
     // KrbMap#fitTo / getBounds
@@ -1389,5 +1705,123 @@ export class Vector3D extends SpatialObject {
             return [[a[0], a[1]], [b[0], b[1]]];
         }
         return [[mnx, mnz], [mxx, mxz]];
+    }
+    // =================================================================
+    // Debug
+    // =================================================================
+    debugDump() {
+        const map = this._map;
+        const line = this._line;
+        const geo = this._geometry;
+        const mat = this._material;
+        const full = this._worldPoints;
+        const simp = this._simplifiedPoints;
+        const lod = {
+            simplify: this._simplify,
+            tolerance: this._simplifyTolerance,
+            zoomBucket: this._simplifyZoomBucket,
+            currentBucket: this._currentSimplifyBucket,
+            pendingBucket: this._pendingBucket,
+            mapZoom: map?.currentDiscreteZoom,
+            mapZoomContinuous: map?.continuousZoom,
+            originalCount: this._positions.length,
+            worldCount: full.length,
+            simplifiedCount: simp.length,
+        };
+        // Line2 buffer health
+        let instCount = 0, geoNaN = 0, geoZero = 0, geoMinLen = Infinity;
+        if (geo) {
+            const sA = geo.attributes?.instanceStart, eA = geo.attributes?.instanceEnd;
+            if (sA && eA) {
+                instCount = sA.count;
+                const s = sA.array, e = eA.array;
+                for (let k = 0; k < instCount; k++) {
+                    const sx = s[k * 3], sy = s[k * 3 + 1], sz = s[k * 3 + 2];
+                    const ex = e[k * 3], ey = e[k * 3 + 1], ez = e[k * 3 + 2];
+                    if (![sx, sy, sz, ex, ey, ez].every(Number.isFinite)) {
+                        geoNaN++;
+                        continue;
+                    }
+                    const dx = ex - sx, dy = ey - sy, dz = ez - sz;
+                    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len === 0)
+                        geoZero++;
+                    if (len < geoMinLen)
+                        geoMinLen = len;
+                }
+            }
+        }
+        const objInfo = line ? {
+            visible: line.visible,
+            inGroup: line.parent === this._group,
+            groupInWorld: this._group.parent === map?.worldGroup,
+            linePosition: [line.position.x.toFixed(1), line.position.y.toFixed(1), line.position.z.toFixed(1)],
+            localOrigin: [this._localOrigin.x.toFixed(1), this._localOrigin.y.toFixed(1), this._localOrigin.z.toFixed(1)],
+            frustumCulled: line.frustumCulled,
+            renderOrder: line.renderOrder,
+        } : null;
+        const matInfo = mat ? {
+            opacity: mat.opacity, linewidth: mat.linewidth,
+            transparent: mat.transparent,
+            depthTest: mat.depthTest, depthWrite: mat.depthWrite,
+            resolution: mat.resolution ? [mat.resolution.x, mat.resolution.y] : null,
+            visible: mat.visible,
+        } : null;
+        console.groupCollapsed(`%c[Vector3D] z=${lod.mapZoom} bucket=${lod.currentBucket} ` +
+            `orig=${lod.originalCount} world=${lod.worldCount} simp=${lod.simplifiedCount} inst=${instCount}`, 'color:#3af;font-weight:bold');
+        console.log('%c1. LOD state', 'color:#3af;font-weight:bold', lod);
+        console.log('%c2. Line2 буфер', 'color:#3af;font-weight:bold', {
+            instances: instCount,
+            maxInstanceCount: geo?._maxInstanceCount,
+            expected: simp.length - 1,
+            missing: (simp.length - 1) - instCount,
+            geoNaN, geoZero,
+            geoMinLen: +geoMinLen.toFixed(6),
+        });
+        console.log('%c3. Object', 'color:#3af;font-weight:bold', objInfo);
+        console.log('%c4. Material', 'color:#3af;font-weight:bold', matInfo);
+        console.log('%c5. Animations', 'color:#3af;font-weight:bold', this._animList.map(a => ({ type: a.config.type, paused: a.config.paused })));
+        if (geoNaN > 0)
+            console.error(`❌ ${geoNaN} NaN-сегментов в Line2 — источник «крошек»`);
+        if (geoZero > 0)
+            console.error(`❌ ${geoZero} нулевых сегментов в Line2 → NaN в шейдере`);
+        if (instCount !== simp.length - 1) {
+            console.error(`❌ Буфер Line2 рассинхронизирован (${instCount} vs ${simp.length - 1})`);
+        }
+        if (this._positionsDirty)
+            console.warn('⚠ _positionsDirty = true, буфер не пересобран');
+        console.groupEnd();
+    }
+    debugToggleSimplify(on) {
+        this._simplify = on;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = on ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket) : -1;
+            this._doRebuildForBucket(b);
+        }
+        console.log(`[Vector3D] simplify = ${on}`);
+    }
+    debugSegmentRange(from, to) {
+        const geo = this._geometry;
+        if (!geo)
+            return console.log('no geometry');
+        const sA = geo.attributes?.instanceStart, eA = geo.attributes?.instanceEnd;
+        if (!sA || !eA)
+            return console.log('no instance attributes');
+        const s = sA.array, e = eA.array;
+        const rows = [];
+        for (let k = from; k < Math.min(to, sA.count); k++) {
+            const sx = s[k * 3], sy = s[k * 3 + 1], sz = s[k * 3 + 2];
+            const ex = e[k * 3], ey = e[k * 3 + 1], ez = e[k * 3 + 2];
+            const len = Math.hypot(ex - sx, ey - sy, ez - sz);
+            rows.push({
+                i: k, len: +len.toFixed(4),
+                start: [sx, sy, sz].map(v => v.toFixed(1)).join(','),
+                end: [ex, ey, ez].map(v => v.toFixed(1)).join(','),
+                bad: !Number.isFinite(len) || len === 0,
+            });
+        }
+        console.table(rows);
     }
 }

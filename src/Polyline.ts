@@ -646,7 +646,61 @@ export class Polyline extends SpatialObject {
     }
     getDepthWrite(): boolean { return this._depthWrite; }
 
-    getCRS(): string | null { return this._crsCode; }
+      getCRS(): string | null { return this._crsCode; }
+
+    // =================================================================
+    // LOD (публичный API)
+    // =================================================================
+
+    setSimplify(on: boolean): this {
+        this._simplify = !!on;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        this._pendingBucket = -1;
+        this._pendingRebuild = false;
+        if (this._rebuildTimer) {
+            clearTimeout(this._rebuildTimer);
+            this._rebuildTimer = null;
+        }
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplify(): boolean { return this._simplify; }
+
+    setSimplifyTolerance(t: number): this {
+        if (!(t >= 0) || !Number.isFinite(t)) return this;
+        this._simplifyTolerance = t;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyTolerance(): number { return this._simplifyTolerance; }
+
+    setSimplifyZoomBucket(n: number): this {
+        if (!(n > 0) || !Number.isFinite(n)) return this;
+        this._simplifyZoomBucket = n;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyZoomBucket(): number { return this._simplifyZoomBucket; }
 
     // =================================================================
     // Позиции
@@ -1278,13 +1332,7 @@ export class Polyline extends SpatialObject {
     }
 
     debugToggleSimplify(on: boolean): void {
-        this._simplify = on;
-        this._simplifyCache.clear();
-        this._currentSimplifyBucket = -1;
-        if (this._map) {
-            const b = on ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket) : -1;
-            this._doRebuildForBucket(b);
-        }
+        this.setSimplify(on);
         console.log(`[Polyline] simplify = ${on}`);
     }
 

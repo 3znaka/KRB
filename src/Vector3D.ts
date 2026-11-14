@@ -2114,13 +2114,7 @@ export class Vector3D extends SpatialObject {
     }
 
     debugToggleSimplify(on: boolean): void {
-        this._simplify = on;
-        this._simplifyCache.clear();
-        this._currentSimplifyBucket = -1;
-        if (this._map) {
-            const b = on ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket) : -1;
-            this._doRebuildForBucket(b);
-        }
+        this.setSimplify(on);
         console.log(`[Vector3D] simplify = ${on}`);
     }
 

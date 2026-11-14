@@ -586,6 +586,22 @@ export class GeoJSONLayer extends Layer {
         this.filterSpec = spec;
         this.filterExpression = null;
     }
+    /**
+ * Рекурсивно подставляет `{field}`-ссылки в строковые значения.
+ * Симметрично поведению `tooltip: '{field}'` — для `titleStyle`,
+ * `titleStartStyle`, `titleEndStyle` во всех `_create*` / `_add*`.
+ */
+    _interpolateStyle(style, props) {
+        if (!style || typeof style !== 'object')
+            return style;
+        const out = {};
+        for (const [k, v] of Object.entries(style)) {
+            out[k] = (typeof v === 'string' && v.includes('{'))
+                ? interpolate(v, props)
+                : v;
+        }
+        return out;
+    }
     // =================================================================
     // Load
     // =================================================================
@@ -1120,9 +1136,12 @@ export class GeoJSONLayer extends Layer {
         };
         const style = this._normalizeStyle(this._resolveStyle(props, 'point'), POINT_ALIASES);
         const cbNorm = this._normalizeStyle(cb, POINT_ALIASES);
-        const marker = new Marker({
+        const merged = {
             ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
-        });
+        };
+        if (merged.titleStyle)
+            merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+        const marker = new Marker(merged);
         this.add(marker);
         this.onEachFeature?.(feature, marker);
     }
@@ -1155,9 +1174,12 @@ export class GeoJSONLayer extends Layer {
         };
         const style = this._normalizeStyle(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
         const cbNorm = this._normalizeStyle(cb, MARKER3D_ALIASES);
-        const marker = new Marker3D({
+        const merged = {
             ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
-        });
+        };
+        if (merged.titleStyle)
+            merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+        const marker = new Marker3D(merged);
         this.add(marker);
         this.onEachFeature?.(feature, marker);
     }
@@ -1201,7 +1223,12 @@ export class GeoJSONLayer extends Layer {
             };
             const style = this._normalizeStyle(this._resolveStyle(props, 'line'), LINE_ALIASES);
             const cbNorm = this._normalizeStyle(cb, LINE_ALIASES);
-            const polyline = new Polyline({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions: coords });
+            const merged = {
+                ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions: coords,
+            };
+            if (merged.titleStyle)
+                merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+            const polyline = new Polyline(merged);
             this.add(polyline);
             this.onEachFeature?.(feature, polyline);
         }
@@ -1288,6 +1315,8 @@ export class GeoJSONLayer extends Layer {
             rings,
             fillColor: choroplethColor || cbNorm?.fillColor || style?.fillColor || defaults.fillColor,
         };
+        if (merged.titleStyle)
+            merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
         const polygon = new Polygon(merged);
         this.add(polygon);
         this.onEachFeature?.(feature, polygon);
@@ -1467,7 +1496,12 @@ export class GeoJSONLayer extends Layer {
         };
         const style = this._normalizeStyle(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
         const cbNorm = this._normalizeStyle(cb, AREA3D_ALIASES);
-        const area = new Area3D({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), rings });
+        const merged = {
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), rings,
+        };
+        if (merged.titleStyle)
+            merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+        const area = new Area3D(merged);
         this.add(area);
         this.onEachFeature?.(feature, area);
     }
@@ -1523,12 +1557,19 @@ export class GeoJSONLayer extends Layer {
                 simplifyZoomBucket: num(props.simplifyZoomBucket) ?? this.defaultVectorSimplifyZoomBucket,
                 animation: props.animation ?? null,
             };
-            const v = new Vector3D({
+            const merged = {
                 ...defaults,
                 ...(styleN ?? {}),
                 ...(cbNorm ?? {}),
                 positions,
-            });
+            };
+            if (merged.titleStyle)
+                merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+            if (merged.titleStartStyle)
+                merged.titleStartStyle = this._interpolateStyle(merged.titleStartStyle, props);
+            if (merged.titleEndStyle)
+                merged.titleEndStyle = this._interpolateStyle(merged.titleEndStyle, props);
+            const v = new Vector3D(merged);
             this.add(v);
             this.onEachFeature?.(feature, v);
         }

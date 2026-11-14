@@ -980,6 +980,24 @@ export class GeoJSONLayer extends Layer {
         this.filterExpression = null;
     }
 
+    /**
+ * Рекурсивно подставляет `{field}`-ссылки в строковые значения.
+ * Симметрично поведению `tooltip: '{field}'` — для `titleStyle`,
+ * `titleStartStyle`, `titleEndStyle` во всех `_create*` / `_add*`.
+ */
+private _interpolateStyle<T extends Record<string, any> | null | undefined>(
+    style: T, props: Props,
+): T {
+    if (!style || typeof style !== 'object') return style;
+    const out: any = {};
+    for (const [k, v] of Object.entries(style as any)) {
+        out[k] = (typeof v === 'string' && v.includes('{'))
+            ? interpolate(v, props)
+            : v;
+    }
+    return out as T;
+}
+
     // =================================================================
     // Load
     // =================================================================
@@ -1507,9 +1525,13 @@ private _createMarker(
     };
     const style = this._normalizeStyle<MarkerOptions>(this._resolveStyle(props, 'point'), POINT_ALIASES);
     const cbNorm = this._normalizeStyle<MarkerOptions>(cb, POINT_ALIASES);
-    const marker = new Marker({
+
+    const merged: MarkerOptions = {
         ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
-    });
+    };
+    if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+
+    const marker = new Marker(merged);
     this.add(marker);
     this.onEachFeature?.(feature, marker);
 }
@@ -1545,11 +1567,15 @@ private _createMarker3D(
             depthWrite: props.depthWrite,
             playAnimation: props.playAnimation,
         };
-        const style = this._normalizeStyle<Marker3DOptions>(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
+                const style = this._normalizeStyle<Marker3DOptions>(this._resolveStyle(props, 'marker3D'), MARKER3D_ALIASES);
         const cbNorm = this._normalizeStyle<Marker3DOptions>(cb, MARKER3D_ALIASES);
-        const marker = new Marker3D({
-            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}),  position,     
-        });
+
+        const merged: Marker3DOptions = {
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), position,
+        };
+        if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+
+        const marker = new Marker3D(merged);
         this.add(marker);
         this.onEachFeature?.(feature, marker);
     }
@@ -1593,9 +1619,15 @@ private _createMarker3D(
                 titleAllowOverflow: props.titleAllowOverflow,
                 titlePriority: this._asNumber(props.titlePriority),
             };
-            const style = this._normalizeStyle<PolylineOptions>(this._resolveStyle(props, 'line'), LINE_ALIASES);
+                       const style = this._normalizeStyle<PolylineOptions>(this._resolveStyle(props, 'line'), LINE_ALIASES);
             const cbNorm = this._normalizeStyle<PolylineOptions>(cb, LINE_ALIASES);
-            const polyline = new Polyline({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions: coords });
+
+            const merged: PolylineOptions = {
+                ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions: coords,
+            };
+            if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+
+            const polyline = new Polyline(merged);
             this.add(polyline);
             this.onEachFeature?.(feature, polyline);
         }
@@ -1683,13 +1715,15 @@ private _createMarker3D(
         const style = this._normalizeStyle<PolygonOptions>(this._resolveStyle(props, 'polygon'), POLYGON_ALIASES);
         const cbNorm = this._normalizeStyle<PolygonOptions>(cb, POLYGON_ALIASES);
 
-        const merged: PolygonOptions = {
+              const merged: PolygonOptions = {
             ...defaults,
             ...(style ?? {}),
             ...(cbNorm ?? {}),
             rings,
             fillColor: choroplethColor || cbNorm?.fillColor || style?.fillColor || defaults.fillColor,
         };
+        if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+
         const polygon = new Polygon(merged);
         this.add(polygon);
         this.onEachFeature?.(feature, polygon);
@@ -1883,9 +1917,15 @@ private _createMarker3D(
             titleMaxZoom: this._asNumber(props.titleMaxZoom),
             tooltip: this._getTooltip(props),
         };
-        const style = this._normalizeStyle<Area3DOptions>(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
+         const style = this._normalizeStyle<Area3DOptions>(this._resolveStyle(props, 'area3D'), AREA3D_ALIASES);
         const cbNorm = this._normalizeStyle<Area3DOptions>(cb, AREA3D_ALIASES);
-        const area = new Area3D({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), rings });
+
+        const merged: Area3DOptions = {
+            ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), rings,
+        };
+        if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+
+        const area = new Area3D(merged);
         this.add(area);
         this.onEachFeature?.(feature, area);
     }
@@ -1949,12 +1989,17 @@ private _createMarker3D(
                 animation: props.animation ?? null,
             };
 
-            const v = new Vector3D({
-                ...defaults,
-                ...(styleN ?? {}),
-                ...(cbNorm ?? {}),
-                positions,
-            });
+            const merged: Vector3DOptions = {
+    ...defaults,
+    ...(styleN ?? {}),
+    ...(cbNorm ?? {}),
+    positions,
+};
+if (merged.titleStyle)      merged.titleStyle      = this._interpolateStyle(merged.titleStyle, props);
+if (merged.titleStartStyle) merged.titleStartStyle = this._interpolateStyle(merged.titleStartStyle, props);
+if (merged.titleEndStyle)   merged.titleEndStyle   = this._interpolateStyle(merged.titleEndStyle, props);
+
+const v = new Vector3D(merged);
             this.add(v);
             this.onEachFeature?.(feature, v);
         }

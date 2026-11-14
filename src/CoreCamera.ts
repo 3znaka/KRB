@@ -30,13 +30,14 @@ setAllowRotate(v: boolean): void;
     getMaxBounds(): [[number, number], [number, number]] | null;
 
     easeTo(options: {
-        center?: [number, number];
-        zoom?: number;
-        pitch?: number;
-        bearing?: number;
-        duration?: number;
-        padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
-    }): void;
+    center?: [number, number] | [number, number, number];   // ← 3-я координата = altitude
+    altitude?: number;                                      // ← или отдельная опция
+    zoom?: number;
+    pitch?: number;
+    bearing?: number;
+    duration?: number;
+    padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
+}): void;
     setPadding(padding: number | { top?: number; right?: number; bottom?: number; left?: number }): void;
     _applyPadding(padding: number | { top?: number; right?: number; bottom?: number; left?: number }): void;
     getZoom(): number;
@@ -44,13 +45,14 @@ setAllowRotate(v: boolean): void;
     getBounds(): [[number, number], [number, number]] | null;
     getPitch(): number;
     getBearing(): number;
-    jumpTo(options: {
-        center?: [number, number];
-        zoom?: number;
-        pitch?: number;
-        bearing?: number;
-        padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
-    }): void;
+   jumpTo(options: {
+    center?: [number, number] | [number, number, number];
+    altitude?: number;
+    zoom?: number;
+    pitch?: number;
+    bearing?: number;
+    padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
+}): void;
     setMaxBounds(bounds: [[number, number], [number, number]] | null): void;
     _enforceMaxBounds(): void;
 }
@@ -102,7 +104,7 @@ initControls() {
 
 easeTo(options) {
     if (this._disposed) return;
-    const { center, zoom, pitch, bearing, duration = 0.5, padding } = options;
+      const { center, altitude, zoom, pitch, bearing, duration = 0.5, padding } = options;
 
     // 1. Отменяем текущую анимацию
     if (this._cameraAnimation || this._cameraAnimFrame !== null) {
@@ -136,18 +138,29 @@ easeTo(options) {
     const startZoom = this.continuousZoom;
 
     // 5. End state
-    let endTarget = startTarget.clone();
-    if (center) {
-        let tx = center[0], ty = center[1];
-        if (this._maxBounds) {
-            const b = this._maxBounds;
-            tx = Math.max(b.minLon, Math.min(b.maxLon, tx));
-            ty = Math.max(b.minLat, Math.min(b.maxLat, ty));
-        }
-        const [cx, cz] = this.projectLonLat(tx, ty);
-        const off = this.worldGroup.position;
-        endTarget.set(cx + off.x, 0, cz + off.z);
+
+
+let endTarget = startTarget.clone();
+if (center) {
+    let tx = center[0], ty = center[1];
+    if (this._maxBounds) {
+        const b = this._maxBounds;
+        tx = Math.max(b.minLon, Math.min(b.maxLon, tx));
+        ty = Math.max(b.minLat, Math.min(b.maxLat, ty));
     }
+    const [cx, cz] = this.projectLonLat(tx, ty);
+    const off = this.worldGroup.position;
+
+    // Приоритет: явный options.altitude > 3-й элемент center > 0
+    let alt = 0;
+    if (altitude !== undefined) {
+        alt = altitude;
+    } else if (center.length >= 3 && Number.isFinite(center[2])) {
+        alt = center[2];
+    }
+
+    endTarget.set(cx + off.x, alt, cz + off.z);
+}
     const endZoom = zoom ?? startZoom;
     const endPitch = pitch !== undefined
         ? (pitch * Math.PI) / 180
@@ -626,11 +639,9 @@ _wrapLongitudeIfNeeded() {
     this.maybeUpdateVisibleTiles(true);
 },
 
-moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
-    if (this._disposed) return;
-    if (duration > 0 && this._cameraAnimation) return;
+moveCameraToSlow(lon: number, lat: number, duration = 1.0, targetZoom: number | null = null, altitude?: number) {
     this.easeTo({
-        center: [lon, lat],
+        center: altitude !== undefined ? [lon, lat, altitude] : [lon, lat],
         zoom: targetZoom ?? undefined,
         duration,
     });

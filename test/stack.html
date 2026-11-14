@@ -622,13 +622,24 @@
             setRoomHash(item.label);
             const isRoom = window.room_layer &&
                 room_layer.features.some(x => x.properties.id === item.id);
-            if (!isRoom) {
-                highlightBuilding(item.id);
-                map.easeTo({ center: [item.x, item.y], zoom: ZOOM_THRESHOLD, duration: 0.8 });
-            } else {
-                highlightRoomById(item.id);
-                map.easeTo({ center: [item.x, item.y], zoom: 21, duration: 0.8 });
-            }
+           if (!isRoom) {
+    highlightBuilding(item.id);
+    map.easeTo({
+        center: [item.x, item.y],
+        // здание выделяется на земле (highlightBuilding → groundLevel: true),
+        // поэтому altitude не указываем — по умолчанию 0.
+        zoom: ZOOM_THRESHOLD,
+        duration: 0.8
+    });
+} else {
+    highlightRoomById(item.id);
+    map.easeTo({
+        center: [item.x, item.y],
+        altitude: floorAltitude(item.floor),   // ← вот это
+        zoom: 21,
+        duration: 0.8
+    });
+}
         }
 
         function findRoom(label) {

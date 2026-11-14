@@ -47,7 +47,7 @@ export const CoreCameraMixin = {
     easeTo(options) {
         if (this._disposed)
             return;
-        const { center, zoom, pitch, bearing, duration = 0.5, padding } = options;
+        const { center, altitude, zoom, pitch, bearing, duration = 0.5, padding } = options;
         // 1. Отменяем текущую анимацию
         if (this._cameraAnimation || this._cameraAnimFrame !== null) {
             if (this._cameraAnimFrame !== null) {
@@ -89,7 +89,15 @@ export const CoreCameraMixin = {
             }
             const [cx, cz] = this.projectLonLat(tx, ty);
             const off = this.worldGroup.position;
-            endTarget.set(cx + off.x, 0, cz + off.z);
+            // Приоритет: явный options.altitude > 3-й элемент center > 0
+            let alt = 0;
+            if (altitude !== undefined) {
+                alt = altitude;
+            }
+            else if (center.length >= 3 && Number.isFinite(center[2])) {
+                alt = center[2];
+            }
+            endTarget.set(cx + off.x, alt, cz + off.z);
         }
         const endZoom = zoom ?? startZoom;
         const endPitch = pitch !== undefined
@@ -540,13 +548,9 @@ export const CoreCameraMixin = {
         this._lastBoundsCheck = null;
         this.maybeUpdateVisibleTiles(true);
     },
-    moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null) {
-        if (this._disposed)
-            return;
-        if (duration > 0 && this._cameraAnimation)
-            return;
+    moveCameraToSlow(lon, lat, duration = 1.0, targetZoom = null, altitude) {
         this.easeTo({
-            center: [lon, lat],
+            center: altitude !== undefined ? [lon, lat, altitude] : [lon, lat],
             zoom: targetZoom ?? undefined,
             duration,
         });

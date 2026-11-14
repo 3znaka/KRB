@@ -12,7 +12,12 @@ import { Marker3D, type Marker3DOptions, type Marker3DPosition,
 import { Area3D, type Area3DOptions, type Area3DRing, type Area3DFit } from './Area3D.js';
 import { Polyline, type PolylineOptions } from './Polyline.js';
 import { Polygon, type PolygonOptions } from './Polygon.js';
-import { Vector3D, type Vector3DOptions, type Vector3DPosition } from './Vector3D.js';
+import {
+    Vector3D,
+    type Vector3DOptions,
+    type Vector3DPosition,
+    type ArrowSizeMode,
+} from './Vector3D.js';
 import { Diagram, type DiagramOptions } from './Diagram.js';
 import { Diagram3D, type Diagram3DSpawnOptions } from './Diagram3D.js';
 import type { SpatialObject } from './SpatialObject.js';
@@ -199,7 +204,11 @@ export interface PolygonStyleAliases extends LineStyleAliases {
     fill?: string | number; 'fill-color'?: string | number; 'fill-opacity'?: number;
 }
 export interface Area3DStyleAliases  { model?: string | null; }
-export interface VectorStyleAliases  extends LineStyleAliases {}
+export interface VectorStyleAliases extends LineStyleAliases {
+    'arrow-size'?: number;
+    'arrow-size-mode'?: ArrowSizeMode;
+    'height-scale'?: number;
+}
 
 const POINT_ALIASES:   Record<string, string> = { icon: 'iconUrl' };
 const MARKER3D_ALIASES: Record<string, string> = { model: 'modelUrl' };
@@ -213,10 +222,16 @@ const POLYGON_ALIASES: Record<string, string> = {
     'stroke-width': 'strokeWidth', 'stroke-opacity': 'strokeOpacity',
 };
 const AREA3D_ALIASES:  Record<string, string> = { model: 'modelUrl' };
-const VECTOR_ALIASES:  Record<string, string> = LINE_ALIASES;
+const VECTOR_ALIASES: Record<string, string> = {
+    ...LINE_ALIASES,
+    'arrow-size': 'arrowSize',
+    'arrow-size-mode': 'arrowSizeMode',
+    'height-scale': 'heightScale',
+};
 
 const NUMERIC_OPTION_KEYS = new Set([
     'fillOpacity', 'strokeOpacity', 'strokeWidth', 'width', 'opacity', 'arrowSize',
+    'heightScale', 'simplifyTolerance', 'simplifyZoomBucket',
 ]);
 
 // =====================================================================
@@ -252,7 +267,19 @@ export interface StyleRule {
     maxZoom?: number;
     altitude?: number;
     altitudeMode?: 'clampToGround' | 'absolute';
-    anchor?: [number, number] | [number, number, number];
+        anchor?: [number, number] | [number, number, number];
+    // ── Vector3D ──
+    arrowSize?: number;
+    'arrow-size'?: number;
+    arrowSizeMode?: ArrowSizeMode;
+    'arrow-size-mode'?: ArrowSizeMode;
+    heightScale?: number;
+    'height-scale'?: number;
+    titleStart?: string;
+    titleEnd?: string;
+    simplify?: boolean;
+    simplifyTolerance?: number;
+    simplifyZoomBucket?: number;
     [key: string]: any;
 }
 
@@ -269,7 +296,7 @@ export interface StyleConfig extends StyleTypeConfig {
     polygon?:  StyleTypeConfig;
     line?:     StyleTypeConfig;
     point?:    StyleTypeConfig;
-    area3D?:   StyleTypeConfig;
+        area3D?:   StyleTypeConfig;
     marker3D?: StyleTypeConfig;
     vector?:   StyleTypeConfig;
 }
@@ -569,6 +596,23 @@ export interface GeoJSONLayerOptions {
     defaultLineMinZoom?: number;
     defaultLineMaxZoom?: number;
 
+    // ── Vector3D ──
+    defaultVectorColor?: string | number;
+    defaultVectorWidth?: number;
+    defaultVectorOpacity?: number;
+    defaultVectorArrowSize?: number;
+    defaultVectorArrowSizeMode?: ArrowSizeMode;
+    defaultVectorHeightScale?: number;
+    defaultVectorAltitude?: number;
+    defaultVectorAltitudeMode?: 'clampToGround' | 'absolute';
+    defaultVectorDepthTest?: boolean;
+    defaultVectorDepthWrite?: boolean;
+    defaultVectorMinZoom?: number;
+    defaultVectorMaxZoom?: number;
+    defaultVectorSimplify?: boolean;
+    defaultVectorSimplifyTolerance?: number;
+    defaultVectorSimplifyZoomBucket?: number;
+
     defaultFillColor?: string | number;
     defaultFillOpacity?: number;
     defaultStrokeColor?: string | number;
@@ -670,6 +714,22 @@ export class GeoJSONLayer extends Layer {
     public defaultLineMinZoom = -Infinity;
     public defaultLineMaxZoom = Infinity;
 
+    public defaultVectorColor: string | number = '#3388ff';
+    public defaultVectorWidth = 2;
+    public defaultVectorOpacity = 1;
+    public defaultVectorArrowSize = 10;
+    public defaultVectorArrowSizeMode: ArrowSizeMode = 'px';
+    public defaultVectorHeightScale = 1;
+    public defaultVectorAltitude = 0;
+    public defaultVectorAltitudeMode: 'clampToGround' | 'absolute' = 'absolute';
+    public defaultVectorDepthTest = false;
+    public defaultVectorDepthWrite = false;
+    public defaultVectorMinZoom = -Infinity;
+    public defaultVectorMaxZoom = Infinity;
+    public defaultVectorSimplify = true;
+    public defaultVectorSimplifyTolerance = 0.5;
+    public defaultVectorSimplifyZoomBucket = 1;
+
     public defaultFillColor: string | number = '#3388ff';
     public defaultFillOpacity = 0.5;
     public defaultStrokeColor: string | number = '#000000';
@@ -751,6 +811,22 @@ export class GeoJSONLayer extends Layer {
         this.defaultLineDepthWrite = o.defaultLineDepthWrite ?? false;
         this.defaultLineMinZoom = o.defaultLineMinZoom ?? -Infinity;
         this.defaultLineMaxZoom = o.defaultLineMaxZoom ?? Infinity;
+
+        this.defaultVectorColor = o.defaultVectorColor ?? '#3388ff';
+        this.defaultVectorWidth = o.defaultVectorWidth ?? 2;
+        this.defaultVectorOpacity = o.defaultVectorOpacity ?? 1;
+        this.defaultVectorArrowSize = o.defaultVectorArrowSize ?? 10;
+        this.defaultVectorArrowSizeMode = o.defaultVectorArrowSizeMode ?? 'px';
+        this.defaultVectorHeightScale = o.defaultVectorHeightScale ?? 1;
+        this.defaultVectorAltitude = o.defaultVectorAltitude ?? 0;
+        this.defaultVectorAltitudeMode = o.defaultVectorAltitudeMode ?? 'absolute';
+        this.defaultVectorDepthTest = o.defaultVectorDepthTest ?? false;
+        this.defaultVectorDepthWrite = o.defaultVectorDepthWrite ?? false;
+        this.defaultVectorMinZoom = o.defaultVectorMinZoom ?? -Infinity;
+        this.defaultVectorMaxZoom = o.defaultVectorMaxZoom ?? Infinity;
+        this.defaultVectorSimplify = o.defaultVectorSimplify ?? true;
+        this.defaultVectorSimplifyTolerance = o.defaultVectorSimplifyTolerance ?? 0.5;
+        this.defaultVectorSimplifyZoomBucket = o.defaultVectorSimplifyZoomBucket ?? 1;
 
         this.defaultFillColor = o.defaultFillColor ?? '#3388ff';
         this.defaultFillOpacity = o.defaultFillOpacity ?? 0.5;
@@ -1312,8 +1388,11 @@ private _computeCoinDenoms(geojson: GeoJSONInput): void {
                 break;
             case 'LineString':
             case 'MultiLineString':
-                if (this.vectorToOptions || props.vector === true) this._addVectorFeature(feature);
-                else this._addLineFeature(feature);
+                if (this.vectorToOptions || props.vector === true || this.style?.vector) {
+                    this._addVectorFeature(feature);
+                } else {
+                    this._addLineFeature(feature);
+                }
                 break;
             case 'Polygon':
             case 'MultiPolygon':
@@ -1814,43 +1893,68 @@ private _createMarker3D(
     // =================================================================
     // Vector3D
     // =================================================================
-
     private _addVectorFeature(feature: GeoJSONFeature): void {
         const geom = feature.geometry;
         const props = feature.properties ?? {};
 
         const coordSets: (GeoJSONLineString | null)[] =
-            geom.type === 'LineString'           ? [geom.coordinates]
-          : geom.type === 'MultiLineString'      ? geom.coordinates
-          :                                        [null];
+            geom.type === 'LineString'         ? [geom.coordinates]
+          : geom.type === 'MultiLineString'    ? geom.coordinates
+          :                                      [null];
+
+        const style  = this._resolveStyle(props, 'vector');
+        const styleN = this._normalizeStyle<Vector3DOptions>(style, VECTOR_ALIASES);
+
+        const num = (v: any): number | undefined => this._asNumber(v);
 
         for (const coords of coordSets) {
             const cb = this.vectorToOptions?.(feature, props) ?? null;
-            const positions = cb?.positions ?? (coords ? this._toVectorPositions(coords) : undefined);
+            const cbNorm = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
+
+            const positions = cbNorm?.positions
+                ?? (coords ? this._toVectorPositions(coords) : undefined);
             if (!positions || positions.length < 2) continue;
 
             const defaults: Vector3DOptions = {
                 positions,
                 crs: this.crs ?? undefined,
                 title: this._getTitle(props),
+                titleStart: props.titleStart,
+                titleEnd: props.titleEnd,
+                titlePlacement: props.titlePlacement || 'start',
                 titleStyle: props.titleStyle,
                 titleOffset: this._parsePair(props.titleOffset) ?? undefined,
                 titleAlign: props.titleAlign,
                 titleVerticalAlign: props.titleVerticalAlign,
-                titleMinZoom: this._asNumber(props.titleMinZoom),
-                titleMaxZoom: this._asNumber(props.titleMaxZoom),
-                titlePlacement: props.titlePlacement || 'start',
+                titleMinZoom: num(props.titleMinZoom),
+                titleMaxZoom: num(props.titleMaxZoom),
+                titleAllowOverflow: props.titleAllowOverflow,
+                titlePriority: num(props.titlePriority),
                 tooltip: this._getTooltip(props),
-                minZoom: this._asNumber(props.minZoom),
-                maxZoom: this._asNumber(props.maxZoom),
-                color: props.stroke || props.color || '#3388ff',
-                width: this._asNumber(props.width) ?? 2,
-                arrowSize: this._asNumber(props.arrowSize) ?? 10,
-                opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? 1,
+                minZoom: num(props.minZoom) ?? this.defaultVectorMinZoom,
+                maxZoom: num(props.maxZoom) ?? this.defaultVectorMaxZoom,
+                color: props.stroke || props.color || this.defaultVectorColor,
+                width: num(props.width ?? props['stroke-width']) ?? this.defaultVectorWidth,
+                arrowSize: num(props.arrowSize) ?? this.defaultVectorArrowSize,
+                arrowSizeMode: props.arrowSizeMode ?? this.defaultVectorArrowSizeMode,
+                opacity: num(props['stroke-opacity'] ?? props.opacity) ?? this.defaultVectorOpacity,
+                heightScale: num(props.heightScale) ?? this.defaultVectorHeightScale,
+                altitude: num(props.altitude) ?? this.defaultVectorAltitude,
+                altitudeMode: props.altitudeMode || this.defaultVectorAltitudeMode,
+                depthTest: props.depthTest ?? this.defaultVectorDepthTest,
+                depthWrite: props.depthWrite ?? this.defaultVectorDepthWrite,
+                simplify: props.simplify ?? this.defaultVectorSimplify,
+                simplifyTolerance: num(props.simplifyTolerance) ?? this.defaultVectorSimplifyTolerance,
+                simplifyZoomBucket: num(props.simplifyZoomBucket) ?? this.defaultVectorSimplifyZoomBucket,
+                animation: props.animation ?? null,
             };
-            const style = this._normalizeStyle<Vector3DOptions>(this._resolveStyle(props, 'vector'), VECTOR_ALIASES);
-            const cbNorm = this._normalizeStyle<Vector3DOptions>(cb, VECTOR_ALIASES);
-            const v = new Vector3D({ ...defaults, ...(style ?? {}), ...(cbNorm ?? {}), positions });
+
+            const v = new Vector3D({
+                ...defaults,
+                ...(styleN ?? {}),
+                ...(cbNorm ?? {}),
+                positions,
+            });
             this.add(v);
             this.onEachFeature?.(feature, v);
         }

@@ -368,6 +368,8 @@ export class Vector3D extends SpatialObject {
     }
     setTitleStart(text) { return this._setTitleText('start', text ?? ''); }
     setTitleEnd(text) { return this._setTitleText('end', text ?? ''); }
+    getTitleStart() { return this._titles.start.text; }
+    getTitleEnd() { return this._titles.end.text; }
     _setTitleText(role, text) {
         this._titles[role].text = text;
         const tm = this._map?.textManager;
@@ -430,7 +432,7 @@ export class Vector3D extends SpatialObject {
             speed: src.speed ?? 1,
             paused: src.paused ?? false,
             reverse: src.reverse ?? false,
-            fadeRatio: Math.min(0.5, Math.max(0, src.fadeRatio ?? 0.15)),
+            fadeRatio: Math.min(0.5, Math.max(0, src.fadeRatio ?? 0)),
             color: src.color ?? null,
             size: src.size ?? null,
             sizeMode: src.sizeMode ?? null,
@@ -1501,6 +1503,50 @@ export class Vector3D extends SpatialObject {
         return this;
     }
     getColor() { return this._color; }
+    // ── LOD ──
+    setSimplify(on) {
+        this._simplify = on;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = on
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplify() { return this._simplify; }
+    setSimplifyTolerance(t) {
+        if (!(t >= 0) || !Number.isFinite(t))
+            return this;
+        this._simplifyTolerance = t;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyTolerance() { return this._simplifyTolerance; }
+    setSimplifyZoomBucket(n) {
+        if (!(n > 0) || !Number.isFinite(n))
+            return this;
+        this._simplifyZoomBucket = n;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyZoomBucket() { return this._simplifyZoomBucket; }
     setWidth(width) {
         if (!(width >= 0))
             return this;

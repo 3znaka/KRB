@@ -604,6 +604,8 @@ export class Vector3D extends SpatialObject {
 
     setTitleStart(text: string): this { return this._setTitleText('start', text ?? ''); }
     setTitleEnd(text: string): this { return this._setTitleText('end', text ?? ''); }
+    getTitleStart(): string { return this._titles.start.text; }
+    getTitleEnd(): string { return this._titles.end.text; }
 
     private _setTitleText(role: TitleRole, text: string): this {
         this._titles[role].text = text;
@@ -665,7 +667,7 @@ export class Vector3D extends SpatialObject {
             speed: src.speed ?? 1,
             paused: src.paused ?? false,
             reverse: src.reverse ?? false,
-            fadeRatio: Math.min(0.5, Math.max(0, src.fadeRatio ?? 0.15)),
+            fadeRatio: Math.min(0.5, Math.max(0, src.fadeRatio ?? 0)),
             color: src.color ?? null,
             size: src.size ?? null,
             sizeMode: src.sizeMode ?? null,
@@ -1771,7 +1773,52 @@ export class Vector3D extends SpatialObject {
         return this;
     }
 
-    getColor(): Vector3DColor { return this._color; }
+      getColor(): Vector3DColor { return this._color; }
+
+    // ── LOD ──
+    setSimplify(on: boolean): this {
+        this._simplify = on;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = on
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplify(): boolean { return this._simplify; }
+
+    setSimplifyTolerance(t: number): this {
+        if (!(t >= 0) || !Number.isFinite(t)) return this;
+        this._simplifyTolerance = t;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyTolerance(): number { return this._simplifyTolerance; }
+
+    setSimplifyZoomBucket(n: number): this {
+        if (!(n > 0) || !Number.isFinite(n)) return this;
+        this._simplifyZoomBucket = n;
+        this._simplifyCache.clear();
+        this._currentSimplifyBucket = -1;
+        if (this._map) {
+            const b = this._simplify
+                ? Math.floor(this._map.currentDiscreteZoom / this._simplifyZoomBucket)
+                : -1;
+            this._doRebuildForBucket(b);
+        }
+        return this;
+    }
+    getSimplifyZoomBucket(): number { return this._simplifyZoomBucket; }
 
     setWidth(width: number): this {
         if (!(width >= 0)) return this;

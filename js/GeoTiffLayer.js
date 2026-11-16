@@ -388,12 +388,7 @@ export class GeoTiffLayer extends SpatialObject {
         tex.generateMipmaps = false;
         tex.wrapS = THREE.ClampToEdgeWrapping;
         tex.wrapT = THREE.ClampToEdgeWrapping;
-        if (THREE.NoColorSpace)
-            tex.colorSpace = THREE.NoColorSpace;
-        else if (THREE.LinearSRGBColorSpace)
-            tex.colorSpace = THREE.LinearSRGBColorSpace;
-        else
-            tex.encoding = THREE.LinearEncoding;
+        tex.colorSpace = 'srgb-linear';
         tex.needsUpdate = true;
         this._map.renderer?.initTexture?.(tex);
         return { texture: tex, bounds: { minX, minZ, sizeX, sizeZ }, feather, projPolys };

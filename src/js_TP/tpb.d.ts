@@ -83,6 +83,25 @@ export namespace THREE {
         invert(): this;
         identity(): this;
     }
+
+    export class Path {
+        constructor();
+        [key: string]: any;
+        moveTo(x: number, y: number): this;
+        lineTo(x: number, y: number): this;
+        quadraticCurveTo(cpx: number, cpy: number, x: number, y: number): this;
+        bezierCurveTo(cp1x: number, cp1y: number, cp2x: number, cp2y: number, x: number, y: number): this;
+        arc(x: number, y: number, radius: number, startAngle: number, endAngle: number, clockwise?: boolean): this;
+        closePath(): this;
+        getPoints(divisions?: number): Vector2[];
+    }
+
+    export class Shape extends Path {
+        constructor(points?: Vector2[]);
+        holes: Path[];
+        extractPoints(divisions: number): { shape: Vector2[]; holes: Vector2[][] };
+    }
+
   export class Sphere {
         constructor(center?: Vector3, radius?: number);
 
@@ -271,6 +290,11 @@ export namespace THREE {
     export class PlaneGeometry extends BufferGeometry {
         constructor(width?: number, height?: number, widthSegments?: number, heightSegments?: number);
     }
+
+    export class ShapeGeometry extends BufferGeometry {
+        constructor(shapes?: Shape | Shape[], curveSegments?: number);
+    }
+
     export class BoxGeometry extends BufferGeometry {
         constructor(width?: number, height?: number, depth?: number, ...rest: number[]);
     }
@@ -630,6 +654,26 @@ export namespace THREE {
     export const FrontSide: number;
     export const BackSide: number;
     export const DoubleSide: number;
+
+      // Stencil func
+    export const NeverStencilFunc: number;
+    export const LessStencilFunc: number;
+    export const EqualStencilFunc: number;
+    export const LessEqualStencilFunc: number;
+    export const GreaterStencilFunc: number;
+    export const NotEqualStencilFunc: number;
+    export const GreaterEqualStencilFunc: number;
+    export const AlwaysStencilFunc: number;
+
+    // Stencil op
+    export const ZeroStencilOp: number;
+    export const KeepStencilOp: number;
+    export const ReplaceStencilOp: number;
+    export const IncrementStencilOp: number;
+    export const DecrementStencilOp: number;
+    export const IncrementWrapStencilOp: number;
+    export const DecrementWrapStencilOp: number;
+    export const InvertStencilOp: number;
 
     export const NormalBlending: number;
     export const AdditiveBlending: number;

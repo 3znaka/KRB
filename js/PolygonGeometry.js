@@ -4,7 +4,7 @@
  */
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import earcut from './js_TP/earcut.js';
-import { POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE, crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, } from './PolygonUtils.js';
+import { POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE, crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial } from './PolygonUtils.js';
 export const PolygonGeometryMixin = {
     _disposeMeshes() {
         if (this._group) {
@@ -200,8 +200,9 @@ export const PolygonGeometryMixin = {
         const isTransparent = hasOpacityAnim || this._fillOpacity < 1;
         const map = this._fillPatternTexture;
         const patternProps = map ? { map } : {};
+        let mat;
         if (this._extruded) {
-            return new THREE.MeshStandardMaterial({
+            mat = new THREE.MeshStandardMaterial({
                 color: this._fillColor, opacity: this._fillOpacity,
                 transparent: isTransparent, side: THREE.FrontSide,
                 roughness: this._roughness, metalness: this._metalness,
@@ -210,13 +211,17 @@ export const PolygonGeometryMixin = {
                 ...patternProps,
             });
         }
-        return new THREE.MeshBasicMaterial({
-            color: this._fillColor, opacity: this._fillOpacity,
-            transparent: isTransparent, side: THREE.FrontSide,
-            depthTest: this._depthTest, depthWrite: this._depthWrite,
-            polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
-            ...patternProps,
-        });
+        else {
+            mat = new THREE.MeshBasicMaterial({
+                color: this._fillColor, opacity: this._fillOpacity,
+                transparent: isTransparent, side: THREE.FrontSide,
+                depthTest: this._depthTest, depthWrite: this._depthWrite,
+                polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+                ...patternProps,
+            });
+        }
+        applyGapMaskToMaterial(mat, this._map);
+        return mat;
     },
     _applyShadowFlags(mesh) {
         if (!mesh)
@@ -626,6 +631,7 @@ export const PolygonGeometryMixin = {
                 depthTest: this._depthTest,
                 depthWrite: this._depthWrite,
             });
+            applyGapMaskToMaterial(lineMaterial, this._map); // ← добавили
             const line = new THREE.Line(lineGeometry, lineMaterial);
             line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
@@ -644,6 +650,7 @@ export const PolygonGeometryMixin = {
                 depthWrite: this._depthWrite,
                 resolution: new THREE.Vector2(canvas.width, canvas.height),
             });
+            applyGapMaskToMaterial(this._strokeMaterial, this._map); // ← добавили
             const line = new Line2(this._strokeGeometry, this._strokeMaterial);
             line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;

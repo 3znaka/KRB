@@ -38,18 +38,6 @@ new KRB.GeoJSONLayer({
     
     // Отключаем подписи стран, чтобы не мешали
     style: { polygon: { default: { title: '' } } },
-
-    choropleth: {
-        value: 'pop', 
-        colorRamp: 'terrain',          
-        classification: 'jenks',    
-        classes: 10,                 
-        noDataColor: '#cccccc'    
-    },
-    
-    defaultFillOpacity: 0.6,
-    defaultStrokeColor: '#333',
-    defaultStrokeWidth: 0.5,
 }).addTo(map);
 
 
@@ -114,6 +102,13 @@ new KRB.GeoJSONLayer({
         minZoom: 1,
     },
 }).addTo(map);
+
+console.log(map.projection.lobes);
+console.log(map.projection.options?.lobes);
+
+
+window.map = map;
+window.THREE = KRB.THREE; // или импортируй THREE из tpb.js, если он не экспортируется из KRB
 </script>
 </body>
 </html>

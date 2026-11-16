@@ -623,7 +623,7 @@ this.scene.background = new THREE.Color(initialBg);
             1,
             200000000
         );
-        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance',  logarithmicDepthBuffer: true, preserveDrawingBuffer: true,   });
+        this.renderer = new THREE.WebGLRenderer({ antialias: this.antialias, powerPreference: 'high-performance',  logarithmicDepthBuffer: true, preserveDrawingBuffer: true,  stencil: true,   });
         this.renderer.autoClear = false;  
         this.renderer.setSize(this.targetElement.clientWidth, this.targetElement.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

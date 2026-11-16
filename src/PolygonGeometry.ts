@@ -7,7 +7,7 @@ import earcut from './js_TP/earcut.js';
 import {
     type UVParams,
     POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE,
-    crossY, flipIndices, approxVisualCenter, getSharedPatternTexture,
+    crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
 
@@ -193,33 +193,38 @@ export const PolygonGeometryMixin = {
         }
     },
 
-    _createSurfaceMaterial(this: Polygon): any {
-        const hasOpacityAnim = !!(
-            (this as any)._zoomInterpolations?.fillOpacity &&
-            (this as any)._zoomInterpolations.fillOpacity.length >= 2
-        );
-        const isTransparent = hasOpacityAnim || this._fillOpacity < 1;
-        const map = this._fillPatternTexture;
-        const patternProps = map ? { map } : {};
+_createSurfaceMaterial(this: Polygon): any {
+    const hasOpacityAnim = !!(
+        (this as any)._zoomInterpolations?.fillOpacity &&
+        (this as any)._zoomInterpolations.fillOpacity.length >= 2
+    );
+    const isTransparent = hasOpacityAnim || this._fillOpacity < 1;
+    const map = this._fillPatternTexture;
+    const patternProps = map ? { map } : {};
 
-        if (this._extruded) {
-            return new THREE.MeshStandardMaterial({
-                color: this._fillColor, opacity: this._fillOpacity,
-                transparent: isTransparent, side: THREE.FrontSide,
-                roughness: this._roughness, metalness: this._metalness,
-                depthTest: this._depthTest, depthWrite: this._depthWrite,
-                polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
-                ...patternProps,
-            });
-        }
-        return new THREE.MeshBasicMaterial({
+    let mat: any;
+    if (this._extruded) {
+        mat = new THREE.MeshStandardMaterial({
+            color: this._fillColor, opacity: this._fillOpacity,
+            transparent: isTransparent, side: THREE.FrontSide,
+            roughness: this._roughness, metalness: this._metalness,
+            depthTest: this._depthTest, depthWrite: this._depthWrite,
+            polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+            ...patternProps,
+        });
+    } else {
+        mat = new THREE.MeshBasicMaterial({
             color: this._fillColor, opacity: this._fillOpacity,
             transparent: isTransparent, side: THREE.FrontSide,
             depthTest: this._depthTest, depthWrite: this._depthWrite,
             polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
             ...patternProps,
         });
-    },
+    }
+
+    applyGapMaskToMaterial(mat, this._map);
+    return mat;
+},
 
     _applyShadowFlags(this: Polygon, mesh: any): void {
         if (!mesh) return;
@@ -619,30 +624,32 @@ export const PolygonGeometryMixin = {
             lineGeometry.computeBoundingSphere();
 
             const lineMaterial = new THREE.LineBasicMaterial({
-                color: this._strokeColor,
-                opacity: this._strokeOpacity,
-                transparent: this._strokeOpacity < 1,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite,
-            });
-            const line = new THREE.Line(lineGeometry, lineMaterial);
+        color: this._strokeColor,
+        opacity: this._strokeOpacity,
+        transparent: this._strokeOpacity < 1,
+        depthTest: this._depthTest,
+        depthWrite: this._depthWrite,
+    });
+    applyGapMaskToMaterial(lineMaterial, this._map);   // ← добавили
+    const line = new THREE.Line(lineGeometry, lineMaterial);
             line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._strokeGeometry = lineGeometry;
             this._strokeMaterial = lineMaterial;
             this._group.add(line);
         } else {
-            this._strokeGeometry = new LineGeometry();
-            this._strokeMaterial = new LineMaterial({
-                color: this._strokeColor,
-                linewidth: this._strokeWidth,
-                opacity: this._strokeOpacity,
-                transparent: this._strokeOpacity < 1,
-                depthTest: this._depthTest,
-                depthWrite: this._depthWrite,
-                resolution: new THREE.Vector2(canvas.width, canvas.height),
-            });
-            const line = new Line2(this._strokeGeometry, this._strokeMaterial);
+           this._strokeGeometry = new LineGeometry();
+    this._strokeMaterial = new LineMaterial({
+        color: this._strokeColor,
+        linewidth: this._strokeWidth,
+        opacity: this._strokeOpacity,
+        transparent: this._strokeOpacity < 1,
+        depthTest: this._depthTest,
+        depthWrite: this._depthWrite,
+        resolution: new THREE.Vector2(canvas.width, canvas.height),
+    });
+    applyGapMaskToMaterial(this._strokeMaterial, this._map);   // ← добавили
+    const line = new Line2(this._strokeGeometry, this._strokeMaterial);
             line.renderOrder = POLYGON_RENDER_ORDER.STROKE;
             this._strokeLine = line;
             this._group.add(line);

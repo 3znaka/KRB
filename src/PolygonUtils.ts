@@ -4,6 +4,7 @@
  */
 import { THREE } from './js_TP/tpb.js';
 import type { TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
+import { Projections } from './Projections.js';
 
 // =====================================================================
 // Types
@@ -190,6 +191,7 @@ export function approxVisualCenter(
     return [bx, by];
 }
 
+
 // =====================================================================
 // Shared pattern textures
 // =====================================================================
@@ -211,6 +213,46 @@ export function getSharedPatternTexture(url: string): any {
     tex.magFilter = THREE.LinearFilter;
     _sharedPatternTextures.set(url, tex);
     return tex;
+}
+
+export function hasGapMask(map: any): boolean {
+    if (!map) return false;
+    
+    // Проверяем кэш (чтобы не тормозить)
+    if (map.__hasGapMaskCache !== undefined) return map.__hasGapMaskCache;
+
+    let found = false;
+    // 1. Ищем Graticule в слоях
+    const graticule = map._dynamicLayers?.find((l: any) => l.constructor?.name === 'Graticule' || l.name === 'graticule');
+    if (graticule && graticule._maskEnabled !== false) {
+        found = true;
+    }
+    
+    // 2. Если не нашли, проверяем сцену
+    if (!found) {
+        map.worldGroup?.traverse((obj: any) => {
+            if (obj.name === 'graticule-mask') found = true;
+        });
+    }
+    
+    map.__hasGapMaskCache = found;
+    return found;
+}
+
+export function applyGapMaskToMaterial(material: any, map: any): void {
+    if (!material) return;
+    
+    if (hasGapMask(map)) {
+        material.stencilWrite = true;
+        material.stencilRef = 1;
+        material.stencilFunc = THREE.EqualStencilFunc ?? 514;
+        material.stencilFail = THREE.KeepStencilOp ?? 7680;
+        material.stencilZFail = THREE.KeepStencilOp ?? 7680;
+        material.stencilZPass = THREE.KeepStencilOp ?? 7680;
+    } else {
+        material.stencilWrite = false;
+    }
+    material.needsUpdate = true;
 }
 
 /** Не используется в показанном коде; сохранён для совместимости. */

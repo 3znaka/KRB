@@ -3,7 +3,7 @@
  * @module graticule
  */
 
-import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
+import { THREE, Line2, LineMaterial, LineGeometry, } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 
 export type LabelSide = 'top' | 'bottom' | 'left' | 'right';
@@ -34,6 +34,7 @@ export interface GraticuleOptions {
     stepLat?: number | null;
     /** Переопределяет `step.lon`. `undefined` — использовать значение из `step`. */
     stepLon?: number | null;
+    maskGaps?: boolean;
     /**
      * Мастер-переключатель адаптивности.
      *  - `true`  — обе оси адаптивные (числа из `step` игнорируются);
@@ -265,6 +266,9 @@ export class Graticule {
     _currentStepLat: number = 0;
     _currentStepLon: number = 0;
 
+    private _maskGroup: any = null;
+private _maskEnabled: boolean;
+
     _color: string | number;
     _width: number;
     _opacity: number;
@@ -362,6 +366,8 @@ export class Graticule {
         );
         this._altitude = options.altitude ?? 0;
         this._debug = options.debug ?? false;
+
+        this._maskEnabled = options.maskGaps ?? true;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -443,6 +449,7 @@ export class Graticule {
         }
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
+        if (this._map) this._createStencilMask();
         return this;
     }
     getCrs(): string { return this._crsCode; }
@@ -577,6 +584,7 @@ export class Graticule {
         map.worldGroup.add(this._linesGroup);
 
         this._createMaterial();
+         this._createStencilMask(); 
         this._needsRebuild = true;
         this._lastActiveLabelIds = null;
         this._lastCamMatrix.fill(0);
@@ -594,6 +602,8 @@ export class Graticule {
         }
 
         this._clearAllLines();
+         this._destroyStencilMask();
+         if (this._map) this._map.__hasGapMaskCache = undefined;
 
         if (this._material) {
             try { this._material.dispose(); } catch {}
@@ -696,28 +706,32 @@ export class Graticule {
         return changed;
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Внутреннее: лепестки / материал / viewport
-    // ─────────────────────────────────────────────────────────────────
+private _getLobes(): any[] | null {
+    // Lobes лежат в RAW-модуле проекции (ESRI_54052.js), а не в обёртке
+    // Projections.getWorld(...). Достаём raw по коду проекции карты.
+    const map = this._map as any;
+    const code = map?.projection?.code ?? this._crsRaw?.code ?? null;
 
-    /** Лепестки текущей проекции или null, если проекция непрерывна. */
-    private _getLobes(): any[] | null {
-        const raw = this._crsRaw as any;
-        if (!raw) return null;
-
-        if (this._debug) {
-            console.log(
-                '[Graticule] _getLobes:',
-                'ctor=', raw.constructor?.name,
-                'code=', raw.code,
-                'lobes=', raw.lobes,
-                'options=', raw.options,
-            );
-        }
-
-        const lobes = raw.lobes ?? raw.options?.lobes;
-        return (Array.isArray(lobes) && lobes.length > 0) ? lobes : null;
+    let raw: any = null;
+    if (code) {
+        try { raw = Projections.getRaw(code); } catch { raw = null; }
     }
+    if (!raw) raw = this._crsRaw;
+    if (!raw) return null;
+
+    if (this._debug) {
+        console.log(
+            '[Graticule] _getLobes:',
+            'code=', code,
+            'rawCtor=', raw.constructor?.name,
+            'raw.lobes=', raw.lobes,
+            'raw.options?.lobes=', raw.options?.lobes,
+        );
+    }
+
+    const lobes = raw.lobes ?? raw.options?.lobes;
+    return (Array.isArray(lobes) && lobes.length > 0) ? lobes : null;
+}
 
     /** Лепестки, реально «владеющие» данной параллелью (lat). */
     private _getEligibleLobesForLat(lat: number, lobes: any[]): any[] {
@@ -732,44 +746,53 @@ export class Graticule {
         return out;  // порядок = порядок в LOBES (слева → направо)
     }
 
-    /** Лепестки, реально «владеющие» данным меридианом (lon). */
-    private _getEligibleLobesForLon(lon: number, lobes: any[]): any[] {
-        const out: any[] = [];
-        const covered: Array<[number, number]> = [];
-        for (const lobe of lobes) {
-            if (lon < lobe.lonMin || lon > lobe.lonMax) continue;
-            if (_isRangeCovered(lobe.latMin, lobe.latMax, covered)) continue;
-            out.push(lobe);
-            covered.push([lobe.latMin, lobe.latMax]);
-        }
-        // для меридианов нужен порядок юг → север (для подписей start/end)
-        out.sort((a, b) => a.latMin - b.latMin);
-        return out;
+private _getEligibleLobesForLon(lon: number, lobes: any[]): any[] {
+    const out: any[] = [];
+    for (const lobe of lobes) {
+        // Небольшой допуск (1e-9), чтобы граница попадала в оба лепестка
+        if (lon < lobe.lonMin - 1e-9 || lon > lobe.lonMax + 1e-9) continue;
+        out.push(lobe);
+    }
+    // для меридианов нужен порядок юг → север (для подписей start/end)
+    out.sort((a, b) => a.latMin - b.latMin);
+    return out;
+}
+
+private _createMaterial(): void {
+    const canvas = this._map.renderer.domElement;
+    const mat = new LineMaterial({
+        color: this._color as any,
+        linewidth: this._width,
+        opacity: this._opacity,
+        transparent: this._opacity < 1,
+        depthTest: false,
+        depthWrite: false,
+        resolution: new THREE.Vector2(canvas.width, canvas.height),
+        worldUnits: false,
+    });
+    if (this._lineDasharray != null) {
+        const [d, g] = typeof this._lineDasharray === 'number'
+            ? [this._lineDasharray, this._lineDasharray]
+            : [this._lineDasharray[0], this._lineDasharray[1]];
+        mat.dashed = true;
+        mat.dashSize = d;
+        mat.gapSize = g;
+        mat.dashOffset = this._lineDashOffset;
     }
 
-    private _createMaterial(): void {
-        const canvas = this._map.renderer.domElement;
-        const mat = new LineMaterial({
-            color: this._color as any,
-            linewidth: this._width,
-            opacity: this._opacity,
-            transparent: this._opacity < 1,
-            depthTest: false,
-            depthWrite: false,
-            resolution: new THREE.Vector2(canvas.width, canvas.height),
-            worldUnits: false,
-        });
-        if (this._lineDasharray != null) {
-            const [d, g] = typeof this._lineDasharray === 'number'
-                ? [this._lineDasharray, this._lineDasharray]
-                : [this._lineDasharray[0], this._lineDasharray[1]];
-            mat.dashed = true;
-            mat.dashSize = d;
-            mat.gapSize = g;
-            mat.dashOffset = this._lineDashOffset;
-        }
-        this._material = mat;
+ if (this._maskEnabled) {
+        mat.stencilWrite = true;
+        mat.stencilRef = 1;
+        mat.stencilFunc = THREE.EqualStencilFunc ?? 514;
+        mat.stencilFail = THREE.KeepStencilOp ?? 7680;
+        mat.stencilZFail = THREE.KeepStencilOp ?? 7680;
+        mat.stencilZPass = THREE.KeepStencilOp ?? 7680;
+    } else {
+        mat.stencilWrite = false;
     }
+
+    this._material = mat;
+}
 
     private _updateResolution(): void {
         if (!this._material || !this._map) return;
@@ -1138,36 +1161,42 @@ export class Graticule {
             return pts.length >= 2 ? [{ pts, crs }] : [];
         }
 
-        const eligible = this._getEligibleLobesForLon(lon, lobes); // уже юг → север
-        if (!eligible.length) return [];
+         const eligible = this._getEligibleLobesForLon(lon, lobes); // уже юг → север
+    if (!eligible.length) return [];
 
-        const EPS_LAT = 1e-6;
-        const segments: SampledLine[] = [];
+    const EPS_LAT = 1e-6;
+    const EPS_LON = 1e-6; // <-- добавили
+    const segments: SampledLine[] = [];
 
-        for (let li = 0; li < eligible.length; li++) {
-            const lobe = eligible[li];
-            const isFirst = li === 0;
-            const isLast  = li === eligible.length - 1;
+    for (let li = 0; li < eligible.length; li++) {
+        const lobe = eligible[li];
+        const isFirst = li === 0;
+        const isLast  = li === eligible.length - 1;
 
-            // Держимся в стороне от полюсов (численная устойчивость как в
-            // исходной версии), и не «пересекаем» границу лепестка дважды.
-            const latStart = Math.max(-89.99, lobe.latMin + (isFirst ? 0 : EPS_LAT));
-            const latEnd   = Math.min( 89.99, lobe.latMax - (isLast  ? 0 : EPS_LAT));
-            if (latEnd - latStart <= 0) continue;
+        // Если меридиан проходит точно по границе лепестка, смещаем его
+        // немного внутрь, чтобы projectSafe не выбрал соседний лепесток.
+        let sampleLon = lon;
+        if (lon <= lobe.lonMin + EPS_LON) sampleLon = lobe.lonMin + EPS_LON;
+        else if (lon >= lobe.lonMax - EPS_LON) sampleLon = lobe.lonMax - EPS_LON;
 
-            const pts: Array<[number, number, number]> = [];
-            const crs: Array<[number, number]> = [];
-            for (let i = 0; i <= N; i++) {
-                const lat = latStart + (latEnd - latStart) * (i / N);
-                const world = map.projectSafe([lon, lat], this._crsRaw);
-                if (!world) continue;
-                pts.push([world[0], this._altitude, world[1]]);
-                crs.push([lon, lat]);
-            }
-            if (pts.length >= 2) segments.push({ pts, crs });
+        const latStart = Math.max(-89.99, lobe.latMin + (isFirst ? 0 : EPS_LAT));
+        const latEnd   = Math.min( 89.99, lobe.latMax - (isLast  ? 0 : EPS_LAT));
+        if (latEnd - latStart <= 0) continue;
+
+        const pts: Array<[number, number, number]> = [];
+        const crs: Array<[number, number]> = [];
+        for (let i = 0; i <= N; i++) {
+            const lat = latStart + (latEnd - latStart) * (i / N);
+            // Проецируем со сдвинутой долготой
+            const world = map.projectSafe([sampleLon, lat], this._crsRaw);
+            if (!world) continue;
+            pts.push([world[0], this._altitude, world[1]]);
+            crs.push([lon, lat]); // в метках оставляем исходную lon
         }
-        return segments;
+        if (pts.length >= 2) segments.push({ pts, crs });
     }
+    return segments;
+}
 
     private _sampleMeridianProj(x: number, N: number): SampledLine[] {
         const map = this._map;
@@ -1200,6 +1229,107 @@ export class Graticule {
         }
         return pts.length >= 2 ? [{ pts, crs: crsArr }] : [];
     }
+
+private _createStencilMask(): void {
+    this._destroyStencilMask();
+    if (!this._maskEnabled || !this._map || !this._crsRaw) return;
+
+    const realLobes = this._getLobes();
+    // Если лепестков нет (непрерывная проекция), создаем один искусственный,
+    // покрывающий весь мир.
+    const lobes = realLobes ?? [{ latMin: -90, latMax: 90, lonMin: -180, lonMax: 180 }];
+
+    const group = new THREE.Group();
+    group.name = 'graticule-mask';
+    group.renderOrder = -1000000;
+
+    for (const lobe of lobes) {
+        const boundary = this._sampleLobeBoundary(lobe);
+        if (boundary.length < 3) continue;
+
+        const shape = new THREE.Shape();
+        shape.moveTo(boundary[0][0], boundary[0][1]);
+        for (let i = 1; i < boundary.length; i++) {
+            shape.lineTo(boundary[i][0], boundary[i][1]);
+        }
+        shape.closePath();
+
+        const geom = new THREE.ShapeGeometry(shape);
+        geom.rotateX(Math.PI / 2);
+
+        const pos = geom.attributes.position;
+        for (let i = 0; i < pos.count; i++) pos.setY(i, this._altitude);
+
+        const mat = new THREE.MeshBasicMaterial({
+            colorWrite: false,
+            depthWrite: false,
+            depthTest: false,
+            stencilWrite: true,
+            stencilRef: 1,
+            stencilFunc: THREE.AlwaysStencilFunc ?? 519,
+            stencilZPass: THREE.ReplaceStencilOp ?? 7681,
+            stencilFail: THREE.KeepStencilOp ?? 7680,
+            stencilZFail: THREE.KeepStencilOp ?? 7680,
+            side: THREE.DoubleSide,
+        });
+
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.renderOrder = -1000000;
+        mesh.frustumCulled = false;
+        group.add(mesh);
+    }
+
+    this._maskGroup = group;
+    this._map.worldGroup.add(group);
+    this._map.__hasGapMaskCache = undefined; // сбрасываем кэш
+
+    if (this._debug) console.log(`[Graticule] stencil mask: ${group.children.length} lobes`);
+}
+
+/** Обход границы лепестка в lon/lat, проекция каждой точки. */
+private _sampleLobeBoundary(lobe: any): Array<[number, number]> {
+    const N = 64;
+    const pts: Array<[number, number]> = [];
+    const EPS = 1e-4;
+    const EPS_LON = 1e-4; // Сдвиг для разрыва маски
+
+    const push = (lon: number, lat: number) => {
+        const w = this._map.projectSafe([lon, lat], this._crsRaw);
+        if (w) pts.push([w[0], w[1]]);
+    };
+
+    const latTop = lobe.latMax - (Math.abs(lobe.latMax) >= 90 ? EPS : 0);
+    const latBot = lobe.latMin + (Math.abs(lobe.latMin) >= 90 ? EPS : 0);
+
+    // Не отступаем от глобальных краев (-180, 180), 
+    // но отступаем от внутренних границ лепестков (например, -40, 80)
+    const lonMin = lobe.lonMin + (lobe.lonMin <= -180 ? 0 : EPS_LON);
+    const lonMax = lobe.lonMax - (lobe.lonMax >= 180 ? 0 : EPS_LON);
+
+    for (let i = 0; i <= N; i++) {
+        push(lonMin + (lonMax - lonMin) * (i / N), latTop);
+    }
+    for (let i = 1; i < N; i++) {
+        push(lonMax, latTop + (latBot - latTop) * (i / N));
+    }
+    for (let i = 0; i <= N; i++) {
+        push(lonMax + (lonMin - lonMax) * (i / N), latBot);
+    }
+    for (let i = 1; i < N; i++) {
+        push(lonMin, latBot + (latTop - latBot) * (i / N));
+    }
+    return pts;
+}
+
+private _destroyStencilMask(): void {
+    if (!this._maskGroup) return;
+    if (this._maskGroup.parent) this._maskGroup.parent.remove(this._maskGroup);
+    this._maskGroup.traverse((obj: any) => {
+        try { obj.geometry?.dispose(); } catch {}
+        try { obj.material?.dispose(); } catch {}
+    });
+    this._maskGroup = null;
+}
 
     // ── Line2 ──
 

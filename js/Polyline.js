@@ -11,6 +11,7 @@ import { Projections } from './Projections.js';
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
 import { douglasPeuckerIndices, simplifyRingIndices } from './Simplify.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
 const REBUILD_DEBOUNCE_MS = 60;
 export class Polyline extends SpatialObject {
     // ── Данные ──
@@ -147,6 +148,7 @@ export class Polyline extends SpatialObject {
             resolution: new THREE.Vector2(canvas.width, canvas.height),
             ...this._computeDashUniforms(),
         });
+        applyGapMaskToMaterial(this._material, map);
         this._line = new Line2(this._geometry, this._material);
         this._line.position.copy(this._localOrigin);
         this._line.renderOrder = 999;

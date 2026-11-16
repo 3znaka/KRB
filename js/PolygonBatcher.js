@@ -1,5 +1,6 @@
 // PolygonBatcher.ts
 import { THREE } from './js_TP/tpb.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
 const RENDER_ORDER = { BOTTOM: 900, SIDE: 901, TOP: 902, STROKE: 903 };
 const DEFAULT_PATTERN_SCALE = 64;
 function isBatchable(obj) {
@@ -232,6 +233,7 @@ class BatchedGroup {
                 map: this._patternTexture ?? null,
             });
         }
+        applyGapMaskToMaterial(mat, this._map);
         this.fillMaterial = mat;
         const mesh = new THREE.Mesh(geom, mat);
         mesh.renderOrder = RENDER_ORDER.TOP;
@@ -274,6 +276,7 @@ class BatchedGroup {
                 depthTest: d0.depthTest,
                 depthWrite: d0.depthWrite,
             });
+            applyGapMaskToMaterial(sMat, this._map);
             const line = new THREE.LineSegments(sGeom, sMat);
             line.renderOrder = RENDER_ORDER.STROKE;
             line.position.set(this._anchorX, 0, this._anchorZ);

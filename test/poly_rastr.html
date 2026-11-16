@@ -24,7 +24,7 @@ await KRB.addCrs(['ESRI:54052']);
 
 const map = new KRB.Map({
     target: 'map',
-    crs: 'ESRI:54052',
+   // crs: 'ESRI:54052',
         layers: [],
         graticule: {
             crs: 'EPSG:4326',
@@ -49,6 +49,52 @@ const rastr = new KRB.Tile({
             attributionUrl: 'https://2gis.ru/',
         }).addTo(map);
 
+const adm = {
+    "type": "Feature",
+    "properties": {
+    },
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [ [
+            [ 31.5, 52.5 ],
+            [ 46.0, 52.5 ],
+            [ 46.0, 57.5 ],
+            [ 31.5, 57.5 ],
+            [ 31.5, 52.5 ]
+        ] ]
+    }
+};
+
+const rastr2 = new KRB.Tile({
+            texture: 'https://cogisdemo.dataeast.com/elitegis/rest/services/common_osmde/ru_basemap/MapServer/tile/{z}/{y}/{x}',
+            attributionTitle: '2GIS',
+            mask: adm,
+            attributionUrl: 'https://2gis.ru/',
+        }).addTo(map);
+
+const adm2 = {
+    "type": "Feature",
+    "properties": {
+    },
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [ [
+                [ 35.125, 53.75 ],
+                [ 42.375, 53.75 ],
+                [ 42.375, 56.25 ],
+                [ 35.125, 56.25 ],
+                [ 35.125, 53.75 ]
+            ] ]
+    }
+};
+
+const rastr3 = new KRB.Tile({
+            texture: 'demo',
+            attributionTitle: '2GIS',
+            attributionUrl: 'https://2gis.ru/',
+        }).addTo(map);
+
+rastr3.setMask(adm2);
 
 
 </script>

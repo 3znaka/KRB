@@ -332,6 +332,8 @@ export const CoreLifecycleMixin = {
         this._enforceMaxBounds();
         this.camera.updateMatrixWorld(true);
         this.worldGroup.updateMatrixWorld(true);
+        for (const mgr of this._tileManagers)
+            mgr._syncMaskOffset?.();
         this.maybeUpdateVisibleTiles();
         this._updateMoveEvents();
         for (const layer of this._getLayersInOrder()) {

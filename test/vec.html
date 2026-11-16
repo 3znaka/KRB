@@ -30,9 +30,7 @@ map.moveCameraTo(37.6178, 55.7558);
 
 const vectorLayer = new KRB.VectorTile({
     url: 'https://storage.mwsapis.ru/b-winzaf/pbf/{z}/{x}/{y}.pbf',
-    maxNativeZoom: 14,                     // тайлы до 14-го уровня, дальше растягиваются
-    minZoom: 2,                            // показываем с 2-го зума
-    maxZoom: 22,
+    maxNativeZoom: 14,
                     zoomOffset: -2
 }).addTo(map);
 

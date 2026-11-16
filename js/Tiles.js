@@ -88,6 +88,9 @@ export class Tile {
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
         this.baseRenderOrder = 0;
         this._map = null;
+        this.mask = options.mask ?? null;
+        this.maskInvert = options.maskInvert ?? false;
+        this.maskFeather = options.maskFeather ?? 0;
     }
     addTo(map) {
         if (!map)
@@ -96,8 +99,14 @@ export class Tile {
             return this;
         if (this._map)
             this.removeFromMap();
-        map._registerRasterLayer(this); // ← см. п.2
+        map._registerRasterLayer(this);
         this._map = map;
+        if (this.mask) {
+            map._tileManagerForLayer?.(this)?.setMask(this.mask, {
+                invert: this.maskInvert,
+                feather: this.maskFeather,
+            });
+        }
         return this;
     }
     removeFromMap() {
@@ -115,6 +124,25 @@ export class Tile {
         const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
         this.opacity = v;
         this._map?._tileManagerForLayer?.(this)?.setOpacity(v);
+    }
+    setMask(geojson, opts = {}) {
+        this.mask = geojson ?? null;
+        if (opts.invert !== undefined)
+            this.maskInvert = !!opts.invert;
+        if (opts.feather !== undefined) {
+            const f = Number(opts.feather);
+            this.maskFeather = Number.isFinite(f) ? Math.max(0, Math.min(0.49, f)) : 0;
+        }
+        this._map?._tileManagerForLayer?.(this)?.setMask(this.mask, {
+            invert: this.maskInvert,
+            feather: this.maskFeather,
+        });
+        return this;
+    }
+    clearMask() {
+        this.mask = null;
+        this._map?._tileManagerForLayer?.(this)?.clearMask();
+        return this;
     }
 }
 /** Менеджер растровых тайлов одного слоя. */
@@ -164,6 +192,14 @@ export class TileManager {
             this.initWorker();
         this.onTileHeightAppliedCallbacks = [];
         this.onTileDisposedCallbacks = [];
+        // --- Mask ---
+        this._maskTexture = null;
+        this._maskBounds = null; // { minX, minZ, sizeX, sizeZ } в ЛОКАЛЬНЫХ координатах worldGroup
+        this._maskEnabled = false;
+        this._maskInvert = false;
+        this._maskFeather = 0;
+        // Общий uniform: сдвиг worldGroup в сцене. Один объект на все материалы менеджера.
+        this._maskOffsetUniform = { value: new THREE.Vector3() };
     }
     get _mapHalfX() {
         const v = this.engine.mapHalfExtentX;
@@ -281,7 +317,6 @@ export class TileManager {
         return typeof code === 'string' ? Projections.get(code) : code;
     }
     key(z, virtX, y) { return getVirtKey(z, virtX, y); }
-    /* ---------- Материал ---------- */
     _createTileMaterial(texture, opts = {}) {
         const layerHasElevation = this.hasElevation;
         const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : layerHasElevation;
@@ -307,29 +342,87 @@ export class TileManager {
             }
         }
         applyGapMaskToMaterial(mat, this.engine);
+        // ---- Overlay ----
         mat.userData.overlayMap = null;
         mat.userData.overlayOpacity = 1;
         mat.userData.hasOverlay = 0;
         mat.userData._overlayUniforms = null;
+        // ---- Mask: начальный снимок состояния менеджера ----
+        mat.userData._maskEnabled = this._maskEnabled;
+        mat.userData._maskInvert = this._maskInvert;
+        mat.userData._maskFeather = this._maskFeather;
+        mat.userData._maskTexture = this._maskTexture;
+        mat.userData._maskBounds = this._maskBounds;
+        mat.userData._maskUniforms = null;
+        mat.userData._maskForcedTransparent = false;
+        mat.userData._maskOrigTransparent = mat.transparent;
+        if (this._maskEnabled && this._maskFeather > 0 && !mat.transparent) {
+            mat.userData._maskForcedTransparent = true;
+            mat.transparent = true;
+        }
         mat.onBeforeCompile = (shader) => {
+            // Overlay
             shader.uniforms.overlayMap = { value: mat.userData.overlayMap };
             shader.uniforms.overlayOpacity = { value: mat.userData.overlayOpacity };
             shader.uniforms.hasOverlay = { value: mat.userData.hasOverlay };
+            const mb = mat.userData._maskBounds;
+            // Mask
+            shader.uniforms.maskMap = { value: mat.userData._maskTexture };
+            shader.uniforms.maskBoundsMin = { value: new THREE.Vector2(mb?.minX ?? 0, mb?.minZ ?? 0) };
+            shader.uniforms.maskBoundsSize = { value: new THREE.Vector2(mb?.sizeX ?? 1, mb?.sizeZ ?? 1) };
+            shader.uniforms.maskEnabled = { value: mat.userData._maskEnabled ? 1 : 0 };
+            shader.uniforms.maskInvert = { value: mat.userData._maskInvert ? 1 : 0 };
+            shader.uniforms.maskFeather = { value: mat.userData._maskFeather };
+            shader.uniforms.maskWorldOffset = this._maskOffsetUniform; // ← общая ссылка, не копия
+            // Vertex
             shader.vertexShader =
-                'varying vec2 vOverlayUv;\n' +
+                'uniform vec3 maskWorldOffset;\n' +
+                    'varying vec2 vOverlayUv;\n' +
+                    'varying vec3 vMaskWorldPos;\n' +
                     shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
-                     vOverlayUv = uv;`);
+         vOverlayUv = uv;
+         vMaskWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz - maskWorldOffset;`);
+            // Fragment
             shader.fragmentShader =
                 `uniform sampler2D overlayMap;
-                 uniform float overlayOpacity;
-                 uniform float hasOverlay;
-                 varying vec2 vOverlayUv;\n` +
-                    shader.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>
+             uniform float overlayOpacity;
+             uniform float hasOverlay;
+             varying vec2 vOverlayUv;
+
+             uniform sampler2D maskMap;
+             uniform vec2 maskBoundsMin;
+             uniform vec2 maskBoundsSize;
+             uniform float maskEnabled;
+             uniform float maskInvert;
+             uniform float maskFeather;
+             varying vec3 vMaskWorldPos;
+            ` +
+                    shader.fragmentShader
+                        .replace('#include <map_fragment>', `#include <map_fragment>
                      if (hasOverlay > 0.5) {
                          vec4 ov = texture2D(overlayMap, vOverlayUv);
                          diffuseColor.rgb = mix(diffuseColor.rgb, ov.rgb, ov.a * overlayOpacity);
-                     }`);
+                     }`)
+                        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+                     float vMaskAlpha = 1.0;
+                     if (maskEnabled > 0.5) {
+                         vec2 mUv = (vMaskWorldPos.xz - maskBoundsMin) / maskBoundsSize;
+                         float inside = 0.0;
+                         if (mUv.x >= 0.0 && mUv.x <= 1.0 && mUv.y >= 0.0 && mUv.y <= 1.0) {
+                             inside = texture2D(maskMap, mUv).r;
+                         }
+                         if (maskInvert > 0.5) inside = 1.0 - inside;
+                         if (maskFeather > 0.0) {
+                             vMaskAlpha = smoothstep(0.5 - maskFeather, 0.5 + maskFeather, inside);
+                             if (vMaskAlpha < 0.001) discard;
+                         } else {
+                             if (inside < 0.5) discard;
+                         }
+                     }`)
+                        .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+                     gl_FragColor.a *= vMaskAlpha;`);
             mat.userData._overlayUniforms = shader.uniforms;
+            mat.userData._maskUniforms = shader.uniforms;
         };
         return mat;
     }
@@ -373,6 +466,200 @@ export class TileManager {
         }
         mesh.material.needsUpdate = true;
     }
+    /* ---------- Маска по GeoJSON ---------- */
+    setMask(geojson, opts = {}) {
+        if (!geojson)
+            return this.clearMask();
+        const built = this._buildMaskTexture(geojson);
+        if (!built) {
+            console.warn('TileManager.setMask: empty or invalid mask');
+            return this.clearMask();
+        }
+        if (this._maskTexture) {
+            try {
+                this._maskTexture.dispose();
+            }
+            catch { }
+        }
+        this._maskTexture = built.texture;
+        this._maskBounds = built.bounds;
+        this._maskEnabled = true;
+        this._maskInvert = !!opts.invert;
+        const f = Number(opts.feather);
+        this._maskFeather = Number.isFinite(f) ? Math.max(0, Math.min(0.49, f)) : 0;
+        this._pendingLayerMask = null;
+        this._applyMaskToAllTiles();
+        return this;
+    }
+    clearMask() {
+        if (this._maskTexture) {
+            try {
+                this._maskTexture.dispose();
+            }
+            catch { }
+        }
+        this._maskTexture = null;
+        this._maskBounds = null;
+        this._maskEnabled = false;
+        this._maskInvert = false;
+        this._maskFeather = 0;
+        this._pendingLayerMask = null;
+        this._applyMaskToAllTiles();
+        return this;
+    }
+    _applyMaskToAllTiles() {
+        for (const inst of this.tiles.values()) {
+            const mat = inst.mesh?.material;
+            if (mat)
+                this._updateMaterialMask(mat);
+        }
+    }
+    _syncMaskOffset() {
+        const wg = this.engine.worldGroup;
+        if (!wg)
+            return;
+        this._maskOffsetUniform.value.copy(wg.position);
+    }
+    _updateMaterialMask(mat) {
+        const bounds = this._maskBounds;
+        mat.userData._maskEnabled = this._maskEnabled;
+        mat.userData._maskInvert = this._maskInvert;
+        mat.userData._maskFeather = this._maskFeather;
+        mat.userData._maskTexture = this._maskTexture;
+        mat.userData._maskBounds = bounds;
+        const u = mat.userData._maskUniforms;
+        if (u) {
+            u.maskMap.value = this._maskTexture;
+            u.maskEnabled.value = this._maskEnabled ? 1 : 0;
+            u.maskInvert.value = this._maskInvert ? 1 : 0;
+            u.maskFeather.value = this._maskFeather;
+            if (bounds) {
+                u.maskBoundsMin.value.set(bounds.minX, bounds.minZ);
+                u.maskBoundsSize.value.set(bounds.sizeX, bounds.sizeZ);
+            }
+        }
+        // Feather требует alpha-блендинга — принудительно включаем transparent.
+        const needsTransparent = this._maskEnabled && this._maskFeather > 0;
+        if (needsTransparent && !mat.userData._maskForcedTransparent) {
+            mat.userData._maskOrigTransparent = mat.transparent;
+            mat.userData._maskForcedTransparent = true;
+            mat.transparent = true;
+            mat.needsUpdate = true;
+        }
+        else if (!needsTransparent && mat.userData._maskForcedTransparent) {
+            mat.transparent = !!mat.userData._maskOrigTransparent;
+            mat.userData._maskForcedTransparent = false;
+            mat.needsUpdate = true;
+        }
+    }
+    _buildMaskTexture(geojson) {
+        const proj = this.engine.projection;
+        if (!proj || typeof proj.fromLonLat !== 'function') {
+            console.warn('TileManager.setMask: engine.projection.fromLonLat недоступен');
+            return null;
+        }
+        const project = (lon, lat) => {
+            let p = null;
+            try {
+                p = (proj.fromLonLatSafe ?? proj.fromLonLat)([lon, lat]);
+            }
+            catch {
+                try {
+                    p = proj.fromLonLat([lon, lat]);
+                }
+                catch { }
+            }
+            if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]))
+                return null;
+            // та же world-система, что в _getWorldEdgePoints: x = p[0], z = -p[1]
+            return [p[0], -p[1]];
+        };
+        const polys = [];
+        const visit = g => {
+            if (!g)
+                return;
+            if (g.type === 'FeatureCollection')
+                g.features.forEach(visit);
+            else if (g.type === 'Feature')
+                visit(g.geometry);
+            else if (g.type === 'Polygon')
+                polys.push(g.coordinates);
+            else if (g.type === 'MultiPolygon')
+                polys.push(...g.coordinates);
+            else if (g.type === 'GeometryCollection')
+                g.geometries.forEach(visit);
+        };
+        visit(geojson);
+        if (!polys.length)
+            return null;
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        const projPolys = [];
+        for (const poly of polys) {
+            const rings = [];
+            for (const ring of poly) {
+                const r = [];
+                for (const pt of ring) {
+                    const p = project(pt[0], pt[1]);
+                    if (!p)
+                        continue;
+                    r.push(p);
+                    if (p[0] < minX)
+                        minX = p[0];
+                    if (p[0] > maxX)
+                        maxX = p[0];
+                    if (p[1] < minZ)
+                        minZ = p[1];
+                    if (p[1] > maxZ)
+                        maxZ = p[1];
+                }
+                if (r.length >= 3)
+                    rings.push(r);
+            }
+            if (rings.length)
+                projPolys.push(rings);
+        }
+        if (!isFinite(minX) || !isFinite(minZ) || maxX <= minX || maxZ <= minZ)
+            return null;
+        const sizeX = maxX - minX, sizeZ = maxZ - minZ;
+        const MAX_DIM = 2048, MIN_DIM = 128;
+        const scale = MAX_DIM / Math.max(sizeX, sizeZ);
+        const W = Math.max(MIN_DIM, Math.min(4096, Math.ceil(sizeX * scale)));
+        const H = Math.max(MIN_DIM, Math.min(4096, Math.ceil(sizeZ * scale)));
+        const canvas = document.createElement('canvas');
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = '#ffffff';
+        for (const rings of projPolys) {
+            ctx.beginPath();
+            for (const ring of rings) {
+                for (let i = 0; i < ring.length; i++) {
+                    const u = (ring[i][0] - minX) / sizeX * W;
+                    const v = (ring[i][1] - minZ) / sizeZ * H;
+                    i === 0 ? ctx.moveTo(u, v) : ctx.lineTo(u, v);
+                }
+                ctx.closePath();
+            }
+            ctx.fill('evenodd');
+        }
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        // маска — данные, не цвет; не даём Three.js применять sRGB-конверсию
+        if (THREE.NoColorSpace)
+            tex.colorSpace = THREE.NoColorSpace;
+        else if (THREE.LinearSRGBColorSpace)
+            tex.colorSpace = THREE.LinearSRGBColorSpace;
+        else
+            tex.encoding = THREE.LinearEncoding;
+        tex.needsUpdate = true;
+        this.engine.renderer?.initTexture?.(tex);
+        return { texture: tex, bounds: { minX, minZ, sizeX, sizeZ } };
+    }
     setVisible(visible) {
         if (visible) {
             // Показываем всё, что есть в кэше, и запоминаем это как «предыдущее видимое»,
@@ -414,6 +701,19 @@ export class TileManager {
     }
     /* ---------- Обновление видимых тайлов ---------- */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
+        if (this._pendingLayerMask) {
+            const m = this._pendingLayerMask;
+            this._pendingLayerMask = null;
+            try {
+                this.setMask(m, {
+                    invert: this.layer?.maskInvert ?? false,
+                    feather: this.layer?.maskFeather ?? 0,
+                });
+            }
+            catch (e) {
+                console.warn('TileManager: deferred mask init failed', e);
+            }
+        }
         if (!this._isVisible) {
             this.setVisible(false);
             return -1;

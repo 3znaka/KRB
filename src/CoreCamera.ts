@@ -825,10 +825,10 @@ applyZoomDistance() {
         return;
     }
 
-    const zoomDiff = Math.abs(this.continuousZoom - this.targetContinuousZoom);
-    const pivotActive = this._zoomPivotActive && zoomDiff > 0.0005;
+    const zoomDiff  = Math.abs(this.continuousZoom - this.targetContinuousZoom);
+    const zoomActive = zoomDiff > 0.0005;          // ← добавлено
+    const pivotActive = this._zoomPivotActive && zoomActive;
 
-    // Гарантируем, что matrixWorld соответствует текущей позиции/кватерниону.
     this.camera.updateMatrixWorld(true);
 
     let P_before: any = null;
@@ -836,25 +836,27 @@ applyZoomDistance() {
     if (pivotActive) {
         pivotSx = this._zoomPivotX;
         pivotSy = this._zoomPivotY;
-        // Reuse _tempVec3a. Safe: _resolveCameraPlacement below does not
-        // touch it, and elevation providers must not either.
         P_before = this._raycastToGround(pivotSx, pivotSy, this._tempVec3a);
     }
 
-    // --- существующее перемещение камеры ---
     const target = this._tempTarget.copy(this.controls.target);
     const currentDir = this._tempDir.subVectors(this.camera.position, target);
     const d0 = currentDir.length();
     if (d0 < 1e-6) return;
     currentDir.divideScalar(d0);
-    const pitch = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
-    const azimuth = Math.atan2(currentDir.z, currentDir.x);
-    const desiredDist = this.getTargetDistanceForZoom(this.continuousZoom);
+    const pitch    = Math.acos(Math.max(-1, Math.min(1, currentDir.y)));
+    const azimuth  = Math.atan2(currentDir.z, currentDir.x);
+
+    // КЛЮЧЕВОЕ: если зум не активен — стартуем с текущего расстояния,
+    // чтобы _resolveCameraPlacement только приподнимал над рельефом,
+    // но не «сдёргивал» камеру назад к desiredDist каждый кадр.
+    const desiredDist = zoomActive
+        ? this.getTargetDistanceForZoom(this.continuousZoom)
+        : d0;
+
     this._resolveCameraPlacement(target, desiredDist, pitch, azimuth, this._tempPlacementOut);
     this.camera.position.copy(this._tempPlacementOut);
     this.camera.lookAt(target);
-
-    // КРИТИЧНО: matrixWorld после lookAt хранит СТАРЫЙ кватернион.
     this.camera.updateMatrixWorld(true);
 
     if (pivotActive && P_before) {

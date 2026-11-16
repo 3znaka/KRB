@@ -429,6 +429,18 @@ export class TileManager {
         const hvRot = hh * absSin + hv * absCos;
         let minX = controlsTarget.x - hhRot, maxX = controlsTarget.x + hhRot;
         let minZ = controlsTarget.z - hvRot, maxZ = controlsTarget.z + hvRot;
+        const camX = camera.position.x;
+        const camZ = camera.position.z;
+        const fpMarginX = tileSizeX * 2;
+        const fpMarginZ = tileSizeY * 2;
+        if (camX - fpMarginX < minX)
+            minX = camX - fpMarginX;
+        if (camX + fpMarginX > maxX)
+            maxX = camX + fpMarginX;
+        if (camZ - fpMarginZ < minZ)
+            minZ = camZ - fpMarginZ;
+        if (camZ + fpMarginZ > maxZ)
+            maxZ = camZ + fpMarginZ;
         // --- Детектор стабильности (нужен ДО горизонта) ---
         const now = performance.now();
         const zoomAnimating = Math.abs(continuousZoom - targetCont) > ZOOM_STABLE_EPSILON;
@@ -564,10 +576,27 @@ export class TileManager {
             const strictHv = Math.max(0, hv - margin * tileSizeY);
             const strictHhRot = strictHh * absCos + strictHv * absSin;
             const strictHvRot = strictHh * absSin + strictHv * absCos;
-            sxMin = Math.max(0, Math.floor((controlsTarget.x - strictHhRot - off.x + halfX) / tileSizeX));
-            sxMax = Math.min(maxTile, Math.floor((controlsTarget.x + strictHhRot - off.x + halfX) / tileSizeX));
-            syMin = Math.max(0, Math.floor((controlsTarget.z - strictHvRot - off.z + halfY) / tileSizeY));
-            syMax = Math.min(maxTile, Math.floor((controlsTarget.z + strictHvRot - off.z + halfY) / tileSizeY));
+            let strictMinX = controlsTarget.x - strictHhRot;
+            let strictMaxX = controlsTarget.x + strictHhRot;
+            let strictMinZ = controlsTarget.z - strictHvRot;
+            let strictMaxZ = controlsTarget.z + strictHvRot;
+            // Strict тоже расширяем на камеру (1 тайл запаса) — иначе при
+            // движении без stable тайлы вплотную к камере ждут бюджета и
+            // появляются с задержкой; с расширением — грузятся сразу.
+            const sMarginX = tileSizeX;
+            const sMarginZ = tileSizeY;
+            if (camX - sMarginX < strictMinX)
+                strictMinX = camX - sMarginX;
+            if (camX + sMarginX > strictMaxX)
+                strictMaxX = camX + sMarginX;
+            if (camZ - sMarginZ < strictMinZ)
+                strictMinZ = camZ - sMarginZ;
+            if (camZ + sMarginZ > strictMaxZ)
+                strictMaxZ = camZ + sMarginZ;
+            sxMin = Math.max(0, Math.floor((strictMinX - off.x + halfX) / tileSizeX));
+            sxMax = Math.min(maxTile, Math.floor((strictMaxX - off.x + halfX) / tileSizeX));
+            syMin = Math.max(0, Math.floor((strictMinZ - off.z + halfY) / tileSizeY));
+            syMax = Math.min(maxTile, Math.floor((strictMaxZ - off.z + halfY) / tileSizeY));
         }
         // --- Центр экрана в tile-space ---
         let cxTile = (xMin + xMax) * 0.5 + 0.5;

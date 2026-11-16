@@ -24,8 +24,8 @@ const _crtVec = new THREE.Vector3();
 const _qhInner = new THREE.Quaternion();
 
 // For _raycastToGround — separate plane from this.groundPlane,
-// because the latter is used for drag with y=0 fixed and must not be
-// mutated by the terrain iteration.
+// because the latter is used for pan-drag with a *frozen* height and must
+// not be mutated by the terrain Newton iteration.
 const _rayPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
 export interface CoreInputMethods {
@@ -54,6 +54,15 @@ export interface CoreInputMethods {
 
 export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
 initDragTools() {
+    // groundPlane используется двумя разными путями:
+    //  - в onMouseDown/onTouchStart он временно «ставится» на высоту террейна
+    //    под курсором (constant = -hit.y) — это фиксирует плоскость панорамы
+    //    на реальной высоте и убирает покадровый LOD-шум при hasElevation.
+    //  - в onMouseMove/onTouchMove по этой плоскости идёт линейный рейкаст,
+    //    стабильный при любом pitch-угле.
+    //  - в onClick — точка «сэмплинга» debug'а shift-click.
+    // Между жестами значение constant может быть любым, но первый же
+    // mousedown/touchstart его переустанавливает.
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.raycasterDragger = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -127,10 +136,9 @@ onMouseDown(e) {
     this._panVelX = 0;
     this._panVelZ = 0;
 
-if (e.button === 2) {
-    if (!this.allowRotate) return;
-    this._rotatePivotActive = true;
-
+    if (e.button === 2) {
+        if (!this.allowRotate) return;
+        this._rotatePivotActive = true;
 
         this._rotatePivotX = e.clientX;
         this._rotatePivotY = e.clientY;
@@ -153,15 +161,23 @@ if (e.button === 2) {
     this._mouseDownX = e.clientX;
     this._mouseDownY = e.clientY;
     this._mouseMoved = false;
-    const rect = this._getCanvasRect();
-    this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycasterDragger.setFromCamera(this.mouse, this.camera);
-    if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
+
+    // Террейн-осведомлённый рейкаст: находим точку захвата на реальной
+    // высоте (или y=0 если рельефа нет), чтобы панорама началась именно
+    // в той точке, куда кликнул пользователь.
+    //
+    // Затем «замораживаем» groundPlane на этой высоте:
+    //   Plane(normal=(0,1,0), constant=c) ⇔ y = -c
+    //   хотим y = hit.y   ⇒   constant = -hit.y
+    //
+    // Все последующие движения идут по этой плоскости — линейно, без
+    // LOD-шума и без Newton-осцилляций, из-за которых на крутом pitch
+    // камера раньше дёргалась (см. обсуждение проблемы).
+    if (this._raycastToGround(e.clientX, e.clientY, this.intersection)) {
         this.isDragging = true;
         this.dragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
+        this.groundPlane.constant = -this.intersection.y;
 
-        // ── старт трекинга pan-скорости ──
         this._panLastMoveTime = performance.now();
         this._panLastWorldX   = this.worldGroup.position.x;
         this._panLastWorldZ   = this.worldGroup.position.z;
@@ -187,14 +203,22 @@ onMouseMove(e) {
         const dy = e.clientY - this._mouseDownY;
         if (dx * dx + dy * dy > 9) this._mouseMoved = true;
     }
+
     if (!this.isDragging) return;
+
+    // Линейный рейкаст по замороженной плоскости (см. onMouseDown).
+    // Никакого getSurfaceHeightAt()/Newton здесь — панорама стабильна.
     const rect = this._getCanvasRect();
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycasterDragger.setFromCamera(this.mouse, this.camera);
     if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
-        this.worldGroup.position.copy(this.intersection).sub(this.dragLocalPoint);
+        // Только X/Z: worldGroup.position.y всегда 0. Если писать сюда
+        // Y-разницу от драга, весь мир поедет вверх/вниз при рельефе.
+        this.worldGroup.position.x = this.intersection.x - this.dragLocalPoint.x;
+        this.worldGroup.position.z = this.intersection.z - this.dragLocalPoint.z;
         this._enforceMaxBounds();
+
         // ── EMA pan-скорости ──
         const now = performance.now();
         const dt  = Math.max((now - this._panLastMoveTime) / 1000, 0.001);
@@ -259,6 +283,13 @@ getTouchDistance(touches) {
 // Raycast against the terrain (or y=0 ground plane when no elevation).
 // Uses a module-scoped Plane — safe because the function is synchronous
 // and getSurfaceHeightAt does not re-enter raycasting.
+//
+// Используется:
+//  - в onMouseDown/onTouchStart — чтобы получить реальную высоту точки
+//    захвата (для последующей заморозки groundPlane);
+//  - в onMouseDown(right)/_rotateAroundPivot — пивот вращения;
+//  - в _applyRotationDelta — проверки clearance камеры при вращении;
+//  - в pinch-жесте — стабилизация точки под пальцами.
 // ───────────────────────────────────────────────────────────────────────
 _raycastToGround(screenX: number, screenY: number, out: any): any | null {
     const rect = this._getCanvasRect();
@@ -430,16 +461,14 @@ onTouchStart(e: TouchEvent) {
         this._panVelX = 0;
         this._panVelZ = 0;
 
-        const rect = this._getCanvasRect();
+        // Террейн-осведомлённый рейкаст + заморозка плоскости,
+        // аналогично onMouseDown.
         const touch = e.touches[0];
-        this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
-        this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
-        this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
-        if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
+        if (this._raycastToGround(touch.clientX, touch.clientY, this.intersection)) {
             this.touchDragActive = true;
             this.touchDragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
+            this.groundPlane.constant = -this.intersection.y;
 
-            // ── старт трекинга pan-скорости ──
             this._panLastMoveTime = performance.now();
             this._panLastWorldX   = this.worldGroup.position.x;
             this._panLastWorldZ   = this.worldGroup.position.z;
@@ -502,14 +531,19 @@ onTouchMove(e: TouchEvent) {
 
     if (this.touchDragActive && e.touches.length === 1) {
         e.preventDefault();
-        const rect = this._getCanvasRect();
+
+        // Линейный рейкаст по замороженной плоскости (см. onMouseDown).
         const touch = e.touches[0];
+        const rect = this._getCanvasRect();
         this.touchMouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
         this.touchMouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycasterDragger.setFromCamera(this.touchMouse, this.camera);
         if (this.raycasterDragger.ray.intersectPlane(this.groundPlane, this.intersection)) {
-            this.worldGroup.position.copy(this.intersection).sub(this.touchDragLocalPoint);
+            // Только X/Z, как и в mouse-пути.
+            this.worldGroup.position.x = this.intersection.x - this.touchDragLocalPoint.x;
+            this.worldGroup.position.z = this.intersection.z - this.touchDragLocalPoint.z;
             this._enforceMaxBounds();
+
             // ── EMA pan-скорости ──
             const now = performance.now();
             const dt  = Math.max((now - this._panLastMoveTime) / 1000, 0.001);
@@ -549,8 +583,8 @@ onTouchMove(e: TouchEvent) {
         while (angleDelta < -Math.PI) angleDelta += 2 * Math.PI;
 
         const dDist   = Math.abs(curDist - ts.prevDist);
-const dRotate = this.allowRotate ? Math.abs(angleDelta) * curDist * 0.5 : 0;
-const dMidY   = this.allowPitch  ? Math.abs(midY - ts.prevMidY)         : 0;
+        const dRotate = this.allowRotate ? Math.abs(angleDelta) * curDist * 0.5 : 0;
+        const dMidY   = this.allowPitch  ? Math.abs(midY - ts.prevMidY)         : 0;
 
         // ─────────────────────────────────────────────────────────────
         // EMA-сглаживание (α = 0.3)
@@ -562,14 +596,6 @@ const dMidY   = this.allowPitch  ? Math.abs(midY - ts.prevMidY)         : 0;
 
         // ─────────────────────────────────────────────────────────────
         // ДИНАМИЧЕСКАЯ КЛАССИФИКАЦИЯ / РЕКЛАССИФИКАЦИЯ
-        //
-        // Каждый кадр определяем «победителя». Если он отличается от
-        // текущего активного жеста SWITCH_FRAMES кадров подряд — плавно
-        // переключаемся с перебазированием (без визуального прыжка).
-        //
-        // Благодаря этому стартовая классификация может быть мягкой
-        // (TILT_BIAS ≈ 0.9 — почти нейтральная): ошибочные решения
-        // самокорректируются за 2–3 кадра после начала движения.
         // ─────────────────────────────────────────────────────────────
         const TILT_BIAS          = 0.9;   // <1 = tilt легче; >1 = tilt строже
         const MOTION_FLOOR       = 0.5;   // порог покоя EMA
@@ -591,8 +617,8 @@ const dMidY   = this.allowPitch  ? Math.abs(midY - ts.prevMidY)         : 0;
 
         const tiltWeighted = ts.smoothTilt / TILT_BIAS;
         const otherMax     = Math.max(ts.smoothZoom, ts.smoothRotate);
-const winner: 'tilt' | 'zoomRotate' =
-    (this.allowPitch && tiltWeighted > otherMax) ? 'tilt' : 'zoomRotate';
+        const winner: 'tilt' | 'zoomRotate' =
+            (this.allowPitch && tiltWeighted > otherMax) ? 'tilt' : 'zoomRotate';
 
         if (winner !== ts.activeGesture) {
             if (winner === ts.candidateGesture) {
@@ -613,9 +639,6 @@ const winner: 'tilt' | 'zoomRotate' =
                 ts.candidateFrames  = 0;
 
                 // ── перебазирование входящего жеста ──
-                // Ставим «нулевую» точку в текущее положение пальцев и
-                // текущую ориентацию камеры. На этом кадре новый жест
-                // даст дельту 0 → визуального прыжка нет.
                 if (winner === 'tilt') {
                     ts.startMidX = midX;
                     ts.startMidY = midY;
@@ -708,14 +731,14 @@ const winner: 'tilt' | 'zoomRotate' =
 
         const target = this.controls.target;
 
-const proposedZoom  = this.continuousZoom + zoomDelta;
-const clampedZoom   = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, proposedZoom));
-const newCameraDist = this.getTargetDistanceForZoom(clampedZoom);
+        const proposedZoom  = this.continuousZoom + zoomDelta;
+        const clampedZoom   = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, proposedZoom));
+        const newCameraDist = this.getTargetDistanceForZoom(clampedZoom);
 
-const newAzimuth = this.allowRotate
-    ? ts.prevAzimuth - angleDelta2
-    : ts.prevAzimuth;
-const newPitch   = ts.prevPitch;          // pitch не меняем
+        const newAzimuth = this.allowRotate
+            ? ts.prevAzimuth - angleDelta2
+            : ts.prevAzimuth;
+        const newPitch   = ts.prevPitch;          // pitch не меняем
 
         const placement = this._resolveCameraPlacement(
             target, newCameraDist, newPitch, newAzimuth, this._tempPlacementOut
@@ -793,6 +816,9 @@ onClick(e) {
     this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
     const groundPoint = new THREE.Vector3();
+    // groundPlane к этому моменту уже стоит на высоте террейна под точкой
+    // клика (его только что установил onMouseDown). Для shift-click это
+    // даёт lon/lat на реальной поверхности, а не на y = 0.
     if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, groundPoint)) {
         console.log('[shift-click] Ray did not hit ground plane (looking at horizon?)');
         return;

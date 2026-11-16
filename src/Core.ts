@@ -507,12 +507,16 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
 
         this._tileManagers = this._rasterLayers.map((layer: any) => new TileManager(this, layer));
 
+        this._rasterLayers.forEach((layer: any) => { layer._map = this; });
+
 for (const mgr of this._tileManagers) {
     mgr.onTileHeightAppliedCallbacks.push(() => {
         if (this._surfaceMaxHeightCache) this._surfaceMaxHeightCache.clear();
         if (this.staticBgGroup && this.staticBgGroup.visible) {
             this.staticBgGroup.visible = false;
         }
+        // === ДОБАВИТЬ ЭТУ СТРОКУ ===
+        mgr._staticBgAllowed = false; 
     });
 }
 

@@ -122,7 +122,8 @@ export class Tile {
     }
     setOpacity(opacity) {
         const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
-        this.opacity = v;
+        this.opacity = v; // Сохраняем значение в конфиге
+        // Передаем управление менеджеру карты
         this._map?._tileManagerForLayer?.(this)?.setOpacity(v);
     }
     setMask(geojson, opts = {}) {
@@ -200,6 +201,7 @@ export class TileManager {
         this._maskFeather = 0;
         // Общий uniform: сдвиг worldGroup в сцене. Один объект на все материалы менеджера.
         this._maskOffsetUniform = { value: new THREE.Vector3() };
+        this._staticBgAllowed = true;
     }
     get _mapHalfX() {
         const v = this.engine.mapHalfExtentX;
@@ -509,10 +511,20 @@ export class TileManager {
         return this;
     }
     _applyMaskToAllTiles() {
+        // 1. Обновляем динамические тайлы
         for (const inst of this.tiles.values()) {
             const mat = inst.mesh?.material;
             if (mat)
                 this._updateMaterialMask(mat);
+        }
+        // 2. ДОБАВИТЬ: Обновляем меши статического фона (низкого разрешения)
+        const bgGroup = this.engine.staticBgGroup;
+        if (bgGroup) {
+            for (const child of bgGroup.children) {
+                if (child.material) {
+                    this._updateMaterialMask(child.material);
+                }
+            }
         }
     }
     _syncMaskOffset() {
@@ -720,12 +732,21 @@ export class TileManager {
         }
         this._visibleKeysPrev = null;
     }
+    // Внутри класса TileManager:
     setOpacity(opacity) {
         if (!this.layer)
             return;
         const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
-        if (this.layer.opacity === v)
-            return;
+        // === Управление видимостью статической подложки — ВСЕГДА ===
+        if (this.engine.staticBgGroup) {
+            if (v < 1) {
+                this.engine.staticBgGroup.visible = false;
+            }
+            else if (this._staticBgAllowed !== false) {
+                this.engine.staticBgGroup.visible = true;
+            }
+        }
+        // Обновляем слой, даже если значение совпадает, чтобы гарантировать синхронизацию
         this.layer.opacity = v;
         const transparent = v < 1;
         for (const inst of this.tiles.values()) {

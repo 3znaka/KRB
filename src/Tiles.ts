@@ -131,11 +131,13 @@ addTo(map) {
         this._map?._tileManagerForLayer?.(this)?.setVisible(this.visible);
     }
 
-    setOpacity(opacity) {
-        const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
-        this.opacity = v;
-        this._map?._tileManagerForLayer?.(this)?.setOpacity(v);
-    }
+
+setOpacity(opacity) {
+    const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+    this.opacity = v; // Сохраняем значение в конфиге
+    // Передаем управление менеджеру карты
+    this._map?._tileManagerForLayer?.(this)?.setOpacity(v);
+}
 
     setMask(geojson, opts = {}) {
     this.mask = geojson ?? null;
@@ -225,6 +227,7 @@ this._maskInvert  = false;
 this._maskFeather = 0;
 // Общий uniform: сдвиг worldGroup в сцене. Один объект на все материалы менеджера.
 this._maskOffsetUniform = { value: new THREE.Vector3() };
+this._staticBgAllowed = true;  
     }
 
     get _mapHalfX() {
@@ -539,9 +542,20 @@ clearMask() {
 }
 
 _applyMaskToAllTiles() {
+    // 1. Обновляем динамические тайлы
     for (const inst of this.tiles.values()) {
         const mat = inst.mesh?.material;
         if (mat) this._updateMaterialMask(mat);
+    }
+    
+    // 2. ДОБАВИТЬ: Обновляем меши статического фона (низкого разрешения)
+    const bgGroup = this.engine.staticBgGroup;
+    if (bgGroup) {
+        for (const child of bgGroup.children) {
+            if (child.material) {
+                this._updateMaterialMask(child.material);
+            }
+        }
     }
 }
 
@@ -728,22 +742,34 @@ const tex = new THREE.CanvasTexture(outCanvas);
         this._visibleKeysPrev = null;
     }
 
-    setOpacity(opacity) {
-        if (!this.layer) return;
-        const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
-        if (this.layer.opacity === v) return;
-        this.layer.opacity = v;
-        const transparent = v < 1;
-        for (const inst of this.tiles.values()) {
-            const mat = inst.mesh?.material;
-            if (!mat) continue;
-            mat.opacity = v;
-            if (mat.transparent !== transparent) {
-                mat.transparent = transparent;
-                mat.needsUpdate = true;
-            }
+// Внутри класса TileManager:
+setOpacity(opacity) {
+    if (!this.layer) return;
+    const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+
+    // === Управление видимостью статической подложки — ВСЕГДА ===
+    if (this.engine.staticBgGroup) {
+        if (v < 1) {
+            this.engine.staticBgGroup.visible = false;
+        } else if (this._staticBgAllowed !== false) {
+            this.engine.staticBgGroup.visible = true;
         }
     }
+
+    // Обновляем слой, даже если значение совпадает, чтобы гарантировать синхронизацию
+    this.layer.opacity = v;
+    const transparent = v < 1;
+
+    for (const inst of this.tiles.values()) {
+        const mat = inst.mesh?.material;
+        if (!mat) continue;
+        mat.opacity = v;
+        if (mat.transparent !== transparent) {
+            mat.transparent = transparent;
+            mat.needsUpdate = true;
+        }
+    }
+}
 
     /* ---------- Обновление видимых тайлов ---------- */
 

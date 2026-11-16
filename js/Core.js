@@ -350,6 +350,7 @@ export class KrbMap {
         this.popupManager = new PopupManager(this);
         this.interaction = new InteractionManager(this);
         this._tileManagers = this._rasterLayers.map((layer) => new TileManager(this, layer));
+        this._rasterLayers.forEach((layer) => { layer._map = this; });
         for (const mgr of this._tileManagers) {
             mgr.onTileHeightAppliedCallbacks.push(() => {
                 if (this._surfaceMaxHeightCache)
@@ -357,6 +358,8 @@ export class KrbMap {
                 if (this.staticBgGroup && this.staticBgGroup.visible) {
                     this.staticBgGroup.visible = false;
                 }
+                // === ДОБАВИТЬ ЭТУ СТРОКУ ===
+                mgr._staticBgAllowed = false;
             });
         }
         const objectsToAdd = new Set();

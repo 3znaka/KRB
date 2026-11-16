@@ -122,7 +122,8 @@ export const VectorTileWorkerMixin = {
     // ── Деформация tile-CRS → map-CRS ─────────────────────────────────────
 
 _computeTileDeform(z, tileCX, tileCZ) {
-    const K = 16;                             // сетка (K+1)×(K+1)
+
+    const K = z < 6 ? 64 : z < 9 ? 32 : 16;
     const tileCrs = this._tileCrs;
     const mapProj = this._map.projection;
     const tsX = (2 * tileCrs.halfExtentX) / (1 << z);
@@ -211,16 +212,39 @@ _tileToMapLocal(lx, lz, df, out) {
     return true;
 },
 
-// Точная проекция массива позиций (заменяет _deformArray).
 _deformArray(pos, df) {
-    const tmp = { x: 0, z: 0 };
+    const K = df.K;
+    const tsX = df.tsX, tsY = df.tsY, htX = df.htX, htY = df.htY;
+    const G = K + 1;
+    const grid = df.grid;
+
     for (let i = 0; i < pos.length; i += 3) {
-        if (this._tileToMapLocal(pos[i], pos[i + 2], df, tmp)) {
-            pos[i]     = tmp.x;
-            pos[i + 2] = tmp.z;
-        }
-        // иначе оставляем как есть (вершина вне домена проекции —
-        // крайне редкий случай, см. ниже)
+        const lx = pos[i];
+        const lz = pos[i + 2];
+        
+        const u = (lx + htX) / tsX;
+        const v = (lz + htY) / tsY;
+        const fu = Math.max(0, Math.min(K, u * K));
+        const fv = Math.max(0, Math.min(K, v * K));
+        const i0 = Math.floor(fu);
+        const j0 = Math.floor(fv);
+        const i1 = i0 < K ? i0 + 1 : K;
+        const j1 = j0 < K ? j0 + 1 : K;
+        const tu = fu - i0;
+        const tv = fv - j0;
+
+        const k00 = (j0 * G + i0) * 2;
+        const k10 = (j0 * G + i1) * 2;
+        const k01 = (j1 * G + i0) * 2;
+        const k11 = (j1 * G + i1) * 2;
+
+        const w00 = (1 - tu) * (1 - tv);
+        const w10 = tu * (1 - tv);
+        const w01 = (1 - tu) * tv;
+        const w11 = tu * tv;
+
+        pos[i]     = w00 * grid[k00]     + w10 * grid[k10]     + w01 * grid[k01]     + w11 * grid[k11];
+        pos[i + 2] = w00 * grid[k00 + 1] + w10 * grid[k10 + 1] + w01 * grid[k01 + 1] + w11 * grid[k11 + 1];
     }
 },
 
@@ -237,6 +261,7 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
 
 
     // ── Сборка группы ─────────────────────────────────────────────────────
+
 
     _buildGroupFromWorkerResult(
         this: any,
@@ -268,13 +293,15 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
             group.remove(child);
         }
 
-        // ── Fills ─────────────────────────────────────────────────────
+               // ── Fills ─────────────────────────────────────────────────────
         for (const fill of result.fills || []) {
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
+            
             const geom = new THREE.BufferGeometry();
             geom.setAttribute('position', new THREE.BufferAttribute(fill.positions, 3));
             if (fill.indices) geom.setIndex(new THREE.BufferAttribute(fill.indices, 1));
             if (df) this._deformGeometry(geom, df);
+            geom.computeBoundingSphere();
 
             const mesh = new THREE.Mesh(geom, mat);
             const rawFillOrder =
@@ -312,6 +339,7 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
                 if (df) {
                     this._deformGeometry(geom, df);
                     geom.computeVertexNormals();
+                    geom.computeBoundingSphere();
                 }
 
                 if (isTransparent) {
@@ -509,16 +537,17 @@ _subdivideSegments(segs, maxSegLen) {
     return new Float32Array(result);
 },
 
-_addFatLineFromPositions(group, positions, material, renderOrder, deform = null) {
-    let segs = this._fatLineSegmentsFromPositions(positions);
-    if (!segs) return;
-if (deform) {
-    const maxSegLen = Math.min(deform.tsX, deform.tsY) / deform.K;
-    segs = this._subdivideSegments(segs, maxSegLen);
-    this._deformArray(segs, deform);
-}
-    const lGeo = new LineSegmentsGeometry();
-    lGeo.setPositions(segs);
+    _addFatLineFromPositions(group, positions, material, renderOrder, deform = null) {
+        let segs = this._fatLineSegmentsFromPositions(positions);
+        if (!segs) return;
+        
+        if (deform) {
+            this._deformArray(segs, deform);
+        }
+        
+        const lGeo = new LineSegmentsGeometry();
+        lGeo.setPositions(segs);
+        lGeo.computeBoundingSphere(); 
 
         const lineObj = new Line2(lGeo, material);
 

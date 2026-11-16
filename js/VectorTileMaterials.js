@@ -1,5 +1,6 @@
 // VectorTileMaterials.ts
 import { THREE, LineMaterial } from './js_TP/tpb.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
 /**
  * Примесь VectorTile — материалы.
  * Применяется через applyMixin(VectorTile.prototype, VectorTileMaterialsMixin).
@@ -26,6 +27,7 @@ export const VectorTileMaterialsMixin = {
             depthWrite: false,
             polygonOffset: false,
         });
+        applyGapMaskToMaterial(mat, this._map);
         this._fillMaterialCache.set(styleKey, mat);
         this._managedMaterials.add(mat);
         const maxSize = this._fillMaterialCacheMaxSize ?? 256;
@@ -39,6 +41,7 @@ export const VectorTileMaterialsMixin = {
         const op = opacity ?? 1;
         const key = `fill:${layerName}:${color.toString(16)}:${op}`;
         const mat = this._getFillMaterial(key);
+        applyGapMaskToMaterial(mat, this._map);
         return mat;
     },
     _getLineMaterial(styleKey, dash) {
@@ -68,6 +71,7 @@ export const VectorTileMaterialsMixin = {
         this._lineMaterialCache.set(styleKey, mat);
         this._lineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
+        applyGapMaskToMaterial(mat, this._map);
         return mat;
     },
     _getLineMaterialFromData(layerName, color, width, dash) {

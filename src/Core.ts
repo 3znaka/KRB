@@ -320,9 +320,10 @@ this.debug = options.debug ?? false;
         if (!options.view) throw new Error('View required');
         this.globalElevCache = new Map();
         this.view = options.view;
-        this.hasTileLayers = this.layers.some((layer: any) =>
+this.hasTileLayers = this.layers.some((layer: any) =>
     !!(layer.texture || layer.elevation) ||
-    (typeof layer?.addTo === 'function' && (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile')))
+    (typeof layer?.addTo === 'function' &&
+     (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile')))
 );
 
 this.allowRotate = this.view.allowRotate ?? true;
@@ -340,10 +341,8 @@ this.allowPitch  = this.view.allowPitch  ?? true;
     ? Projections.getRaw(options.inputCRS)
     : Projections.getRaw('EPSG:4326');
 
-        this._rasterLayers = this.layers.filter((l: any) => !!l.texture);
-        this._elevationLayer = this.layers.find((l: any) => !!l.elevation) ?? null;
-        this._tileLayer = this._rasterLayers[0] ?? this._elevationLayer ?? null;
-        this._elevationProvider = null;
+     this._elevationProvider = null;
+this._rebuildRasterRegistry();
 
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
@@ -377,12 +376,7 @@ this.allowPitch  = this.view.allowPitch  ?? true;
             }
         }
 
-        const tileCrsCode = this._tileLayer?.crs ?? this._tileLayer?.projection ?? 'EPSG:3857';
-        this.tileCRS = Projections.getWorld(tileCrsCode);
 
-        this.deformedTiles = this._rasterLayers.length > 0
-            ? this._rasterLayers.some((l: any) => !this._isLayerLinear(l))
-            : !(this.tileCRS === this.projection && this.projection.isMercator);
 
 
 this.R = options.R ?? this.projection.meanRadius;

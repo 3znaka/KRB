@@ -1036,16 +1036,141 @@ function lineIntersectsAny(lineRings, exclusionPolygons) {
 // ОБРАБОТКА ТАЙЛА
 // ════════════════════════════════════════════════════════════════════════
 
+
+function subdivideLineSegments(positions, maxSegLen) {
+    const maxLenSq = maxSegLen * maxSegLen;
+    const result = [];
+    // positions — это плоский массив [x, y, z, x, y, z, ...], где каждая пара точек образует сегмент
+    for (let i = 0; i < positions.length; i += 6) {
+        const ax = positions[i], ay = positions[i+1], az = positions[i+2];
+        const bx = positions[i+3], by = positions[i+4], bz = positions[i+5];
+        const dx = bx - ax, dy = by - ay, dz = bz - az;
+        const lenSq = dx * dx + dz * dz;
+        
+        if (lenSq <= maxLenSq) {
+            result.push(ax, ay, az, bx, by, bz);
+            continue;
+        }
+        const nSub = Math.ceil(Math.sqrt(lenSq) / maxSegLen);
+        for (let k = 0; k < nSub; k++) {
+            const t0 = k / nSub;
+            const t1 = (k + 1) / nSub;
+            result.push(
+                ax + dx * t0, ay + dy * t0, az + dz * t0,
+                ax + dx * t1, ay + dy * t1, az + dz * t1,
+            );
+        }
+    }
+    return new Float32Array(result);
+}
+
+function subdivideLinePositions(positions, maxSegLen) {
+    const maxLenSq = maxSegLen * maxSegLen;
+    const result = [];
+    let havePrev = false;
+    let px = 0, py = 0, pz = 0;
+
+    for (let i = 0; i < positions.length; i += 3) {
+        const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+        
+        // Восстанавливаем разделитель между линиями
+        if (Number.isNaN(x)) {
+            if (havePrev) result.push(NaN, NaN, NaN);
+            havePrev = false;
+            continue;
+        }
+
+        if (havePrev) {
+            const dx = x - px, dy = y - py, dz = z - pz;
+            const lenSq = dx * dx + dz * dz;
+            
+            if (lenSq > maxLenSq) {
+                const nSub = Math.ceil(Math.sqrt(lenSq) / maxSegLen);
+                for (let k = 1; k < nSub; k++) {
+                    const t = k / nSub;
+                    result.push(px + dx * t, py + dy * t, pz + dz * t);
+                }
+            }
+        }
+        result.push(x, y, z);
+        px = x; py = y; pz = z; havePrev = true;
+    }
+
+    return new Float32Array(result);
+}
+
+function subdivideFillGeometry(positions, indices, maxSegLen) {
+    const maxLenSq = maxSegLen * maxSegLen;
+    const pos = Array.from(positions);
+    let idx = Array.from(indices);
+    const midpoints = new Map();
+
+    const getMidpoint = (a, b) => {
+       const key = a < b ? a + ',' + b : b + ',' + a;
+        const hit = midpoints.get(key);
+        if (hit !== undefined) return hit;
+        
+        const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+        const bx = pos[b * 3], by = pos[b * 3 + 1], bz = pos[b * 3 + 2];
+        const newIndex = pos.length / 3;
+        pos.push((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+        midpoints.set(key, newIndex);
+        return newIndex;
+    };
+
+    let iter = 0;
+    let changed = true;
+    // Ограничиваем 3 итерациями, чтобы не раздувать геометрию.
+    // 3 итерации = максимум 64 треугольника на исходный.
+    while (changed && iter < 3) {
+        changed = false;
+        const newIdx = [];
+        for (let i = 0; i < idx.length; i += 3) {
+            const a = idx[i], b = idx[i + 1], c = idx[i + 2];
+            
+            const abSq = (pos[a * 3] - pos[b * 3]) ** 2 + (pos[a * 3 + 2] - pos[b * 3 + 2]) ** 2;
+            const bcSq = (pos[b * 3] - pos[c * 3]) ** 2 + (pos[b * 3 + 2] - pos[c * 3 + 2]) ** 2;
+            const caSq = (pos[c * 3] - pos[a * 3]) ** 2 + (pos[c * 3 + 2] - pos[a * 3 + 2]) ** 2;
+
+            if (abSq > maxLenSq || bcSq > maxLenSq || caSq > maxLenSq) {
+                changed = true;
+                const mAB = getMidpoint(a, b);
+                const mBC = getMidpoint(b, c);
+                const mCA = getMidpoint(c, a);
+                newIdx.push(
+                    a, mAB, mCA,
+                    mAB, b, mBC,
+                    mCA, mBC, c,
+                    mAB, mBC, mCA
+                );
+            } else {
+                newIdx.push(a, b, c);
+            }
+        }
+        idx = newIdx;
+        iter++;
+    }
+
+    return {
+        positions: new Float32Array(pos),
+        indices: new Uint32Array(idx)
+    };
+}
+
 function processTile(tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is3d,
                      visibleLayers, invisibleLayers, buildingEdges,
                      exclusionPolygons, exclusionLayers,
                      maxTextPointsPerTile, maxTextLinesPerTile, styleZoom) {
-    const eps = Math.min(tileSizeX, tileSizeY) * 0.5 / 4096;
+  const eps = Math.min(tileSizeX, tileSizeY) * 0.5 / 4096;
     const pointScale = computePointScale(styleZoom);
    const halfTileX = tileSizeX / 2;
     const halfTileY = tileSizeY / 2;
     const centerX = x * tileSizeX - maxMercX + tileSizeX / 2;
     const centerZ = -maxMercY + y * tileSizeY + tileSizeY / 2;
+
+    // Вычисляем тот же K, что и в главном потоке для _computeTileDeform
+    const K = z < 6 ? 64 : z < 9 ? 32 : 16;
+    const maxSegLen = Math.min(tileSizeX, tileSizeY) / K;
 
     const localExclusionPolygons = exclusionPolygons.map(poly => poly.map(p => ({
         x: p.x - centerX,
@@ -1252,7 +1377,15 @@ textPoints.push({
                     }
                     triData.push({ positions, indices: new Uint32Array(t.indices), sortKey });
                 }
-                if (triData.length > 0) fillGroup.push(...triData);
+
+                if (triData.length > 0) {
+                    for (let t = 0; t < triData.length; t++) {
+                        const sub = subdivideFillGeometry(triData[t].positions, triData[t].indices, maxSegLen);
+                        triData[t].positions = sub.positions;
+                        triData[t].indices = sub.indices;
+                    }
+                    fillGroup.push(...triData);
+                }
 
                 // ---- polygon stroke ----
                 const strokeColor = resolveColor(layerStyle.stroke, props, styleZoom, geomType);
@@ -1495,6 +1628,16 @@ renderOrder: semanticOrder - 0.5,
     }));
 
     result.is3d = is3d;
+    // Применяем разбиение к линиям ПЕРЕД отправкой в главный поток
+    for (const line of result.lines) {
+        line.positions = subdivideLinePositions(line.positions, maxSegLen);
+    }
+
+    // То же для штрихов (strokes)
+    for (const stroke of result.strokes) {
+        stroke.positions = subdivideLinePositions(stroke.positions, maxSegLen);
+    }
+
     return result;
 }
 `;

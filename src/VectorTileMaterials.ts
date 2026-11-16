@@ -1,6 +1,8 @@
 // VectorTileMaterials.ts
 import { THREE, LineMaterial } from './js_TP/tpb.js';
 import type { WorkerLine, WidthSpec } from './VectorTileTypes.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
+
 
 /**
  * Примесь VectorTile — материалы.
@@ -30,6 +32,7 @@ _getFillMaterial(this: any, styleKey: string): THREE.Material {
         depthWrite: false,
         polygonOffset: false,
     });
+ applyGapMaskToMaterial(mat, this._map); 
 
  this._fillMaterialCache.set(styleKey, mat);
     this._managedMaterials.add(mat);
@@ -46,6 +49,7 @@ _getFillMaterialFromData(layerName, color, opacity) {
     const op = opacity ?? 1;
     const key = `fill:${layerName}:${color.toString(16)}:${op}`;
     const mat = this._getFillMaterial(key);
+    applyGapMaskToMaterial(mat, this._map);
 
     return mat;
 },
@@ -80,6 +84,7 @@ _getFillMaterialFromData(layerName, color, opacity) {
         this._lineMaterialCache.set(styleKey, mat);
         this._lineMaterialsSet.add(mat);
         this._managedMaterials.add(mat);
+        applyGapMaskToMaterial(mat, this._map);
         return mat;
     },
 

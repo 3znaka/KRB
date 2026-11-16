@@ -3,6 +3,7 @@ import { THREE } from './js_TP/tpb.js';
 import { DEFAULTS } from './Defaults.js';
 import { getVirtKey, getOriginZ } from './TileKey.js';
 import { Projections } from './Projections.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
 
 const MAX_CACHED_TILES = 350;
 const ANCESTOR_FALLBACK = 4;
@@ -97,7 +98,36 @@ export class Tile {
         }
         this.crs = options.crs ?? options.projection ?? 'EPSG:3857';
         this.baseRenderOrder = 0;
+         this._map = null;
     }
+
+ addTo(map) {
+        if (!map) throw new Error('Tile.addTo: map is required');
+        if (this._map === map) return this;
+        if (this._map) this.removeFromMap();
+        map._registerRasterLayer(this);   // ← см. п.2
+        this._map = map;
+        return this;
+    }
+
+    removeFromMap() {
+        if (!this._map) return;
+        const map = this._map;
+        this._map = null;
+        map._unregisterRasterLayer(this);
+    }
+
+    setVisible(visible) {
+        this.visible = !!visible;
+        this._map?._tileManagerForLayer?.(this)?.setVisible(this.visible);
+    }
+
+    setOpacity(opacity) {
+        const v = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+        this.opacity = v;
+        this._map?._tileManagerForLayer?.(this)?.setOpacity(v);
+    }
+
 }
 
 /** Менеджер растровых тайлов одного слоя. */
@@ -297,6 +327,8 @@ get _isVisible() {
                 if (texture) mat.emissiveMap = texture;
             }
         }
+
+applyGapMaskToMaterial(mat, this.engine);
 
         mat.userData.overlayMap = null;
         mat.userData.overlayOpacity = 1;

@@ -1,5 +1,6 @@
 // CoreLayers.ts
 import { Projections } from './Projections.js';
+import { TileManager } from './Tiles.js';
 import { getOriginZ } from './TileKey.js';
 export const CoreLayersMixin = {
     _isLayerLinear(layer) {
@@ -89,6 +90,135 @@ export const CoreLayersMixin = {
         this.maybeUpdateVisibleTiles(true);
     },
     get tileManager() { return this._tileManagers?.[0] ?? null; },
+    // ========================================================================
+    // Реестр растровых слоёв
+    // ========================================================================
+    _rebuildRasterRegistry() {
+        this._rasterLayers = this.layers.filter((l) => !!l.texture);
+        this._elevationLayer = this.layers.find((l) => !!l.elevation) ?? null;
+        this._tileLayer = this._rasterLayers[0] ?? this._elevationLayer ?? null;
+        this.hasTileLayers = this.layers.some((layer) => !!(layer.texture || layer.elevation) ||
+            (typeof layer?.addTo === 'function' &&
+                (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile'))));
+        const tileCrsCode = this._tileLayer?.crs ?? this._tileLayer?.projection ?? 'EPSG:3857';
+        this.tileCRS = Projections.getWorld(tileCrsCode);
+        this.deformedTiles = this._rasterLayers.length > 0
+            ? this._rasterLayers.some((l) => !this._isLayerLinear(l))
+            : !(this.tileCRS === this.projection && this.projection.isMercator);
+    },
+    _ensureTileManagerFor(layer) {
+        if (!layer)
+            return null;
+        if (!this._tileManagers)
+            this._tileManagers = [];
+        let mgr = this._tileManagers.find((m) => m.layer === layer);
+        if (mgr)
+            return mgr;
+        mgr = new TileManager(this, layer);
+        this._tileManagers.push(mgr);
+        return mgr;
+    },
+    _disposeTileManagerFor(layer) {
+        if (!layer || !this._tileManagers)
+            return;
+        const idx = this._tileManagers.findIndex((m) => m.layer === layer);
+        if (idx < 0)
+            return;
+        const mgr = this._tileManagers[idx];
+        try {
+            mgr._disposeAllTiles?.();
+        }
+        catch (e) {
+            console.warn('dispose tiles failed', e);
+        }
+        try {
+            mgr.worker?.terminate?.();
+        }
+        catch (e) {
+            console.warn('terminate worker failed', e);
+        }
+        // Снимаем pending-очереди, чтобы старые промисы не дёргали уже
+        // отцепленный менеджер.
+        try {
+            for (const p of mgr._buildQueue ?? [])
+                p.resolve?.(null);
+            mgr._buildQueue = [];
+            for (const q of mgr._textureQueue ?? [])
+                q.resolve?.(null);
+            mgr._textureQueue = [];
+            mgr._inFlightTextures?.clear?.();
+        }
+        catch (e) { /* noop */ }
+        this._tileManagers.splice(idx, 1);
+    },
+    _tileManagerForLayer(layer) {
+        if (!layer || !this._tileManagers)
+            return null;
+        return this._tileManagers.find((m) => m.layer === layer) ?? null;
+    },
+    /**
+     * Регистрирует тайловый слой, уже привязанный к карте через
+     * `Tile.addTo(map)`. Идемпотентно: повторный вызов для того же слоя
+     * ничего не дублирует.
+     */
+    _registerRasterLayer(layer) {
+        if (!layer)
+            return;
+        if (!this._tileManagers)
+            this._tileManagers = [];
+        const wasRaster = this._rasterLayers.length > 0;
+        const already = this.layers.includes(layer);
+        if (!already)
+            this.layers.push(layer);
+        // Менеджер нужен любому слою, который что-то грузит:
+        // растр (texture) и/или рельеф (elevation).
+        if (layer.texture || layer.elevation) {
+            this._ensureTileManagerFor(layer);
+        }
+        this._rebuildRasterRegistry();
+        this._rebuildLayerStack();
+        // Если это первый растровый слой — сразу собираем фон, чтобы не
+        // ждать следующего тика.
+        if (!wasRaster && this._rasterLayers.length > 0) {
+            this.createStaticBackgroundLayer?.();
+        }
+        this._onRasterLayersChanged();
+    },
+    /**
+     * Отцепляет слой: dispose всех тайлов, terminate воркера,
+     * удаление из `layers[]` + пересборка производных структур.
+     */
+    _unregisterRasterLayer(layer) {
+        if (!layer)
+            return;
+        const idx = this.layers.indexOf(layer);
+        if (idx < 0)
+            return;
+        this.layers.splice(idx, 1);
+        this._disposeTileManagerFor(layer);
+        this._rebuildRasterRegistry();
+        this._rebuildLayerStack();
+        this._onRasterLayersChanged();
+    },
+    /**
+     * Единый хук «состав растровых слоёв изменился». Эмитит событие
+     * для UI/attribution и форсирует обновление тайлов.
+     */
+    _onRasterLayersChanged() {
+        try {
+            this.emit?.('layers-changed', { layers: this.layers });
+        }
+        catch (e) { /* noop */ }
+        try {
+            this.maybeUpdateVisibleTiles(true);
+        }
+        catch (e) {
+            console.warn('_onRasterLayersChanged: update failed', e);
+        }
+    },
+    // ========================================================================
+    // Static background
+    // ========================================================================
     createStaticBackgroundLayer() {
         if (this._rasterLayers.length === 0)
             return;
@@ -106,10 +236,11 @@ export const CoreLayersMixin = {
                 child.material.dispose();
             }
         }
-        const mgr = this._tileManagers[0];
+        // Менеджер ищем по слою, а не по индексу — после addTo/removeFromMap
+        // порядок _tileManagers может не совпадать с порядком _rasterLayers.
+        const mgr = this._tileManagerForLayer(bgLayer) ?? this._tileManagers?.[0];
         if (!mgr)
             return;
-        // После extent-рефакторинга всё считаем от map-экстента проекции.
         const halfX = this.mapHalfExtentX;
         const halfY = this.mapHalfExtentY;
         const z = this.staticBgZoom;

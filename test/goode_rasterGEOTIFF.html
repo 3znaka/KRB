@@ -69,11 +69,10 @@ const rastr = new KRB.Tile({
 const tiff = new KRB.GeoTiffLayer({
     source: 'tempworld.tif',
     colorRamp: 'terrain',
-    mask: adm,
     opacity: 0.75,
 }).addTo(map);
 
-tiff.clearMask();
+tiff.setMask(adm, { invert: true, feather: 20000 });
 
 
 

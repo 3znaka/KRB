@@ -131,7 +131,7 @@ export class Tile {
             this.maskInvert = !!opts.invert;
         if (opts.feather !== undefined) {
             const f = Number(opts.feather);
-            this.maskFeather = Number.isFinite(f) ? Math.max(0, Math.min(0.49, f)) : 0;
+            this.maskFeather = Number.isFinite(f) ? Math.max(0, f) : 0;
         }
         this._map?._tileManagerForLayer?.(this)?.setMask(this.mask, {
             invert: this.maskInvert,
@@ -413,11 +413,11 @@ export class TileManager {
                          }
                          if (maskInvert > 0.5) inside = 1.0 - inside;
                          if (maskFeather > 0.0) {
-                             vMaskAlpha = smoothstep(0.5 - maskFeather, 0.5 + maskFeather, inside);
-                             if (vMaskAlpha < 0.001) discard;
-                         } else {
-                             if (inside < 0.5) discard;
-                         }
+    vMaskAlpha = inside;
+    if (vMaskAlpha < 0.001) discard;
+} else {
+    if (inside < 0.5) discard;
+}
                      }`)
                         .replace('#include <opaque_fragment>', `#include <opaque_fragment>
                      gl_FragColor.a *= vMaskAlpha;`);
@@ -470,7 +470,9 @@ export class TileManager {
     setMask(geojson, opts = {}) {
         if (!geojson)
             return this.clearMask();
-        const built = this._buildMaskTexture(geojson);
+        const f = Number(opts.feather);
+        const feather = Number.isFinite(f) ? Math.max(0, f) : 0;
+        const built = this._buildMaskTexture(geojson, feather);
         if (!built) {
             console.warn('TileManager.setMask: empty or invalid mask');
             return this.clearMask();
@@ -485,8 +487,7 @@ export class TileManager {
         this._maskBounds = built.bounds;
         this._maskEnabled = true;
         this._maskInvert = !!opts.invert;
-        const f = Number(opts.feather);
-        this._maskFeather = Number.isFinite(f) ? Math.max(0, Math.min(0.49, f)) : 0;
+        this._maskFeather = built.feather; // фактический, после ограничения размером маски
         this._pendingLayerMask = null;
         this._applyMaskToAllTiles();
         return this;
@@ -552,7 +553,7 @@ export class TileManager {
             mat.needsUpdate = true;
         }
     }
-    _buildMaskTexture(geojson) {
+    _buildMaskTexture(geojson, featherWorld = 0) {
         const proj = this.engine.projection;
         if (!proj || typeof proj.fromLonLat !== 'function') {
             console.warn('TileManager.setMask: engine.projection.fromLonLat недоступен');
@@ -620,6 +621,16 @@ export class TileManager {
         }
         if (!isFinite(minX) || !isFinite(minZ) || maxX <= minX || maxZ <= minZ)
             return null;
+        // feather в world-единицах; ограничиваем долей размера маски
+        let feather = Math.max(0, Number(featherWorld) || 0);
+        feather = Math.min(feather, 0.25 * Math.min(maxX - minX, maxZ - minZ));
+        // Запас по краям: у прямоугольного полигона края совпадают с bbox,
+        // и без pad размытие наружу обрежется границей текстуры.
+        const pad = feather * 2.5;
+        minX -= pad;
+        maxX += pad;
+        minZ -= pad;
+        maxZ += pad;
         const sizeX = maxX - minX, sizeZ = maxZ - minZ;
         const MAX_DIM = 2048, MIN_DIM = 128;
         const scale = MAX_DIM / Math.max(sizeX, sizeZ);
@@ -629,7 +640,12 @@ export class TileManager {
         canvas.width = W;
         canvas.height = H;
         const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, W, H);
+        // ВАЖНО: фон — непрозрачный чёрный, а не clearRect().
+        // Канвас хранит premultiplied alpha; при выгрузке в текстуру белый
+        // полупрозрачный ореол разворачивается в r≈1 по ВСЕМУ размытию,
+        // и feather снова исчезнет. Непрозрачный чёрный фон убирает проблему.
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, W, H);
         ctx.fillStyle = '#ffffff';
         for (const rings of projPolys) {
             ctx.beginPath();
@@ -643,7 +659,31 @@ export class TileManager {
             }
             ctx.fill('evenodd');
         }
-        const tex = new THREE.CanvasTexture(canvas);
+        let outCanvas = canvas;
+        if (feather > 0) {
+            const px = feather * (W / sizeX); // world → пиксели
+            const blurred = document.createElement('canvas');
+            blurred.width = W;
+            blurred.height = H;
+            const bctx = blurred.getContext('2d');
+            if (typeof bctx.filter === 'string') {
+                bctx.filter = `blur(${px.toFixed(1)}px)`;
+                bctx.drawImage(canvas, 0, 0);
+                bctx.filter = 'none';
+            }
+            else {
+                // fallback без ctx.filter: downscale → upscale
+                const s = Math.max(1, px / 2);
+                const small = document.createElement('canvas');
+                small.width = Math.max(1, Math.round(W / s));
+                small.height = Math.max(1, Math.round(H / s));
+                small.getContext('2d').drawImage(canvas, 0, 0, small.width, small.height);
+                bctx.imageSmoothingEnabled = true;
+                bctx.drawImage(small, 0, 0, W, H);
+            }
+            outCanvas = blurred;
+        }
+        const tex = new THREE.CanvasTexture(outCanvas);
         tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
         tex.generateMipmaps = false;
@@ -658,7 +698,7 @@ export class TileManager {
             tex.encoding = THREE.LinearEncoding;
         tex.needsUpdate = true;
         this.engine.renderer?.initTexture?.(tex);
-        return { texture: tex, bounds: { minX, minZ, sizeX, sizeZ } };
+        return { texture: tex, bounds: { minX, minZ, sizeX, sizeZ }, feather };
     }
     setVisible(visible) {
         if (visible) {

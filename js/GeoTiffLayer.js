@@ -130,6 +130,19 @@ export class GeoTiffLayer extends SpatialObject {
         // Merge-mode state
         this._tileTextureCache = new Map(); // key "z,vx,y,size" -> THREE.Texture | null
         this._mergedIntoMap = false; // добавили ли мы свой overlay в тайлы
+        // GeoJSON Mask state (аналогично Tile / TileManager)
+        this.mask = options.mask ?? null;
+        this.maskInvert = options.maskInvert ?? false;
+        this.maskFeather = Number.isFinite(Number(options.maskFeather))
+            ? Math.max(0, Number(options.maskFeather))
+            : 0;
+        this._maskTexture = null;
+        this._maskBounds = null; // { minX, minZ, sizeX, sizeZ } в локальных координатах worldGroup
+        this._maskProjPolys = null;
+        this._maskEnabled = false;
+        this._maskInvert = this.maskInvert;
+        this._maskFeather = this.maskFeather;
+        this._maskOffsetUniform = { value: new THREE.Vector3() };
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
         if (options.zoomInterpolate)
@@ -160,14 +173,335 @@ export class GeoTiffLayer extends SpatialObject {
         this._opacity = Math.max(0, Math.min(1, v));
         if (this._material) {
             this._material.opacity = this._opacity;
-            this._material.transparent = this._opacity < 1;
-            this._material.needsUpdate = true;
+            const needsTransparent = this._opacity < 1 || (this._maskEnabled && this._maskFeather > 0);
+            if (this._material.transparent !== needsTransparent) {
+                this._material.transparent = needsTransparent;
+                this._material.needsUpdate = true;
+            }
         }
         if (this._mergedIntoMap)
             this._syncOverlayOpacity();
         return this;
     }
     getOpacity() { return this._opacity; }
+    /* ==== Маска по GeoJSON (как у Tile) ==== */
+    setMask(geojson, opts = {}) {
+        this.mask = geojson ?? null;
+        if (opts.invert !== undefined)
+            this.maskInvert = !!opts.invert;
+        if (opts.feather !== undefined) {
+            const f = Number(opts.feather);
+            this.maskFeather = Number.isFinite(f) ? Math.max(0, f) : 0;
+        }
+        if (!this.mask) {
+            return this.clearMask();
+        }
+        if (this._map) {
+            this._rebuildAndApplyMask();
+        }
+        return this;
+    }
+    clearMask() {
+        this.mask = null;
+        if (this._maskTexture) {
+            try {
+                this._maskTexture.dispose();
+            }
+            catch { }
+        }
+        this._maskTexture = null;
+        this._maskBounds = null;
+        this._maskProjPolys = null;
+        this._maskEnabled = false;
+        this._maskInvert = false;
+        this._maskFeather = 0;
+        if (this._material) {
+            this._updateMaterialMask(this._material);
+        }
+        return this;
+    }
+    _rebuildAndApplyMask() {
+        if (!this.mask || !this._map)
+            return this.clearMask();
+        const built = this._buildMaskTexture(this.mask, this.maskFeather);
+        if (!built) {
+            console.warn('GeoTiffLayer.setMask: empty or invalid mask');
+            return this.clearMask();
+        }
+        if (this._maskTexture) {
+            try {
+                this._maskTexture.dispose();
+            }
+            catch { }
+        }
+        this._maskTexture = built.texture;
+        this._maskBounds = built.bounds;
+        this._maskProjPolys = built.projPolys;
+        this._maskEnabled = true;
+        this._maskInvert = !!this.maskInvert;
+        this._maskFeather = built.feather;
+        if (this._material) {
+            this._updateMaterialMask(this._material);
+        }
+        return this;
+    }
+    _buildMaskTexture(geojson, featherWorld = 0) {
+        const proj = this._map?.projection;
+        if (!proj || typeof proj.fromLonLat !== 'function') {
+            console.warn('GeoTiffLayer.setMask: map.projection.fromLonLat недоступен');
+            return null;
+        }
+        const project = (lon, lat) => {
+            let p = null;
+            try {
+                p = (proj.fromLonLatSafe ?? proj.fromLonLat)([lon, lat]);
+            }
+            catch {
+                try {
+                    p = proj.fromLonLat([lon, lat]);
+                }
+                catch { }
+            }
+            if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]))
+                return null;
+            return [p[0], -p[1]];
+        };
+        const polys = [];
+        const visit = (g) => {
+            if (!g)
+                return;
+            if (g.type === 'FeatureCollection')
+                g.features.forEach(visit);
+            else if (g.type === 'Feature')
+                visit(g.geometry);
+            else if (g.type === 'Polygon')
+                polys.push(g.coordinates);
+            else if (g.type === 'MultiPolygon')
+                polys.push(...g.coordinates);
+            else if (g.type === 'GeometryCollection')
+                g.geometries.forEach(visit);
+        };
+        visit(geojson);
+        if (!polys.length)
+            return null;
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        const projPolys = [];
+        for (const poly of polys) {
+            const rings = [];
+            for (const ring of poly) {
+                const r = [];
+                for (const pt of ring) {
+                    const p = project(pt[0], pt[1]);
+                    if (!p)
+                        continue;
+                    r.push(p);
+                    if (p[0] < minX)
+                        minX = p[0];
+                    if (p[0] > maxX)
+                        maxX = p[0];
+                    if (p[1] < minZ)
+                        minZ = p[1];
+                    if (p[1] > maxZ)
+                        maxZ = p[1];
+                }
+                if (r.length >= 3)
+                    rings.push(r);
+            }
+            if (rings.length)
+                projPolys.push(rings);
+        }
+        if (!isFinite(minX) || !isFinite(minZ) || maxX <= minX || maxZ <= minZ)
+            return null;
+        let feather = Math.max(0, Number(featherWorld) || 0);
+        feather = Math.min(feather, 0.25 * Math.min(maxX - minX, maxZ - minZ));
+        const pad = feather * 2.5;
+        minX -= pad;
+        maxX += pad;
+        minZ -= pad;
+        maxZ += pad;
+        const sizeX = maxX - minX, sizeZ = maxZ - minZ;
+        const MAX_DIM = 2048, MIN_DIM = 128;
+        const scale = MAX_DIM / Math.max(sizeX, sizeZ);
+        const W = Math.max(MIN_DIM, Math.min(4096, Math.ceil(sizeX * scale)));
+        const H = Math.max(MIN_DIM, Math.min(4096, Math.ceil(sizeZ * scale)));
+        const canvas = document.createElement('canvas');
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#ffffff';
+        for (const rings of projPolys) {
+            ctx.beginPath();
+            for (const ring of rings) {
+                for (let i = 0; i < ring.length; i++) {
+                    const cx = ((ring[i][0] - minX) / sizeX) * W;
+                    const cy = ((ring[i][1] - minZ) / sizeZ) * H;
+                    if (i === 0)
+                        ctx.moveTo(cx, cy);
+                    else
+                        ctx.lineTo(cx, cy);
+                }
+                ctx.closePath();
+            }
+            ctx.fill('evenodd');
+        }
+        let outCanvas = canvas;
+        if (feather > 0) {
+            const blurPx = feather * (W / sizeX);
+            if (blurPx >= 0.5) {
+                const blurred = document.createElement('canvas');
+                blurred.width = W;
+                blurred.height = H;
+                const bctx = blurred.getContext('2d');
+                bctx.fillStyle = '#000000';
+                bctx.fillRect(0, 0, W, H);
+                const MAX_BLUR = 24;
+                if (blurPx <= MAX_BLUR) {
+                    bctx.filter = `blur(${blurPx.toFixed(2)}px)`;
+                    bctx.drawImage(canvas, 0, 0);
+                    bctx.filter = 'none';
+                }
+                else {
+                    const ratio = MAX_BLUR / blurPx;
+                    const sw = Math.max(16, Math.round(W * ratio));
+                    const sh = Math.max(16, Math.round(H * ratio));
+                    const small = document.createElement('canvas');
+                    small.width = sw;
+                    small.height = sh;
+                    const sctx = small.getContext('2d');
+                    sctx.fillStyle = '#000000';
+                    sctx.fillRect(0, 0, sw, sh);
+                    sctx.filter = `blur(${MAX_BLUR}px)`;
+                    sctx.drawImage(canvas, 0, 0, sw, sh);
+                    sctx.filter = 'none';
+                    bctx.imageSmoothingEnabled = true;
+                    bctx.imageSmoothingQuality = 'high';
+                    bctx.drawImage(small, 0, 0, W, H);
+                }
+                outCanvas = blurred;
+            }
+        }
+        const tex = new THREE.CanvasTexture(outCanvas);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        if (THREE.NoColorSpace)
+            tex.colorSpace = THREE.NoColorSpace;
+        else if (THREE.LinearSRGBColorSpace)
+            tex.colorSpace = THREE.LinearSRGBColorSpace;
+        else
+            tex.encoding = THREE.LinearEncoding;
+        tex.needsUpdate = true;
+        this._map.renderer?.initTexture?.(tex);
+        return { texture: tex, bounds: { minX, minZ, sizeX, sizeZ }, feather, projPolys };
+    }
+    _setupMaterialMask(mat) {
+        if (this._map?.worldGroup) {
+            this._maskOffsetUniform.value.copy(this._map.worldGroup.position);
+        }
+        mat.userData._maskUniforms = null;
+        if (this._maskEnabled && this._maskFeather > 0 && !mat.transparent) {
+            mat.transparent = true;
+        }
+        mat.onBeforeCompile = (shader) => {
+            const b = this._maskBounds;
+            const maskUniforms = {
+                maskMap: { value: this._maskTexture },
+                maskEnabled: { value: this._maskEnabled ? 1 : 0 },
+                maskInvert: { value: this._maskInvert ? 1 : 0 },
+                maskFeather: { value: this._maskFeather },
+                maskBoundsMin: {
+                    value: new THREE.Vector2(b ? b.minX : 0, b ? b.minZ : 0),
+                },
+                maskBoundsSize: {
+                    value: new THREE.Vector2(b ? b.sizeX : 1, b ? b.sizeZ : 1),
+                },
+                maskWorldOffset: this._maskOffsetUniform,
+            };
+            Object.assign(shader.uniforms, maskUniforms);
+            mat.userData._maskUniforms = maskUniforms;
+            shader.vertexShader = shader.vertexShader
+                .replace('#include <common>', `#include <common>
+                    uniform vec3 maskWorldOffset;
+                    varying vec2 vMaskWorldPos;`)
+                .replace('#include <project_vertex>', `#include <project_vertex>
+                    vec4 maskWp = modelMatrix * vec4( transformed, 1.0 );
+                    vMaskWorldPos = maskWp.xz - maskWorldOffset.xz;`);
+            shader.fragmentShader = shader.fragmentShader
+                .replace('#include <common>', `#include <common>
+                    uniform sampler2D maskMap;
+                    uniform int maskEnabled;
+                    uniform int maskInvert;
+                    uniform float maskFeather;
+                    uniform vec2 maskBoundsMin;
+                    uniform vec2 maskBoundsSize;
+                    varying vec2 vMaskWorldPos;`)
+                .replace('#include <map_fragment>', `#include <map_fragment>
+                    if (maskEnabled == 1) {
+                        vec2 maskUV = (vMaskWorldPos - maskBoundsMin) / maskBoundsSize;
+                        float maskVal = 0.0;
+                        if (maskUV.x >= 0.0 && maskUV.x <= 1.0 && maskUV.y >= 0.0 && maskUV.y <= 1.0) {
+                            maskVal = texture2D(maskMap, vec2(maskUV.x, 1.0 - maskUV.y)).r;
+                        }
+                        if (maskInvert == 1) {
+                            maskVal = 1.0 - maskVal;
+                        }
+                        if (maskFeather > 0.0) {
+                            if (maskVal <= 0.001) discard;
+                            diffuseColor.a *= maskVal;
+                        } else {
+                            if (maskVal < 0.5) discard;
+                        }
+                    }`);
+        };
+        mat.needsUpdate = true;
+    }
+    _updateMaterialMask(mat) {
+        const bounds = this._maskBounds;
+        const u = mat.userData._maskUniforms;
+        if (u) {
+            u.maskMap.value = this._maskTexture;
+            u.maskEnabled.value = this._maskEnabled ? 1 : 0;
+            u.maskInvert.value = this._maskInvert ? 1 : 0;
+            u.maskFeather.value = this._maskFeather;
+            if (bounds) {
+                u.maskBoundsMin.value.set(bounds.minX, bounds.minZ);
+                u.maskBoundsSize.value.set(bounds.sizeX, bounds.sizeZ);
+            }
+        }
+        const needsTransparent = this._opacity < 1 || (this._maskEnabled && this._maskFeather > 0);
+        if (mat.transparent !== needsTransparent) {
+            mat.transparent = needsTransparent;
+            mat.needsUpdate = true;
+        }
+    }
+    /** Проверка попадания точки (в локальных координатах worldGroup) в маску для pick(). */
+    _passesMaskAtLocalXZ(x, z) {
+        if (!this._maskEnabled || !this._maskProjPolys)
+            return true;
+        let insideAny = false;
+        for (const rings of this._maskProjPolys) {
+            let insidePoly = false;
+            for (const ring of rings) {
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                    const xi = ring[i][0], zi = ring[i][1];
+                    const xj = ring[j][0], zj = ring[j][1];
+                    const intersect = ((zi > z) !== (zj > z)) &&
+                        (x < ((xj - xi) * (z - zi)) / (zj - zi) + xi);
+                    if (intersect)
+                        insidePoly = !insidePoly;
+                }
+            }
+            if (insidePoly) {
+                insideAny = true;
+                break;
+            }
+        }
+        return this._maskInvert ? !insideAny : insideAny;
+    }
     setBlending(v) {
         this._blending = v;
         if (this._material)
@@ -284,6 +618,12 @@ export class GeoTiffLayer extends SpatialObject {
         if (!hits.length)
             return null;
         const point = hits[0].point;
+        if (this._maskEnabled && this._map.worldGroup) {
+            const lx = point.x - this._map.worldGroup.position.x;
+            const lz = point.z - this._map.worldGroup.position.z;
+            if (!this._passesMaskAtLocalXZ(lx, lz))
+                return null;
+        }
         const lonLat = this._map.unprojectToLonLat(point.x, point.z);
         if (!lonLat)
             return null;
@@ -492,6 +832,9 @@ export class GeoTiffLayer extends SpatialObject {
         if (this._material) {
             applyGapMaskToMaterial(this._material, map);
         }
+        if (this._maskEnabled && map.worldGroup) {
+            this._maskOffsetUniform.value.copy(map.worldGroup.position);
+        }
         this._group.visible = true;
         this._isVisible = true;
     }
@@ -561,6 +904,9 @@ export class GeoTiffLayer extends SpatialObject {
                 this._mergedIntoMap = true;
             }
             else {
+                if (this.mask && !this._maskEnabled) {
+                    this._rebuildAndApplyMask();
+                }
                 this._buildMesh();
                 this._map.worldGroup.add(this._group);
                 this._mergedIntoMap = false;
@@ -1573,6 +1919,7 @@ export class GeoTiffLayer extends SpatialObject {
         });
         // Применяем stencil-маску Graticule для лепестковых и ограниченных проекций
         applyGapMaskToMaterial(material, this._map);
+        this._setupMaterialMask(material);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.renderOrder = this._renderOrder;
         this._group.clear();

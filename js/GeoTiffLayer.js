@@ -4,6 +4,7 @@ import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
 import { fromArrayBuffer, Pool } from './js_TP/geotiff.bundle.js';
 import { resolveColorRamp, sampleColorRamp, parseColorToRGBA } from './ColorRamps.js';
+import { applyGapMaskToMaterial } from './PolygonUtils.js';
 /** @private */ const GEOTIFF_RENDER_ORDER = 995;
 /** @private */ const DEFAULT_WORKER_URL = new URL('./js_TP/geotiff.worker.js', import.meta.url).href;
 /** @private */ const DEFAULT_HEIGHT_SCALE = 1.0;
@@ -488,6 +489,9 @@ export class GeoTiffLayer extends SpatialObject {
                 }
             }
         }
+        if (this._material) {
+            applyGapMaskToMaterial(this._material, map);
+        }
         this._group.visible = true;
         this._isVisible = true;
     }
@@ -876,15 +880,31 @@ export class GeoTiffLayer extends SpatialObject {
         const rgba = parseColorToRGBA(c);
         return [rgba.r, rgba.g, rgba.b, rgba.a];
     }
+    /** Приводит долготу lon к диапазону [ox, ox + W*rx], если растр в географической СК (напр. 0..360). */
+    _normalizeLonForRaster(lon) {
+        if (!this._crs?.isGeographic || !this._geoOrigin || !this._geoResolution)
+            return lon;
+        const ox = this._geoOrigin[0];
+        const rx = this._geoResolution[0];
+        const minX = Math.min(ox, ox + this._rawWidth * rx);
+        const maxX = Math.max(ox, ox + this._rawWidth * rx);
+        if (lon < minX && lon + 360 <= maxX + 1)
+            return lon + 360;
+        if (lon > maxX && lon - 360 >= minX - 1)
+            return lon - 360;
+        return lon;
+    }
     _sampleAtLonLat(lon, lat) {
         if (!this._rawData || !this._geoOrigin || !this._geoResolution)
             return null;
         let xy;
         const code = this._crs?.code;
-        if (code === 'EPSG:4326' || code === 'CRS:84')
-            xy = [lon, lat];
-        else if (typeof this._crs?.fromLonLatSafe === 'function')
+        if (code === 'EPSG:4326' || code === 'CRS:84') {
+            xy = [this._normalizeLonForRaster(lon), lat];
+        }
+        else if (typeof this._crs?.fromLonLatSafe === 'function') {
             xy = this._crs.fromLonLatSafe([lon, lat]);
+        }
         else if (typeof this._crs?.fromLonLat === 'function') {
             try {
                 xy = this._crs.fromLonLat([lon, lat]);
@@ -1012,7 +1032,7 @@ export class GeoTiffLayer extends SpatialObject {
                 let xy;
                 if (isGeo) {
                     xy = ll;
-                    ll[0] = lon;
+                    ll[0] = this._normalizeLonForRaster(lon);
                     ll[1] = lat;
                 }
                 else if (hasSafe) {
@@ -1319,6 +1339,24 @@ export class GeoTiffLayer extends SpatialObject {
         }
         return cnt > 0 ? sum / cnt : null;
     }
+    /** Безопасное проецирование точки из CRS растра в world-координаты карты. */
+    _projectCrsToWorld(x, yCrs) {
+        let sx = x, sy = yCrs;
+        if (this._crs?.isGeographic) {
+            const maxLat = this._map?.projection?.maxLatDeg ?? 85.05112878;
+            sy = Math.max(-maxLat, Math.min(maxLat, sy));
+            // Поджимаем полупиксельные вылеты за ±180° (например, -180.125 .. +180.125)
+            if (sx < -180 && sx >= -185)
+                sx = -180;
+            if (sx > 180 && sx <= 185)
+                sx = 180;
+        }
+        const pt = this._map.project([sx, sy], this._crs);
+        if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) {
+            return null;
+        }
+        return pt;
+    }
     _computeWorldCorners(image) {
         const width = image.getWidth(), height = image.getHeight();
         const origin = image.getOrigin(), resolution = image.getResolution();
@@ -1332,31 +1370,36 @@ export class GeoTiffLayer extends SpatialObject {
             [ox, oy + height * ry],
             [ox + width * rx, oy + height * ry]
         ];
-        this._cornersCrs = cornersCrs; // ← NEW
-        const map = this._map;
+        this._cornersCrs = cornersCrs;
         const y = this._altitude;
         this._worldPositions = cornersCrs.map(([x, yCrs]) => {
-            const [wx, wz] = map.project([x, yCrs], this._crs);
-            return new THREE.Vector3(wx, y, wz);
+            const pt = this._projectCrsToWorld(x, yCrs);
+            return pt ? new THREE.Vector3(pt[0], y, pt[1]) : new THREE.Vector3(0, y, 0);
         });
     }
     _computeCentroid() {
         const positions = this._worldPositions;
-        if (positions.length < 4) {
-            this._centroidWorld.set(0, 0, 0);
+        this._centroidWorld.set(0, this._altitude, 0);
+        if (positions.length < 4)
             return;
+        let count = 0;
+        let sumX = 0, sumZ = 0;
+        for (const p of positions) {
+            if (Number.isFinite(p.x) && Number.isFinite(p.z)) {
+                sumX += p.x;
+                sumZ += p.z;
+                count++;
+            }
         }
-        this._centroidWorld.set(0, 0, 0);
-        for (const p of positions)
-            this._centroidWorld.add(p);
-        this._centroidWorld.multiplyScalar(1 / positions.length);
-        this._centroidWorld.y = this._altitude;
+        if (count > 0) {
+            this._centroidWorld.set(sumX / count, this._altitude, sumZ / count);
+        }
     }
     _autoMeshSegments() {
         const maxDim = Math.max(this._imageWidth || 512, this._imageHeight || 512);
         return Math.min(256, Math.max(64, Math.ceil(maxDim / 8)));
     }
-    /** true, если прямые в source-CRS могут изгибаться в map-CRS. */
+    /** true, если прямые или шаг сетки в source-CRS деформируются в map-CRS. */
     _isWarpedProjection() {
         const mapProj = this._map?.projection;
         const srcCrs = this._crs;
@@ -1364,48 +1407,45 @@ export class GeoTiffLayer extends SpatialObject {
             return false;
         if (mapProj === srcCrs || mapProj.code === srcCrs.code)
             return false;
-        // Прямые сохраняются, если обе проекции — Mercator / geographic
-        // (или одна Mercator, другая geographic — параллели/меридианы прямые).
         const bothMerc = mapProj.isMercator && srcCrs.isMercator;
         const bothGeo = mapProj.isGeographic && srcCrs.isGeographic;
-        const mixedAxis = (mapProj.isMercator && srcCrs.isGeographic) ||
-            (mapProj.isGeographic && srcCrs.isMercator);
-        if (bothMerc || bothGeo || mixedAxis)
+        if (bothMerc || bothGeo)
             return false;
-        // Всё остальное — поликонические, конические, UTM, стерео, полиномиальные.
         return true;
     }
-    /** Авто-число сегментов для искривления: ~1 на 3° span, 8..64. */
     _autoWarpSegments() {
         const corners = this._cornersCrs;
         if (!corners)
             return 16;
         let span = 60;
         try {
-            const c0 = this._crs.toLonLat(corners[0]);
-            const c3 = this._crs.toLonLat(corners[3]);
-            if (c0 && c3) {
-                const dLon = Math.abs(c3[0] - c0[0]);
-                const dLat = Math.abs(c3[1] - c0[1]);
+            if (this._crs?.isGeographic) {
+                const dLon = Math.abs(corners[3][0] - corners[0][0]);
+                const dLat = Math.abs(corners[3][1] - corners[0][1]);
                 span = Math.max(dLon, dLat);
+            }
+            else {
+                const c0 = this._crs.toLonLat(corners[0]);
+                const c3 = this._crs.toLonLat(corners[3]);
+                if (c0 && c3) {
+                    const dLon = Math.abs(c3[0] - c0[0]);
+                    const dLat = Math.abs(c3[1] - c0[1]);
+                    span = Math.max(dLon, dLat);
+                }
             }
         }
         catch { /* fallback */ }
-        return Math.max(8, Math.min(64, Math.ceil(span / 3)));
+        return Math.max(8, Math.min(180, Math.ceil(span / 2)));
     }
     _buildMesh() {
         const positions = this._worldPositions;
         if (positions.length < 4)
             return;
         this._disposeMesh();
-        const centroid = new THREE.Vector3();
-        positions.forEach(p => centroid.add(p));
-        centroid.divideScalar(positions.length);
-        this._centroidWorld.copy(centroid);
+        this._computeCentroid();
+        const centroid = this._centroidWorld.clone();
         const canDrape = this._drape && this._rawData && this._geoOrigin
             && this._geoResolution && this._imageWidth > 0 && this._imageHeight > 0;
-        // Для деформированных проекций рёбра source-прямоугольника изгибаются.
-        // Разбиваем сеткой — даже без drape.
         const warped = this._isWarpedProjection();
         const segDrape = canDrape ? (this._meshSegments ?? this._autoMeshSegments()) : 1;
         const segWarp = (warped && !canDrape)
@@ -1416,19 +1456,22 @@ export class GeoTiffLayer extends SpatialObject {
         const geometry = new THREE.PlaneGeometry(1, 1, seg, seg);
         const posAttr = geometry.attributes.position;
         if (seg === 1) {
-            // 4 угла — плоский прямоугольник без искривления.
             for (let i = 0; i < 4; i++) {
-                posAttr.setXYZ(i, positions[i].x - centroid.x, positions[i].y - centroid.y, positions[i].z - centroid.z);
+                const px = Number.isFinite(positions[i].x) ? positions[i].x - centroid.x : 0;
+                const py = Number.isFinite(positions[i].y) ? positions[i].y - centroid.y : 0;
+                const pz = Number.isFinite(positions[i].z) ? positions[i].z - centroid.z : 0;
+                posAttr.setXYZ(i, px, py, pz);
             }
         }
         else {
-            // Сетка grid × grid: drape и/или warp.
-            const map = this._map, crs = this._crs;
             const hs = this._elevationHeightScale;
             const corners = this._cornersCrs;
             if (!corners || corners.length < 4) {
                 for (let i = 0; i < 4; i++) {
-                    posAttr.setXYZ(i, positions[i].x - centroid.x, positions[i].y - centroid.y, positions[i].z - centroid.z);
+                    const px = Number.isFinite(positions[i].x) ? positions[i].x - centroid.x : 0;
+                    const py = Number.isFinite(positions[i].y) ? positions[i].y - centroid.y : 0;
+                    const pz = Number.isFinite(positions[i].z) ? positions[i].z - centroid.z : 0;
+                    posAttr.setXYZ(i, px, py, pz);
                 }
             }
             else {
@@ -1437,11 +1480,15 @@ export class GeoTiffLayer extends SpatialObject {
                 const spanY = corners[2][1] - c0y;
                 const W = this._imageWidth, H = this._imageHeight;
                 const maxPx = W - 1, maxPy = H - 1;
+                const count = grid * grid;
+                const valid = new Uint8Array(count);
+                let sumX = 0, sumZ = 0, nValid = 0;
                 for (let j = 0; j < grid; j++) {
                     const v = j / seg;
                     const srcY = c0y + v * spanY;
                     const py = canDrape ? Math.min(maxPy, v * H) : 0;
                     for (let i = 0; i < grid; i++) {
+                        const idx = j * grid + i;
                         const u = i / seg;
                         const srcX = c0x + u * spanX;
                         let yWorld = 0;
@@ -1452,9 +1499,59 @@ export class GeoTiffLayer extends SpatialObject {
                                 hgt = 0;
                             yWorld = hgt * hs;
                         }
-                        const [wx, wz] = map.project([srcX, srcY], crs);
-                        posAttr.setXYZ(j * grid + i, wx - centroid.x, yWorld, wz - centroid.z);
+                        const pt = this._projectCrsToWorld(srcX, srcY);
+                        if (pt) {
+                            posAttr.setXYZ(idx, pt[0], yWorld, pt[1]);
+                            valid[idx] = 1;
+                            sumX += pt[0];
+                            sumZ += pt[1];
+                            nValid++;
+                        }
+                        else {
+                            posAttr.setXYZ(idx, 0, 0, 0);
+                        }
                     }
+                }
+                if (nValid > 0) {
+                    centroid.set(sumX / nValid, this._altitude, sumZ / nValid);
+                    this._centroidWorld.copy(centroid);
+                }
+                for (let idx = 0; idx < count; idx++) {
+                    if (valid[idx]) {
+                        posAttr.setX(idx, posAttr.getX(idx) - centroid.x);
+                        posAttr.setZ(idx, posAttr.getZ(idx) - centroid.z);
+                    }
+                }
+                // Отсекаем треугольники, перепрыгивающие через разрывы лепестков
+                // или антимеридиан (как в Tiles.ts -> _createDeformedTileMesh)
+                const worldSize = this._map?.WORLD_SIZE || 40075016.68557849;
+                const maxEdge2 = (0.22 * worldSize) ** 2;
+                const outIndices = [];
+                const d2 = (a, b) => {
+                    const dx = posAttr.getX(a) - posAttr.getX(b);
+                    const dz = posAttr.getZ(a) - posAttr.getZ(b);
+                    return dx * dx + dz * dz;
+                };
+                const tryTri = (a, b, c) => {
+                    if (!valid[a] || !valid[b] || !valid[c])
+                        return;
+                    if (d2(a, b) > maxEdge2 || d2(b, c) > maxEdge2 || d2(c, a) > maxEdge2)
+                        return;
+                    outIndices.push(a, b, c);
+                };
+                for (let iy = 0; iy < seg; iy++) {
+                    for (let ix = 0; ix < seg; ix++) {
+                        const a = ix + grid * iy;
+                        const b = ix + grid * (iy + 1);
+                        const c = ix + 1 + grid * (iy + 1);
+                        const d = ix + 1 + grid * iy;
+                        tryTri(a, b, d);
+                        tryTri(b, c, d);
+                    }
+                }
+                if (outIndices.length > 0) {
+                    const IndexArr = count > 65535 ? Uint32Array : Uint16Array;
+                    geometry.setIndex(new THREE.BufferAttribute(new IndexArr(outIndices), 1));
                 }
             }
         }
@@ -1474,6 +1571,8 @@ export class GeoTiffLayer extends SpatialObject {
             polygonOffsetFactor: this._polygonOffset,
             polygonOffsetUnits: this._polygonOffset
         });
+        // Применяем stencil-маску Graticule для лепестковых и ограниченных проекций
+        applyGapMaskToMaterial(material, this._map);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.renderOrder = this._renderOrder;
         this._group.clear();
@@ -1597,13 +1696,14 @@ export class GeoTiffLayer extends SpatialObject {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const [x, y] of corners) {
             let tx, ty;
-            if (this._crs === dst) {
+            if (this._crs === dst || this._crs.code === dst.code) {
                 tx = x;
                 ty = y;
             }
             else {
-                const lonLat = this._crs.toLonLat([x, y]);
-                const conv = dst.fromLonLat(lonLat);
+                const lonLat = this._crs.isGeographic ? [x, y] : this._crs.toLonLat([x, y]);
+                const clamped = dst.clampLonLat ? dst.clampLonLat(lonLat) : lonLat;
+                const conv = dst.fromLonLat(clamped);
                 tx = conv[0];
                 ty = conv[1];
             }
@@ -1620,6 +1720,12 @@ export class GeoTiffLayer extends SpatialObject {
         }
         if (!isFinite(minX))
             return null;
+        if (dst.isGeographic) {
+            minX = Math.max(-180, minX);
+            maxX = Math.min(180, maxX);
+            minY = Math.max(-85.05112878, minY);
+            maxY = Math.min(85.05112878, maxY);
+        }
         return [[minX, minY], [maxX, maxY]];
     }
 }

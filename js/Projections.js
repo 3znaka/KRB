@@ -329,9 +329,9 @@ export class Projection {
         const lon = lonLat[0], lat = lonLat[1];
         if (!Number.isFinite(lon) || !Number.isFinite(lat))
             return false;
-        if (Math.abs(lon) > 180.0001)
+        if (Math.abs(lon) > 360.5)
             return false;
-        if (Math.abs(lat) > 90.0001)
+        if (Math.abs(lat) > 90.5)
             return false;
         return true;
     }
@@ -346,26 +346,35 @@ export class Projection {
         return true;
     }
     clampLonLat(lonLat) {
-        if (this.maxLatDeg === null)
-            return lonLat;
         const lon = lonLat[0], lat = lonLat[1];
         if (!Number.isFinite(lat))
             return lonLat;
-        if (Math.abs(lat) <= this.maxLatDeg)
-            return lonLat;
-        return [lon, Math.sign(lat) * this.maxLatDeg];
+        const maxLat = this.maxLatDeg ?? 89.999999;
+        const cLat = Math.max(-maxLat, Math.min(maxLat, lat));
+        const cLon = (lon < -180 && lon >= -185) ? -180 : ((lon > 180 && lon <= 185) ? 180 : lon);
+        return [cLon, cLat];
     }
     _getConv() {
         return this._conv ?? (this._conv = proj4(HARDCODED['EPSG:4326'], this.def));
     }
     fromLonLat(coord) {
+        const maxLat = this.maxLatDeg ?? 89.999999;
+        const lon = coord[0];
+        const lat = Math.max(-maxLat, Math.min(maxLat, coord[1]));
+        if (this.isGeographic) {
+            return [lon, lat];
+        }
         if (this._fastMerc) {
             const a = this._a, D = Math.PI / 180;
-            return [a * coord[0] * D, a * Math.log(Math.tan(Math.PI / 4 + coord[1] * D / 2))];
+            return [a * lon * D, a * Math.log(Math.tan(Math.PI / 4 + lat * D / 2))];
         }
-        return this._getConv().forward(coord);
+        return this._getConv().forward([lon, lat]);
     }
     toLonLat(coord) {
+        if (this.isGeographic) {
+            const lat = Math.max(-89.999999, Math.min(89.999999, coord[1]));
+            return [coord[0], lat];
+        }
         if (this._fastMerc) {
             const a = this._a, R = 180 / Math.PI;
             return [coord[0] / a * R, (2 * Math.atan(Math.exp(coord[1] / a)) - Math.PI / 2) * R];
@@ -375,14 +384,17 @@ export class Projection {
     convertTo(other, coord) {
         if (!other)
             return coord;
+        const inCoord = this.isGeographic
+            ? (typeof other.clampLonLat === 'function' ? other.clampLonLat(coord) : this.clampLonLat(coord))
+            : coord;
         if (other.def == null)
-            return other.fromLonLat(this.toLonLat(coord));
+            return other.fromLonLat(this.toLonLat(inCoord));
         let c = this._convTo.get(other.code);
         if (!c) {
             c = proj4(this.def, other.def);
             this._convTo.set(other.code, c);
         }
-        return c.forward(coord);
+        return c.forward(inCoord);
     }
     fromLonLatSafe(coord) {
         if (!this.isValidLonLat(coord))
@@ -397,7 +409,7 @@ export class Projection {
         const out = this.toLonLat(coord);
         if (!out || !Number.isFinite(out[0]) || !Number.isFinite(out[1]))
             return null;
-        if (Math.abs(out[0]) > 180.0001 || Math.abs(out[1]) > 90.0001)
+        if (Math.abs(out[0]) > 360.5 || Math.abs(out[1]) > 90.5)
             return null;
         return out;
     }

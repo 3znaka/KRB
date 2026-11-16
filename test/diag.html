@@ -17,7 +17,7 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
-await KRB.addCrs(['ADPKP:0057']);
+await KRB.addCrs(['ADPKP:0072']);
 
 // 1. Создаем сетку явно
 const graticule = new KRB.Graticule({ 
@@ -30,7 +30,7 @@ const graticule = new KRB.Graticule({
 // 2. Передаем её в карту
 const map = new KRB.Map({
     target: 'map',
-    crs: 'ADPKP:0057',
+    crs: 'ADPKP:0072',
     graticule: graticule, // передаем экземпляр
     view: new KRB.View({
         centerLonLat: [10, 20],

@@ -205,7 +205,7 @@ const HALF_Y = (maxY || 2e7) * 1.15;
 import { Ellipsoid } from '../Ellipsoid.js';
 
 export default {
-    code: 'ADPKP:0057',
+    code: 'ADPKP:0072',
     formula: [
         (lat, lon) => forward(lat, lon)[0],
         (lat, lon) => forward(lat, lon)[1],

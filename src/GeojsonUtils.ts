@@ -427,6 +427,8 @@ export interface GeoJSONLayerOptions {
     tooltipOnHover?: boolean;
     titleField?: string | null;
 
+    extendAntarctica?: boolean;
+
     featureFilter?: FeatureFilterInput;
     /** @deprecated Используйте `featureFilter`. */
     filter?: FeatureFilterInput;

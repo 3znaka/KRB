@@ -22,6 +22,8 @@ const { Projections, ELLIPSOIDS } = await import('./../js/Projections.js');
 
 await KRB.addCrs(['ADPKP:0057', 'EPSG:32637', 'EPSG:32601']);
 
+
+
  const map = new KRB.Map({
         target: 'map',
 debug: true,
@@ -29,7 +31,7 @@ debug: true,
         layers: [],
         graticule: {
             crs: 'EPSG:4326',
-            step: { lat: 15, lon: 5 },
+            step: { lat: 5, lon: 5 },
             color: '#888',
             width: 1,
             opacity: 0.6,
@@ -46,6 +48,7 @@ debug: true,
 
   const world = new KRB.GeoJSONLayer({
         url: 'world.geojson',
+        extendAntarctica: true,
         defaultFillColor:   '#aa0101',
       
         defaultStrokeColor: '#000000',

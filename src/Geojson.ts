@@ -51,6 +51,8 @@ export class GeoJSONLayer extends Layer {
     public tooltipOnHover = false;
     public legend: MapLegend | null = null;
 
+    public extendAntarctica = false;
+
     public choropleth: ChoroplethConfig | null = null;
     public _choroplethBreaks: number[] = [];
     public _choroplethRamp: any = null;
@@ -163,6 +165,8 @@ export class GeoJSONLayer extends Layer {
         this.diagram3DToOptions = o.diagram3DToOptions ?? null;
         this.onEachDiagram3D = o.onEachDiagram3D ?? null;
         this.choropleth = o.choropleth ?? null;
+
+        this.extendAntarctica = o.extendAntarctica ?? false;
 
         this.url = o.url ?? null;
         this.data = o.data ?? null;
@@ -311,7 +315,13 @@ export class GeoJSONLayer extends Layer {
         if (this.filterSpec != null) return this.filterSpec;
         return this.featureFilter;
     }
-    addData(data: GeoJSONInput): this { this._parse(data); return this; }
+    addData(data: GeoJSONInput): this { 
+        const finalData = this.extendAntarctica 
+            ? this._extendAntarcticaGeoJSON(data) 
+            : data;
+        this._parse(finalData); 
+        return this; 
+    }
 
     // ── filter ──────────────────────────────────────────────────────
     private _applyFilter(input: unknown): void {
@@ -348,16 +358,24 @@ export class GeoJSONLayer extends Layer {
     }
 
     // ── load ────────────────────────────────────────────────────────
-    private async _load(): Promise<void> {
+   private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
         try {
-            if (this.data) geojson = this.data;
-            else if (this.url) {
+            if (this.data) {
+                geojson = this.extendAntarctica 
+                    ? this._extendAntarcticaGeoJSON(this.data) 
+                    : this.data;
+            } else if (this.url) {
                 const resp = await fetch(this.url);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                geojson = await resp.json() as GeoJSONInput;
+                const fetched = await resp.json() as GeoJSONInput;
+                geojson = this.extendAntarctica 
+                    ? this._extendAntarcticaGeoJSON(fetched) 
+                    : fetched;
             }
             if (!geojson) { console.warn('GeoJSONLayer: no data or URL'); return; }
+
+
             if (this.choropleth) {
                 const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
                 this._choroplethRamp = this.choropleth.colorRampReverse ? invertColorRamp(baseRamp) : baseRamp;
@@ -670,6 +688,52 @@ export class GeoJSONLayer extends Layer {
             coins: this._diagramCoins ?? cfg.coins,
             segmentSizes: cfg.segmentSizes,
         };
+    }
+
+
+    /**
+     * Растягивает Антарктиду до -90°, если исходные данные обрезаны по -84°.
+     * Клонирует данные, чтобы не мутировать оригинальный объект.
+     */
+    private _extendAntarcticaGeoJSON(geojson: GeoJSONInput): GeoJSONInput {
+        if (!geojson) return geojson;
+        
+        // Глубокое клонирование (безопасно для больших объектов)
+        const clone = typeof structuredClone === 'function' 
+            ? structuredClone(geojson) 
+            : JSON.parse(JSON.stringify(geojson));
+
+        const processFeature = (feature: GeoJSONFeature) => {
+            if (!feature.geometry) return;
+            const geomType = feature.geometry.type;
+            if (geomType !== 'Polygon' && geomType !== 'MultiPolygon') return;
+
+            // Ищем Антарктиду по имени (учитываем разные регистры и языки)
+            const props = feature.properties ?? {};
+            const name = String(props.name || props.NAME || props.NAME_RU || '').toLowerCase();
+            if (!name.includes('antarctica') && !name.includes('антарктида')) return;
+
+                        const extendCoords = (coords: any) => {
+                if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+                    // Не доходим ровно до полюса: некоторые проекции (Гуд/Мольвейде)
+                    // ломаются в Math.sin(±90°) и возвращают NaN.
+                    if (coords[1] < -84) coords[1] = -89.9999;
+                    else if (coords[1] > 84) coords[1] = 89.9999;
+                } else if (Array.isArray(coords)) {
+                    for (const c of coords) extendCoords(c);
+                }
+            };
+            extendCoords(feature.geometry.coordinates);
+        };
+
+        if (clone.type === 'FeatureCollection') {
+            clone.features.forEach(processFeature);
+        } else if (clone.type === 'Feature') {
+            processFeature(clone as GeoJSONFeature);
+        } else if (clone.type === 'Polygon' || clone.type === 'MultiPolygon') {
+            processFeature({ type: 'Feature', geometry: clone as GeoJSONGeometry, properties: {} });
+        }
+        return clone;
     }
 
     // ── parsers (тонкие обёртки) ────────────────────────────────────

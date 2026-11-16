@@ -23,6 +23,7 @@ export class GeoJSONLayer extends Layer {
     crs = null;
     tooltipOnHover = false;
     legend = null;
+    extendAntarctica = false;
     choropleth = null;
     _choroplethBreaks = [];
     _choroplethRamp = null;
@@ -118,6 +119,7 @@ export class GeoJSONLayer extends Layer {
         this.diagram3DToOptions = o.diagram3DToOptions ?? null;
         this.onEachDiagram3D = o.onEachDiagram3D ?? null;
         this.choropleth = o.choropleth ?? null;
+        this.extendAntarctica = o.extendAntarctica ?? false;
         this.url = o.url ?? null;
         this.data = o.data ?? null;
         this.crs = o.crs ?? null;
@@ -272,7 +274,13 @@ export class GeoJSONLayer extends Layer {
             return this.filterSpec;
         return this.featureFilter;
     }
-    addData(data) { this._parse(data); return this; }
+    addData(data) {
+        const finalData = this.extendAntarctica
+            ? this._extendAntarcticaGeoJSON(data)
+            : data;
+        this._parse(finalData);
+        return this;
+    }
     // ── filter ──────────────────────────────────────────────────────
     _applyFilter(input) {
         if (Array.isArray(input)) {
@@ -318,13 +326,19 @@ export class GeoJSONLayer extends Layer {
     async _load() {
         let geojson = null;
         try {
-            if (this.data)
-                geojson = this.data;
+            if (this.data) {
+                geojson = this.extendAntarctica
+                    ? this._extendAntarcticaGeoJSON(this.data)
+                    : this.data;
+            }
             else if (this.url) {
                 const resp = await fetch(this.url);
                 if (!resp.ok)
                     throw new Error(`HTTP ${resp.status}`);
-                geojson = await resp.json();
+                const fetched = await resp.json();
+                geojson = this.extendAntarctica
+                    ? this._extendAntarcticaGeoJSON(fetched)
+                    : fetched;
             }
             if (!geojson) {
                 console.warn('GeoJSONLayer: no data or URL');
@@ -699,6 +713,55 @@ export class GeoJSONLayer extends Layer {
             coins: this._diagramCoins ?? cfg.coins,
             segmentSizes: cfg.segmentSizes,
         };
+    }
+    /**
+     * Растягивает Антарктиду до -90°, если исходные данные обрезаны по -84°.
+     * Клонирует данные, чтобы не мутировать оригинальный объект.
+     */
+    _extendAntarcticaGeoJSON(geojson) {
+        if (!geojson)
+            return geojson;
+        // Глубокое клонирование (безопасно для больших объектов)
+        const clone = typeof structuredClone === 'function'
+            ? structuredClone(geojson)
+            : JSON.parse(JSON.stringify(geojson));
+        const processFeature = (feature) => {
+            if (!feature.geometry)
+                return;
+            const geomType = feature.geometry.type;
+            if (geomType !== 'Polygon' && geomType !== 'MultiPolygon')
+                return;
+            // Ищем Антарктиду по имени (учитываем разные регистры и языки)
+            const props = feature.properties ?? {};
+            const name = String(props.name || props.NAME || props.NAME_RU || '').toLowerCase();
+            if (!name.includes('antarctica') && !name.includes('антарктида'))
+                return;
+            const extendCoords = (coords) => {
+                if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+                    // Не доходим ровно до полюса: некоторые проекции (Гуд/Мольвейде)
+                    // ломаются в Math.sin(±90°) и возвращают NaN.
+                    if (coords[1] < -84)
+                        coords[1] = -89.9999;
+                    else if (coords[1] > 84)
+                        coords[1] = 89.9999;
+                }
+                else if (Array.isArray(coords)) {
+                    for (const c of coords)
+                        extendCoords(c);
+                }
+            };
+            extendCoords(feature.geometry.coordinates);
+        };
+        if (clone.type === 'FeatureCollection') {
+            clone.features.forEach(processFeature);
+        }
+        else if (clone.type === 'Feature') {
+            processFeature(clone);
+        }
+        else if (clone.type === 'Polygon' || clone.type === 'MultiPolygon') {
+            processFeature({ type: 'Feature', geometry: clone, properties: {} });
+        }
+        return clone;
     }
     // ── parsers (тонкие обёртки) ────────────────────────────────────
     _parseIconSize(raw) { return parseIconSize(raw); }

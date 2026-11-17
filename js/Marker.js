@@ -7,9 +7,10 @@
  *
  * @module marker
  */
-import { Projections } from './Projections.js';
+import { Projections, isEcefCrs } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
 import { SpatialObject } from './SpatialObject.js';
+import { ecefToGeodetic } from './Ellipsoid.js';
 const _mapPanes = new WeakMap();
 const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
 /** @deprecated Иконки рендерятся через TextManager. */
@@ -77,11 +78,24 @@ export class Marker extends SpatialObject {
         if (!options.position || options.position.length < 2) {
             throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
         }
-        this._coord = [options.position[0], options.position[1]];
-        const posZ = options.position[2];
-        this._nodeHeight = Number.isFinite(posZ) ? posZ : 0;
+        // 1. Сначала определяем CRS
         this._crsCode = options.crs ?? null;
         this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
+        // 2. Умный перехват [X, Y, Z] — по типу проекции, а не по коду
+        if (options.position.length === 3 && isEcefCrs(this._crs)) {
+            const geo = ecefToGeodetic(options.position[0], options.position[1], options.position[2], this._crs.ellipsoid // ← эллипсоид данной CRS из def, а не всегда WGS84
+            );
+            this._lon = geo.lon;
+            this._lat = geo.lat;
+            this._nodeHeight = geo.h;
+            this._positionSetAsLonLat = true;
+            this._coord = [0, 0];
+        }
+        else {
+            this._coord = [options.position[0], options.position[1]];
+            const posZ = options.position[2];
+            this._nodeHeight = Number.isFinite(posZ) ? posZ : 0;
+        }
         this._iconSize = options.iconSize ?? [16, 16];
         this._anchor = options.anchor ?? [0.5, 1.0];
         this._rotation = options.rotation ?? 0;

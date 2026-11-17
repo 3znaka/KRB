@@ -8,9 +8,12 @@
  * @module marker
  */
 
-import { Projections } from './Projections.js';
+import { Projections, isEcefCrs } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
 import { SpatialObject, TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
+import { ecefToGeodetic } from './Ellipsoid.js';
+
+
 
 // =====================================================================
 // Типы
@@ -133,21 +136,35 @@ export class Marker extends SpatialObject {
 
     constructor(options: MarkerOptions) {
         super();
-
         if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
-
         this._properties = options.properties ?? {};
         this._userData = options.userData ?? {};
-
         if (!options.position || options.position.length < 2) {
             throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
         }
+
+    // 1. Сначала определяем CRS
+    this._crsCode = options.crs ?? null;
+    this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
+
+    // 2. Умный перехват [X, Y, Z] — по типу проекции, а не по коду
+    if (options.position.length === 3 && isEcefCrs(this._crs)) {
+        const geo = ecefToGeodetic(
+            options.position[0],
+            options.position[1],
+            options.position[2],
+            this._crs.ellipsoid   // ← эллипсоид данной CRS из def, а не всегда WGS84
+        );
+        this._lon = geo.lon;
+        this._lat = geo.lat;
+        this._nodeHeight = geo.h;
+        this._positionSetAsLonLat = true;
+        this._coord = [0, 0];
+    } else {
         this._coord = [options.position[0], options.position[1]];
         const posZ = options.position[2];
         this._nodeHeight = Number.isFinite(posZ) ? (posZ as number) : 0;
-
-        this._crsCode = options.crs ?? null;
-        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
+    }
 
         this._iconSize = options.iconSize ?? [16, 16];
         this._anchor = options.anchor ?? [0.5, 1.0];
@@ -162,7 +179,6 @@ export class Marker extends SpatialObject {
         this._onClick = options.onClick ?? null;
         this._clusterable = options.clusterable !== undefined ? options.clusterable : true;
         this._tooltipText = options.tooltip ?? '';
-
         this._title = options.title ?? '';
         this._titleAlign = options.titleAlign ?? 'center';
         this._titleStyle = options.titleStyle ?? {};

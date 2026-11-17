@@ -2,6 +2,7 @@
 // Projections.ts
 import proj4 from './js_TP/proj4.js';
 import { Ellipsoid, ELLIPSOIDS, parseEllipsoid } from './Ellipsoid.js';
+import { createEcefProjection, isGeocentricDef } from './EcefProjection.js';
 
 export { Ellipsoid, ELLIPSOIDS, parseEllipsoid };
 
@@ -35,6 +36,7 @@ export interface FormulaProjectionOptions {
     /** Полный эллипсоид. Приоритетнее `semiMajor`. По умолчанию WGS84. */
     ellipsoid?: Ellipsoid;
     isGeographic?: boolean;
+    isGeocentric?: boolean; 
     isMercator?: boolean;
     halfExtentX?: number;
     halfExtentY?: number;
@@ -60,6 +62,7 @@ export class FormulaProjection {
         this.code         = options.code ?? `FORMULA:${++_formulaCounter}`;
         this.def          = null;                        // совместимость с Projection
         this.isGeographic = options.isGeographic ?? false;
+        this.isGeocentric = options.isGeocentric ?? false;
         this.isMercator   = options.isMercator   ?? false;
         this.projName     = 'formula';
         this.lon0         = 0;
@@ -219,6 +222,7 @@ class ScaledProjection {
     // ── Делегирование ──
     get ellipsoid()      { return this._raw.ellipsoid; }
     get isSphere()       { return this._raw.isSphere; }
+        get isGeocentric()   { return this._raw.isGeocentric === true; }
 
     /**
      * Радиус Земли в world-единицах — той же единице, что halfExtentX_world.
@@ -273,8 +277,14 @@ export class Projection {
      * @param code — код СК ('EPSG:4326', 'EPSG:32637', ...).
      * @param def  — PROJ-строка.
      */
-    constructor(code, def) {
-        this.code = code;
+constructor(code, def) {
+    if (isGeocentricDef(def)) {
+        throw new Error(
+            `${code}: +proj=geocent не поддерживается proj4. ` +
+            `Используйте createEcefProjection (addCrs делает это автоматически).`
+        );
+    }
+    this.code = code;
         this.def  = def;
         this.isGeographic = /\+proj=longlat/.test(def);
 
@@ -466,6 +476,7 @@ class ProjectionRegistry {
         for (const [code, def] of Object.entries(HARDCODED)) {
             if (!this._map.has(code)) this.register(new Projection(code, def));
         }
+    
     }
 
     register(p) { this._map.set(p.code, p); return p; }
@@ -499,6 +510,16 @@ class ProjectionRegistry {
         this._map.set(code, proj);
         this._formulaRawCache.set(formula, proj);
         return proj;
+    }
+
+        /** @private Единая точка регистрации по PROJ-строке (epsg_defs.json и customCRS). */
+    _registerDef(code: string, def: string) {
+        if (isGeocentricDef(def)) {
+            // proj4 не поддерживает geocent — строим формульную ECEF-проекцию,
+            // эллипсоид парсится ИЗ ЭТОЙ ЖЕ строки (WGS72, GRS80, krass, ...)
+            return this.register(createEcefProjection(code, parseEllipsoid(def)));
+        }
+        return this.register(new Projection(code, def));
     }
 
     /** @private */
@@ -558,7 +579,7 @@ class ProjectionRegistry {
         // 2) epsg_defs.json
         const defs = await this._loadDefs();
         const def  = defs?.[code];
-        if (def) { this.register(new Projection(code, def)); return; }
+       if (def) { this._registerDef(code, def); return; } 
 
         throw new Error(
             `addCrs(${code}): не найден ни в customCRS/${code.replace(':', '_')}.js, ` +
@@ -616,8 +637,8 @@ if (spec.formula) {
     return;
 }
         if (spec.def) {
-            this._map.set(code, new Projection(code, spec.def));
-            return;
+           this._registerDef(code, spec.def);
+        return;
         }
         throw new Error(`addCrs(${code}): спек должен содержать 'formula' или 'def'`);
     }
@@ -698,3 +719,17 @@ getCustomCrsUrl(code: string): string | null {
 
 export const Projections = new ProjectionRegistry();
 export const addCrs = (codeOrCodes: string | string[]) => Projections.addCrs(codeOrCodes);
+/**
+ * Является ли CRS геоцентрической (ECEF). Определяется по типу загруженной
+ * проекции (+proj=geocent в def), а не по списку кодов.
+ * Принимает код ('EPSG:4978') или инстанс проекции.
+ * Для строкового кода вернёт false, если CRS ещё не загружена —
+ * сначала await Projections.ensure(code).
+ */
+export function isEcefCrs(crsOrCode: string | any | null | undefined): boolean {
+    if (!crsOrCode) return false;
+    const p = typeof crsOrCode === 'string'
+        ? (Projections.has(crsOrCode) ? Projections.get(crsOrCode) : null)
+        : crsOrCode;
+    return !!(p && (p.isGeocentric === true || p._raw?.isGeocentric === true));
+}

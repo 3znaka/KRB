@@ -299,3 +299,93 @@ function parseFrac(s: string): number {
     }
     return parseFloat(s);
 }
+
+export interface EcefResult {
+    X: number;
+    Y: number;
+    Z: number;
+}
+
+export interface GeodeticResult {
+    lon: number; // градусы
+    lat: number; // градусы
+    h: number;   // метры
+}
+
+/**
+ * Преобразует геодезические координаты в ECEF.
+ */
+export function geodeticToEcef(
+    lonDeg: number,
+    latDeg: number,
+    h: number,
+    ellipsoid: Ellipsoid
+): EcefResult {
+    const lat = latDeg * Math.PI / 180;
+    const lon = lonDeg * Math.PI / 180;
+    const sinLat = Math.sin(lat);
+    const cosLat = Math.cos(lat);
+    const sinLon = Math.sin(lon);
+    const cosLon = Math.cos(lon);
+    
+    const e2 = ellipsoid.e2;
+    const N = ellipsoid.a / Math.sqrt(1 - e2 * sinLat * sinLat);
+    
+    return {
+        X: (N + h) * cosLat * cosLon,
+        Y: (N + h) * cosLat * sinLon,
+        Z: (N * (1 - e2) + h) * sinLat
+    };
+}
+
+/**
+ * Преобразует ECEF в геодезические координаты (итерационный метод).
+ */
+export function ecefToGeodetic(
+    X: number,
+    Y: number,
+    Z: number,
+    ellipsoid: Ellipsoid
+): GeodeticResult {
+    const e2 = ellipsoid.e2;
+    const p = Math.sqrt(X * X + Y * Y);
+    const lon = Math.atan2(Y, X);
+    
+    // Начальное приближение для широты
+    let lat = Math.atan2(Z, p * (1 - e2));
+    
+    // Итерационное уточнение (обычно хватает 3-5 итераций для сходимости)
+    for (let i = 0; i < 5; i++) {
+        const sinLat = Math.sin(lat);
+        const N = ellipsoid.a / Math.sqrt(1 - e2 * sinLat * sinLat);
+        lat = Math.atan2(Z + e2 * N * sinLat, p);
+    }
+    
+    const sinLat = Math.sin(lat);
+    const cosLat = Math.cos(lat);
+    const N = ellipsoid.a / Math.sqrt(1 - e2 * sinLat * sinLat);
+    
+    // Высота над эллипсоидом
+    const h = cosLat > 1e-10 ? p / cosLat - N : Math.abs(Z) - ellipsoid.b;
+    
+    return {
+        lon: lon * 180 / Math.PI,
+        lat: lat * 180 / Math.PI,
+        h
+    };
+}
+
+/**
+ * Является ли CRS геоцентрической (ECEF). Определяется по типу загруженной
+ * проекции (+proj=geocent в def), а не по списку кодов.
+ * Принимает код ('EPSG:4978') или инстанс проекции.
+ * Для строкового кода вернёт false, если CRS ещё не загружена —
+ * сначала await Projections.ensure(code).
+ */
+export function isEcefCrs(crsOrCode: string | any | null | undefined): boolean {
+    if (!crsOrCode) return false;
+    const p = typeof crsOrCode === 'string'
+        ? (Projections.has(crsOrCode) ? Projections.get(crsOrCode) : null)
+        : crsOrCode;
+    return !!(p && (p.isGeocentric === true || p._raw?.isGeocentric === true));
+}

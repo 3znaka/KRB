@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Geotiff ECEF Test</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: 100%; height: 100dvh; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// 1. ИМПОРТИРУЕМ НАПРЯМУЮ из Ellipsoid.js (проверьте путь, если у вас он отличается)
+import { ecefToGeodetic, ELLIPSOIDS } from '../js/Ellipsoid.js';
+
+
+await KRB.Projections.addCrs('EPSG:4978');
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [
+        new KRB.Tile({
+            texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
+            attributionTitle: '2GIS',
+            attributionUrl: 'https://2gis.ru/',
+        })
+    ],
+    view: new KRB.View({
+        centerLonLat: [37.6178, 55.7558], // Москва
+        zoom: 4, // Уменьшил зум, чтобы было видно всю точку
+        maxZoom: 18
+    }),
+    debug: true,
+});
+
+// 2. Ваши ECEF координаты (X, Y, Z)
+const ecefCoord = [2517606.5420, 1992977.2560, 5492599.8500];
+
+// 3. Конвертируем их в геодезические (lon, lat, h)
+const geodetic = ecefToGeodetic(
+    ecefCoord[0], 
+    ecefCoord[1], 
+    ecefCoord[2], 
+    ELLIPSOIDS.wgs84 // Теперь это сработает, так как импортировано напрямую
+);
+
+console.log('Конвертированная точка:', geodetic); 
+
+
+
+// 5. Marker 2: Прямой ECEF (синтаксический сахар, который мы добавили в Marker.ts)
+// Убедитесь, что вы добавили блок "умного перехвата" в конструктор Marker.ts, как я описывал ранее
+const marker2 = new KRB.Marker({
+    position: ecefCoord, // Просто передаем [X, Y, Z]
+    crs: 'EPSG:4978',
+    title: 'ECEF-точка (авто-конвертация)'
+});
+
+marker2.addTo(map);
+
+window.map = map; 
+</script>
+</body>
+</html>

@@ -19,6 +19,9 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
+await KRB.Projections.ensure('EPSG:32637');
+
+
 const map = new KRB.Map({
     target: 'map',
     layers: [
@@ -36,6 +39,7 @@ const map = new KRB.Map({
     }),
     debug:true,
 });
+
 
 window.map = map; 
 

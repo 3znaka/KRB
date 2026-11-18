@@ -368,13 +368,13 @@ private _nodeToPosition(node: ImageNode): number[] {
     getSource(): ImageSource { return this._source; }
 
     setOpacity(opacity: number): this {
-        this._opacity = Math.max(0, Math.min(1, opacity));
-        if (this._material) {
-            this._material.opacity = this._opacity;
-            this._material.transparent = this._opacity < 1;
-        }
-        return this;
+    this._opacity = Math.max(0, Math.min(1, opacity));
+    if (this._material) {
+        this._material.opacity = this._opacity;
+        this._material.transparent = true;   // всегда остаёмся в transparent-очереди
     }
+    return this;
+}
 
     getOpacity(): number { return this._opacity; }
 
@@ -684,7 +684,7 @@ private _computeWorldPositionsFromAnchor(): any[] {
         const material = new THREE.MeshBasicMaterial({
             map: this._texture || null,
             side: THREE.DoubleSide,
-            transparent: this._opacity < 1,
+            transparent: true,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
             depthTest:  !onTop,

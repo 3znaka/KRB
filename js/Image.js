@@ -269,7 +269,7 @@ export class Image extends SpatialObject {
         this._opacity = Math.max(0, Math.min(1, opacity));
         if (this._material) {
             this._material.opacity = this._opacity;
-            this._material.transparent = this._opacity < 1;
+            this._material.transparent = true; // всегда остаёмся в transparent-очереди
         }
         return this;
     }
@@ -533,7 +533,7 @@ export class Image extends SpatialObject {
         const material = new THREE.MeshBasicMaterial({
             map: this._texture || null,
             side: THREE.DoubleSide,
-            transparent: this._opacity < 1,
+            transparent: true,
             opacity: this._opacity,
             blending: this._normalizeBlending(this._blending),
             depthTest: !onTop,

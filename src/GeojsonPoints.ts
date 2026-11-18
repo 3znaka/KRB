@@ -11,6 +11,8 @@ import {
     type GeoJSONFeature, type Props,
 } from './Geojson.js';
 import type { GeoJSONLayer } from './Geojson.js';
+import { Projections } from './Projections.js';
+import { SpatialObject } from './SpatialObject.js';
 
 export interface GeoJSONLayerPoints {
     _addPointFeature(feature: GeoJSONFeature): void;
@@ -23,21 +25,30 @@ export interface GeoJSONLayerPoints {
 }
 
 export const PointsMixin = {
-    _addPointFeature(this: GeoJSONLayer, feature: GeoJSONFeature): void {
-        const geom = feature.geometry;
-        if (geom.type !== 'Point') return;
-        const props = feature.properties ?? {};
+_addPointFeature(this: GeoJSONLayer, feature: GeoJSONFeature): void {
+    const geom = feature.geometry;
+    if (geom.type !== 'Point') return;
+    const props = feature.properties ?? {};
 
-        const [lon, lat, altRaw] = geom.coordinates;
-        const lonLat: LonLat = [lon, lat];
-        const altFromCoords = typeof altRaw === 'number' && Number.isFinite(altRaw) ? altRaw : undefined;
-        const markerPos: MarkerPosition = altFromCoords !== undefined ? [lon, lat, altFromCoords] : [lon, lat];
-        const marker3DPos: Marker3DPosition = altFromCoords !== undefined ? [lon, lat, altFromCoords] : [lon, lat];
+    const coords = geom.coordinates;
+    const srcCrs = this.crs ? Projections.get(this.crs) : Projections.get('EPSG:4326');
+    const n = SpatialObject.normalizePosition(coords, srcCrs);
 
-        if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
-            this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
-            return;
-        }
+    // Маркеры получают СЫРЫЕ координаты + crs — нормализуют сами.
+    const hasZ = coords.length >= 3 && Number.isFinite(coords[2]);
+    const markerPos: MarkerPosition = hasZ
+        ? [coords[0], coords[1], coords[2]]
+        : [coords[0], coords[1]];
+    const marker3DPos: Marker3DPosition = markerPos;
+
+    // Диаграммы про ECEF не знают — отдаём им честные WGS84 + высоту.
+    const lonLat: LonLat = n.lonLat ?? srcCrs.toLonLat(n.coord);
+    const altFromCoords = n.nodeHeight;
+
+    if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
+        this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
+        return;
+    }
         if ((this.diagram || this.diagramToOptions) && props.diagram !== false) {
             this._addPointDiagram(feature, props, lonLat);
             return;
@@ -60,7 +71,7 @@ export const PointsMixin = {
         const d = new Diagram3D({
             ...baseOpts,
             position: lonLat,
-            crs: this.crs ?? undefined,
+            crs: 'EPSG:4326',
             altitude: baseOpts.altitude ?? altFromCoords ?? 0,
             altitudeMode: baseOpts.altitudeMode ?? 'clampToGround',
             clusterable: false,
@@ -77,7 +88,7 @@ export const PointsMixin = {
         const d = new Diagram({
             ...opts,
             position: lonLat,
-            crs: this.crs ?? undefined,
+            crs: 'EPSG:4326',
             parentPolygon: null,
             fitToPolygon: false,
             clusterable: false,

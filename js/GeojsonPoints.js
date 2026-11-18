@@ -6,17 +6,26 @@ import { Marker3D } from './Marker3D.js';
 import { Diagram } from './Diagram.js';
 import { Diagram3D } from './Diagram3D.js';
 import { POINT_ALIASES, MARKER3D_ALIASES, } from './Geojson.js';
+import { Projections } from './Projections.js';
+import { SpatialObject } from './SpatialObject.js';
 export const PointsMixin = {
     _addPointFeature(feature) {
         const geom = feature.geometry;
         if (geom.type !== 'Point')
             return;
         const props = feature.properties ?? {};
-        const [lon, lat, altRaw] = geom.coordinates;
-        const lonLat = [lon, lat];
-        const altFromCoords = typeof altRaw === 'number' && Number.isFinite(altRaw) ? altRaw : undefined;
-        const markerPos = altFromCoords !== undefined ? [lon, lat, altFromCoords] : [lon, lat];
-        const marker3DPos = altFromCoords !== undefined ? [lon, lat, altFromCoords] : [lon, lat];
+        const coords = geom.coordinates;
+        const srcCrs = this.crs ? Projections.get(this.crs) : Projections.get('EPSG:4326');
+        const n = SpatialObject.normalizePosition(coords, srcCrs);
+        // Маркеры получают СЫРЫЕ координаты + crs — нормализуют сами.
+        const hasZ = coords.length >= 3 && Number.isFinite(coords[2]);
+        const markerPos = hasZ
+            ? [coords[0], coords[1], coords[2]]
+            : [coords[0], coords[1]];
+        const marker3DPos = markerPos;
+        // Диаграммы про ECEF не знают — отдаём им честные WGS84 + высоту.
+        const lonLat = n.lonLat ?? srcCrs.toLonLat(n.coord);
+        const altFromCoords = n.nodeHeight;
         if ((this.diagram3D || this.diagram3DToOptions) && props.diagram3D !== false) {
             this._addPointDiagram3D(feature, props, lonLat, altFromCoords);
             return;
@@ -42,7 +51,7 @@ export const PointsMixin = {
         const d = new Diagram3D({
             ...baseOpts,
             position: lonLat,
-            crs: this.crs ?? undefined,
+            crs: 'EPSG:4326',
             altitude: baseOpts.altitude ?? altFromCoords ?? 0,
             altitudeMode: baseOpts.altitudeMode ?? 'clampToGround',
             clusterable: false,
@@ -59,7 +68,7 @@ export const PointsMixin = {
         const d = new Diagram({
             ...opts,
             position: lonLat,
-            crs: this.crs ?? undefined,
+            crs: 'EPSG:4326',
             parentPolygon: null,
             fitToPolygon: false,
             clusterable: false,

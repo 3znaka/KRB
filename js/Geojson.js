@@ -8,6 +8,7 @@ import { getAutoCoins, resolveDiagramUnitPx, MIN_COIN_DIAMETER_PX } from './Diag
 import { calculateBreaks, makeBreaksPretty } from './Classification.js';
 import { resolveColorRamp, invertColorRamp } from './ColorRamps.js';
 import { buildDiagramLegend, buildChoroplethLegend, buildDiagram3DLegend, } from './Legend.js';
+import { Projections } from './Projections.js';
 import { compileExpressionFilter, compileObjectFilter, mapboxToJsExpr, resolveColorMapValue, resolveStyle, normalizeStyle, interpolateStyle, evaluateValueExpression, getTitle, getTooltip, parseIconSize, parseSizeSpec, parsePair, parseTriple, asNumber, } from './GeojsonUtils.js';
 import { PointsMixin } from './GeojsonPoints.js';
 import { ShapesMixin } from './GeojsonShapes.js';
@@ -275,6 +276,10 @@ export class GeoJSONLayer extends Layer {
         return this.featureFilter;
     }
     addData(data) {
+        if (this.crs && !Projections.has(this.crs)) {
+            console.warn(`GeoJSONLayer.addData: CRS ${this.crs} не загружена. ` +
+                `Вызовите await Projections.ensure('${this.crs}') перед addData().`);
+        }
         const finalData = this.extendAntarctica
             ? this._extendAntarcticaGeoJSON(data)
             : data;
@@ -326,6 +331,8 @@ export class GeoJSONLayer extends Layer {
     async _load() {
         let geojson = null;
         try {
+            if (this.crs)
+                await Projections.ensure(this.crs);
             if (this.data) {
                 geojson = this.extendAntarctica
                     ? this._extendAntarcticaGeoJSON(this.data)
@@ -721,6 +728,11 @@ export class GeoJSONLayer extends Layer {
     _extendAntarcticaGeoJSON(geojson) {
         if (!geojson)
             return geojson;
+        if (this.crs) {
+            const c = Projections.get(this.crs);
+            if (!c?.isGeographic)
+                return geojson;
+        }
         // Глубокое клонирование (безопасно для больших объектов)
         const clone = typeof structuredClone === 'function'
             ? structuredClone(geojson)

@@ -18,6 +18,7 @@ import {
     buildDiagramLegend, buildChoroplethLegend, buildDiagram3DLegend,
     type MapLegend, type LegendOptions, type LegendContext,
 } from './Legend.js';
+import { Projections } from './Projections.js';
 
 import {
     type GeoJSONFeature, type GeoJSONInput, type GeoJSONGeometry, type GeoJSONFeatureCollection,
@@ -316,6 +317,10 @@ export class GeoJSONLayer extends Layer {
         return this.featureFilter;
     }
     addData(data: GeoJSONInput): this { 
+        if (this.crs && !Projections.has(this.crs)) {
+    console.warn(`GeoJSONLayer.addData: CRS ${this.crs} не загружена. ` +
+                 `Вызовите await Projections.ensure('${this.crs}') перед addData().`);
+}
         const finalData = this.extendAntarctica 
             ? this._extendAntarcticaGeoJSON(data) 
             : data;
@@ -361,6 +366,8 @@ export class GeoJSONLayer extends Layer {
    private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
         try {
+if (this.crs) await Projections.ensure(this.crs);
+
             if (this.data) {
                 geojson = this.extendAntarctica 
                     ? this._extendAntarcticaGeoJSON(this.data) 
@@ -697,6 +704,11 @@ export class GeoJSONLayer extends Layer {
      */
     private _extendAntarcticaGeoJSON(geojson: GeoJSONInput): GeoJSONInput {
         if (!geojson) return geojson;
+
+if (this.crs) {
+    const c = Projections.get(this.crs);
+    if (!c?.isGeographic) return geojson;
+}
         
         // Глубокое клонирование (безопасно для больших объектов)
         const clone = typeof structuredClone === 'function' 

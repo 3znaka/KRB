@@ -156,8 +156,8 @@ export const ShapesMixin = {
         if (!center) return;
         const d = new Diagram({
             ...opts,
-            position: center,
-            crs: this.crs,
+    position: center,      
+    crs: 'EPSG:4326',       
             parentPolygon: polygon,
             fitToPolygon: opts.fitToPolygon ?? this.diagram?.fitToPolygon ?? true,
             minScreenScale: opts.minScreenScale ?? this.diagram?.minScreenScale ?? 0.5,

@@ -13,12 +13,13 @@ import type { Diagram3D, Diagram3DSpawnOptions } from './Diagram3D.js';
 import type { SpatialObject } from './SpatialObject.js';
 import type { DiagramOrientation, LabelPosition } from './DiagramTypes.js';
 import type { LegendOptions, LegendContext } from './Legend.js';
+import type { SpatialPosition } from './SpatialObject.js';
 
 // =====================================================================
 // GeoJSON types
 // =====================================================================
 
-export type GeoJSONCoord = [number, number] | [number, number, number];
+export type GeoJSONCoord = SpatialPosition;
 export type GeoJSONLineString = GeoJSONCoord[];
 export type GeoJSONPolygon = GeoJSONCoord[][];
 export type GeoJSONProperties = Record<string, any>;

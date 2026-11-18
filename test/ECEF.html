@@ -63,17 +63,19 @@ marker2.addTo(map);
 const msk = KRB.geodeticToEcef(37.6178, 55.7558, 500, KRB.ELLIPSOIDS.wgs84);
 const spb = KRB.geodeticToEcef(30.3141, 59.9386, 500, KRB.ELLIPSOIDS.wgs84);
 
-const v = new KRB.Vector3D({
+const line = new KRB.Polyline({
     positions: [
         [msk.X, msk.Y, msk.Z],
         [spb.X, spb.Y, spb.Z],
     ],
     crs: 'EPSG:4978',
     color: '#ff5533',
-    animation: 'flowArrows',
-    heightScale: 1,
+    width: 3,
+    altitudeMode: 'absolute',
+    altitude: 0,
 });
-v.addTo(map);
+line.addTo(map);
+
 
 window.map = map; 
 </script>

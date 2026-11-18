@@ -46,6 +46,7 @@ export class Polyline extends SpatialObject {
     _pendingRebuild = false;
     // ── Кэши / перфоманс ──
     _projectedCache = null;
+    _normalizedCache = null;
     _positionsDirty = true;
     _bsCache = null;
     /**
@@ -90,7 +91,7 @@ export class Polyline extends SpatialObject {
         this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
         this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._color = options.color ?? '#3388ff';
         this._opacity = options.opacity ?? 1;
         this._width = options.width || 2;
@@ -126,6 +127,7 @@ export class Polyline extends SpatialObject {
     _onAttached(map) {
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
         this._projectedCache = null;
+        this._normalizedCache = null;
         this._fullLineData = null;
         this._simplifyCache.clear();
         this._localOriginValid = false;
@@ -187,6 +189,7 @@ export class Polyline extends SpatialObject {
         this._screenData.camera = null;
         this._labelPrefixSums = null;
         this._projectedCache = null;
+        this._normalizedCache = null;
         this._fullLineData = null;
         this._simplifyCache.clear();
         this._currentSimplifyBucket = -1;
@@ -230,8 +233,20 @@ export class Polyline extends SpatialObject {
     _worldPerPixel(z) {
         return this._map.WORLD_SIZE / (Math.pow(2, z) * this._map.TILE_PIXELS);
     }
-    _projectClamped(pt) {
-        const p = this._map.project(pt, this._crs);
+    /** Нормализация всех узлов (один раз до инвалидации кэша). */
+    _getNormalized() {
+        if (this._normalizedCache)
+            return this._normalizedCache;
+        this._normalizedCache = this._positions.map(p => this._normalizePosition(p, this._crs));
+        return this._normalizedCache;
+    }
+    _projectNormalized(nn) {
+        // ВАЖНО: для ECEF проецируем точные lon/lat напрямую, а не nn.coord:
+        // round-trip через 2D-проекцию ECEF ограничен видимой полусферой,
+        // а полилиния должна работать по всему глобусу (Москва→Токио).
+        const p = nn.lonLat
+            ? this._map.project(nn.lonLat, 'EPSG:4326')
+            : this._map.project(nn.coord, this._crs);
         let x = p[0];
         let y = p[1];
         if (!Number.isFinite(x))
@@ -243,10 +258,10 @@ export class Polyline extends SpatialObject {
     _getFullProjected() {
         if (this._projectedCache)
             return this._projectedCache;
-        const n = this._positions.length;
-        const out = new Array(n);
-        for (let i = 0; i < n; i++)
-            out[i] = this._projectClamped(this._positions[i]);
+        const norm = this._getNormalized();
+        const out = new Array(norm.length);
+        for (let i = 0; i < norm.length; i++)
+            out[i] = this._projectNormalized(norm[i]);
         this._projectedCache = out;
         return out;
     }
@@ -278,13 +293,13 @@ export class Polyline extends SpatialObject {
         if (this._fullLineData)
             return this._fullLineData;
         const projected = this._getFullProjected();
+        const norm = this._getNormalized();
         const n = this._positions.length;
         const abs = new Array(n);
         const nodeH = new Array(n);
         for (let i = 0; i < n; i++) {
             abs[i] = projected[i];
-            const h = this._positions[i][2];
-            nodeH[i] = Number.isFinite(h) ? h : 0;
+            nodeH[i] = norm[i].nodeHeight; // для ECEF — h над эллипсоидом, не Z_ecef
         }
         this._fullLineData = { abs, nodeH };
         return this._fullLineData;
@@ -601,6 +616,7 @@ export class Polyline extends SpatialObject {
         this._screenData.valid = false;
         this._labelPrefixSums = null;
         this._projectedCache = null;
+        this._normalizedCache = null;
         this._fullLineData = null;
         this._localOriginValid = false;
         this._bsCache = null;
@@ -1057,14 +1073,21 @@ export class Polyline extends SpatialObject {
             const pt = this._positions[i];
             if (!pt || pt.length < 2)
                 continue;
+            // Нормализуем с src, а не с this._crs: getBounds может вызываться до attach.
+            const nn = this._normalizePosition(pt, src);
             let x, y;
-            if (sameProjection) {
-                x = pt[0];
-                y = pt[1];
+            if (nn.lonLat) {
+                // ECEF: точные геодезические координаты, глобально
+                const conv = dst.fromLonLat(nn.lonLat);
+                x = conv[0];
+                y = conv[1];
+            }
+            else if (sameProjection) {
+                x = nn.coord[0];
+                y = nn.coord[1];
             }
             else {
-                const lonLat = src.toLonLat(pt);
-                const conv = dst.fromLonLat(lonLat);
+                const conv = dst.fromLonLat(src.toLonLat(nn.coord));
                 x = conv[0];
                 y = conv[1];
             }

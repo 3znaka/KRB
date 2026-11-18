@@ -13,7 +13,6 @@
  * @module VectorLineLayer
  */
 import { GeoJSONLayer } from './Geojson.js';
-export { ecefToGeodetic, enuToEcefDelta, isEcefCrs, ECEF_CODES } from './Vector3D.js';
 /**
  * @deprecated Используйте {@link GeoJSONLayer} с `vectorToOptions`.
  */

@@ -13,7 +13,7 @@
 
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation, SpatialPosition } from './SpatialObject.js';
 import { getDracoDecoderPath } from './Defaults.js';
 
 // =====================================================================
@@ -28,7 +28,7 @@ export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'cone';
 export type AltitudeMode = 'clampToGround' | 'absolute';
 export type TitlePlacement = 'top' | 'bottom' | 'left' | 'right';
 export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
-export type Marker3DPosition = [number, number] | [number, number, number];
+export type Marker3DPosition = SpatialPosition;
 
 export interface Marker3DOptions {
     position: Marker3DPosition;
@@ -148,11 +148,16 @@ this._userData = options.userData ?? {};
 if (!options.position || options.position.length < 2) {
     throw new Error('Marker3D: options.position is required [x, y] or [x, y, altitude]');
 }
-this._coord = [options.position[0], options.position[1]];
-const posZ = options.position[2];
-this._nodeHeight = Number.isFinite(posZ) ? (posZ as number) : 0;
-        this._crsCode = options.crs ?? null;
-        this._crs = null;
+this._crsCode = options.crs ?? null;
+    this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
+
+    const pos = this._normalizePosition(options.position, this._crs);
+    this._coord = pos.coord;
+    this._nodeHeight = pos.nodeHeight;
+    if (pos.lonLat) {
+        this._lon = pos.lonLat[0];
+        this._lat = pos.lonLat[1];
+    }
 
         this._primitiveType = options.primitiveType ?? 'box';
         this._size = options.size ?? null;

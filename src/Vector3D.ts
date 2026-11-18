@@ -11,7 +11,7 @@
  */
 
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
+import { SpatialObject, SpatialPosition, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
 import {
     THREE,
     Line2,
@@ -81,7 +81,7 @@ export interface AnimationSpec {
 }
 
 export interface Vector3DOptions {
-    positions: Vector3DPosition[];
+    positions: SpatialPosition[];
     crs?: string;
     color?: Vector3DColor;
     width?: number;
@@ -212,57 +212,6 @@ interface BoundingCache {
     cx: number; cy: number; cz: number; r: number;
 }
 
-// =====================================================================
-// ECEF
-// =====================================================================
-
-const _A  = 6378137.0;
-const _F  = 1 / 298.257222101;
-const _B  = _A * (1 - _F);
-const _E2 = 1 - (_B * _B) / (_A * _A);
-
-export function ecefToGeodetic(
-    X: number, Y: number, Z: number,
-    ell: { a: number; f: number } = { a: _A, f: _F },
-): [number, number, number] {
-    const { a, f } = ell;
-    const e2 = f * (2 - f);
-    const b  = a * (1 - f);
-    const p  = Math.sqrt(X * X + Y * Y);
-    const lon = Math.atan2(Y, X);
-    let lat = Math.atan2(Z, p * (1 - e2));
-    for (let i = 0; i < 10; i++) {
-        const s = Math.sin(lat);
-        const N = a / Math.sqrt(1 - e2 * s * s);
-        lat = Math.atan2(Z + e2 * N * s, p);
-    }
-    const sL = Math.sin(lat), cL = Math.cos(lat);
-    const N = a / Math.sqrt(1 - e2 * sL * sL);
-    const h = cL > 1e-10 ? p / cL - N : Math.abs(Z) - b;
-    return [lon * 180 / Math.PI, lat * 180 / Math.PI, h];
-}
-
-export function enuToEcefDelta(e: number, n: number, u: number, lonRad: number, latRad: number): [number, number, number] {
-    const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
-    const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
-    return [
-        -sLo * e - sLa * cLo * n + cLa * cLo * u,
-         cLo * e - sLa * sLo * n + cLa * sLo * u,
-                      cLa * n    + sLa * u,
-    ];
-}
-
-export const ECEF_CODES = new Set<string>([
-    'EPSG:4978', 'EPSG:10176',
-    'EPSG:7901', 'EPSG:7902', 'EPSG:7903', 'EPSG:7904',
-    'EPSG:7905', 'EPSG:7906', 'EPSG:7907', 'EPSG:7908',
-    'EPSG:7909', 'EPSG:7910', 'EPSG:7911', 'EPSG:7912',
-    'EPSG:8403', 'EPSG:8404',
-]);
-
-export function isEcefCrs(code: string | null | undefined): boolean {
-    return code ? ECEF_CODES.has(code.toUpperCase()) : false;
-}
 
 const CONE_RADIUS_RATIO = 0.35;
 const FLOW_MAX_CONES = 50;
@@ -276,10 +225,9 @@ const REBUILD_DEBOUNCE_MS = 60;
 
 export class Vector3D extends SpatialObject {
     // ── Данные ──
-    private _positions: Vector3DPosition[];
+    private _positions: SpatialPosition[];
     private _crsCode: string | null;
     private _crs: any | null;
-    private _isEcef: boolean;
 
     // ── Оформление ── (altitude — в базе)
     private _color: Vector3DColor;
@@ -361,10 +309,9 @@ private _pathDestroyListeners = new Set<() => void>();
             throw new Error('Vector3D: options.positions required, at least 2 points');
         }
 
-        this._positions = options.positions;
-        this._crsCode = options.crs ?? null;
-        this._crs = null;
-        this._isEcef = isEcefCrs(this._crsCode);
+    this._positions = options.positions;
+    this._crsCode = options.crs ?? null;
+    this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._color = options.color ?? '#3388ff';
         this._width = options.width ?? 2;
@@ -1496,38 +1443,38 @@ private _emitPathRebuild(): void {
     // Точки / геометрия
     // =================================================================
 
-    /** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
-    private _recomputeWorldPoints(): void {
-        if (!this._map) return;
-        const worldPts: Vector3DPosition[] = [];
-        const wgPos = this._map.worldGroup.position;
-        const clamp = this._altitudeMode === 'clampToGround';
+/** Пересчитывает `_worldPoints` из `_positions` (требует `_map`). */
+private _recomputeWorldPoints(): void {
+    if (!this._map) return;
+    const worldPts: Vector3DPosition[] = [];
+    const wgPos = this._map.worldGroup.position;
+    const clamp = this._altitudeMode === 'clampToGround';
 
-        for (let i = 0; i < this._positions.length; i++) {
-            const p = this._positions[i];
-            if (!Array.isArray(p) || p.length < 2) continue;
+    for (let i = 0; i < this._positions.length; i++) {
+        const p = this._positions[i];
+        if (!Array.isArray(p) || p.length < 2) continue;
 
-            let xy: [number, number] | null = null;
-            let h = 0;
-            if (this._isEcef) {
-                const [lon, lat, hh] = ecefToGeodetic(p[0], p[1], p[2] ?? 0);
-                xy = this._map.projectSafe([lon, lat], 'EPSG:4326');
-                h = hh;
-            } else {
-                xy = this._map.projectSafe([p[0], p[1]], this._crs);
-                h = p[2] ?? 0;
-            }
-            if (!xy) continue;
+        // Единая нормализация из SpatialObject:
+        // ECEF [X,Y,Z] → точные lonLat + h; обычный вход → coord + высота узла.
+        const n = this._normalizePosition(p, this._crs);
 
-            let surfaceY = 0;
-            if (clamp) {
-                surfaceY = this._map.getSurfaceHeightAt(xy[0] + wgPos.x, xy[1] + wgPos.z);
-            }
-            const worldY = surfaceY + h * this._heightScale + this._altitude;
-            worldPts.push([xy[0], worldY, xy[1]]);
+        // ВАЖНО: для ECEF проецируем точные геодезические lon/lat напрямую,
+        // НЕ через n.coord → toLonLat: 2D-проекция ECEF ограничена видимой
+        // полусферой, а Vector3D должен работать по всему глобусу.
+        const xy = n.lonLat
+            ? this._map.projectSafe(n.lonLat, 'EPSG:4326')
+            : this._map.projectSafe(n.coord, this._crs);
+        if (!xy) continue;
+
+        let surfaceY = 0;
+        if (clamp) {
+            surfaceY = this._map.getSurfaceHeightAt(xy[0] + wgPos.x, xy[1] + wgPos.z);
         }
-        this._worldPoints = worldPts;
+        const worldY = surfaceY + n.nodeHeight * this._heightScale + this._altitude;
+        worldPts.push([xy[0], worldY, xy[1]]);
     }
+    this._worldPoints = worldPts;
+}
 
     private _buildLine(map: any): void {
         this._geometry = new LineGeometry();
@@ -2024,7 +1971,7 @@ private _emitPathRebuild(): void {
     // Позиции
     // =================================================================
 
-    setPositions(positions: Vector3DPosition[]): this {
+  setPositions(positions: SpatialPosition[]): this {
         if (!positions || positions.length < 2) return this;
         this._positions = positions;
 
@@ -2055,7 +2002,7 @@ private _emitPathRebuild(): void {
         return this;
     }
 
-    getPositions(): Vector3DPosition[] {
+    getPositions(): SpatialPosition[] {
         return this._positions.map(p => [p[0], p[1], p[2]] as Vector3DPosition);
     }
 

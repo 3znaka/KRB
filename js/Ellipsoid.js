@@ -328,3 +328,13 @@ export function isEcefCrs(crsOrCode) {
         : crsOrCode;
     return !!(p && (p.isGeocentric === true || p._raw?.isGeocentric === true));
 }
+// В конец Ellipsoid.ts
+export function enuToEcefDelta(e, n, u, lonRad, latRad) {
+    const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
+    const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
+    return [
+        -sLo * e - sLa * cLo * n + cLa * cLo * u,
+        cLo * e - sLa * sLo * n + cLa * sLo * u,
+        cLa * n + sLa * u,
+    ];
+}

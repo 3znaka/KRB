@@ -9,6 +9,8 @@
  * @module SpatialObject
  */
 import { Layer } from './Layers.js';
+import { isEcefCrs } from './Projections.js';
+import { ecefToGeodetic } from './Ellipsoid.js';
 export class SpatialObject {
     // ── Границы зума ──
     _minZoom = -Infinity;
@@ -388,5 +390,37 @@ export class SpatialObject {
             return false;
         const z = this._map.continuousZoom;
         return z >= this._minZoom && z <= this._maxZoom;
+    }
+    /**
+ * Единая нормализация входной координаты для всех пространственных объектов.
+ *
+ * - Обычный вход `[x, y]` / `[x, y, altitude]`: coord = [x, y], nodeHeight = altitude.
+ * - 3D ECEF `[X, Y, Z]` (crs — геоцентрическая): точная конвертация в [lon, lat, h].
+ *   coord сразу вычисляется в CRS объекта (h=0), h уходит в nodeHeight,
+ *   точные [lon, lat] возвращаются отдельно, чтобы не потерять их на
+ *   round-trip через 2D-проекцию ECEF.
+ *
+ * @param position — массив из 2 или 3 чисел.
+ * @param crs — RAW-инстанс проекции (Projections.get), НЕ world-обёртка; null допустим.
+ *
+ * Вызывается в конструкторе объекта; для полилиний/полигонов — на каждый узел.
+ */
+    _normalizePosition(position, crs) {
+        if (position.length === 3 && isEcefCrs(crs)) {
+            const geo = ecefToGeodetic(position[0], position[1], position[2], crs.ellipsoid // эллипсоид данной CRS из def, а не всегда WGS84
+            );
+            const flat = crs.fromLonLat([geo.lon, geo.lat]);
+            return {
+                coord: [flat[0], flat[1]],
+                nodeHeight: geo.h,
+                lonLat: [geo.lon, geo.lat],
+            };
+        }
+        const z = position[2];
+        return {
+            coord: [position[0], position[1]],
+            nodeHeight: Number.isFinite(z) ? z : 0,
+            lonLat: null,
+        };
     }
 }

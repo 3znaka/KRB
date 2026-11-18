@@ -15,9 +15,6 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
-// 1. ИМПОРТИРУЕМ НАПРЯМУЮ из Ellipsoid.js (проверьте путь, если у вас он отличается)
-import { ecefToGeodetic, ELLIPSOIDS } from '../js/Ellipsoid.js';
-
 
 await KRB.Projections.addCrs('EPSG:4978');
 
@@ -42,11 +39,11 @@ const map = new KRB.Map({
 const ecefCoord = [2517606.5420, 1992977.2560, 5492599.8500];
 
 // 3. Конвертируем их в геодезические (lon, lat, h)
-const geodetic = ecefToGeodetic(
+const geodetic = KRB.ecefToGeodetic(
     ecefCoord[0], 
     ecefCoord[1], 
     ecefCoord[2], 
-    ELLIPSOIDS.wgs84 // Теперь это сработает, так как импортировано напрямую
+    KRB.ELLIPSOIDS.wgs84 // Теперь это сработает, так как импортировано напрямую
 );
 
 console.log('Конвертированная точка:', geodetic); 
@@ -55,13 +52,28 @@ console.log('Конвертированная точка:', geodetic);
 
 // 5. Marker 2: Прямой ECEF (синтаксический сахар, который мы добавили в Marker.ts)
 // Убедитесь, что вы добавили блок "умного перехвата" в конструктор Marker.ts, как я описывал ранее
-const marker2 = new KRB.Marker({
+const marker2 = new KRB.Marker3D({
     position: ecefCoord, // Просто передаем [X, Y, Z]
     crs: 'EPSG:4978',
     title: 'ECEF-точка (авто-конвертация)'
 });
 
 marker2.addTo(map);
+
+const msk = KRB.geodeticToEcef(37.6178, 55.7558, 500, KRB.ELLIPSOIDS.wgs84);
+const spb = KRB.geodeticToEcef(30.3141, 59.9386, 500, KRB.ELLIPSOIDS.wgs84);
+
+const v = new KRB.Vector3D({
+    positions: [
+        [msk.X, msk.Y, msk.Z],
+        [spb.X, spb.Y, spb.Z],
+    ],
+    crs: 'EPSG:4978',
+    color: '#ff5533',
+    animation: 'flowArrows',
+    heightScale: 1,
+});
+v.addTo(map);
 
 window.map = map; 
 </script>

@@ -79,11 +79,15 @@ export class Marker3D extends SpatialObject {
         if (!options.position || options.position.length < 2) {
             throw new Error('Marker3D: options.position is required [x, y] or [x, y, altitude]');
         }
-        this._coord = [options.position[0], options.position[1]];
-        const posZ = options.position[2];
-        this._nodeHeight = Number.isFinite(posZ) ? posZ : 0;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
+        const pos = this._normalizePosition(options.position, this._crs);
+        this._coord = pos.coord;
+        this._nodeHeight = pos.nodeHeight;
+        if (pos.lonLat) {
+            this._lon = pos.lonLat[0];
+            this._lat = pos.lonLat[1];
+        }
         this._primitiveType = options.primitiveType ?? 'box';
         this._size = options.size ?? null;
         this._modelUrl = options.modelUrl ?? null;

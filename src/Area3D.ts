@@ -14,7 +14,8 @@
 
 import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation, SpatialPosition, NormalizedPosition } from './SpatialObject.js';
+
 import { getDracoDecoderPath } from './Defaults.js';
 
 // =====================================================================
@@ -22,7 +23,7 @@ import { getDracoDecoderPath } from './Defaults.js';
 // =====================================================================
 
 export type LonLat = [number, number];
-export type Area3DCoord = [number, number] | [number, number, number];
+export type Area3DCoord = SpatialPosition;
 export type Area3DRing = Area3DCoord[];
 export type SizeSpec = number | number[];
 export type PrimitiveType = 'box' | 'sphere' | 'cylinder' | 'cone';
@@ -30,6 +31,7 @@ export type Area3DFit = 'stretch' | 'contain';
 export type AltitudeMode = 'clampToGround' | 'absolute';
 export type TitlePlacement = 'top' | 'bottom' | 'left' | 'right';
 export type Anchor = [number, number, number];
+
 
 export interface Area3DOptions {
     rings: Area3DRing[];
@@ -117,6 +119,11 @@ export class Area3D extends SpatialObject {
     private _polygonDepth = 0;
     private _worldCoords: Array<[number, number]> = [];
 
+    /** Нормализованное внешнее кольцо (кэш до setRings / re-attach). */
+private _normalizedOuter: NormalizedPosition[] | null = null;
+/** Средняя высота узлов внешнего кольца (для ECEF — h над эллипсоидом). */
+private _nodeHeight = 0;
+
     // ── Кэш рельефа ──
     private _cachedSurfaceHeight = 0;
     private _lastHeightUpdateTime = 0;
@@ -147,7 +154,7 @@ this._userData = options.userData ?? {};
 
         this._rings = options.rings;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._modelUrl = options.modelUrl ?? null;
         this._primitiveType = options.primitiveType ?? 'box';
@@ -213,7 +220,7 @@ this._userData = options.userData ?? {};
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
-
+this._normalizedOuter = null;
         this._calculatePolygonParams();
         this._group.position.set(this._centroidWorld.x, 0, this._centroidWorld.z);
         map.worldGroup.add(this._group);
@@ -257,6 +264,7 @@ this._userData = options.userData ?? {};
             }
         }
         this._crs = null;
+        this._normalizedOuter = null;
         this._raycastMeshesCache = null;
         this._boundingRadius = 0;
         this._boundingCenterYLocal = 0;
@@ -368,59 +376,74 @@ this._userData = options.userData ?? {};
     // Расчёт полигона
     // =================================================================
 
-    private _calculatePolygonParams(): void {
-        const outerRing = this._rings[0];
-        this._worldCoords.length = 0;
+    /** Нормализация внешнего кольца один раз до инвалидации. */
+private _getNormalizedOuter(): NormalizedPosition[] {
+    if (this._normalizedOuter) return this._normalizedOuter;
+    const outer = this._rings[0] ?? [];
+    this._normalizedOuter = outer.map(p => this._normalizePosition(p, this._crs));
+    return this._normalizedOuter;
+}
 
-        let sumX = 0, sumZ = 0;
-        const uniquePoints: Array<[number, number]> = [];
-        for (let i = 0; i < outerRing.length; i++) {
-            const [absX, absZ] = this._map.project(outerRing[i], this._crs);
-            if (i > 0 && absX === uniquePoints[0]?.[0] && absZ === uniquePoints[0]?.[1]) continue;
-            uniquePoints.push([absX, absZ]);
-            this._worldCoords.push([absX, absZ]);
-            sumX += absX;
-            sumZ += absZ;
-        }
-        const centroidX = sumX / this._worldCoords.length;
-        const centroidZ = sumZ / this._worldCoords.length;
-        this._centroidWorld.set(centroidX, 0, centroidZ);
+private _calculatePolygonParams(): void {
+    const norm = this._getNormalizedOuter();
+    this._worldCoords.length = 0;
+    let sumX = 0, sumZ = 0;
+    let sumH = 0, countH = 0;
+    const uniquePoints: Array<[number, number]> = [];
 
-        if (this._worldCoords.length < 3) return;
+    for (let i = 0; i < norm.length; i++) {
+        const nn = norm[i];
+        // ВАЖНО: для ECEF проецируем точные lon/lat напрямую, а не nn.coord:
+        // round-trip через 2D-проекцию ECEF ограничен видимой полусферой,
+        // а footprint должен строиться по всему глобусу.
+        const [absX, absZ] = nn.lonLat
+            ? this._map.project(nn.lonLat, 'EPSG:4326')
+            : this._map.project(nn.coord, this._crs);
 
-        let maxLenSq = -1;
-        let dirX = 0, dirZ = 0;
-        for (let i = 0; i < this._worldCoords.length; i++) {
-            const j = (i + 1) % this._worldCoords.length;
-            const dx = this._worldCoords[j][0] - this._worldCoords[i][0];
-            const dz = this._worldCoords[j][1] - this._worldCoords[i][1];
-            const lenSq = dx * dx + dz * dz;
-            if (lenSq > maxLenSq) {
-                maxLenSq = lenSq;
-                dirX = dx;
-                dirZ = dz;
-            }
-        }
-        if (maxLenSq === 0) return;
-
-        this._polygonAngle = Math.atan2(dirZ, dirX);
-
-        const cos = Math.cos(-this._polygonAngle);
-        const sin = Math.sin(-this._polygonAngle);
-        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-        for (const [x, z] of this._worldCoords) {
-            const localX = x - centroidX;
-            const localZ = z - centroidZ;
-            const rotatedX = localX * cos - localZ * sin;
-            const rotatedZ = localX * sin + localZ * cos;
-            if (rotatedX < minX) minX = rotatedX;
-            if (rotatedX > maxX) maxX = rotatedX;
-            if (rotatedZ < minZ) minZ = rotatedZ;
-            if (rotatedZ > maxZ) maxZ = rotatedZ;
-        }
-        this._polygonWidth = maxX - minX;
-        this._polygonDepth = maxZ - minZ;
+        if (i > 0 && absX === uniquePoints[0]?.[0] && absZ === uniquePoints[0]?.[1]) continue;
+        uniquePoints.push([absX, absZ]);
+        this._worldCoords.push([absX, absZ]);
+        sumX += absX;
+        sumZ += absZ;
+        sumH += nn.nodeHeight;
+        countH++;
     }
+
+    this._nodeHeight = countH > 0 ? sumH / countH : 0;
+
+    const centroidX = sumX / this._worldCoords.length;
+    const centroidZ = sumZ / this._worldCoords.length;
+    this._centroidWorld.set(centroidX, 0, centroidZ);
+    if (this._worldCoords.length < 3) return;
+
+    // ── Дальше без изменений: самое длинное ребро → угол, bbox → width/depth ──
+    let maxLenSq = -1;
+    let dirX = 0, dirZ = 0;
+    for (let i = 0; i < this._worldCoords.length; i++) {
+        const j = (i + 1) % this._worldCoords.length;
+        const dx = this._worldCoords[j][0] - this._worldCoords[i][0];
+        const dz = this._worldCoords[j][1] - this._worldCoords[i][1];
+        const lenSq = dx * dx + dz * dz;
+        if (lenSq > maxLenSq) { maxLenSq = lenSq; dirX = dx; dirZ = dz; }
+    }
+    if (maxLenSq === 0) return;
+    this._polygonAngle = Math.atan2(dirZ, dirX);
+    const cos = Math.cos(-this._polygonAngle);
+    const sin = Math.sin(-this._polygonAngle);
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const [x, z] of this._worldCoords) {
+        const localX = x - centroidX;
+        const localZ = z - centroidZ;
+        const rotatedX = localX * cos - localZ * sin;
+        const rotatedZ = localX * sin + localZ * cos;
+        if (rotatedX < minX) minX = rotatedX;
+        if (rotatedX > maxX) maxX = rotatedX;
+        if (rotatedZ < minZ) minZ = rotatedZ;
+        if (rotatedZ > maxZ) maxZ = rotatedZ;
+    }
+    this._polygonWidth = maxX - minX;
+    this._polygonDepth = maxZ - minZ;
+}
 
     // =================================================================
     // Построение примитива / загрузка модели
@@ -639,14 +662,14 @@ loader.setDRACOLoader(dracoLoader);
     // Позиция / CRS
     // =================================================================
 
-    /** Центроид внешнего кольца в СК Area3D. */
-    getPosition(): [number, number] {
-        const outer = this._rings[0];
-        if (!outer || !outer.length) return [0, 0];
-        let sx = 0, sy = 0;
-        for (const p of outer) { sx += p[0]; sy += p[1]; }
-        return [sx / outer.length, sy / outer.length];
-    }
+/** Центроид внешнего кольца в СК Area3D. */
+getPosition(): [number, number] {
+    const norm = this._getNormalizedOuter();
+    if (!norm.length) return [0, 0];
+    let sx = 0, sy = 0;
+    for (const nn of norm) { sx += nn.coord[0]; sy += nn.coord[1]; }
+    return [sx / norm.length, sy / norm.length];
+}
 
     /** WGS84-центр bbox — алиас `getCenter()`. */
     getLonLat(): LonLat | null {
@@ -677,7 +700,7 @@ loader.setDRACOLoader(dracoLoader);
         }
         this._rings = rings;
         if (!this._map) return this;
-
+this._normalizedOuter = null;
         this._calculatePolygonParams();
         this._group.position.x = this._centroidWorld.x;
         this._group.position.z = this._centroidWorld.z;
@@ -839,10 +862,10 @@ loader.setDRACOLoader(dracoLoader);
                 this._lastHeightUpdateTime = now;
                 this._lastWorldGroupPos.copy(map.worldGroup.position);
             }
-            this._group.position.y = this._cachedSurfaceHeight + this._altitude;
+            this._group.position.y = this._cachedSurfaceHeight + this._altitude + this._nodeHeight;
             this._group.updateMatrixWorld(true);
         } else {
-            this._group.position.y = this._altitude;
+            this._group.position.y = this._altitude + this._nodeHeight;
             this._group.updateMatrixWorld(true);
         }
 
@@ -904,41 +927,39 @@ loader.setDRACOLoader(dracoLoader);
     // KrbMap#fitTo / getBounds
     // =================================================================
 
-    getBounds(crs: string | any = 'EPSG:4326'): [LonLat, LonLat] | null {
-        if (!this._rings || !this._rings.length) return null;
-
-        const src = this._crs
-            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
-        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
-        if (!src || !dst) return null;
-
-        const sameProjection = src === dst;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        let count = 0;
-
-        for (const ring of this._rings) {
-            if (!ring) continue;
-            for (let i = 0; i < ring.length; i++) {
-                const pt = ring[i];
-                if (!pt || pt.length < 2) continue;
-                let x: number, y: number;
-                if (sameProjection) {
-                    x = pt[0];
-                    y = pt[1];
-                } else {
-                    const lonLat = src.toLonLat(pt);
-                    const conv = dst.fromLonLat(lonLat);
-                    x = conv[0];
-                    y = conv[1];
-                }
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-                count++;
+getBounds(crs: string | any = 'EPSG:4326'): [LonLat, LonLat] | null {
+    if (!this._rings || !this._rings.length) return null;
+    const src = this._crs
+        ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+    const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+    if (!src || !dst) return null;
+    const sameProjection = src === dst;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let count = 0;
+    for (const ring of this._rings) {
+        if (!ring) continue;
+        for (let i = 0; i < ring.length; i++) {
+            const pt = ring[i];
+            if (!pt || pt.length < 2) continue;
+            const nn = this._normalizePosition(pt, src);
+            let x: number, y: number;
+            if (nn.lonLat) {
+                const conv = dst.fromLonLat(nn.lonLat);
+                x = conv[0]; y = conv[1];
+            } else if (sameProjection) {
+                x = nn.coord[0]; y = nn.coord[1];
+            } else {
+                const conv = dst.fromLonLat(src.toLonLat(nn.coord));
+                x = conv[0]; y = conv[1];
             }
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            count++;
         }
-        if (count === 0 || !isFinite(minX)) return null;
-        return [[minX, minY], [maxX, maxY]];
     }
+    if (count === 0 || !isFinite(minX)) return null;
+    return [[minX, minY], [maxX, maxY]];
+}
 }

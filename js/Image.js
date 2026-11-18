@@ -71,7 +71,7 @@ export class Image extends SpatialObject {
         this._nodes = options.nodes ?? null;
         this._position = options.position ?? null;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._size = options.size ?? [100, 100];
         this._anchor = options.anchor ?? [0.5, 0.5];
         this._rotation = options.rotation ?? [0, 0, 0];
@@ -165,6 +165,14 @@ export class Image extends SpatialObject {
             x: (screenPos.x * 0.5 + 0.5) * canvas.clientWidth,
             y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
         };
+    }
+    _nodeToPosition(node) {
+        if (Array.isArray(node))
+            return node;
+        const p = [node.lon, node.lat];
+        if (Number.isFinite(node.alt))
+            p.push(node.alt);
+        return p;
     }
     // =================================================================
     // Статический реестр интерактивных
@@ -324,9 +332,11 @@ export class Image extends SpatialObject {
         return this;
     }
     getNodes() {
-        return this._nodes
-            ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
-            : null;
+        if (!this._nodes)
+            return null;
+        return this._nodes.map(n => Array.isArray(n)
+            ? [...n]
+            : { lon: n.lon, lat: n.lat, alt: n.alt });
     }
     setPositionRotation(params = {}) {
         if (params.position)
@@ -425,8 +435,12 @@ export class Image extends SpatialObject {
             return [];
         const map = this._map;
         const positions = this._nodes.map(node => {
-            const [x, z] = map.project([node.lon, node.lat], this._crs);
-            const y = (node.alt || 0) + this._altitude;
+            const nn = this._normalizePosition(this._nodeToPosition(node), this._crs);
+            // ECEF: точные lon/lat напрямую — глобально, без ограничения полусферой.
+            const [x, z] = nn.lonLat
+                ? map.project(nn.lonLat, 'EPSG:4326')
+                : map.project(nn.coord, this._crs);
+            const y = nn.nodeHeight + this._altitude;
             return new THREE.Vector3(x, y, z);
         });
         if (positions.length === 4) {
@@ -447,12 +461,14 @@ export class Image extends SpatialObject {
     _computeWorldPositionsFromAnchor() {
         if (!this._position || !this._map)
             return [];
-        const [lon, lat, alt] = this._position;
+        const nn = this._normalizePosition(this._position, this._crs);
         const [width, height] = this._size;
         const [ax, ay] = this._anchor;
         const [rx, ry, rz] = this._rotation;
-        const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-        const center = new THREE.Vector3(worldX, (alt || 0) + this._altitude, worldZ);
+        const [worldX, worldZ] = nn.lonLat
+            ? this._map.project(nn.lonLat, 'EPSG:4326')
+            : this._map.project(nn.coord, this._crs);
+        const center = new THREE.Vector3(worldX, nn.nodeHeight + this._altitude, worldZ);
         const halfW = width / 2;
         const halfH = height / 2;
         const cornersLocal = [
@@ -642,17 +658,22 @@ export class Image extends SpatialObject {
             for (const node of this._nodes) {
                 if (!node)
                     continue;
-                const px = node.lon, py = node.lat;
-                if (!isFinite(px) || !isFinite(py))
+                const raw = this._nodeToPosition(node);
+                if (!isFinite(raw[0]) || !isFinite(raw[1]))
                     continue;
+                const nn = this._normalizePosition(raw, srcCrs);
                 let x, y;
-                if (srcCrs === dstCrs) {
-                    x = px;
-                    y = py;
+                if (nn.lonLat) {
+                    const conv = dstCrs.fromLonLat(nn.lonLat);
+                    x = conv[0];
+                    y = conv[1];
+                }
+                else if (srcCrs === dstCrs) {
+                    x = nn.coord[0];
+                    y = nn.coord[1];
                 }
                 else {
-                    const lonLat = srcCrs.toLonLat([px, py]);
-                    const conv = dstCrs.fromLonLat(lonLat);
+                    const conv = dstCrs.fromLonLat(srcCrs.toLonLat(nn.coord));
                     x = conv[0];
                     y = conv[1];
                 }
@@ -696,20 +717,24 @@ export class Image extends SpatialObject {
                 }
             }
             // Fallback: карта не привязана — возвращаем точку position.
-            const px = this._position[0], py = this._position[1];
-            if (!isFinite(px) || !isFinite(py))
-                return null;
+            const nn = this._normalizePosition(this._position, srcCrs);
             let x, y;
-            if (srcCrs === dstCrs) {
-                x = px;
-                y = py;
-            }
-            else {
-                const lonLat = srcCrs.toLonLat([px, py]);
-                const conv = dstCrs.fromLonLat(lonLat);
+            if (nn.lonLat) {
+                const conv = dstCrs.fromLonLat(nn.lonLat);
                 x = conv[0];
                 y = conv[1];
             }
+            else if (srcCrs === dstCrs) {
+                x = nn.coord[0];
+                y = nn.coord[1];
+            }
+            else {
+                const conv = dstCrs.fromLonLat(srcCrs.toLonLat(nn.coord));
+                x = conv[0];
+                y = conv[1];
+            }
+            if (!isFinite(x) || !isFinite(y))
+                return null;
             return [[x, y], [x, y]];
         }
         return null;

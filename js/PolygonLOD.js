@@ -21,9 +21,26 @@ export const PolygonLODMixin = {
             const heights = new Array(n);
             for (let i = 0; i < n; i++) {
                 const pt = ring[i];
-                worldCoords[i] = map.project(pt, this._crs);
-                const h = pt?.[2];
-                heights[i] = Number.isFinite(h) ? h : 0;
+                // Единая нормализация из SpatialObject:
+                // - обычные [x, y] / [x, y, h]
+                // - ECEF [X, Y, Z] → точные lonLat + h
+                const nn = this._normalizeCoord(pt, this._crs);
+                // ВАЖНО: для 3D ECEF проецируем точные lon/lat напрямую.
+                // Не через nn.coord → ECEF.toLonLat(), потому что 2D ECEF-проекция
+                // ограничена видимой полусферой.
+                const p = nn.lonLat
+                    ? map.project(nn.lonLat, 'EPSG:4326')
+                    : map.project(nn.coord, this._crs);
+                let x = p[0];
+                let z = p[1];
+                // Защита от NaN в earcut/BufferGeometry.
+                if (!Number.isFinite(x))
+                    x = 0;
+                if (!Number.isFinite(z))
+                    z = 0;
+                worldCoords[i] = [x, z];
+                // Для ECEF это h над эллипсоидом, а не Z_ecef.
+                heights[i] = nn.nodeHeight;
             }
             return { worldCoords, heights };
         });

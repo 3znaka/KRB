@@ -113,7 +113,7 @@ export class Polygon extends SpatialObject {
         this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
         this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._fillColor = options.fillColor ?? '#3388ff';
         this._fillOpacity = options.fillOpacity ?? 0.5;
         this._fillPatternSource = options.fillPattern ?? null;
@@ -441,6 +441,13 @@ export class Polygon extends SpatialObject {
             meshes.push(this._bottomMesh);
         this._raycastMeshesCache = meshes;
         return meshes;
+    }
+    /**
+     * @internal
+     * Единая точка нормализации координаты для Polygon-миксинов.
+     */
+    _normalizeCoord(pt, crs) {
+        return this._normalizePosition(pt, crs);
     }
     // =================================================================
     // Rings

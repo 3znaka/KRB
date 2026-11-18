@@ -311,56 +311,84 @@ export const PolygonUpdateMixin = {
         return result;
     },
 
-    _computeBounds(this: Polygon, crs: string | any): [LonLat, LonLat] | null {
-        if (!this._rings || !this._rings.length) return null;
-        const src = this._crs
-            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
-        const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
-        if (!src || !dst) return null;
+_computeBounds(this: Polygon, crs: string | any): [LonLat, LonLat] | null {
+    if (!this._rings || !this._rings.length) return null;
 
-        const sameProjection = src === dst;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        let count = 0;
+    const src = this._crs
+        ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+    const dst = typeof crs === 'string' ? Projections.get(crs) : crs;
+    if (!src || !dst) return null;
 
-        for (const ring of this._rings) {
-            if (!ring) continue;
-            for (const pt of ring) {
-                if (!pt || pt.length < 2) continue;
-                let x: number, y: number;
-                if (sameProjection) { x = pt[0]; y = pt[1]; }
-                else {
-                    const lonLat = src.toLonLat(pt);
-                    const conv = dst.fromLonLat(lonLat);
-                    x = conv[0]; y = conv[1];
-                }
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-                count++;
+    const sameProjection = src === dst;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let count = 0;
+
+    for (const ring of this._rings) {
+        if (!ring) continue;
+
+        for (const pt of ring) {
+            if (!pt || pt.length < 2) continue;
+
+            // Нормализуем с src, а не обязательно с this._crs:
+            // getBounds() может вызываться до attach.
+            const nn = this._normalizeCoord(pt, src);
+
+            let x: number, y: number;
+
+            if (nn.lonLat) {
+                // 3D ECEF: точные геодезические координаты.
+                const conv = dst.fromLonLat(nn.lonLat);
+                x = conv[0];
+                y = conv[1];
+            } else if (sameProjection) {
+                x = nn.coord[0];
+                y = nn.coord[1];
+            } else {
+                const conv = dst.fromLonLat(src.toLonLat(nn.coord));
+                x = conv[0];
+                y = conv[1];
             }
+
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            count++;
         }
-        if (count === 0 || !isFinite(minX)) return null;
-        return [[minX, minY], [maxX, maxY]];
-    },
+    }
 
-    getVisualCenter(this: Polygon): LonLat | null {
-        if (this._visualCenterCache) return this._visualCenterCache;
-        const rings = this._rings;
-        if (!rings || !rings.length) return null;
-        const src = this._crs
-            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
-        if (!src) return null;
+    if (count === 0 || !isFinite(minX)) return null;
+    return [[minX, minY], [maxX, maxY]];
+},
+getVisualCenter(this: Polygon): LonLat | null {
+    if (this._visualCenterCache) return this._visualCenterCache;
 
-        const wgsRings: Array<Array<[number, number]>> = rings.map(r => r.map(pt => {
-            const [lon, lat] = src.toLonLat(pt);
-            return [lon, lat] as [number, number];
-        }));
-        const vc = approxVisualCenter(wgsRings, 0.001);
-        if (!vc) return null;
-        this._visualCenterCache = vc;
-        return this._visualCenterCache;
-    },
+    const rings = this._rings;
+    if (!rings || !rings.length) return null;
+
+    const src = this._crs
+        ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'));
+    if (!src) return null;
+
+    const wgsRings: Array<Array<[number, number]>> = rings.map(r =>
+        r.map(pt => {
+            const nn = this._normalizeCoord(pt, src);
+
+            // ECEF 3D → точные lon/lat.
+            // Обычная CRS → src.toLonLat(coord).
+            const ll = nn.lonLat ?? src.toLonLat(nn.coord);
+
+            return [ll[0], ll[1]] as [number, number];
+        })
+    );
+
+    const vc = approxVisualCenter(wgsRings, 0.001);
+    if (!vc) return null;
+
+    this._visualCenterCache = vc;
+    return this._visualCenterCache;
+},
 
     getScreenBBox(this: Polygon): { minX: number; minY: number; maxX: number; maxY: number;
                                      width: number; height: number } | null {

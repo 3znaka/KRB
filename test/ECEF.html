@@ -76,6 +76,88 @@ const line = new KRB.Polyline({
 });
 line.addTo(map);
 
+const corners = [
+    [37.6170, 55.7550], [37.6186, 55.7550],
+    [37.6186, 55.7562], [37.6170, 55.7562],
+    [37.6170, 55.7550], // замыкающая
+].map(([lon, lat]) => {
+    const e = KRB.geodeticToEcef(lon, lat, 30, KRB.ELLIPSOIDS.wgs84);
+    return [e.X, e.Y, e.Z];
+});
+
+const area = new KRB.Area3D({
+    rings: [corners],
+    crs: 'EPSG:4978',
+    primitiveType: 'box',
+    fit: 'stretch',
+    size: [1, 25, 1],   // высота бокса 25 м
+    altitudeMode: 'absolute',
+    title: 'КОРОБКА',
+    altitude: 0,
+});
+area.addTo(map);
+
+console.log(area.getBounds());  // честные [[37.617, 55.755], [37.6186, 55.7562]]
+console.log(area.getRings());  
+
+const ringLonLat = [
+    [37.6170, 55.756],
+    [37.6186, 55.7550],
+    [37.6186, 55.7562],
+    [37.6170, 55.7562],
+    [37.6170, 55.7550],
+];
+
+const ringEcef = ringLonLat.map(([lon, lat]) => {
+    const e = KRB.geodeticToEcef(lon, lat, 30, KRB.ELLIPSOIDS.wgs84);
+    return [e.X, e.Y, e.Z];
+});
+
+const polygon = new KRB.Polygon({
+    rings: [ringEcef],
+    crs: 'EPSG:4978',
+
+    fillColor: '#ff5533',
+    fillOpacity: 0.4,
+
+    extruded: true,
+    height: 20,
+
+    altitudeMode: 'absolute',
+    altitude: 0,
+});
+
+polygon.addTo(map);
+
+const toEcef = (lon, lat, h) => {
+    const e = KRB.geodeticToEcef(lon, lat, h, KRB.ELLIPSOIDS.wgs84);
+    return [e.X, e.Y, e.Z];
+};
+
+
+// Режим nodes: quad по ECEF-узлам с высотой 50 м
+const img1 = new KRB.Image({
+    source: 'texture.png',
+    crs: 'EPSG:4978',
+    nodes: [
+        toEcef(37.6170, 55.7562, 50),
+        toEcef(37.6186, 55.7562, 50),
+        toEcef(37.6170, 55.7550, 50),
+        toEcef(37.6186, 55.7550, 50),
+    ],
+});
+img1.addTo(map);
+
+// Режим position: центр по ECEF + размер в world-метрах
+const img2 = new KRB.Image({
+    source: 'horse.png',
+    crs: 'EPSG:4978',
+    title: 'лошадь',
+    position: toEcef(37.6178, 55.7558, 80),
+    size: [200, 200],
+});
+img2.addTo(map);
+
 
 window.map = map; 
 </script>

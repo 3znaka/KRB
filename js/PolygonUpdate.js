@@ -305,14 +305,22 @@ export const PolygonUpdateMixin = {
             for (const pt of ring) {
                 if (!pt || pt.length < 2)
                     continue;
+                // Нормализуем с src, а не обязательно с this._crs:
+                // getBounds() может вызываться до attach.
+                const nn = this._normalizeCoord(pt, src);
                 let x, y;
-                if (sameProjection) {
-                    x = pt[0];
-                    y = pt[1];
+                if (nn.lonLat) {
+                    // 3D ECEF: точные геодезические координаты.
+                    const conv = dst.fromLonLat(nn.lonLat);
+                    x = conv[0];
+                    y = conv[1];
+                }
+                else if (sameProjection) {
+                    x = nn.coord[0];
+                    y = nn.coord[1];
                 }
                 else {
-                    const lonLat = src.toLonLat(pt);
-                    const conv = dst.fromLonLat(lonLat);
+                    const conv = dst.fromLonLat(src.toLonLat(nn.coord));
                     x = conv[0];
                     y = conv[1];
                 }
@@ -342,8 +350,11 @@ export const PolygonUpdateMixin = {
         if (!src)
             return null;
         const wgsRings = rings.map(r => r.map(pt => {
-            const [lon, lat] = src.toLonLat(pt);
-            return [lon, lat];
+            const nn = this._normalizeCoord(pt, src);
+            // ECEF 3D → точные lon/lat.
+            // Обычная CRS → src.toLonLat(coord).
+            const ll = nn.lonLat ?? src.toLonLat(nn.coord);
+            return [ll[0], ll[1]];
         }));
         const vc = approxVisualCenter(wgsRings, 0.001);
         if (!vc)

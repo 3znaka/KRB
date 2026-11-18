@@ -5,13 +5,14 @@
 import { THREE } from './js_TP/tpb.js';
 import type { TitleAlignH, ZoomInterpolation } from './SpatialObject.js';
 import { Projections } from './Projections.js';
+import type { SpatialPosition } from './SpatialObject.js';
 
 // =====================================================================
 // Types
 // =====================================================================
 
 export type LonLat = [number, number];
-export type PolygonCoord = [number, number] | [number, number, number];
+export type PolygonCoord = SpatialPosition;
 export type PolygonRing = PolygonCoord[];
 export type TitleAlign = TitleAlignH;
 export type AltitudeMode = 'clampToGround' | 'absolute';

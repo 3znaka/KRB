@@ -25,24 +25,50 @@ export const PolygonLODMixin = {
         return map.WORLD_SIZE / (Math.pow(2, z) * map.TILE_PIXELS);
     },
 
-    _getFullRenderRings(this: Polygon): RenderRing[] {
-        if (this._fullRenderRings) return this._fullRenderRings;
-        const map = (this as any)._map;
-        if (!map) return [];
-        this._fullRenderRings = this._rings.map(ring => {
-            const n = ring.length;
-            const worldCoords: [number, number][] = new Array(n);
-            const heights: number[] = new Array(n);
-            for (let i = 0; i < n; i++) {
-                const pt = ring[i];
-                worldCoords[i] = map.project(pt, this._crs) as [number, number];
-                const h = pt?.[2];
-                heights[i] = Number.isFinite(h) ? (h as number) : 0;
-            }
-            return { worldCoords, heights };
-        });
-        return this._fullRenderRings;
-    },
+_getFullRenderRings(this: Polygon): RenderRing[] {
+    if (this._fullRenderRings) return this._fullRenderRings;
+
+    const map = (this as any)._map;
+    if (!map) return [];
+
+    this._fullRenderRings = this._rings.map(ring => {
+        const n = ring.length;
+        const worldCoords: [number, number][] = new Array(n);
+        const heights: number[] = new Array(n);
+
+        for (let i = 0; i < n; i++) {
+            const pt = ring[i];
+
+            // Единая нормализация из SpatialObject:
+            // - обычные [x, y] / [x, y, h]
+            // - ECEF [X, Y, Z] → точные lonLat + h
+            const nn = this._normalizeCoord(pt, this._crs);
+
+            // ВАЖНО: для 3D ECEF проецируем точные lon/lat напрямую.
+            // Не через nn.coord → ECEF.toLonLat(), потому что 2D ECEF-проекция
+            // ограничена видимой полусферой.
+            const p = nn.lonLat
+                ? map.project(nn.lonLat, 'EPSG:4326')
+                : map.project(nn.coord, this._crs);
+
+            let x = p[0];
+            let z = p[1];
+
+            // Защита от NaN в earcut/BufferGeometry.
+            if (!Number.isFinite(x)) x = 0;
+            if (!Number.isFinite(z)) z = 0;
+
+            worldCoords[i] = [x, z];
+
+            // Для ECEF это h над эллипсоидом, а не Z_ecef.
+            heights[i] = nn.nodeHeight;
+        }
+
+        return { worldCoords, heights };
+    });
+
+    return this._fullRenderRings;
+},
 
     _getRenderRings(this: Polygon, bucket: number): RenderRing[] {
         if (!this._simplify || !(this as any)._map || bucket < 0) {

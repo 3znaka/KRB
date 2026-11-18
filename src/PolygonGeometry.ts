@@ -237,23 +237,37 @@ _createSurfaceMaterial(this: Polygon): any {
         }
     },
 
-    _hasAntimeridianWrap(this: Polygon): boolean {
-        const crs = this._crs;
-        if (!crs || !crs.isGeographic) return false;
-        const rings = this._rings;
-        if (!rings) return false;
-        for (let r = 0; r < rings.length; r++) {
-            const ring = rings[r];
-            if (!ring || ring.length < 2) continue;
-            const n = ring.length;
-            for (let i = 0; i < n; i++) {
-                const a = ring[i], b = ring[(i + 1) % n];
-                if (!a || !b || a.length < 2 || b.length < 2) continue;
-                if (Math.abs(b[0] - a[0]) > 180) return true;
-            }
+_hasAntimeridianWrap(this: Polygon): boolean {
+    const crs = this._crs;
+    if (!crs || !this._rings) return false;
+
+    const toLonLat = (pt: any): [number, number] | null => {
+        const nn = this._normalizeCoord(pt, crs);
+        if (nn.lonLat) return nn.lonLat;
+
+        try {
+            return crs.toLonLat(nn.coord);
+        } catch {
+            return null;
         }
-        return false;
-    },
+    };
+
+    for (const ring of this._rings) {
+        if (!ring || ring.length < 2) continue;
+
+        const lonLats = ring.map(toLonLat);
+
+        for (let i = 0; i < lonLats.length; i++) {
+            const a = lonLats[i];
+            const b = lonLats[(i + 1) % lonLats.length];
+            if (!a || !b) continue;
+
+            if (Math.abs(b[0] - a[0]) > 180) return true;
+        }
+    }
+
+    return false;
+},
 
     _isGeometryInvalid(this: Polygon, ringStartIndices: number[], worldSize: number): boolean {
         const maxEdge = worldSize / INVALID_EDGE_FRACTION;

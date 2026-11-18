@@ -59,6 +59,10 @@ export class Area3D extends SpatialObject {
     _polygonWidth = 0;
     _polygonDepth = 0;
     _worldCoords = [];
+    /** Нормализованное внешнее кольцо (кэш до setRings / re-attach). */
+    _normalizedOuter = null;
+    /** Средняя высота узлов внешнего кольца (для ECEF — h над эллипсоидом). */
+    _nodeHeight = 0;
     // ── Кэш рельефа ──
     _cachedSurfaceHeight = 0;
     _lastHeightUpdateTime = 0;
@@ -83,7 +87,7 @@ export class Area3D extends SpatialObject {
         }
         this._rings = options.rings;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._modelUrl = options.modelUrl ?? null;
         this._primitiveType = options.primitiveType ?? 'box';
         this._size = options.size ?? null;
@@ -138,6 +142,7 @@ export class Area3D extends SpatialObject {
         this._crs = this._crsCode
             ? Projections.get(this._crsCode)
             : map.inputCRS;
+        this._normalizedOuter = null;
         this._calculatePolygonParams();
         this._group.position.set(this._centroidWorld.x, 0, this._centroidWorld.z);
         map.worldGroup.add(this._group);
@@ -180,6 +185,7 @@ export class Area3D extends SpatialObject {
             }
         }
         this._crs = null;
+        this._normalizedOuter = null;
         this._raycastMeshesCache = null;
         this._boundingRadius = 0;
         this._boundingCenterYLocal = 0;
@@ -279,25 +285,44 @@ export class Area3D extends SpatialObject {
     // =================================================================
     // Расчёт полигона
     // =================================================================
+    /** Нормализация внешнего кольца один раз до инвалидации. */
+    _getNormalizedOuter() {
+        if (this._normalizedOuter)
+            return this._normalizedOuter;
+        const outer = this._rings[0] ?? [];
+        this._normalizedOuter = outer.map(p => this._normalizePosition(p, this._crs));
+        return this._normalizedOuter;
+    }
     _calculatePolygonParams() {
-        const outerRing = this._rings[0];
+        const norm = this._getNormalizedOuter();
         this._worldCoords.length = 0;
         let sumX = 0, sumZ = 0;
+        let sumH = 0, countH = 0;
         const uniquePoints = [];
-        for (let i = 0; i < outerRing.length; i++) {
-            const [absX, absZ] = this._map.project(outerRing[i], this._crs);
+        for (let i = 0; i < norm.length; i++) {
+            const nn = norm[i];
+            // ВАЖНО: для ECEF проецируем точные lon/lat напрямую, а не nn.coord:
+            // round-trip через 2D-проекцию ECEF ограничен видимой полусферой,
+            // а footprint должен строиться по всему глобусу.
+            const [absX, absZ] = nn.lonLat
+                ? this._map.project(nn.lonLat, 'EPSG:4326')
+                : this._map.project(nn.coord, this._crs);
             if (i > 0 && absX === uniquePoints[0]?.[0] && absZ === uniquePoints[0]?.[1])
                 continue;
             uniquePoints.push([absX, absZ]);
             this._worldCoords.push([absX, absZ]);
             sumX += absX;
             sumZ += absZ;
+            sumH += nn.nodeHeight;
+            countH++;
         }
+        this._nodeHeight = countH > 0 ? sumH / countH : 0;
         const centroidX = sumX / this._worldCoords.length;
         const centroidZ = sumZ / this._worldCoords.length;
         this._centroidWorld.set(centroidX, 0, centroidZ);
         if (this._worldCoords.length < 3)
             return;
+        // ── Дальше без изменений: самое длинное ребро → угол, bbox → width/depth ──
         let maxLenSq = -1;
         let dirX = 0, dirZ = 0;
         for (let i = 0; i < this._worldCoords.length; i++) {
@@ -545,15 +570,15 @@ export class Area3D extends SpatialObject {
     // =================================================================
     /** Центроид внешнего кольца в СК Area3D. */
     getPosition() {
-        const outer = this._rings[0];
-        if (!outer || !outer.length)
+        const norm = this._getNormalizedOuter();
+        if (!norm.length)
             return [0, 0];
         let sx = 0, sy = 0;
-        for (const p of outer) {
-            sx += p[0];
-            sy += p[1];
+        for (const nn of norm) {
+            sx += nn.coord[0];
+            sy += nn.coord[1];
         }
-        return [sx / outer.length, sy / outer.length];
+        return [sx / norm.length, sy / norm.length];
     }
     /** WGS84-центр bbox — алиас `getCenter()`. */
     getLonLat() {
@@ -582,6 +607,7 @@ export class Area3D extends SpatialObject {
         this._rings = rings;
         if (!this._map)
             return this;
+        this._normalizedOuter = null;
         this._calculatePolygonParams();
         this._group.position.x = this._centroidWorld.x;
         this._group.position.z = this._centroidWorld.z;
@@ -727,11 +753,11 @@ export class Area3D extends SpatialObject {
                 this._lastHeightUpdateTime = now;
                 this._lastWorldGroupPos.copy(map.worldGroup.position);
             }
-            this._group.position.y = this._cachedSurfaceHeight + this._altitude;
+            this._group.position.y = this._cachedSurfaceHeight + this._altitude + this._nodeHeight;
             this._group.updateMatrixWorld(true);
         }
         else {
-            this._group.position.y = this._altitude;
+            this._group.position.y = this._altitude + this._nodeHeight;
             this._group.updateMatrixWorld(true);
         }
         if (this._mixer && this._mixerClock) {
@@ -820,14 +846,19 @@ export class Area3D extends SpatialObject {
                 const pt = ring[i];
                 if (!pt || pt.length < 2)
                     continue;
+                const nn = this._normalizePosition(pt, src);
                 let x, y;
-                if (sameProjection) {
-                    x = pt[0];
-                    y = pt[1];
+                if (nn.lonLat) {
+                    const conv = dst.fromLonLat(nn.lonLat);
+                    x = conv[0];
+                    y = conv[1];
+                }
+                else if (sameProjection) {
+                    x = nn.coord[0];
+                    y = nn.coord[1];
                 }
                 else {
-                    const lonLat = src.toLonLat(pt);
-                    const conv = dst.fromLonLat(lonLat);
+                    const conv = dst.fromLonLat(src.toLonLat(nn.coord));
                     x = conv[0];
                     y = conv[1];
                 }

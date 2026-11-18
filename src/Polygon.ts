@@ -5,7 +5,7 @@
  */
 import { Projections } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
-import { SpatialObject } from './SpatialObject.js';
+import { SpatialObject, type NormalizedPosition } from './SpatialObject.js';
 
 import {
     type LonLat, type PolygonCoord, type PolygonRing, type PolygonOptions,
@@ -140,8 +140,8 @@ export class Polygon extends SpatialObject {
         this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
         this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
 
-        this._crsCode = options.crs ?? null;
-        this._crs = null;
+this._crsCode = options.crs ?? null;
+this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._fillColor = options.fillColor ?? '#3388ff';
         this._fillOpacity = options.fillOpacity ?? 0.5;
@@ -478,6 +478,14 @@ export class Polygon extends SpatialObject {
         this._raycastMeshesCache = meshes;
         return meshes;
     }
+
+/**
+ * @internal
+ * Единая точка нормализации координаты для Polygon-миксинов.
+ */
+_normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
+    return this._normalizePosition(pt, crs);
+}
 
     // =================================================================
     // Rings

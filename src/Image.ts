@@ -17,7 +17,8 @@
 
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
-import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
+import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation, SpatialPosition } from './SpatialObject.js';
+
 
 // =====================================================================
 // Типы
@@ -29,13 +30,10 @@ export type ImageBlending = 'normal' | 'additive' | 'multiply' | 'subtract' | nu
 export type ImageTitleAlign = TitleAlignH;
 export type ImageTitleAlignV = TitleAlignV;
 
-export interface ImageNode {
-    lon: number;
-    lat: number;
-    alt?: number;
-}
+export interface ImageNodeObject { lon: number; lat: number; alt?: number; }
+export type ImageNode = ImageNodeObject | SpatialPosition;
 
-export type ImagePosition = [number, number, number];
+export type ImagePosition = SpatialPosition;
 export type ImageSize = [number, number];
 export type ImageAnchor = [number, number];
 export type ImageRotation = [number, number, number];
@@ -153,7 +151,7 @@ this._userData = options.userData ?? {};
         this._nodes = options.nodes ?? null;
         this._position = options.position ?? null;
         this._crsCode = options.crs ?? null;
-        this._crs = null;
+        this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._size = options.size ?? [100, 100];
         this._anchor = options.anchor ?? [0.5, 0.5];
@@ -258,6 +256,13 @@ this._userData = options.userData ?? {};
             y: (-screenPos.y * 0.5 + 0.5) * canvas.clientHeight,
         };
     }
+
+private _nodeToPosition(node: ImageNode): number[] {
+    if (Array.isArray(node)) return node;
+    const p: number[] = [node.lon, node.lat];
+    if (Number.isFinite(node.alt)) p.push(node.alt as number);
+    return p;
+}
 
     // =================================================================
     // Статический реестр интерактивных
@@ -440,11 +445,12 @@ this._userData = options.userData ?? {};
         return this;
     }
 
-    getNodes(): ImageNode[] | null {
-        return this._nodes
-            ? this._nodes.map(n => ({ lon: n.lon, lat: n.lat, alt: n.alt }))
-            : null;
-    }
+getNodes(): ImageNode[] | null {
+    if (!this._nodes) return null;
+    return this._nodes.map(n => Array.isArray(n)
+        ? ([...n] as SpatialPosition)
+        : { lon: n.lon, lat: n.lat, alt: n.alt });
+}
 
     setPositionRotation(params: SizeAnchorRotationParams = {}): this {
         if (params.position) this._position = params.position;
@@ -547,15 +553,19 @@ this._userData = options.userData ?? {};
         }
     }
 
-    private _computeWorldPositionsFromNodes(): any[] {
-        if (!this._nodes || this._nodes.length < 3 || !this._map) return [];
+private _computeWorldPositionsFromNodes(): any[] {
+    if (!this._nodes || this._nodes.length < 3 || !this._map) return [];
+    const map = this._map;
 
-        const map = this._map;
-        const positions = this._nodes.map(node => {
-            const [x, z] = map.project([node.lon, node.lat], this._crs);
-            const y = (node.alt || 0) + this._altitude;
-            return new THREE.Vector3(x, y, z);
-        });
+    const positions = this._nodes.map(node => {
+        const nn = this._normalizePosition(this._nodeToPosition(node), this._crs);
+        // ECEF: точные lon/lat напрямую — глобально, без ограничения полусферой.
+        const [x, z] = nn.lonLat
+            ? map.project(nn.lonLat, 'EPSG:4326')
+            : map.project(nn.coord, this._crs);
+        const y = nn.nodeHeight + this._altitude;
+        return new THREE.Vector3(x, y, z);
+    });
 
         if (positions.length === 4) {
             const [p0, p1, p2, p3] = positions;
@@ -574,16 +584,20 @@ this._userData = options.userData ?? {};
         return positions;
     }
 
-    private _computeWorldPositionsFromAnchor(): any[] {
-        if (!this._position || !this._map) return [];
+private _computeWorldPositionsFromAnchor(): any[] {
+    if (!this._position || !this._map) return [];
 
-        const [lon, lat, alt] = this._position;
-        const [width, height] = this._size;
-        const [ax, ay] = this._anchor;
-        const [rx, ry, rz] = this._rotation;
+    const nn = this._normalizePosition(this._position, this._crs);
+    const [width, height] = this._size;
+    const [ax, ay] = this._anchor;
+    const [rx, ry, rz] = this._rotation;
 
-        const [worldX, worldZ] = this._map.project([lon, lat], this._crs);
-        const center = new THREE.Vector3(worldX, (alt || 0) + this._altitude, worldZ);
+    const [worldX, worldZ] = nn.lonLat
+        ? this._map.project(nn.lonLat, 'EPSG:4326')
+        : this._map.project(nn.coord, this._crs);
+
+    const center = new THREE.Vector3(worldX, nn.nodeHeight + this._altitude, worldZ);
+
 
         const halfW = width / 2;
         const halfH = height / 2;
@@ -803,18 +817,22 @@ this._userData = options.userData ?? {};
         if (this._nodes && this._nodes.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let count = 0;
-            for (const node of this._nodes) {
-                if (!node) continue;
-                const px = node.lon, py = node.lat;
-                if (!isFinite(px) || !isFinite(py)) continue;
-                let x: number, y: number;
-                if (srcCrs === dstCrs) {
-                    x = px; y = py;
-                } else {
-                    const lonLat = srcCrs.toLonLat([px, py]);
-                    const conv = dstCrs.fromLonLat(lonLat);
-                    x = conv[0]; y = conv[1];
-                }
+for (const node of this._nodes) {
+    if (!node) continue;
+    const raw = this._nodeToPosition(node);
+    if (!isFinite(raw[0]) || !isFinite(raw[1])) continue;
+
+    const nn = this._normalizePosition(raw, srcCrs);
+    let x: number, y: number;
+    if (nn.lonLat) {
+        const conv = dstCrs.fromLonLat(nn.lonLat);
+        x = conv[0]; y = conv[1];
+    } else if (srcCrs === dstCrs) {
+        x = nn.coord[0]; y = nn.coord[1];
+    } else {
+        const conv = dstCrs.fromLonLat(srcCrs.toLonLat(nn.coord));
+        x = conv[0]; y = conv[1];
+    }
                 if (x < minX) minX = x;
                 if (x > maxX) maxX = x;
                 if (y < minY) minY = y;
@@ -845,17 +863,19 @@ this._userData = options.userData ?? {};
                 }
             }
             // Fallback: карта не привязана — возвращаем точку position.
-            const px = this._position[0], py = this._position[1];
-            if (!isFinite(px) || !isFinite(py)) return null;
-            let x: number, y: number;
-            if (srcCrs === dstCrs) {
-                x = px; y = py;
-            } else {
-                const lonLat = srcCrs.toLonLat([px, py]);
-                const conv = dstCrs.fromLonLat(lonLat);
-                x = conv[0]; y = conv[1];
-            }
-            return [[x, y], [x, y]];
+            const nn = this._normalizePosition(this._position, srcCrs);
+let x: number, y: number;
+if (nn.lonLat) {
+    const conv = dstCrs.fromLonLat(nn.lonLat);
+    x = conv[0]; y = conv[1];
+} else if (srcCrs === dstCrs) {
+    x = nn.coord[0]; y = nn.coord[1];
+} else {
+    const conv = dstCrs.fromLonLat(srcCrs.toLonLat(nn.coord));
+    x = conv[0]; y = conv[1];
+}
+if (!isFinite(x) || !isFinite(y)) return null;
+return [[x, y], [x, y]];
         }
 
         return null;

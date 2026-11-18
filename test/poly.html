@@ -22,21 +22,21 @@ const { Projections, ELLIPSOIDS } = await import('./../js/Projections.js');
 
 await KRB.addCrs(['ADPKP:0072', 'EPSG:32637', 'EPSG:32601']);
 
-
+const graticule = new KRB.Graticule({
+    crs: 'EPSG:4326',
+    step: { lat: 5, lon: 5 },
+    color: '#888',
+    width: 1,
+    opacity: 0.6,
+    showLabels: true,
+});
 
  const map = new KRB.Map({
         target: 'map',
 debug: true,
         crs: 'ADPKP:0072',
         layers: [],
-        graticule: {
-            crs: 'EPSG:4326',
-            step: { lat: 5, lon: 5 },
-            color: '#888',
-            width: 1,
-            opacity: 0.6,
-            showLabels: true,
-        },
+        graticule: graticule,
         view: new KRB.View({
             centerLonLat: [10, 20],
             zoom: 1,
@@ -55,6 +55,25 @@ debug: true,
         defaultStrokeWidth: 0.3,
     }).addTo(map);
 
+
+  const marker =  new KRB.Marker({
+    position: [37.6178, 55.7558],
+    tooltip: '<b>Москва</b><br><small>столица России</small>',
+    title: 'Москва',
+    titleStyle: { color: '#fff', textShadow: '0 1px 3px #000', fontSize: '13px', fontWeight: 'bold' }
+}).addTo(map);
+
+// marker.downloadGeoJSON();
+
+
+
+if (1===2) {graticule.downloadGeoJSON({
+    gridCrs: 'EPSG:4326',
+    targetCrs: 'ADPKP:0072',
+    stepLat: 5,
+    stepLon: 5,
+}, 'graticule.geojson');
+}
 
 </script>
 </body>

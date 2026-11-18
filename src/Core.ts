@@ -10,6 +10,7 @@ import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
 import { View } from './View.js';
 import { Graticule, GraticuleOptions } from './Graticule.js';
+import { GeoJSONExporter } from './GeoJSONExporter.js';  
 
 
 // Примеси
@@ -293,6 +294,15 @@ private _refreshExtents(): void {
     this.WORLD_SIZE    = 2 * this.projection.halfExtentX;
     this.MAX_MERCATOR  = this.projection.halfExtentX;
     this.WORLD_EXTENT  = this.WORLD_SIZE;
+}
+
+private _geoJSONExporter: GeoJSONExporter | null = null;
+
+get geoJSONExporter(): GeoJSONExporter {
+    if (!this._geoJSONExporter) {
+        this._geoJSONExporter = new GeoJSONExporter(this.projection);
+    }
+    return this._geoJSONExporter;
 }
 
 /* Extent MAP-проекции (мир, в котором живут worldGroup-меши) */

@@ -72,7 +72,10 @@ export class Marker extends SpatialObject {
         super();
         if (options.zoomInterpolate)
             this.setZoomInterpolations(options.zoomInterpolate);
-        this._properties = options.properties ?? {};
+        this._properties = {
+            id: `marker-${++Marker._idCounter}`,
+            ...(options.properties ?? {}),
+        };
         this._userData = options.userData ?? {};
         if (!options.position || options.position.length < 2) {
             throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
@@ -513,5 +516,30 @@ export class Marker extends SpatialObject {
             y = conv[1];
         }
         return [[x, y], [x, y]];
+    }
+    toGeoJSONGeometry(targetCrs) {
+        const srcCrs = (this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326')));
+        if (!srcCrs)
+            return null;
+        const lonLat = srcCrs.toLonLat(this._coord);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return null;
+        }
+        const projected = targetCrs.fromLonLat(lonLat);
+        if (!projected || !Number.isFinite(projected[0]) || !Number.isFinite(projected[1])) {
+            return null;
+        }
+        const z = (this._altitude ?? 0) + (this._nodeHeight ?? 0);
+        const coords = z !== 0 ? [projected[0], projected[1], z] : [projected[0], projected[1]];
+        return { type: 'Point', coordinates: coords };
+    }
+    getGeoJSONProperties() {
+        return {
+            id: this._properties.id ?? `marker-${Marker._idCounter}`,
+            title: this._title || undefined,
+            tooltip: this._tooltipText || undefined,
+            ...this._properties,
+        };
     }
 }

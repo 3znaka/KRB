@@ -9,8 +9,9 @@
  * @module SpatialObject
  */
 import { Layer } from './Layers.js';
-import { isEcefCrs } from './Projections.js';
+import { isEcefCrs, Projections } from './Projections.js';
 import { ecefToGeodetic } from './Ellipsoid.js';
+import { GeoJSONExporter } from './GeoJSONExporter.js';
 export class SpatialObject {
     // ── Границы зума ──
     _minZoom = -Infinity;
@@ -380,6 +381,65 @@ export class SpatialObject {
         else if (this._title) {
             this._textLabel = tm.addLabel(this);
         }
+    }
+    // ================================================================
+    // GeoJSON: экспорт объекта
+    // ================================================================
+    /**
+     * Дефолтные GeoJSON-свойства. Подкласс может переопределить, чтобы
+     * добавить специфичные поля (например, `radius` у круга, `color`
+     * у полигона и т.д.).
+     */
+    getGeoJSONProperties() {
+        const props = { ...this._properties };
+        if (this._title)
+            props.title = this._title;
+        if (this._tooltipText)
+            props.tooltip = this._tooltipText;
+        return props;
+    }
+    /**
+     * Возвращает FeatureCollection (строкой) с единственным Feature —
+     * этим объектом.
+     *
+     * Требует, чтобы подкласс реализовал `toGeoJSONGeometry(targetCrs)`.
+     * Если он отсутствует — бросаем исключение, чтобы не экспортировать
+     * молча пустую геометрию.
+     *
+     * По умолчанию использует `map.projection` в качестве целевой СК
+     * (то есть координаты будут в world-метрах карты). Передайте
+     * `options.targetCrs` для другого результата — например, `'EPSG:4326'`.
+     */
+    toGeoJSON(options = {}) {
+        if (typeof this.toGeoJSONGeometry !== 'function') {
+            throw new Error(`${this.constructor.name}.toGeoJSON: класс не реализует toGeoJSONGeometry`);
+        }
+        const exporter = this._map?.geoJSONExporter
+            ?? new GeoJSONExporter(Projections.get('EPSG:4326'));
+        return exporter.exportString([this], options);
+    }
+    /**
+     * Скачивает объект как `.geojson` файл.
+     *
+     * @param filename — по умолчанию `${ClassName}-${id ?? Date.now()}.geojson`.
+     * @example
+     *   marker.downloadGeoJSON();
+     *   marker.downloadGeoJSON({ targetCrs: 'EPSG:4326' }, 'moscow-wgs84.geojson');
+     */
+    downloadGeoJSON(options = {}, filename) {
+        const json = this.toGeoJSON(options);
+        const props = this.getGeoJSONProperties();
+        const name = filename
+            ?? `${this.constructor.name.toLowerCase()}-${props.id ?? Date.now()}.geojson`;
+        const blob = new Blob([json], { type: 'application/geo+json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
     _isWithinView() {
         if (!this._map)

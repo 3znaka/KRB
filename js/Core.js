@@ -9,6 +9,7 @@ import { PopupManager } from './PopupManager.js';
 import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
 import { Graticule } from './Graticule.js';
+import { GeoJSONExporter } from './GeoJSONExporter.js';
 // Примеси
 import { CoreElevationMixin } from './CoreElevation.js';
 import { CoreCameraMixin } from './CoreCamera.js';
@@ -180,6 +181,13 @@ export class KrbMap {
         this.WORLD_SIZE = 2 * this.projection.halfExtentX;
         this.MAX_MERCATOR = this.projection.halfExtentX;
         this.WORLD_EXTENT = this.WORLD_SIZE;
+    }
+    _geoJSONExporter = null;
+    get geoJSONExporter() {
+        if (!this._geoJSONExporter) {
+            this._geoJSONExporter = new GeoJSONExporter(this.projection);
+        }
+        return this._geoJSONExporter;
     }
     /* Extent MAP-проекции (мир, в котором живут worldGroup-меши) */
     get mapHalfExtentX() { return this.projection.halfExtentX; }

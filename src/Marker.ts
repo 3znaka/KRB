@@ -11,7 +11,12 @@
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject, TitleAlignH, ZoomInterpolation, SpatialPosition } from './SpatialObject.js';
-
+import type { Projection } from './Projections.js';
+import type {
+    GeoJSONExportable,
+    GeoJSONGeometry,
+    CrsLike,
+} from './GeoJSONExportable.js';
 
 
 
@@ -104,7 +109,7 @@ export function _getMarkerFromElement(el: HTMLElement | null | undefined): Marke
 // Marker
 // =====================================================================
 
-export class Marker extends SpatialObject {
+export class Marker extends SpatialObject implements GeoJSONExportable {
     static _idCounter = 0;
 
     // ── Данные позиции ──
@@ -136,7 +141,10 @@ export class Marker extends SpatialObject {
     constructor(options: MarkerOptions) {
         super();
         if (options.zoomInterpolate) this.setZoomInterpolations(options.zoomInterpolate);
-        this._properties = options.properties ?? {};
+        this._properties = {
+    id: `marker-${++Marker._idCounter}`,
+    ...(options.properties ?? {}),   
+};
         this._userData = options.userData ?? {};
         if (!options.position || options.position.length < 2) {
             throw new Error('Marker: options.position is required [x, y] or [x, y, altitude]');
@@ -631,4 +639,35 @@ export class Marker extends SpatialObject {
         }
         return [[x, y], [x, y]];
     }
+  toGeoJSONGeometry(targetCrs: CrsLike): GeoJSONGeometry | null {
+        const srcCrs = (this._crs
+            ?? (this._crsCode ? Projections.get(this._crsCode) : Projections.get('EPSG:4326'))) as unknown as CrsLike;
+        if (!srcCrs) return null;
+
+        const lonLat = srcCrs.toLonLat(this._coord);
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) {
+            return null;
+        }
+
+        const projected = targetCrs.fromLonLat(lonLat);
+        if (!projected || !Number.isFinite(projected[0]) || !Number.isFinite(projected[1])) {
+            return null;
+        }
+
+        const z = (this._altitude ?? 0) + (this._nodeHeight ?? 0);
+        const coords: [number, number] | [number, number, number] =
+            z !== 0 ? [projected[0], projected[1], z] : [projected[0], projected[1]];
+
+        return { type: 'Point', coordinates: coords };
+    }
+
+    getGeoJSONProperties(): Record<string, any> {
+        return {
+            id: this._properties.id ?? `marker-${Marker._idCounter}`,
+            title: this._title || undefined,
+            tooltip: this._tooltipText || undefined,
+            ...this._properties,
+        };
+    }
+
 }

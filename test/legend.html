@@ -125,7 +125,7 @@ const map = new KRB.Map({
 // ─────────────────────────────────────────────────────────────────
 // СЛОЙ 1: Choropleth
 // ─────────────────────────────────────────────────────────────────
-new KRB.GeoJSONLayer({
+const chror = new KRB.GeoJSONLayer({
     url: 'world.geojson',
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
@@ -153,6 +153,8 @@ new KRB.GeoJSONLayer({
         },
     },
 }).addTo(map);
+
+//await chror.download();
 
 // ─────────────────────────────────────────────────────────────────
 // СЛОЙ 2: Точки с картодиаграммами

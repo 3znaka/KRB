@@ -13,7 +13,7 @@ export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
 export { Area3D } from './Area3D.js';
 export { Image } from './Image.js';
-export { Projections, addCrs, isEcefCrs } from './Projections.js';
+export { Projections, crs, addCrs, isEcefCrs } from './Projections.js';
 export { exportToGLB } from './Exporter.js';
 export { InteractionManager } from './Interaction.js';
 export { GeoTiffLayer } from './GeoTiffLayer.js';
@@ -29,6 +29,7 @@ export {
     enuToEcefDelta,
 } from './Ellipsoid.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
+
 export * from './styles/index.js';
 export { Diagram } from './Diagram.js';
 export { Graticule } from './Graticule.js';

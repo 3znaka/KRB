@@ -325,7 +325,7 @@ reload(): void {
     addData(data: GeoJSONInput): this { 
         if (this.crs && !Projections.has(this.crs)) {
     console.warn(`GeoJSONLayer.addData: CRS ${this.crs} не загружена. ` +
-                 `Вызовите await Projections.ensure('${this.crs}') перед addData().`);
+                 `Вызовите await KRB.crs.add('${this.crs}') перед addData().`);
 }
         const finalData = this.extendAntarctica 
             ? this._extendAntarcticaGeoJSON(data) 

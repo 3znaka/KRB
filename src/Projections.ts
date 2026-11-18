@@ -8,6 +8,48 @@ export { Ellipsoid, ELLIPSOIDS, parseEllipsoid };
 
 const WORLD_HALF_X = 20037508.342789244;
 
+export interface CrsSpec {
+    code?: string;
+    def?: string;
+    formula?: ProjectionFormula;
+    lobes?: any[];
+    options?: FormulaProjectionOptions;
+}
+
+const PROJ_RE = /\+proj\s*=/i;
+const WKT_RE  = /^(PROJCS|GEOGCS|PROJCRS|GEOGCRS|GEODCRS|GEOCCS|LOCAL_CS|ENGCRS|COMPD_CS|VERT_CS)\s*\[/i;
+
+export type CrsInput = 
+    | string                  // Код ('EPSG:4326') или PROJ/WKT-строка
+    | string[]                // Массив кодов
+    | File | Blob             // Файл с диска
+    | CrsSpec;                // Объект-спецификация { code, formula, def, ... }
+
+/** Эвристика: похоже ли содержимое на определение проекции, а не на код. */
+function isProjectionDef(s: string): boolean {
+    const t = s.trim();
+    return /\+proj\s*=/i.test(t) || 
+           /^(PROJCS|GEOGCS|PROJCRS|GEOGCRS|GEODCRS|GEOCCS|LOCAL_CS|ENGCRS|COMPD_CS|VERT_CS)\s*\[/i.test(t);
+}
+
+/** Стабильный короткий хеш для безымянных PROJ-строк. */
+function defCode(def: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < def.length; i++) {
+        h ^= def.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return `CUSTOM:${h.toString(36).toUpperCase()}`;
+}
+
+/** ESRI_54052.js → 'ESRI:54052'; иначе — имя без расширения. */
+function codeFromFilename(name: string): string | undefined {
+    const stem = name.replace(/\.[^.]+$/, '');
+    const m = stem.match(/^([A-Za-z][A-Za-z0-9]*)[_-](\d+)$/);
+    return m ? `${m[1].toUpperCase()}:${m[2]}` : (stem || undefined);
+}
+
+
 const HARDCODED = {
     'EPSG:4326': '+proj=longlat +datum=WGS84 +no_defs +type=crs',
     'EPSG:3857': '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs +type=crs',
@@ -479,7 +521,7 @@ class ProjectionRegistry {
     
     }
 
-    register(p) { this._map.set(p.code, p); return p; }
+    register(p) { this._map.set(p.code, p);  _worldCache.delete(p.code);  return p; }
     has(code)   { return typeof code === 'string' && this._map.has(code); }
 
     get(code) {
@@ -491,7 +533,55 @@ class ProjectionRegistry {
         return p;
     }
 
+    /**
+     * Универсальная точка входа для регистрации СК.
+     * Автоматически определяет тип ввода и делегирует специализированному методу.
+     * 
+     * @param input Код, массив кодов, PROJ/WKT-строка, File/Blob или CrsSpec.
+     * @param fallbackCode Код, который будет использован, если он не указан в input 
+     *                     (например, для File без spec.code или для анонимной PROJ-строки).
+     */
+    async add(input: CrsInput, fallbackCode?: string): Promise<Projection | void> {
+        // 1. Массив кодов
+        if (Array.isArray(input)) {
+            await this.addCrs(input);
+            return;
+        }
+
+        // 2. File или Blob (проверка File через typeof, чтобы не упасть в Node.js)
+        if ((typeof File !== 'undefined' && input instanceof File) || input instanceof Blob) {
+            return await this.addFile(input as File | Blob, fallbackCode);
+        }
+
+        // 3. Объект-спецификация (CrsSpec)
+        if (typeof input === 'object' && input !== null) {
+            const spec = input as CrsSpec;
+            if (spec.formula || spec.def) {
+                return this.addSpec(spec, fallbackCode ?? spec.code);
+            }
+        }
+
+        // 4. Строка: код или определение?
+        if (typeof input === 'string') {
+            const trimmed = input.trim();
+            if (isProjectionDef(trimmed)) {
+                // Это PROJ/WKT. Если код не передан, генерируем стабильный хеш.
+                const code = fallbackCode ?? defCode(trimmed);
+                return this.addDef(code, trimmed);
+            } else {
+                // Это код (или список кодов через запятую, хотя массив предпочтительнее)
+                return this.addCrs(trimmed);
+            }
+        }
+
+        throw new Error('KRB.crs.add: неподдерживаемый тип аргумента');
+    }
+
     registerFormula(codeOrFormula, formulaOrOptions?, maybeOptions?) {
+        if (codeOrFormula && !Array.isArray(codeOrFormula)
+            && typeof codeOrFormula === 'object' && codeOrFormula.formula) {
+            return this._registerSpec(codeOrFormula, maybeOptions?.code);
+        }
         let code, formula, options;
         if (typeof codeOrFormula === 'string') {
             code    = codeOrFormula;
@@ -509,11 +599,13 @@ class ProjectionRegistry {
         const proj = new FormulaProjection(formula, { ...options, code });
         this._map.set(code, proj);
         this._formulaRawCache.set(formula, proj);
+        _worldCache.delete(proj.code); 
         return proj;
     }
 
         /** @private Единая точка регистрации по PROJ-строке (epsg_defs.json и customCRS). */
     _registerDef(code: string, def: string) {
+         _worldCache.delete(code);   
         if (isGeocentricDef(def)) {
             // proj4 не поддерживает geocent — строим формульную ECEF-проекцию,
             // эллипсоид парсится ИЗ ЭТОЙ ЖЕ строки (WGS72, GRS80, krass, ...)
@@ -521,11 +613,13 @@ class ProjectionRegistry {
         }
         return this.register(new Projection(code, def));
     }
-
-    /** @private */
+    
     _getOrCreateFormulaRaw(input) {
         const cached = this._formulaRawCache.get(input);
         if (cached) return cached;
+        if (input && !Array.isArray(input) && input.formula) {
+            return this._registerSpec(input);  
+        }
 
         let formula, options;
         if (Array.isArray(input)) {
@@ -661,6 +755,7 @@ if (spec.formula) {
     }
 
     getRaw(codeOrProj) {
+        if (isProjectionDef(codeOrProj)) return this._resolveDefString(codeOrProj);
         if (typeof codeOrProj === 'string')      return this.get(codeOrProj);
         if (Array.isArray(codeOrProj))           return this._getOrCreateFormulaRaw(codeOrProj);
         if (codeOrProj && codeOrProj.formula)    return this._getOrCreateFormulaRaw(codeOrProj);
@@ -686,6 +781,7 @@ getCustomCrsUrl(code: string): string | null {
     }
 
     getWorld(codeOrProj) {
+        if (isProjectionDef(codeOrProj)) return this._resolveDefString(codeOrProj);
         // 1) строковый код
         if (typeof codeOrProj === 'string') {
             const hit = _worldCache.get(codeOrProj);
@@ -715,6 +811,150 @@ getCustomCrsUrl(code: string): string | null {
         }
         return codeOrProj;
     }
+
+    /** @private кэш безымянных PROJ-строк: одна строка → один инстанс. */
+    private _defByString = new Map<string, any>();
+
+    /** @private Единая нормализация спека: {def} | {formula}, вложенные options, lobes. */
+    private _registerSpec(spec: CrsSpec, codeOverride?: string, fallbackCode?: string) {
+        if (!spec || typeof spec !== 'object') {
+            throw new Error('CRS spec: ожидается объект');
+        }
+        const code = codeOverride ?? spec.code ?? fallbackCode;
+
+        if (spec.def) {
+            if (!code) throw new Error('CRS spec: для def нужен code');
+            return this._registerDef(code, String(spec.def).trim());
+        }
+
+        if (Array.isArray(spec.formula)) {
+            if (spec.formula.length !== 4 || spec.formula.some(f => typeof f !== 'function')) {
+                throw new Error('CRS spec: formula должен быть массивом из 4 функций');
+            }
+            const opts = {
+                ...(spec.options ?? {}),
+                lobes: spec.options?.lobes ?? spec.lobes,
+                code: code ?? `FORMULA:${++_formulaCounter}`,
+            };
+            const prev = this._map.get(opts.code);
+            if (prev) console.warn(`[Projections] СК ${opts.code} перезаписана новой формулой`);
+            const proj = new FormulaProjection(spec.formula, opts);
+            this._map.set(proj.code, proj);
+            this._formulaRawCache.set(spec.formula, proj);
+            this._formulaRawCache.set(spec, proj);
+            _worldCache.delete(proj.code);
+            return proj;
+        }
+
+        throw new Error('CRS spec: нужен def или formula');
+    }
+
+    /** PROJ-строка или WKT + код. Синхронно. */
+    addDef(code: string, def: string) {
+        if (!code) throw new Error('addDef: нужен code');
+        if (typeof def !== 'string' || !def.trim()) throw new Error('addDef: def должен быть строкой');
+        const p = this._registerDef(code, def.trim());
+        try {
+            const probe = p.fromLonLat([0, 0]);
+            if (!probe || !Number.isFinite(probe[0])) {
+                console.warn(`[Projections] ${code}: fromLonLat([0,0]) не дал числа — проверь определение`);
+            }
+        } catch (e) {
+            console.warn(`[Projections] ${code}: определение не прошло проверку`, e);
+        }
+        return p;
+    }
+
+    /** Spec-объект как default-экспорт customCRS/*.js. Синхронно. */
+    addSpec(spec: CrsSpec, code?: string) { return this._registerSpec(spec, code); }
+
+    /** @private безымянная строка → стабильный код + кэш. */
+    private _resolveDefString(def: string) {
+        const key = def.trim().replace(/\s+/g, ' ');
+        const hit = this._defByString.get(key);
+        if (hit) return hit;
+        const p = this._registerDef(defCode(key), key);
+        this._defByString.set(key, p);
+        return p;
+    }
+
+    /** Каталог customCRS как база для относительных импортов. */
+    private _customCrsDir(): string {
+        return new URL('./customCRS/', import.meta.url).href;
+    }
+
+    /** '../Ellipsoid.js' → абсолютный URL библиотеки. Эвристика, не AST. */
+    private _rewriteImports(src: string): string {
+        const base = this._customCrsDir();
+        return src.replace(
+            /(\bfrom\s*|\bimport\s*\(?\s*)(['"])(\.\.?\/[^'"]+)\2/g,
+            (_m, head, q, spec) => `${head}${q}${new URL(spec, base).href}${q}`,
+        );
+    }
+
+    /** Текст файла: PROJ/WKT, JSON-спек или JS-модуль. */
+    async addText(
+        text: string,
+        opts: { code?: string; fallbackCode?: string; kind?: 'js' | 'json' | 'def'; name?: string } = {},
+    ) {
+        const src = String(text);
+        const t = src.trim();
+
+        if (opts.kind === 'def' || (!opts.kind && isProjectionDef(t))) {
+            return opts.code
+                ? this.addDef(opts.code, t)
+                : this._resolveDefString(t);
+        }
+
+        if (opts.kind === 'json' || (!opts.kind && t.startsWith('{'))) {
+            return this._registerSpec(JSON.parse(t), opts.code, opts.fallbackCode);
+        }
+
+        // JS-модуль: переписываем относительные импорты и грузим через blob.
+        const named = opts.name ? `\n//# sourceURL=${opts.name}\n` : '';
+        const blob = new Blob([this._rewriteImports(src) + named], { type: 'text/javascript' });
+        const url = URL.createObjectURL(blob);
+        const mod = await import(/* @vite-ignore */ url);
+        const spec = mod?.default ?? mod;
+        if (!spec || typeof spec !== 'object') {
+            throw new Error('addText: файл не экспортирует default-спек');
+        }
+        return this._registerSpec(spec, opts.code, opts.fallbackCode);
+    }
+
+    /** Файл с диска пользователя (File из <input> или drag&drop). */
+    async addFile(file: File | Blob, code?: string) {
+        const name = (file as File).name ?? '';
+        const ext = name.split('.').pop()?.toLowerCase();
+        const kind = ext === 'json' ? 'json'
+                   : (ext === 'prj' || ext === 'wkt') ? 'def'
+                   : undefined;
+        return this.addText(await file.text(), {
+            code,
+            fallbackCode: codeFromFilename(name),
+            kind: kind as any,
+            name: `customCRS/${name || 'uploaded.js'}`,
+        });
+    }
+
+    /** Файл по URL (свой сервер, CDN) — относительные импорты резолвятся сами. */
+    async addUrl(url: string, code?: string) {
+        const abs = new URL(url, document.baseURI).href;
+        const ext = abs.split('?')[0].split('.').pop()?.toLowerCase();
+        if (ext === 'js' || ext === 'mjs') {
+            const mod = await import(/* @vite-ignore */ abs);
+            return this.addSpec(mod?.default ?? mod, code);
+        }
+        const r = await fetch(abs);
+        if (!r.ok) throw new Error(`addUrl(${url}): HTTP ${r.status}`);
+        return this.addText(await r.text(), {
+            code,
+            kind: ext === 'json' ? 'json' : undefined,
+            name: abs,
+        });
+    }
+
+
 }
 
 export const Projections = new ProjectionRegistry();
@@ -733,3 +973,27 @@ export function isEcefCrs(crsOrCode: string | any | null | undefined): boolean {
         : crsOrCode;
     return !!(p && (p.isGeocentric === true || p._raw?.isGeocentric === true));
 }
+
+// ── Namespace для короткого API: KRB.crs.addUrl(...) ──
+export const crs = {
+    /** Прямой доступ к реестру, если нужен полный контроль. */
+    registry: Projections,
+
+    /** Универсальный метод: принимает код, массив, PROJ-строку, File или spec. */
+    add: (input: CrsInput, fallbackCode?: string) => Projections.add(input, fallbackCode),
+
+    // Явные методы для случаев, когда нужна строгая типизация или контроль:
+    addDef:  (code: string, def: string) => Projections.addDef(code, def),
+    addSpec: (spec: CrsSpec, code?: string) => Projections.addSpec(spec, code),
+    addFile: (file: File | Blob, code?: string) => Projections.addFile(file, code),
+    addUrl:  (url: string, code?: string) => Projections.addUrl(url, code),
+
+    /** Получение инстансов. */
+    get:     (code: string) => Projections.get(code),
+    has:     (code: string) => Projections.has(code),
+    getRaw:  (codeOrProj: any) => Projections.getRaw(codeOrProj),
+    getWorld:(codeOrProj: any) => Projections.getWorld(codeOrProj),
+
+    /** Проверка типа. */
+    isEcef:  (codeOrInst: any) => isEcefCrs(codeOrInst),
+};

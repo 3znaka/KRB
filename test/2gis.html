@@ -19,7 +19,7 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
-await KRB.Projections.ensure('EPSG:32637');
+await KRB.crs.add('EPSG:32637');
 
 
 const map = new KRB.Map({

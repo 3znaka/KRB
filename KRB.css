@@ -214,3 +214,26 @@
         max-width: none;
     }
 }
+
+.krb-scale-bar--draggable {
+    pointer-events: auto;        /* ловим события поверх canvas */
+    cursor: pointer;
+    touch-action: none;          /* запрет системного скролла/зума на тач */
+    user-select: none;
+    -webkit-user-select: none;
+    /* Плавный возврат при отпускании.
+       Transition всегда включён, кроме момента активного drag —
+       тогда мы добавляем класс --dragging, который его отключает. */
+    transition: transform 0.35s cubic-bezier(.2, .8, .2, 1);
+    will-change: transform;
+}
+
+/* Активный drag: отключаем transition (иначе будет "резиновый" лаг),
+   добавляем визуальный отклик. */
+.krb-scale-bar--dragging {
+    cursor: none;
+    transition: none !important;
+    z-index: 1001;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}

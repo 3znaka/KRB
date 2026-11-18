@@ -67,7 +67,7 @@ R?: number;
     objectLayers?: MapObjectLayer[];    // явный список объектных слоёв
     graticule?: Graticule | GraticuleOptions | false;  // удобство для сетки
 
-
+dragRuler?: boolean;
     panInertia?: boolean;
 
     panFriction?: number;
@@ -168,7 +168,8 @@ export class KrbMap {
     currentDiscreteZoom: number;
     tileCRS: any;
     deformedTiles: boolean;
-
+dragRuler: boolean;
+    _rulerDragging: boolean = false; 
     
 
     allowRotate: boolean;
@@ -350,6 +351,8 @@ this.hasTileLayers = this.layers.some((layer: any) =>
 
 this.allowRotate = this.view.allowRotate ?? true;
 this.allowPitch  = this.view.allowPitch  ?? true;
+
+this.dragRuler = options.dragRuler ?? true;
 
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(

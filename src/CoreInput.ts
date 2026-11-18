@@ -125,6 +125,7 @@ _invalidateCanvasRect() {
 },
 
 onMouseDown(e) {
+    if (this._rulerDragging) return; 
     if (this._cameraAnimation) return;
     this._zoomPivotActive = false;
 
@@ -185,6 +186,7 @@ onMouseDown(e) {
 },
 
 onMouseMove(e) {
+    if (this._rulerDragging) return; 
     if (this._cameraAnimation) return;
 
     // NEW: right-drag → rotate around pivot
@@ -235,6 +237,7 @@ onMouseMove(e) {
 },
 
 onMouseUp(e?: MouseEvent) {
+    if (this._rulerDragging) return; 
     // завершение rotate-to-cursor
     if (this._rotatePivotActive) {
         this._rotatePivotActive = false;
@@ -452,6 +455,7 @@ _applyRotationDelta(dTheta: number, dPhi: number, pivot: any) {
 },
 
 onTouchStart(e: TouchEvent) {
+    if (this._rulerDragging) return; 
     if (this._cameraAnimation) return;
     this._zoomPivotActive = false;
     this._invalidateCanvasRect();
@@ -527,6 +531,7 @@ findTouchById(touches, id) {
 },
 
 onTouchMove(e: TouchEvent) {
+    if (this._rulerDragging) return; 
     if (this._cameraAnimation) return;
 
     if (this.touchDragActive && e.touches.length === 1) {
@@ -770,6 +775,7 @@ onTouchMove(e: TouchEvent) {
 },
 
 onTouchEnd(e: TouchEvent) {
+    if (this._rulerDragging) return; 
     if (e.touches.length < 2 && this.touchState.isPinching) {
         this.touchState.isPinching = false;
         this.touchState.activeGesture = null;

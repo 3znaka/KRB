@@ -87,6 +87,63 @@ export function initUI(map) {
     scaleBar.className = 'krb-scale-bar';
     const scaleLabel = document.createElement('div');
     scaleLabel.className = 'krb-scale-label';
+    // ── Drag ruler (опционально) ─────────────────────────────────────
+    const dragRulerEnabled = map.dragRuler !== false;
+    let rulerDragging = false;
+    // Кэшированная геометрия линейки на момент начала drag.
+    // НЕ перечитываем getBoundingClientRect() каждый кадр — это устраняет
+    // layout thrashing и feedback loop через изменение ширины.
+    let rulerStartRect = null;
+    let rulerDx = 0;
+    let rulerDy = 0;
+    const syncRulerFlag = (v) => {
+        rulerDragging = v;
+        map._rulerDragging = v;
+    };
+    const onRulerPointerDown = (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0)
+            return;
+        e.stopPropagation();
+        e.preventDefault();
+        // ← КЛЮЧЕВОЕ: читаем rect ОДИН РАЗ при старте drag
+        rulerStartRect = scaleBar.getBoundingClientRect();
+        rulerDx = 0;
+        rulerDy = 0;
+        syncRulerFlag(true);
+        scaleBar.classList.add('krb-scale-bar--dragging');
+        try {
+            scaleBar.setPointerCapture(e.pointerId);
+        }
+        catch { }
+    };
+    const onRulerPointerMove = (e) => {
+        if (!rulerDragging || !rulerStartRect)
+            return;
+        rulerDx = e.clientX - (rulerStartRect.left + rulerStartRect.width / 2);
+        rulerDy = e.clientY - (rulerStartRect.top + rulerStartRect.height / 2);
+        scaleBar.style.transform = `translate(${rulerDx}px, ${rulerDy}px)`;
+    };
+    const onRulerPointerUp = (e) => {
+        if (!rulerDragging)
+            return;
+        syncRulerFlag(false);
+        rulerStartRect = null; // освобождаем ссылку
+        rulerDx = 0;
+        rulerDy = 0;
+        scaleBar.classList.remove('krb-scale-bar--dragging');
+        scaleBar.style.transform = '';
+        try {
+            scaleBar.releasePointerCapture(e.pointerId);
+        }
+        catch { }
+    };
+    if (dragRulerEnabled) {
+        scaleBar.classList.add('krb-scale-bar--draggable');
+        scaleBar.addEventListener('pointerdown', onRulerPointerDown);
+        scaleBar.addEventListener('pointermove', onRulerPointerMove);
+        scaleBar.addEventListener('pointerup', onRulerPointerUp);
+        scaleBar.addEventListener('pointercancel', onRulerPointerUp);
+    }
     let coordLabel = null;
     let fpsLabel = null;
     let zoomValueLabel = null;
@@ -297,88 +354,118 @@ export function initUI(map) {
         const bearingRad = Math.atan2(_dirVec.x, -_dirVec.z);
         return bearingRad * 180 / Math.PI;
     }
+    const BAR_LENGTH_PX = 100;
     /**
-     * Обновляет масштабную линейку, координаты и подпись зума.
+     * Пересчитывает ширину и подпись масштабной линейки
+     * для точки экрана (screenX, screenY).
+     * Возвращает true при успехе.
      */
+    function computeScaleAt(screenX, screenY) {
+        if (!map.worldGroup || !map.controls || !map.renderer)
+            return false;
+        const worldPos = map.worldGroup.position;
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height)
+            return false;
+        const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
+        // Точка 1: под якорем
+        _ndc.set(ndcX, ndcY);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit1))
+            return false;
+        // Точка 2: на BAR_LENGTH_PX правее по экрану (горизонтальный масштаб)
+        const ndcOffsetX = (2 * BAR_LENGTH_PX) / rect.width;
+        _ndc.set(ndcX + ndcOffsetX, ndcY);
+        _raycaster.setFromCamera(_ndc, map.camera);
+        if (!_raycaster.ray.intersectPlane(_plane, _hit2))
+            return false;
+        const toLonLatSafe = (wx, wz) => {
+            if (map.unprojectToLonLatSafe)
+                return map.unprojectToLonLatSafe(wx, wz);
+            const v = map.unprojectToLonLat(wx, wz);
+            return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+        };
+        const h1 = toLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
+        if (!h1) {
+            scaleLabel.textContent = '';
+            return false;
+        }
+        const [lon1, lat1] = h1;
+        const h2 = toLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
+        if (!h2) {
+            scaleLabel.textContent = '';
+            return false;
+        }
+        const [lon2, lat2] = h2;
+        const R = (Number.isFinite(map.R) && map.R > 0) ? map.R : 6371008.8;
+        const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
+        if (!(distance > 0)) {
+            return false;
+        }
+        const nice = niceDistance(distance);
+        const ratio = nice / distance;
+        const newWidth = BAR_LENGTH_PX * ratio;
+        const newText = formatDistance(nice);
+        // Защита от резких скачков (>50% за кадр — явно артефакт проекции)
+        if (lastGoodWidth > 0) {
+            const jump = Math.abs(newWidth - lastGoodWidth) / lastGoodWidth;
+            if (jump > 0.5) {
+                // Скачок — игнорируем, оставляем предыдущее значение
+                return false;
+            }
+        }
+        scaleBar.style.width = newWidth + 'px';
+        scaleLabel.textContent = newText;
+        lastGoodWidth = newWidth;
+        lastGoodText = newText;
+        return true;
+    }
+    let lastGoodWidth = 0;
+    let lastGoodText = '';
     function updateScaleBar() {
         if (!map.worldGroup || !map.controls || !map.renderer)
             return;
+        // ── Якорь: центр линейки при drag, центр экрана иначе ──
+        let anchorX, anchorY;
+        if (map._rulerDragging && rulerStartRect) {
+            // ← КЛЮЧЕВОЕ: используем СТАРТОВЫЙ rect + текущие dx/dy.
+            // Никакого getBoundingClientRect() — ни reflow, ни feedback loop.
+            anchorX = rulerStartRect.left + rulerStartRect.width / 2 + rulerDx;
+            anchorY = rulerStartRect.top + rulerStartRect.height / 2 + rulerDy;
+        }
+        else {
+            const r = map.renderer.domElement.getBoundingClientRect();
+            anchorX = r.left + r.width / 2;
+            anchorY = r.top + r.height / 2;
+        }
+        computeScaleAt(anchorX, anchorY);
+        // ── Координаты / pitch / bearing (для debug) — всегда для центра карты ──
         const worldPos = map.worldGroup.position;
         const target = map.controls.target;
         const centerX = target.x - worldPos.x;
         const centerZ = target.z - worldPos.z;
-        // ── центр: используем safe, если есть ────────────────────────
         const centerLL = map.unprojectToLonLatSafe
             ? map.unprojectToLonLatSafe(centerX, centerZ)
             : (() => {
                 const v = map.unprojectToLonLat(centerX, centerZ);
-                if (!v || !Number.isFinite(v[0]) || !Number.isFinite(v[1]))
-                    return null;
-                if (Math.abs(v[0]) > 180.0001 || Math.abs(v[1]) > 90.0001)
-                    return null;
-                return v;
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
             })();
-        if (!centerLL)
-            return;
-        const [lon, lat] = centerLL;
-        if (map.debug && coordLabel) {
+        if (map.debug && coordLabel && centerLL) {
+            const [lon, lat] = centerLL;
             _dirVec.subVectors(map.camera.position, target);
             const dist = _dirVec.length();
             const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
             const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
             const bearingDeg = computeBearingDeg().toFixed(1);
             coordLabel.textContent =
-                `${lon.toFixed(3)}, ${lat.toFixed(3)}  ·  ${pitchDeg}° / ${bearingDeg}°`;
-        }
-        const barLengthPx = 100;
-        const rect = map.renderer.domElement.getBoundingClientRect();
-        if (!rect.width || !rect.height)
-            return;
-        _ndc.set(0, 0);
-        _raycaster.setFromCamera(_ndc, map.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit1))
-            return;
-        const ndcOffsetX = (2 * barLengthPx) / rect.width;
-        _ndc.set(ndcOffsetX, 0);
-        _raycaster.setFromCamera(_ndc, map.camera);
-        if (!_raycaster.ray.intersectPlane(_plane, _hit2))
-            return;
-        // ── углы: safe-путь ──────────────────────────────────────────
-        const h1 = map.unprojectToLonLatSafe
-            ? map.unprojectToLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z)
-            : (() => {
-                const v = map.unprojectToLonLat(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
-                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-            })();
-        if (!h1) {
-            scaleLabel.textContent = '';
-            return;
-        }
-        const [lon1, lat1] = h1;
-        const h2 = map.unprojectToLonLatSafe
-            ? map.unprojectToLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z)
-            : (() => {
-                const v = map.unprojectToLonLat(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
-                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-            })();
-        if (!h2) {
-            scaleLabel.textContent = '';
-            return;
-        }
-        const [lon2, lat2] = h2;
-        const R = (Number.isFinite(map.R) && map.R > 0) ? map.R : 6371008.8;
-        const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
-        if (distance > 0) {
-            const nice = niceDistance(distance);
-            const ratio = nice / distance;
-            scaleBar.style.width = (barLengthPx * ratio) + 'px';
-            scaleLabel.textContent = formatDistance(nice);
+                `${lon.toFixed(3)}, ${lat.toFixed(3)} · ${pitchDeg}° / ${bearingDeg}°`;
         }
         if (map.debug && zoomValueLabel) {
             zoomValueLabel.textContent =
-                ` (${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
+                `(${map.continuousZoom.toFixed(1)} / z${map.currentDiscreteZoom})`;
         }
     }
     let lastFpsUpdate = performance.now();
@@ -415,6 +502,12 @@ export function initUI(map) {
             if (rafId !== null) {
                 cancelAnimationFrame(rafId);
                 rafId = null;
+            }
+            if (dragRulerEnabled) {
+                scaleBar.removeEventListener('pointerdown', onRulerPointerDown);
+                scaleBar.removeEventListener('pointermove', onRulerPointerMove);
+                scaleBar.removeEventListener('pointerup', onRulerPointerUp);
+                scaleBar.removeEventListener('pointercancel', onRulerPointerUp);
             }
             btnPlus.removeEventListener('click', onPlusClick);
             btnMinus.removeEventListener('click', onMinusClick);

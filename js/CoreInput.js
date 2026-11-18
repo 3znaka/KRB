@@ -89,6 +89,8 @@ export const CoreInputMixin = {
         this._cachedCanvasRect = null;
     },
     onMouseDown(e) {
+        if (this._rulerDragging)
+            return;
         if (this._cameraAnimation)
             return;
         this._zoomPivotActive = false;
@@ -144,6 +146,8 @@ export const CoreInputMixin = {
         }
     },
     onMouseMove(e) {
+        if (this._rulerDragging)
+            return;
         if (this._cameraAnimation)
             return;
         // NEW: right-drag → rotate around pivot
@@ -191,6 +195,8 @@ export const CoreInputMixin = {
         }
     },
     onMouseUp(e) {
+        if (this._rulerDragging)
+            return;
         // завершение rotate-to-cursor
         if (this._rotatePivotActive) {
             this._rotatePivotActive = false;
@@ -387,6 +393,8 @@ export const CoreInputMixin = {
         this.maybeUpdateVisibleTiles();
     },
     onTouchStart(e) {
+        if (this._rulerDragging)
+            return;
         if (this._cameraAnimation)
             return;
         this._zoomPivotActive = false;
@@ -458,6 +466,8 @@ export const CoreInputMixin = {
         return null;
     },
     onTouchMove(e) {
+        if (this._rulerDragging)
+            return;
         if (this._cameraAnimation)
             return;
         if (this.touchDragActive && e.touches.length === 1) {
@@ -661,6 +671,8 @@ export const CoreInputMixin = {
         }
     },
     onTouchEnd(e) {
+        if (this._rulerDragging)
+            return;
         if (e.touches.length < 2 && this.touchState.isPinching) {
             this.touchState.isPinching = false;
             this.touchState.activeGesture = null;

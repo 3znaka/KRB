@@ -76,6 +76,8 @@ export class KrbMap {
     currentDiscreteZoom;
     tileCRS;
     deformedTiles;
+    dragRuler;
+    _rulerDragging = false;
     allowRotate;
     allowPitch;
     globalElevCache;
@@ -225,6 +227,7 @@ export class KrbMap {
                 (layer?.isTileLayer === true || layer?.constructor?.name?.includes?.('Tile'))));
         this.allowRotate = this.view.allowRotate ?? true;
         this.allowPitch = this.view.allowPitch ?? true;
+        this.dragRuler = options.dragRuler ?? true;
         if (options.crs && options.projection && options.crs !== options.projection) {
             console.warn(`KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`);
         }

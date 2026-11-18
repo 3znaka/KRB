@@ -195,11 +195,11 @@ export class GeoJSONLayer extends Layer {
         this.defaultPolygon3DDepthWrite = o.defaultPolygon3DDepthWrite ?? true;
         this.legendToOptions = o.legendToOptions ?? null;
     }
-    // ── lifecycle ───────────────────────────────────────────────────
     addTo(map) {
         super.addTo(map);
-        if (!this._loaded)
-            this._load();
+        if (!this._loaded && !this._readyPromise) {
+            this._readyPromise = this._load();
+        }
         return this;
     }
     reload() {
@@ -215,8 +215,12 @@ export class GeoJSONLayer extends Layer {
             this.legend = null;
         }
         this._loaded = false;
-        if (self._map)
-            this._load();
+        if (self._map) {
+            this._readyPromise = this._load();
+        }
+        else {
+            this._readyPromise = null;
+        }
     }
     // ── setters ─────────────────────────────────────────────────────
     setData(data) {

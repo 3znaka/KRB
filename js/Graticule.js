@@ -4,6 +4,7 @@
  */
 import { THREE, Line2, LineMaterial, LineGeometry, } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
+import { resolveUnitScale, scaleGeometry, engineeringCrsWkt } from './UnitScale.js';
 // ─────────────────────────────────────────────────────────────────────
 // «Красивые» шаги
 // ─────────────────────────────────────────────────────────────────────
@@ -1676,13 +1677,8 @@ export class Graticule {
             return `${value.toFixed(1)}m`;
         return `${value.toFixed(2)}m`;
     }
-    /**
-     * Генерирует GeoJSON с геометрией сетки.
-     * По умолчанию экспортирует в "абстрактную декартову проекцию" (LOCAL_CS),
-     * чтобы координаты в точности соответствовали world-метрам карты,
-     * а QGIS не пытался молча перепроецировать их как WGS84.
-     */
-    toGeoJSON(options = {}) {
+    // ── Новый внутренний метод: только сборка FeatureCollection ──
+    _buildFeatureCollection(options = {}) {
         if (!this._map)
             throw new Error('[Graticule] Cannot export: map is not attached');
         const gridCrsCode = options.gridCrs ?? this._crsCode;
@@ -1690,27 +1686,27 @@ export class Graticule {
         if (!gridCrsRaw)
             throw new Error(`[Graticule] Unknown gridCrs: ${gridCrsCode}`);
         const isGeo = !!gridCrsRaw.isGeographic;
-        // Шаги всегда в градусах.
         let stepLat = options.stepLat ?? (this._currentStepLat > 0 ? this._currentStepLat : 10);
         let stepLon = options.stepLon ?? (this._currentStepLon > 0 ? this._currentStepLon : 10);
         if (!(stepLat > 0))
             stepLat = 10;
         if (!(stepLon > 0))
             stepLon = 10;
-        // Extent всегда в градусах.
         let minLon = -180, maxLon = 180, minLat = -90, maxLat = 90;
-        if (options.extent) {
+        if (options.extent)
             [minLon, minLat, maxLon, maxLat] = options.extent;
-        }
         const N = Math.max(2, options.samplesPerLine ?? 64);
         const features = [];
-        const targetCrsCode = options.targetCrs ?? this._map.projection.code;
+        // По умолчанию — проекция карты, как и у SpatialObject.download()
+        const targetCrsCode = options.targetCrs
+            ?? this._map.projection?.code
+            ?? 'EPSG:4326';
         const isLocal = targetCrsCode === 'local';
-        const targetCrsRaw = isLocal ? gridCrsRaw : Projections.getRaw(targetCrsCode);
+        const targetCrsRaw = isLocal
+            ? Projections.getRaw(this._map.projection?.code ?? gridCrsCode)
+            : Projections.getRaw(targetCrsCode);
         if (!targetCrsRaw)
             throw new Error(`[Graticule] Unknown targetCrs: ${targetCrsCode}`);
-        // Проецирование lon/lat -> координаты targetCrs.
-        // null — точка невалидна для этой проекции в этой позиции.
         const project = (lon, lat) => {
             if (!Number.isFinite(lon) || !Number.isFinite(lat))
                 return null;
@@ -1719,18 +1715,13 @@ export class Graticule {
             let out = null;
             try {
                 if (gridCrsRaw.isGeographic) {
-                    // Для географической gridCrs её координаты — это и есть lon/lat.
                     out = targetCrsRaw.fromLonLat([lon, lat]);
                 }
                 else {
-                    const gridCoord = gridCrsRaw.fromLonLat([lon, lat]);
-                    if (!gridCoord ||
-                        !Number.isFinite(gridCoord[0]) ||
-                        !Number.isFinite(gridCoord[1]))
+                    const gc = gridCrsRaw.fromLonLat([lon, lat]);
+                    if (!gc || !Number.isFinite(gc[0]) || !Number.isFinite(gc[1]))
                         return null;
-                    out = (targetCrsRaw === gridCrsRaw)
-                        ? gridCoord
-                        : gridCrsRaw.convertTo(targetCrsRaw, gridCoord);
+                    out = (targetCrsRaw === gridCrsRaw) ? gc : gridCrsRaw.convertTo(targetCrsRaw, gc);
                 }
             }
             catch {
@@ -1753,10 +1744,7 @@ export class Graticule {
                             gridCrs: gridCrsCode,
                             label: this._formatLabel(value, !isLon, isLon ? stepLon : stepLat, isGeo),
                         },
-                        geometry: {
-                            type: 'LineString',
-                            coordinates: coords.slice(),
-                        },
+                        geometry: { type: 'LineString', coordinates: coords.slice() },
                     });
                 }
                 coords.length = 0;
@@ -1766,69 +1754,79 @@ export class Graticule {
                 const lon = isLon ? value : v;
                 const lat = isLon ? v : value;
                 const p = project(lon, lat);
-                if (p) {
+                if (p)
                     coords.push(p);
-                }
-                else {
-                    flush(); // разрыв линии (например, между лепестками проекции)
-                }
+                else
+                    flush();
             }
             flush();
         };
-        // Меридианы: lon = const, lat варьируется.
         const startLon = Math.ceil(minLon / stepLon - 1e-9) * stepLon;
         for (let lon = startLon; lon <= maxLon + stepLon * 1e-6; lon += stepLon) {
             const v = Math.abs(lon) < stepLon * 1e-9 ? 0 : lon;
             buildLine('meridian', v, minLat, maxLat, true);
         }
-        // Параллели: lat = const, lon варьируется.
         const startLat = Math.ceil(minLat / stepLat - 1e-9) * stepLat;
         for (let lat = startLat; lat <= maxLat + stepLat * 1e-6; lat += stepLat) {
             const v = Math.abs(lat) < stepLat * 1e-9 ? 0 : lat;
             buildLine('parallel', v, minLon, maxLon, false);
         }
-        const geojson = {
-            type: 'FeatureCollection',
-            features,
-        };
-        // Явный targetCrs = EPSG:xxxx -> пропишем crs через urn, чтобы QGIS
-        // понял систему координат. Для 'local' поле не ставим — RFC 7946
-        // по умолчанию считает координаты WGS84 (что верно для географической
-        // gridCrs в градусах; для проекционной gridCrs пользователь должен
-        // сам указать targetCrs).
-        if (!isLocal) {
-            const m = targetCrsCode.match(/^EPSG:(\d+)$/i);
-            if (m) {
-                geojson.crs = {
+        const manual = options.unitScale;
+        const unitScale = resolveUnitScale(targetCrsRaw, options);
+        if (unitScale !== 1) {
+            for (const f of features)
+                f.geometry = scaleGeometry(f.geometry, unitScale);
+        }
+        const fc = { type: 'FeatureCollection', features };
+        if (unitScale !== 1) {
+            fc.unitScale = unitScale;
+            fc.sourceCrs = targetCrsCode;
+        }
+        if (options.writeCrsMember !== false) {
+            if (isLocal) {
+                fc.crs = {
                     type: 'name',
-                    properties: { name: `urn:ogc:def:crs:EPSG::${m[1]}` },
+                    properties: {
+                        name: `ENGCRS["Local Cartesian (World Units)",` +
+                            `EDATUM["Unknown engineering datum"],` +
+                            `CS[Cartesian,2],` +
+                            `AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1]],` +
+                            `AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1]]]`,
+                    },
                 };
             }
+            else {
+                const m = targetCrsCode.match(/^EPSG:(\d+)$/i);
+                const name = m
+                    ? `urn:ogc:def:crs:EPSG::${m[1]}`
+                    : (unitScale !== 1
+                        ? engineeringCrsWkt(`${targetCrsCode} (metres)`)
+                        : targetCrsCode);
+                fc.crs = { type: 'name', properties: { name } };
+            }
         }
-        if (!isLocal && targetCrsCode) {
-            geojson.crs = {
-                type: 'name',
-                properties: {
-                    name: targetCrsCode // например, "ADPKP:0072" или "EPSG:3857"
-                }
-            };
-        }
-        return JSON.stringify(geojson);
+        return fc;
     }
-    /**
-     * Удобный метод для скачивания GeoJSON сетки как файла.
-     */
-    downloadGeoJSON(options = {}, filename = 'graticule.geojson') {
-        const json = this.toGeoJSON(options);
-        const blob = new Blob([json], { type: 'application/geo+json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    // ── Старый API: строка ──
+    toGeoJSON(options = {}) {
+        return JSON.stringify(this._buildFeatureCollection(options));
+    }
+    // ── Новый единый API ──
+    async download(options = {}) {
+        if (!this._map)
+            throw new Error('[Graticule] Cannot export: map is not attached');
+        const fc = this._buildFeatureCollection(options);
+        // downloader есть у карты; fallback — на случай, если понадобится
+        // использовать Graticule вне карты (сейчас невозможно, но на будущее).
+        const downloader = this._map.downloader;
+        await downloader.downloadCollection(fc, {
+            format: options.format,
+            filename: options.filename ?? 'graticule',
+        });
+    }
+    // ── Обратная совместимость ──
+    async downloadGeoJSON(options = {}, filename) {
+        return this.download({ ...options, format: 'geojson', filename });
     }
 }
 // ─────────────────────────────────────────────────────────────────────

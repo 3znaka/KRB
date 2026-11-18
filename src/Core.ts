@@ -11,6 +11,7 @@ import { NoiseElevationProvider } from './NoiseElevation.js';
 import { View } from './View.js';
 import { Graticule, GraticuleOptions } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';  
+import { Downloader } from './Downloader.js';
 
 
 // Примеси
@@ -168,6 +169,8 @@ export class KrbMap {
     tileCRS: any;
     deformedTiles: boolean;
 
+    
+
     allowRotate: boolean;
     allowPitch: boolean;
 
@@ -290,6 +293,8 @@ _uiHandle: { destroy: () => void } | null = null;
 private _backgroundColor: any = null;
 private _backgroundExplicit = false;
 
+private _downloader: Downloader | null = null;
+
 private _refreshExtents(): void {
     this.WORLD_SIZE    = 2 * this.projection.halfExtentX;
     this.MAX_MERCATOR  = this.projection.halfExtentX;
@@ -316,6 +321,13 @@ get authalicRadius() { return this.projection.authalicRadius; }
 /* Extent TILE-CRS (домен сетки z/x/y, определяется layer.crs) */
 get tileHalfExtentX() { return this.tileCRS.halfExtentX; }
 get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
+
+get downloader(): Downloader {
+    if (!this._downloader) {
+        this._downloader = new Downloader(this.geoJSONExporter);
+    }
+    return this._downloader;
+}
 
     constructor(options: KrbMapOptions) {
         if (!options) throw new Error('Map constructor: options object is required');

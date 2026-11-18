@@ -9,6 +9,10 @@
 import { _getPanes, type Marker } from './Marker.js';
 import { THREE } from './js_TP/tpb.js';
 import type { SpatialObject } from './SpatialObject.js';
+import type { DownloadOptions } from './Downloader.js';
+import { getDownloadFormat } from './Downloader.js';
+import type { GeoJSONExportable, CrsLike } from './GeoJSONExportable.js';
+import { Projections } from './Projections.js';
 
 // =====================================================================
 // Типы кластеризации
@@ -48,6 +52,15 @@ interface ScreenPoint {
     worldPos: any;
 }
 
+export interface LayerDownloadOptions extends DownloadOptions {
+    /**
+     * - `false` (по умолчанию) — один файл со всеми фичами;
+     * - `true` — разделить по типам геометрии;
+     * - `'auto'` — разделить только если типов >1.
+     */
+    split?: boolean | 'auto';
+}
+
 // =====================================================================
 // Layer
 // =====================================================================
@@ -75,6 +88,7 @@ export class Layer {
     protected _map: any = null;
     protected _filter: ((obj: SpatialObject) => boolean) | null = null;
     protected _filterHidden = new Set<SpatialObject>();
+     protected _readyPromise: Promise<void> | null = null;
 
     // ── Batcher ──
     _polygonBatcher: any = null;
@@ -226,6 +240,151 @@ export class Layer {
         if (count === 0 || !isFinite(minX)) return null;
         return [[minX, minY], [maxX, maxY]];
     }
+
+    async download(options: LayerDownloadOptions = {}): Promise<void> {
+        if (!this._map) throw new Error('[Layer.download] layer not attached to map');
+
+        // ⬇ ждём, пока слой загрузится (для GeoJSONLayer — fetch + parse)
+        await this.ready();
+
+        const exportables = this._collectExportables();
+        if (exportables.length === 0) {
+            if (this._objects.length === 0) {
+                console.warn(
+                    '[Layer.download] layer is empty — nothing added yet, ' +
+                    'or load failed',
+                );
+            } else {
+                console.warn(
+                    `[Layer.download] ${this._objects.length} objects, but none ` +
+                    'implement toGeoJSONGeometry (GeoJSONExportable)',
+                );
+            }
+            return;
+        }
+
+        const split = options.split ?? false;
+
+        if (split === false) {
+            await this._map.downloader.download(exportables, {
+                ...options,
+                filename: options.filename ?? this._defaultLayerFilename(),
+            });
+            return;
+        }
+
+        // Собираем группы по типу геометрии.
+        const groups = this._groupByGeometryKind(exportables);
+        if (groups.length === 0) {
+            console.warn('[Layer.download] no exportable geometries after filtering');
+            return;
+        }
+
+        // Авто: если тип один — не дробим.
+        if (split === 'auto' && groups.length === 1) {
+            await this._map.downloader.download(exportables, {
+                ...options,
+                filename: options.filename ?? this._defaultLayerFilename(),
+            });
+            return;
+        }
+
+        const base = options.filename ?? this._defaultLayerFilename();
+
+        // Если формат умеет convertMany (например zip) — один архив.
+        // Иначе downloadMultiple триггернёт несколько скачиваний.
+        const handler = options.format
+            ? getDownloadFormat(options.format)
+            : getDownloadFormat('geojson');
+
+        if (handler?.convertMany) {
+
+            // Экспортёр общий — берём из карты, чтобы переиспользовать targetCrs.
+            const exporter = this._map.geoJSONExporter;
+            const named: Array<{ name: string; fc: any }> = groups.map(g => ({
+                name: `${base}-${g.name}`,
+                fc: exporter.export(g.objects, options as any),
+            }));
+            await this._map.downloader.downloadMultiple(named, {
+                ...options,
+                filename: base,
+            });
+            return;
+        }
+
+        // Fallback: одно скачивание на тип.
+        for (const g of groups) {
+            await this._map.downloader.download(g.objects, {
+                ...options,
+                filename: `${base}-${g.name}`,
+            });
+        }
+    }
+
+    // ── Внутренние ──
+
+       /**
+     * Ждёт готовности слоя. Для синхронных слоёв — no-op.
+     * Ошибки загрузки не пробрасываются — они уже залогированы
+     * внутри загрузчика; `ready()` в этом случае просто резолвится.
+     */
+    async ready(): Promise<void> {
+        if (this._readyPromise) {
+            try { await this._readyPromise; }
+            catch (err) { console.warn('[Layer.ready] load failed', err); }
+        }
+    }
+
+
+
+
+    private _collectExportables(): GeoJSONExportable[] {
+        const out: GeoJSONExportable[] = [];
+        for (const obj of this._objects) {
+            const o = obj as any;
+            if (typeof o.toGeoJSONGeometry === 'function'
+                && typeof o.getGeoJSONProperties === 'function') {
+                out.push(o);
+            } else if ((this._map as any)?.debug) {
+                console.debug(
+                    `[Layer.download] skip ${obj.constructor?.name}: ` +
+                    `does not implement GeoJSONExportable`,
+                );
+            }
+        }
+        return out;
+    }
+
+    private _groupByGeometryKind(
+        exportables: GeoJSONExportable[],
+    ): Array<{ name: string; objects: GeoJSONExportable[] }> {
+        const tempCrs = Projections.get('EPSG:4326') as unknown as CrsLike;
+        const groups: Record<string, GeoJSONExportable[]> = {};
+
+        for (const obj of exportables) {
+            let geom;
+            try {
+                geom = obj.toGeoJSONGeometry(tempCrs);
+            } catch {
+                continue;
+            }
+            if (!geom) continue;
+
+            const kind = _geometryKind(geom.type);
+            (groups[kind] ??= []).push(obj);
+        }
+
+        return Object.entries(groups).map(([name, objects]) => ({ name, objects }));
+    }
+
+    private _defaultLayerFilename(): string {
+        const ts = new Date()
+            .toISOString()
+            .replace(/[:.]/g, '-')
+            .slice(0, 19);
+        return `layer-${ts}`;
+    }
+
 }
 
 // =====================================================================
@@ -567,5 +726,23 @@ export class ClusterLayer extends Layer {
         map.moveCameraToSlow(lon, lat, 0.6, targetZoom);
     }
 
+ 
+
     
+}
+
+function _geometryKind(type: string): string {
+    switch (type) {
+        case 'Point':
+        case 'MultiPoint':
+            return 'points';
+        case 'LineString':
+        case 'MultiLineString':
+            return 'lines';
+        case 'Polygon':
+        case 'MultiPolygon':
+            return 'polygons';
+        default:
+            return 'other';
+    }
 }

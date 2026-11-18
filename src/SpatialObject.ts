@@ -15,6 +15,8 @@ import { ecefToGeodetic } from './Ellipsoid.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';     
 import type { GeoJSONExportOptions } from './GeoJSONExporter.js';
 import type { CrsLike, GeoJSONExportable } from './GeoJSONExportable.js';
+import { Downloader } from './Downloader.js';
+import type { DownloadOptions } from './Downloader.js';
 
 export type TitleAlignH = 'left' | 'center' | 'right';
 export type TitleAlignV = 'top' | 'middle' | 'center' | 'bottom';
@@ -466,59 +468,49 @@ getGeoJSONProperties(): Record<string, any> {
 }
 
 /**
- * Возвращает FeatureCollection (строкой) с единственным Feature —
- * этим объектом.
+ * Универсальное скачивание объекта.
  *
- * Требует, чтобы подкласс реализовал `toGeoJSONGeometry(targetCrs)`.
- * Если он отсутствует — бросаем исключение, чтобы не экспортировать
- * молча пустую геометрию.
+ * Формат по умолчанию — `geojson`. Для других форматов достаточно
+ * зарегистрировать обработчик через `registerDownloadFormat(...)`.
  *
- * По умолчанию использует `map.projection` в качестве целевой СК
- * (то есть координаты будут в world-метрах карты). Передайте
- * `options.targetCrs` для другого результата — например, `'EPSG:4326'`.
+ * @example
+ *   marker.download();                                   // .geojson
+ *   marker.download({ format: 'geojson' });
+ *   marker.download({ format: 'shp', filename: 'moscow' }); // .zip с .shp/.dbf/.shx/.prj
+ *   marker.download({ targetCrs: 'EPSG:4326' }, );
  */
-toGeoJSON(options: GeoJSONExportOptions = {}): string {
+async download(options: DownloadOptions = {}): Promise<void> {
     if (typeof (this as any).toGeoJSONGeometry !== 'function') {
         throw new Error(
-            `${this.constructor.name}.toGeoJSON: класс не реализует toGeoJSONGeometry`
+            `${this.constructor.name}.download: класс не реализует toGeoJSONGeometry`,
         );
     }
-    const exporter: GeoJSONExporter =
-        this._map?.geoJSONExporter
-        ?? new GeoJSONExporter(Projections.get('EPSG:4326') as unknown as CrsLike);
 
-    return exporter.exportString(
+    const downloader: Downloader = this._map?.downloader
+        ?? new Downloader(
+            new GeoJSONExporter(
+                Projections.get('EPSG:4326') as unknown as CrsLike,
+            ),
+        );
+
+    await downloader.download(
         [this as unknown as GeoJSONExportable],
-        options,
+        { filename: this._defaultFilename(), ...options },
     );
 }
 
-/**
- * Скачивает объект как `.geojson` файл.
- *
- * @param filename — по умолчанию `${ClassName}-${id ?? Date.now()}.geojson`.
- * @example
- *   marker.downloadGeoJSON();
- *   marker.downloadGeoJSON({ targetCrs: 'EPSG:4326' }, 'moscow-wgs84.geojson');
- */
-downloadGeoJSON(
+/** Обратная совместимость: сахар над `download({ format: 'geojson' })`. */
+async downloadGeoJSON(
     options: GeoJSONExportOptions = {},
     filename?: string,
-): void {
-    const json = this.toGeoJSON(options);
-    const props = this.getGeoJSONProperties();
-    const name = filename
-        ?? `${this.constructor.name.toLowerCase()}-${props.id ?? Date.now()}.geojson`;
+): Promise<void> {
+    return this.download({ ...options, format: 'geojson', filename });
+}
 
-    const blob = new Blob([json], { type: 'application/geo+json' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+private _defaultFilename(): string {
+    const props = this.getGeoJSONProperties();
+    if (props.id) return String(props.id);
+    return `${this.constructor.name.toLowerCase()}-${Date.now()}`;
 }
 
     protected _isWithinView(): boolean {

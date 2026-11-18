@@ -96,7 +96,7 @@ export class Polyline extends SpatialObject {
         this._opacity = options.opacity ?? 1;
         this._width = options.width || 2;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
-        this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 0;
         this._lineDasharray = options.lineDasharray ?? null;
         this._lineDashOffset = options.lineDashOffset ?? 0;
         this._minZoom = options.minZoom ?? -Infinity;
@@ -1256,5 +1256,73 @@ export class Polyline extends SpatialObject {
             });
         }
         console.table(rows);
+    }
+    toGeoJSONGeometry(targetCrs) {
+        if (!this._positions || this._positions.length < 2)
+            return null;
+        const src = this._crs
+            ?? (this._crsCode
+                ? Projections.get(this._crsCode)
+                : Projections.get('EPSG:4326'));
+        if (!src)
+            return null;
+        const srcLike = src;
+        const flat = [];
+        const zs = [];
+        for (let i = 0; i < this._positions.length; i++) {
+            const pt = this._positions[i];
+            if (!pt || pt.length < 2)
+                continue;
+            const nn = this._normalizePosition(pt, src);
+            // 1. XY: всегда через lon/lat. Для Geographic→Geographic это
+            //    тождественное преобразование без потерь; для проекционных
+            //    даёт корректный результат даже если src и target — один
+            //    и тот же инстанс, но из разных реестров (raw vs world).
+            let lon, lat;
+            if (nn.lonLat) {
+                lon = nn.lonLat[0];
+                lat = nn.lonLat[1];
+            }
+            else {
+                const ll = srcLike.toLonLat(nn.coord);
+                if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                    continue;
+                lon = ll[0];
+                lat = ll[1];
+            }
+            const proj = targetCrs.fromLonLat([lon, lat]);
+            if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1]))
+                continue;
+            flat.push([proj[0], proj[1]]);
+            zs.push(this._altitude + (nn.nodeHeight ?? 0));
+        }
+        if (flat.length < 2)
+            return null;
+        const allZeroZ = zs.every(z => z === 0);
+        if (allZeroZ) {
+            return { type: 'LineString', coordinates: flat };
+        }
+        const coords3d = flat.map((c, i) => [c[0], c[1], zs[i]]);
+        return { type: 'LineString', coordinates: coords3d };
+    }
+    getGeoJSONProperties() {
+        const props = super.getGeoJSONProperties();
+        // Поля пишем только если пользователь их не задал.
+        if (props.color === undefined)
+            props.color = this._color;
+        if (props.width === undefined)
+            props.width = this._width;
+        if (props.opacity === undefined && this._opacity !== 1) {
+            props.opacity = this._opacity;
+        }
+        if (props.lineDasharray === undefined && this._lineDasharray) {
+            props.lineDasharray = Array.isArray(this._lineDasharray)
+                ? [this._lineDasharray[0], this._lineDasharray[1]]
+                : [this._lineDasharray, this._lineDasharray];
+        }
+        if (props.altitudeMode === undefined) {
+            props.altitudeMode = this._altitudeMode;
+        }
+        return props;
     }
 }

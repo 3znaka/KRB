@@ -80,6 +80,7 @@ export const PointsMixin = {
         const defaults = {
             position,
             crs: this.crs ?? undefined,
+            properties: props,
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             iconUrl: props.icon || this.defaultIconUrl,
@@ -111,6 +112,7 @@ export const PointsMixin = {
         const defaults = {
             position,
             crs: this.crs ?? undefined,
+            properties: props,
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             primitiveType: props.primitiveType || this.default3DPrimitiveType,

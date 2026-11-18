@@ -10,6 +10,7 @@ import { InteractionManager } from './Interaction.js';
 import { NoiseElevationProvider } from './NoiseElevation.js';
 import { Graticule } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';
+import { Downloader } from './Downloader.js';
 // Примеси
 import { CoreElevationMixin } from './CoreElevation.js';
 import { CoreCameraMixin } from './CoreCamera.js';
@@ -177,6 +178,7 @@ export class KrbMap {
     _defaultBackgroundColor = 0xffffff;
     _backgroundColor = null;
     _backgroundExplicit = false;
+    _downloader = null;
     _refreshExtents() {
         this.WORLD_SIZE = 2 * this.projection.halfExtentX;
         this.MAX_MERCATOR = this.projection.halfExtentX;
@@ -198,6 +200,12 @@ export class KrbMap {
     /* Extent TILE-CRS (домен сетки z/x/y, определяется layer.crs) */
     get tileHalfExtentX() { return this.tileCRS.halfExtentX; }
     get tileHalfExtentY() { return this.tileCRS.halfExtentY; }
+    get downloader() {
+        if (!this._downloader) {
+            this._downloader = new Downloader(this.geoJSONExporter);
+        }
+        return this._downloader;
+    }
     constructor(options) {
         if (!options)
             throw new Error('Map constructor: options object is required');

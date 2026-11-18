@@ -103,6 +103,7 @@ _addPointFeature(this: GeoJSONLayer, feature: GeoJSONFeature): void {
         const defaults: MarkerOptions = {
             position,
             crs: this.crs ?? undefined,
+            properties: props, 
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             iconUrl: props.icon || this.defaultIconUrl,
@@ -137,6 +138,7 @@ _addPointFeature(this: GeoJSONLayer, feature: GeoJSONFeature): void {
         const defaults: Marker3DOptions = {
             position,
             crs: this.crs ?? undefined,
+            properties: props, 
             title: this._getTitle(props),
             tooltip: this._getTooltip(props),
             primitiveType: props.primitiveType || this.default3DPrimitiveType,

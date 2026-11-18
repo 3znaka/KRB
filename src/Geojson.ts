@@ -255,21 +255,27 @@ export class GeoJSONLayer extends Layer {
         this.legendToOptions = o.legendToOptions ?? null;
     }
 
-    // ── lifecycle ───────────────────────────────────────────────────
-    override addTo(map: any): this {
-        super.addTo(map);
-        if (!this._loaded) this._load();
-        return this;
+override addTo(map: any): this {
+    super.addTo(map);
+    if (!this._loaded && !this._readyPromise) {
+        this._readyPromise = this._load();
     }
+    return this;
+}
 
-    reload(): void {
-        const self = this as any;
-        for (const obj of [...(self._objects ?? [])]) obj.remove();
-        self._objects = [];
-        if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
-        this._loaded = false;
-        if (self._map) this._load();
+reload(): void {
+    const self = this as any;
+    for (const obj of [...(self._objects ?? [])]) obj.remove();
+    self._objects = [];
+    if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
+    this._loaded = false;
+
+    if (self._map) {
+        this._readyPromise = this._load();
+    } else {
+        this._readyPromise = null;
     }
+}
 
     // ── setters ─────────────────────────────────────────────────────
     setData(data: GeoJSONInput | null): this {

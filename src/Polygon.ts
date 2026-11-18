@@ -6,6 +6,11 @@
 import { Projections } from './Projections.js';
 import { THREE } from './js_TP/tpb.js';
 import { SpatialObject, type NormalizedPosition } from './SpatialObject.js';
+import type {
+    GeoJSONExportable,
+    GeoJSONGeometry,
+    CrsLike,
+} from './GeoJSONExportable.js';
 
 import {
     type LonLat, type PolygonCoord, type PolygonRing, type PolygonOptions,
@@ -19,7 +24,7 @@ import { PolygonUpdateMixin, type PolygonUpdate } from './PolygonUpdate.js';
 
 export * from './PolygonUtils.js';
 
-export class Polygon extends SpatialObject {
+export class Polygon extends SpatialObject implements GeoJSONExportable {
     // ── Кольца / CRS ──
     _rings: PolygonRing[];
     _crsCode: string | null;
@@ -154,7 +159,7 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
         this._tooltipOnHover = options.tooltipOnHover ?? false;
 
-        this._altitude = options.altitude ?? options.altitudeOffset ?? 10;
+        this._altitude = options.altitude ?? options.altitudeOffset ?? 0;
 
         this._extruded = options.extruded ?? false;
         this._height = options.height ?? 0;
@@ -515,6 +520,124 @@ _normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
     getRings(): PolygonRing[] {
         return this._rings.map(ring => ring.map(pt => [...pt] as PolygonCoord));
     }
+
+    /**
+ * Экспорт в GeoJSON. Берём исходные `_rings`, а не LOD-кэш
+ * `_renderRings`: пользователь ждёт заданную геометрию, а не
+ * упрощённую под текущий зум.
+ *
+ * Все кольца замыкаются автоматически (первая точка = последней),
+ * как требует RFC 7946. Кольца с <3 уникальными точками
+ * пропускаются; если внешнее кольцо становится невалидным —
+ * возвращаем `null`.
+ *
+ * Z-координата считается как `_altitude + nodeHeight` (та же
+ * формула, что у Marker/Polyline). Если все Z нулевые — отдаём
+ * 2D-геометрию.
+ */
+toGeoJSONGeometry(targetCrs: CrsLike): GeoJSONGeometry | null {
+    if (!this._rings || !this._rings.length) return null;
+
+    const src = (this._crs
+        ?? (this._crsCode
+            ? Projections.get(this._crsCode)
+            : Projections.get('EPSG:4326'))) as unknown as CrsLike;
+    if (!src) return null;
+
+    const ringsOut3d: Array<Array<[number, number, number]>> = [];
+
+    for (let ringIdx = 0; ringIdx < this._rings.length; ringIdx++) {
+        const ring = this._rings[ringIdx];
+        if (!ring || ring.length < 3) continue;
+
+        const ringCoords: Array<[number, number, number]> = [];
+
+        for (const pt of ring) {
+            if (!pt || pt.length < 2) continue;
+
+            const nn = this._normalizeCoord(pt, this._crs);
+
+            // lon/lat
+            let lon: number, lat: number;
+            if (nn.lonLat) {
+                lon = nn.lonLat[0];
+                lat = nn.lonLat[1];
+            } else {
+                const ll = src.toLonLat(nn.coord);
+                if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
+                lon = ll[0];
+                lat = ll[1];
+            }
+
+            const proj = targetCrs.fromLonLat([lon, lat]);
+            if (!proj || !Number.isFinite(proj[0]) || !Number.isFinite(proj[1])) continue;
+
+            const z = this._altitude + (nn.nodeHeight ?? 0);
+            ringCoords.push([proj[0], proj[1], z]);
+        }
+
+        if (ringCoords.length < 3) continue;
+
+        // Замыкаем кольцо: GeoJSON требует совпадения первой и последней точек.
+        const first = ringCoords[0];
+        const last = ringCoords[ringCoords.length - 1];
+        if (first[0] !== last[0] || first[1] !== last[1] || first[2] !== last[2]) {
+            ringCoords.push([first[0], first[1], first[2]]);
+        }
+
+        // Внешнее кольцо: минимум 3 уникальные + замыкание = 4 точки.
+        if (ringIdx === 0 && ringCoords.length < 4) return null;
+
+        ringsOut3d.push(ringCoords);
+    }
+
+    if (ringsOut3d.length === 0) return null;
+
+    // Проверяем, все ли Z нулевые.
+    let allZero = true;
+    for (const ring of ringsOut3d) {
+        for (const c of ring) {
+            if (c[2] !== 0) { allZero = false; break; }
+        }
+        if (!allZero) break;
+    }
+
+    if (allZero) {
+        return {
+            type: 'Polygon',
+            coordinates: ringsOut3d.map(ring =>
+                ring.map(c => [c[0], c[1]] as [number, number])
+            ),
+        };
+    }
+
+    return { type: 'Polygon', coordinates: ringsOut3d };
+}
+
+override getGeoJSONProperties(): Record<string, any> {
+    const props = super.getGeoJSONProperties();
+
+    if (props.fillColor === undefined)    props.fillColor = this._fillColor;
+    if (props.fillOpacity === undefined && this._fillOpacity !== 0.5) {
+        props.fillOpacity = this._fillOpacity;
+    }
+    if (props.strokeColor === undefined)  props.strokeColor = this._strokeColor;
+    if (props.strokeWidth === undefined)  props.strokeWidth = this._strokeWidth;
+    if (props.strokeOpacity === undefined && this._strokeOpacity !== 1) {
+        props.strokeOpacity = this._strokeOpacity;
+    }
+    if (props.altitudeMode === undefined) props.altitudeMode = this._altitudeMode;
+
+    if (this._extruded) {
+        if (props.extruded === undefined) props.extruded = true;
+        if (props.height === undefined)   props.height = this._height;
+        if (props.minHeight === undefined && this._minHeight !== 0) {
+            props.minHeight = this._minHeight;
+        }
+    }
+
+    return props;
+}
 
     _rebuildGeometry(): void {
         if (!this._map) return;

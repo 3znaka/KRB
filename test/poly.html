@@ -55,6 +55,13 @@ debug: true,
         defaultStrokeWidth: 0.3,
     }).addTo(map);
 
+// await world.download(); 
+
+// await world.download();
+
+//await graticule.download({ trueScale: true });
+
+
 
   const marker =  new KRB.Marker({
     position: [37.6178, 55.7558],
@@ -65,9 +72,24 @@ debug: true,
 
 // marker.downloadGeoJSON();
 
+// marker.download();   
 
 
-if (1===2) {graticule.downloadGeoJSON({
+const polyline = new KRB.Polyline({
+    positions: [[37.5, 55.7], [37.7, 55.8], [37.9, 55.7]],
+    color: '#e10600',
+    width: 3,
+    title: 'Маршрут',
+    tooltip: 'Тестовая линия',
+}).addTo(map);
+
+// 1. По умолчанию — в СК карты (ADPKP:0072)
+// polyline.download();
+// → polyline-marker-1.geojson, coordinates в метрах ADPKP, crs = "ADPKP:0072"
+
+
+
+if (1===2) {graticule.download({
     gridCrs: 'EPSG:4326',
     targetCrs: 'ADPKP:0072',
     stepLat: 5,

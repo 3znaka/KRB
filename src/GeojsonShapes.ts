@@ -39,6 +39,7 @@ export const ShapesMixin = {
             const defaults: PolylineOptions = {
                 positions: coords,
                 crs: this.crs ?? undefined,
+                properties: props, 
                 color: props.stroke || props.color || this.defaultLineColor,
                 opacity: this._asNumber(props['stroke-opacity'] ?? props.opacity) ?? this.defaultLineOpacity,
                 width: this._asNumber(props['stroke-width'] ?? props.width) ?? this.defaultLineWidth,
@@ -108,6 +109,7 @@ export const ShapesMixin = {
         const defaults: PolygonOptions = {
             rings,
             crs: this.crs ?? undefined,
+            properties: props,    
             fillColor: choroplethColor || props.fill || props['fill-color'] || this.defaultFillColor,
             fillOpacity: this._asNumber(props['fill-opacity']) ?? this.defaultFillOpacity,
             strokeColor: props.stroke || props['stroke-color'] || this.defaultStrokeColor,

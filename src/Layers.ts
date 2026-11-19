@@ -336,6 +336,18 @@ export class Layer {
     }
 
 
+    reproject(): void {
+    if (!this._map) return;
+    for (const obj of this._objects) {
+        try {
+            (obj as any).reproject?.();
+        } catch (err) {
+            console.warn('Layer.reproject: object reproject failed', obj, err);
+        }
+    }
+    this._polygonBatcher?.markDirty?.();
+}
+
 
 
     private _collectExportables(): GeoJSONExportable[] {

@@ -456,4 +456,29 @@ export class SpatialObject {
     _normalizePosition(position, crs) {
         return SpatialObject.normalizePosition(position, crs);
     }
+    /**
+     * Пересобрать геометрию под текущий map.projection, не выходя из
+     * родительского Layer и не задевая его _objects.
+     * Требует, чтобы подкласс правильно реализовал _teardown()/_attach().
+     */
+    reproject() {
+        const map = this._map;
+        const layer = this._layer;
+        if (!map || !layer)
+            return;
+        // 1. Сносим старую геометрию/меши. Пользовательские данные
+        //    (_rings, _positions, _coord) сохраняются в подклассах.
+        this._teardown();
+        // 2. Убираем старую подпись из TextManager.
+        if (this._textLabel && map.textManager) {
+            map.textManager.removeLabel(this._textLabel);
+        }
+        this._textLabel = null;
+        // 3. Обнуляем привязку, чтобы _attach не выстрелил в
+        //    early-return и не вызвал remove().
+        this._map = null;
+        this._layer = null;
+        // 4. Полный реаттач: _onAttached(map) + addLabel.
+        this._attach(map, layer);
+    }
 }

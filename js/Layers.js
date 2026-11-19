@@ -266,6 +266,19 @@ export class Layer {
             }
         }
     }
+    reproject() {
+        if (!this._map)
+            return;
+        for (const obj of this._objects) {
+            try {
+                obj.reproject?.();
+            }
+            catch (err) {
+                console.warn('Layer.reproject: object reproject failed', obj, err);
+            }
+        }
+        this._polygonBatcher?.markDirty?.();
+    }
     _collectExportables() {
         const out = [];
         for (const obj of this._objects) {

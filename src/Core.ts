@@ -22,6 +22,7 @@ import { CoreLayersMixin } from './CoreLayers.js';
 import { CoreInputMixin } from './CoreInput.js';
 import { CoreLifecycleMixin } from './CoreLifecycle.js';
 import { CoreEventsMixin } from './CoreEvents.js';
+import { CoreCrsMixin } from './CoreCrs.js';
 
 // =====================================================================
 // ИНТЕРФЕЙСЫ
@@ -802,3 +803,4 @@ applyMixin(KrbMap.prototype, CoreLayersMixin);
 applyMixin(KrbMap.prototype, CoreInputMixin);
 applyMixin(KrbMap.prototype, CoreLifecycleMixin);
 applyMixin(KrbMap.prototype, CoreEventsMixin); 
+applyMixin(KrbMap.prototype, CoreCrsMixin);

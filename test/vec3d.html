@@ -21,39 +21,73 @@ import * as KRB from '../js/KRB.js';
 
 await KRB.addCrs(['ADPKP:0072', 'EPSG:32637', 'EPSG:32601']);
 
- const map = new KRB.Map({
-        target: 'map',
+const map = new KRB.Map({
+    target: 'map',
+    debug: true,
+    crs: 'ADPKP:0072',            // стартовый; дальше рулит auto-CRS
+    layers: [],
+    graticule: {
+        crs: 'EPSG:4326', step: 15,
+        color: '#888', width: 1, opacity: 0.6, showLabels: true,
+    },
+    view: new KRB.View({
+        centerLonLat: [10, 20],
+        zoom: 1, minZoom: 0, maxZoom: 8,
+        allowRotate: false, allowPitch: false,
+    }),
+});
 
-        crs: 'ADPKP:0072',
-        layers: [],
-        graticule: {
-            crs: 'EPSG:4326',
-            step: 15,
-            color: '#888',
-            width: 1,
-            opacity: 0.6,
-            showLabels: true,
-        },
-        view: new KRB.View({
-            centerLonLat: [10, 20],
-            zoom: 1,
-            minZoom: 0,
-            maxZoom: 8,
-             allowRotate: false,    
-        allowPitch: false,
-        }),
-    });
+const world = new KRB.GeoJSONLayer({
+    url: 'world.geojson',
+    defaultFillColor: '#aa0101',
+    defaultStrokeColor: '#000000',
+    defaultStrokeWidth: 0.3,
+}).addTo(map);
 
+// ── Auto-CRS по зуму ───────────────────────────────────────────
+const ZOOM_THRESHOLD = 4;
+const CRS_LOW  = 'ADPKP:0072';
+const CRS_HIGH = 'EPSG:3857';
+const SETTLE_MS = 1;          // ждём пока зум «устоится»
 
-  const world = new KRB.GeoJSONLayer({
-        url: 'world.geojson',
-        defaultFillColor:   '#aa0101',
-      
-        defaultStrokeColor: '#000000',
-        defaultStrokeWidth: 0.3,
-    }).addTo(map);
+const pickCrs = z => (z >= ZOOM_THRESHOLD ? CRS_HIGH : CRS_LOW);
 
+let lastZoom = -1;
+let stableSince = 0;
+let switching = false;
 
+function autoCrsTick(now) {
+    requestAnimationFrame(autoCrsTick);
+    if (switching) return;
+
+    const z = map.continuousZoom;
+
+    // 1. Зум ещё движется — сбрасываем таймер
+    if (Math.abs(z - lastZoom) > 0.001) {
+        lastZoom = z;
+        stableSince = now;
+        return;
+    }
+    // 2. Не «устоялся» — ждём
+    if (now - stableSince < SETTLE_MS) return;
+
+    // 3. Уже в нужном CRS — выход
+    const want = pickCrs(z);
+    if (want === map.getCrs()) return;
+
+    // 4. Переключаемся
+    switching = true;
+    try {
+        map.setCrs(want, { preserveZoom: true });
+        console.log(`[auto-crs] zoom=${z.toFixed(2)} → ${want}`);
+    } catch (err) {
+        console.warn('[auto-crs] setCrs failed:', err);
+    } finally {
+        switching = false;
+        lastZoom = -1;         // после переключения — заново settle
+    }
+}
+requestAnimationFrame(autoCrsTick);
 </script>
 </body>
 </html>

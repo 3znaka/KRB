@@ -21,6 +21,7 @@ export interface CoreCoordinatesMethods {
     readonly maxObjectDistance: number;
     readonly tileZoom: number;
     unprojectToLonLatSafe(x: number, z: number): [number, number] | null;
+    
 }
 
 export const CoreCoordinatesMixin: CoreCoordinatesMethods & ThisType<KrbMap> = {

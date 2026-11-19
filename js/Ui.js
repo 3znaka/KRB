@@ -96,6 +96,8 @@ export function initUI(map) {
     let rulerStartRect = null;
     let rulerDx = 0;
     let rulerDy = 0;
+    let grabOffsetX = 0;
+    let grabOffsetY = 0;
     const syncRulerFlag = (v) => {
         rulerDragging = v;
         map._rulerDragging = v;
@@ -105,8 +107,10 @@ export function initUI(map) {
             return;
         e.stopPropagation();
         e.preventDefault();
-        // ← КЛЮЧЕВОЕ: читаем rect ОДИН РАЗ при старте drag
         rulerStartRect = scaleBar.getBoundingClientRect();
+        // Точка захвата относительно левого верхнего угла линейки
+        grabOffsetX = e.clientX - rulerStartRect.left;
+        grabOffsetY = e.clientY - rulerStartRect.top;
         rulerDx = 0;
         rulerDy = 0;
         syncRulerFlag(true);
@@ -119,17 +123,22 @@ export function initUI(map) {
     const onRulerPointerMove = (e) => {
         if (!rulerDragging || !rulerStartRect)
             return;
-        rulerDx = e.clientX - (rulerStartRect.left + rulerStartRect.width / 2);
-        rulerDy = e.clientY - (rulerStartRect.top + rulerStartRect.height / 2);
+        // Новая позиция левого верхнего угла линейки
+        const newLeft = e.clientX - grabOffsetX;
+        const newTop = e.clientY - grabOffsetY;
+        rulerDx = newLeft - rulerStartRect.left;
+        rulerDy = newTop - rulerStartRect.top;
         scaleBar.style.transform = `translate(${rulerDx}px, ${rulerDy}px)`;
     };
     const onRulerPointerUp = (e) => {
         if (!rulerDragging)
             return;
         syncRulerFlag(false);
-        rulerStartRect = null; // освобождаем ссылку
+        rulerStartRect = null;
         rulerDx = 0;
         rulerDy = 0;
+        grabOffsetX = 0; // ← новое
+        grabOffsetY = 0; // ← новое
         scaleBar.classList.remove('krb-scale-bar--dragging');
         scaleBar.style.transform = '';
         try {
@@ -430,10 +439,9 @@ export function initUI(map) {
         // ── Якорь: центр линейки при drag, центр экрана иначе ──
         let anchorX, anchorY;
         if (map._rulerDragging && rulerStartRect) {
-            // ← КЛЮЧЕВОЕ: используем СТАРТОВЫЙ rect + текущие dx/dy.
-            // Никакого getBoundingClientRect() — ни reflow, ни feedback loop.
-            anchorX = rulerStartRect.left + rulerStartRect.width / 2 + rulerDx;
-            anchorY = rulerStartRect.top + rulerStartRect.height / 2 + rulerDy;
+            // Якорь = точка захвата в экранных координатах
+            anchorX = rulerStartRect.left + grabOffsetX + rulerDx;
+            anchorY = rulerStartRect.top + grabOffsetY + rulerDy;
         }
         else {
             const r = map.renderer.domElement.getBoundingClientRect();

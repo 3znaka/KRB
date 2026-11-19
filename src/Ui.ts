@@ -133,22 +133,23 @@ let rulerDragging = false;
 let rulerStartRect: DOMRect | null = null;
 let rulerDx = 0;
 let rulerDy = 0;
+let grabOffsetX = 0;   
+let grabOffsetY = 0;   
 
 const syncRulerFlag = (v: boolean) => {
     rulerDragging = v;
     map._rulerDragging = v;
 };
-
 const onRulerPointerDown = (e: PointerEvent) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
-
-    // ← КЛЮЧЕВОЕ: читаем rect ОДИН РАЗ при старте drag
     rulerStartRect = scaleBar.getBoundingClientRect();
+    // Точка захвата относительно левого верхнего угла линейки
+    grabOffsetX = e.clientX - rulerStartRect.left;
+    grabOffsetY = e.clientY - rulerStartRect.top;
     rulerDx = 0;
     rulerDy = 0;
-
     syncRulerFlag(true);
     scaleBar.classList.add('krb-scale-bar--dragging');
     try { scaleBar.setPointerCapture(e.pointerId); } catch {}
@@ -156,17 +157,22 @@ const onRulerPointerDown = (e: PointerEvent) => {
 
 const onRulerPointerMove = (e: PointerEvent) => {
     if (!rulerDragging || !rulerStartRect) return;
-    rulerDx = e.clientX - (rulerStartRect.left + rulerStartRect.width  / 2);
-    rulerDy = e.clientY - (rulerStartRect.top  + rulerStartRect.height / 2);
+    // Новая позиция левого верхнего угла линейки
+    const newLeft = e.clientX - grabOffsetX;
+    const newTop  = e.clientY - grabOffsetY;
+    rulerDx = newLeft - rulerStartRect.left;
+    rulerDy = newTop  - rulerStartRect.top;
     scaleBar.style.transform = `translate(${rulerDx}px, ${rulerDy}px)`;
 };
 
 const onRulerPointerUp = (e: PointerEvent) => {
     if (!rulerDragging) return;
     syncRulerFlag(false);
-    rulerStartRect = null;   // освобождаем ссылку
+    rulerStartRect = null;
     rulerDx = 0;
     rulerDy = 0;
+    grabOffsetX = 0;   // ← новое
+    grabOffsetY = 0;   // ← новое
     scaleBar.classList.remove('krb-scale-bar--dragging');
     scaleBar.style.transform = '';
     try { scaleBar.releasePointerCapture(e.pointerId); } catch {}
@@ -508,16 +514,15 @@ function updateScaleBar(): void {
 
     // ── Якорь: центр линейки при drag, центр экрана иначе ──
     let anchorX: number, anchorY: number;
-    if (map._rulerDragging && rulerStartRect) {
-        // ← КЛЮЧЕВОЕ: используем СТАРТОВЫЙ rect + текущие dx/dy.
-        // Никакого getBoundingClientRect() — ни reflow, ни feedback loop.
-        anchorX = rulerStartRect.left + rulerStartRect.width  / 2 + rulerDx;
-        anchorY = rulerStartRect.top  + rulerStartRect.height / 2 + rulerDy;
-    } else {
-        const r = map.renderer.domElement.getBoundingClientRect();
-        anchorX = r.left + r.width / 2;
-        anchorY = r.top  + r.height / 2;
-    }
+if (map._rulerDragging && rulerStartRect) {
+    // Якорь = точка захвата в экранных координатах
+    anchorX = rulerStartRect.left + grabOffsetX + rulerDx;
+    anchorY = rulerStartRect.top  + grabOffsetY + rulerDy;
+} else {
+    const r = map.renderer.domElement.getBoundingClientRect();
+    anchorX = r.left + r.width / 2;
+    anchorY = r.top  + r.height / 2;
+}
     computeScaleAt(anchorX, anchorY);
 
     // ── Координаты / pitch / bearing (для debug) — всегда для центра карты ──

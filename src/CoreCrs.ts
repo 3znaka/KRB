@@ -1,6 +1,8 @@
 // CoreCrs.ts
 import { Projections } from './Projections.js';
 import type { KrbMap, MapObjectLayer } from './Core.js';
+import { createWorldSurface } from './WorldSurface.js';
+
 
 export interface SetCrsOptions {
     /** Сохранять текущий zoom (по умолчанию true). */
@@ -94,6 +96,7 @@ for (const l of this._dynamicLayers) {
     // ── 6. Поменять проекцию и производные ────────────────────────────
     this.projection = newProj;
     this.R          = newProj.meanRadius;      // см. «R» ниже
+   this.surface = createWorldSurface(newProj, this.globe);
     this._refreshExtents();                    // WORLD_SIZE / MAX_MERCATOR / WORLD_EXTENT
     this._calibrateBaseDistance?.();           // BASE_DISTANCE
 

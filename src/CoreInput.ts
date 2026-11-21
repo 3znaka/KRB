@@ -23,6 +23,22 @@ const _nhAxis = new THREE.Vector3();
 const _crtVec = new THREE.Vector3();
 const _qhInner = new THREE.Quaternion();
 
+// ── Globe drag: дифференциальная орбита камеры ──
+const _gUp   = new THREE.Vector3(0, 1, 0);
+const _gCam  = new THREE.Vector3();
+const _gN    = new THREE.Vector3();
+const _gAxis = new THREE.Vector3();
+const _gA    = new THREE.Vector3();   // hit под ПРОШЛЫМ курсором
+const _gB    = new THREE.Vector3();   // hit под ТЕКУЩИМ курсором
+const GLOBE_MAX_LAT = 89.99 * Math.PI / 180;
+const _clamp1 = (v: number) => Math.max(-1, Math.min(1, v));
+const _wrapPi = (a: number) => {
+    while (a >  Math.PI) a -= 2 * Math.PI;
+    while (a < -Math.PI) a += 2 * Math.PI;
+    return a;
+};
+
+
 // For _raycastToGround — separate plane from this.groundPlane,
 // because the latter is used for pan-drag with a *frozen* height and must
 // not be mutated by the terrain Newton iteration.
@@ -46,10 +62,16 @@ export interface CoreInputMethods {
     onResize(): void;
     onClick(e: MouseEvent): void;
     bindEvents(): void;
+        _globeOrbit(dx: number, dy: number): void;
+    _globeGrabAt(screenX: number, screenY: number): boolean;   // ← добавить
+    shiftWorld(dx: number, dz: number): void;
     shiftWorld(dx: number, dz: number): void;
     resize(): void;
     _getCanvasRect(): { left: number; top: number; width: number; height: number };
     _invalidateCanvasRect(): void;
+    _correctGlobeRoll(): void;  
+    
+    
 }
 
 export const CoreInputMixin: CoreInputMethods & ThisType<KrbMap> = {
@@ -72,6 +94,7 @@ initDragTools() {
     this._mouseDownX = 0;
     this._mouseDownY = 0;
     this._mouseMoved = false;
+    
 
     this._rotatePivotActive = false;
     this._rotatePivot = null;
@@ -124,6 +147,118 @@ _invalidateCanvasRect() {
     (this as any)._cachedCanvasRect = null;
 },
 
+/** Фиксирует точку захвата под курсором (единичный вектор в СК глобуса). */
+_globeGrabAt(screenX: number, screenY: number): boolean {
+    this._globeGrabActive = false;
+    if (!this.globe) return false;
+    const hit = this._raycastToGround(screenX, screenY, this._globeGrabDir);
+    if (!hit) return false;
+    this.worldGroup.worldToLocal(hit);
+    const len = hit.length();
+    if (len < 1e-6) return false;
+    hit.divideScalar(len);
+    this._globeGrabActive = true;
+    return true;
+},
+
+/**
+ * Дифференциальный драг глобуса. Без якоря и без накопленной ошибки:
+ * каждый кадр заново измеряем две точки ОДНОЙ камерой и двигаем её
+ * на разницу. Разворот мыши инвертирует знак в том же кадре.
+ * Радиус орбиты сохраняется → зум не дрейфует.
+ */
+_globeOrbit(dx: number, dy: number): void {
+    if (!this.globe || !this.worldGroup) return;
+    if (dx === 0 && dy === 0) return;
+
+    const cam = this.camera;
+    const wg  = this.worldGroup;
+    const H   = this.renderer.domElement.clientHeight || 1;
+
+    _gCam.copy(cam.position);
+    wg.worldToLocal(_gCam);
+    const d = _gCam.length();
+    if (!(d > 1e-6)) return;
+    _gN.copy(_gCam).divideScalar(d);
+
+    const x0 = this._globeLastX, y0 = this._globeLastY;
+    const x1 = x0 + dx,          y1 = y0 + dy;
+
+    // ОБА луча — до перемещения камеры. Это и есть весь фикс.
+    const A = this._raycastToGround(x0, y0, _gA);
+    const B = this._raycastToGround(x1, y1, _gB);
+
+    let dLon = 0, dLat = 0, picked = false;
+    if (A && B) {
+        wg.worldToLocal(A);
+        wg.worldToLocal(B);
+        const la = A.length(), lb = B.length();
+        if (la > 1e-6 && lb > 1e-6) {
+            A.divideScalar(la);
+            B.divideScalar(lb);
+            dLon = _wrapPi(Math.atan2(-A.z, A.x) - Math.atan2(-B.z, B.x));
+            dLat = Math.asin(_clamp1(A.y)) - Math.asin(_clamp1(B.y));
+            picked = true;
+        }
+    }
+
+    const pix = Math.hypot(dx, dy);
+    const cap = (pix / H) * Math.PI;   // ≤ пол-оборота на высоту экрана
+
+    if (picked) {
+        const mag = Math.hypot(dLon, dLat);
+        if (mag > cap && mag > 0) {
+            // режем ВХОД, обрезанное забывается — долга не возникает
+            const k = cap / mag;
+            dLon *= k; dLat *= k;
+        } else if (mag > 1e-12) {
+            // запоминаем масштаб только на «честных» шагах (не у кромки)
+            const s = mag / pix;
+            this._globeRadPerPx = this._globeRadPerPx > 0
+                ? this._globeRadPerPx * 0.7 + s * 0.3
+                : s;
+        }
+    } else {
+        // один из лучей ушёл с диска — продолжаем в том же масштабе
+        let s = this._globeRadPerPx;
+        if (!(s > 0)) {
+            const h = Math.max(d - this.R, 1);
+            s = (2 * h * Math.tan(cam.fov * Math.PI / 360)) / H / this.R;
+        }
+        s = Math.min(s, Math.PI / H);
+        dLon = -dx * s;
+        dLat =  dy * s;
+    }
+
+    // 1) долгота — вокруг мировой Y (полюс не наклоняется)
+    if (dLon !== 0) _gN.applyAxisAngle(_gUp, dLon);
+
+    // 2) широта — вокруг горизонтальной оси «запад» = n × Y
+    _gAxis.crossVectors(_gN, _gUp);
+    if (_gAxis.lengthSq() < 1e-14) _gAxis.set(1, 0, 0); else _gAxis.normalize();
+    const lat = Math.asin(_clamp1(_gN.y));
+    const newLat = Math.max(-GLOBE_MAX_LAT, Math.min(GLOBE_MAX_LAT, lat + dLat));
+    const eff = newLat - lat;
+    if (eff !== 0) _gN.applyAxisAngle(_gAxis, eff);
+
+    _gCam.copy(_gN).multiplyScalar(d);
+    wg.localToWorld(_gCam);
+    cam.position.copy(_gCam);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(this.controls.target);
+    cam.updateMatrixWorld(true);
+    this.controls.update();
+
+    this._globeLastX = x1;
+    this._globeLastY = y1;
+
+    this.maybeUpdateVisibleTiles();
+},
+
+_correctGlobeRoll(): void {
+    // no-op: крен невозможен по построению. УДАЛИ вызов из CoreLifecycle.animate().
+},
+
 onMouseDown(e) {
     if (this._rulerDragging) return; 
     if (this._cameraAnimation) return;
@@ -138,6 +273,7 @@ onMouseDown(e) {
     this._panVelZ = 0;
 
     if (e.button === 2) {
+        if (this.globe) return;
         if (!this.allowRotate) return;
         this._rotatePivotActive = true;
 
@@ -163,17 +299,16 @@ onMouseDown(e) {
     this._mouseDownY = e.clientY;
     this._mouseMoved = false;
 
-    // Террейн-осведомлённый рейкаст: находим точку захвата на реальной
-    // высоте (или y=0 если рельефа нет), чтобы панорама началась именно
-    // в той точке, куда кликнул пользователь.
-    //
-    // Затем «замораживаем» groundPlane на этой высоте:
-    //   Plane(normal=(0,1,0), constant=c) ⇔ y = -c
-    //   хотим y = hit.y   ⇒   constant = -hit.y
-    //
-    // Все последующие движения идут по этой плоскости — линейно, без
-    // LOD-шума и без Newton-осцилляций, из-за которых на крутом pitch
-    // камера раньше дёргалась (см. обсуждение проблемы).
+if (this.globe) {
+    this.isDragging = true;
+    this._globeLastX = e.clientX;
+    this._globeLastY = e.clientY;
+    this._globeRadPerPx = 0;     
+    this._panVelX = 0;
+    this._panVelZ = 0;
+    return;
+}
+
     if (this._raycastToGround(e.clientX, e.clientY, this.intersection)) {
         this.isDragging = true;
         this.dragLocalPoint.copy(this.intersection).sub(this.worldGroup.position);
@@ -208,6 +343,13 @@ onMouseMove(e) {
 
     if (!this.isDragging) return;
 
+if (this.globe) {
+    const dx = e.clientX - this._globeLastX;
+    const dy = e.clientY - this._globeLastY;
+    if (dx !== 0 || dy !== 0) this._globeOrbit(dx, dy);
+    return;
+}
+
     // Линейный рейкаст по замороженной плоскости (см. onMouseDown).
     // Никакого getSurfaceHeightAt()/Newton здесь — панорама стабильна.
     const rect = this._getCanvasRect();
@@ -235,6 +377,8 @@ onMouseMove(e) {
         this.maybeUpdateVisibleTiles();
     }
 },
+
+
 
 onMouseUp(e?: MouseEvent) {
     if (this._rulerDragging) return; 
@@ -266,7 +410,7 @@ onWheel(e: WheelEvent) {
     const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
 
     // запоминаем точку-пивот для zoom-to-cursor
-    this._zoomPivotActive = true;
+    this._zoomPivotActive = !this.globe; 
     this._zoomPivotX = e.clientX;
     this._zoomPivotY = e.clientY;
 
@@ -300,6 +444,10 @@ _raycastToGround(screenX: number, screenY: number, out: any): any | null {
     const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
     this._tempMouse.set(ndcX, ndcY);
     this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
+
+    if (this.globe) {
+    return this.surface.raycast(this._tempRaycaster, out, this.worldGroup);
+}
 
     // Начальное приближение — плоскость y = 0.
     _rayPlane.constant = 0;
@@ -461,6 +609,18 @@ onTouchStart(e: TouchEvent) {
     this._invalidateCanvasRect();
 
     if (e.touches.length === 1) {
+
+if (this.globe) {
+    e.preventDefault();
+    const t = e.touches[0];
+    this.touchDragActive = true;
+    this.touchState.isPinching = false;
+    this._globeLastX = t.clientX;
+    this._globeLastY = t.clientY;
+    this._globeRadPerPx = 0;
+    return;
+}
+
         // ── сброс pan-скорости ──
         this._panVelX = 0;
         this._panVelZ = 0;
@@ -535,7 +695,14 @@ onTouchMove(e: TouchEvent) {
     if (this._cameraAnimation) return;
 
     if (this.touchDragActive && e.touches.length === 1) {
-        e.preventDefault();
+    e.preventDefault();
+    if (this.globe) {
+        const t = e.touches[0];
+        const dx = t.clientX - this._globeLastX;
+        const dy = t.clientY - this._globeLastY;
+        if (dx !== 0 || dy !== 0) this._globeOrbit(dx, dy);
+        return;
+    }
 
         // Линейный рейкаст по замороженной плоскости (см. onMouseDown).
         const touch = e.touches[0];
@@ -567,6 +734,18 @@ onTouchMove(e: TouchEvent) {
 
     if (this.touchState.isPinching && e.touches.length === 2) {
         e.preventDefault();
+
+if (this.globe) {
+    e.preventDefault();
+    const t = e.touches[0];
+    const dx = t.clientX - this._globeLastX;
+    const dy = t.clientY - this._globeLastY;
+    this._globeLastX = t.clientX;
+    this._globeLastY = t.clientY;
+    if (dx !== 0 || dy !== 0) this._globeOrbit(dx, dy);
+    return;
+}
+
         const ts = this.touchState;
         const t0 = this.findTouchById(e.touches, ts.id0);
         const t1 = this.findTouchById(e.touches, ts.id1);
@@ -579,6 +758,17 @@ onTouchMove(e: TouchEvent) {
         const midX = (t0.clientX + t1.clientX) * 0.5;
         const midY = (t0.clientY + t1.clientY) * 0.5;
         if (curDist < 1e-3) return;
+
+if (this.globe) {
+    const zd = Math.log2(curDist / ts.prevDist);
+    if (isFinite(zd) && zd !== 0) this.applyZoomDelta(zd);
+    const mdx = midX - ts.prevMidX;
+    const mdy = midY - ts.prevMidY;
+    ts.prevDist = curDist; ts.prevAngle = curAngle;
+    ts.prevMidX = midX;    ts.prevMidY = midY;
+    if (mdx !== 0 || mdy !== 0) this._globeOrbit(mdx, mdy);
+    return;
+}
 
         // ─────────────────────────────────────────────────────────────
         // Мгновенные дельты текущего кадра (для классификации).
@@ -890,6 +1080,8 @@ onClick(e) {
         (window as any).__lastShiftClick = report;
     });
 },
+
+
 
 bindEvents() {
     this._abortController = new AbortController();

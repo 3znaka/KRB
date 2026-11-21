@@ -11,6 +11,7 @@ import { NoiseElevationProvider } from './NoiseElevation.js';
 import { Graticule } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';
 import { Downloader } from './Downloader.js';
+import { createWorldSurface } from './WorldSurface.js';
 // Примеси
 import { CoreElevationMixin } from './CoreElevation.js';
 import { CoreCameraMixin } from './CoreCamera.js';
@@ -50,6 +51,7 @@ export class KrbMap {
     hasTileLayers;
     R;
     WORLD_SIZE;
+    _globeDragStartPoint = null;
     MAX_MERCATOR;
     WORLD_EXTENT;
     TILE_PIXELS;
@@ -77,6 +79,10 @@ export class KrbMap {
     currentDiscreteZoom;
     tileCRS;
     deformedTiles;
+    /** Глобус-режим (см. KrbMapOptions.globe). */
+    globe;
+    /** Поверхность мира: плоскость или эллипсоид. Создаётся в конструкторе. */
+    surface;
     dragRuler;
     _rulerDragging = false;
     allowRotate;
@@ -105,6 +111,8 @@ export class KrbMap {
     _maxBounds = null;
     _lastBoundsCheck = null;
     _uiHandle = null;
+    _globeGrabActive = false;
+    _globeGrabDir;
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene;
     camera;
@@ -167,6 +175,8 @@ export class KrbMap {
     isDragging;
     _mouseDownX;
     _mouseDownY;
+    _globeLastX;
+    _globeLastY;
     _mouseMoved;
     touchState;
     _zoomPivotActive;
@@ -233,6 +243,8 @@ export class KrbMap {
             console.warn(`KrbMap: заданы и crs='${options.crs}', и projection='${options.projection}'; использую crs.`);
         }
         this.projection = Projections.getWorld(options.crs ?? options.projection ?? 'EPSG:3857');
+        this.globe = options.globe === true;
+        this.surface = createWorldSurface(this.projection, this.globe);
         this._resolveViewCenter();
         this.inputCRS = options.inputCRS
             ? Projections.getRaw(options.inputCRS)
@@ -242,6 +254,7 @@ export class KrbMap {
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
         this.lastVisibleUpdateTime = 0;
+        this._globeGrabDir = new THREE.Vector3();
         this._defaultZoomOffset = options.zoomOffset ?? 0;
         this._defaultMinReliefZ = undefined;
         this._defaultMaxReliefZ = undefined;
@@ -279,6 +292,8 @@ export class KrbMap {
         this.SEGMENTS = options.segments ?? DEFAULTS.SEGMENTS;
         this.ANIM_DURATION = options.animDuration ?? DEFAULTS.ANIM_DURATION;
         this.MIN_ZOOM = this.view.minZoom;
+        if (this.globe)
+            this.MIN_ZOOM = Math.min(this.MIN_ZOOM, -3);
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
@@ -322,6 +337,12 @@ export class KrbMap {
         this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
         this.initControls();
+        if (this.globe) {
+            this.controls.minDistance = this.R + 100; // Не даем зайти внутрь планеты
+            this.controls.maxDistance = this.R + 50000000; // Ограничиваем отдаление
+            // Для глобуса панорамирование обычно отключают (или меняют на вращение)
+            this.controls.enablePan = false;
+        }
         this.initDragTools();
         this.touchDragActive = false;
         this.touchDragLocalPoint = new THREE.Vector3();
@@ -336,6 +357,8 @@ export class KrbMap {
         this._rotatePivotY = 0;
         this._rotateLastX = 0;
         this._rotateLastY = 0;
+        this._globeLastX = 0;
+        this._globeLastY = 0;
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
         this._tempVec3c = new THREE.Vector3();
@@ -352,11 +375,26 @@ export class KrbMap {
         const [cx, cz] = this.view.center;
         const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
         const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
-        this.controls.target.set(cx, 0, cz);
-        const dist = this.getTargetDistanceForZoom(this.view.zoom);
-        const sinP = Math.sin(initialPitchRad);
-        const cosP = Math.cos(initialPitchRad);
-        this.camera.position.set(cx - dist * sinP * Math.sin(initialBearingRad), dist * cosP, cz + dist * sinP * Math.cos(initialBearingRad));
+        if (this.globe) {
+            this.controls.target.set(0, 0, 0);
+            this.controls.enablePan = false;
+            this.controls.enableRotate = false;
+            this.controls.minDistance = this.R + 1;
+            this.controls.maxDistance = this.R + 50000000;
+            this.camera.up.set(0, 1, 0);
+            // камера на орбите над view.center
+            const [lon0, lat0] = this.projection.toLonLat([cx, cz]);
+            const dir = this.surface.position(lon0, lat0, 0, this._tempVec3a).normalize();
+            this.camera.position.copy(dir.multiplyScalar(this.getTargetDistanceForZoom(this.view.zoom)));
+        }
+        else {
+            // Старый плоский путь
+            this.controls.target.set(cx, 0, cz);
+            const dist = this.getTargetDistanceForZoom(this.view.zoom);
+            const sinP = Math.sin(initialPitchRad);
+            const cosP = Math.cos(initialPitchRad);
+            this.camera.position.set(cx - dist * sinP * Math.sin(initialBearingRad), dist * cosP, cz + dist * sinP * Math.cos(initialBearingRad));
+        }
         this.controls.update();
         this.worldGroup = new THREE.Group();
         this.worldGroup.position.set(0, 0, 0);
@@ -433,7 +471,7 @@ export class KrbMap {
         }
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
-        if (this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
+        if (!this.globe && this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
             this.createStaticBackgroundLayer();
         }
         this._calibrateBaseDistance();

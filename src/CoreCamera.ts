@@ -100,6 +100,16 @@ initControls() {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.6;
     this.controls.rotateSpeed = 1;
+
+this.controls.enableRotate = false;   // вращение делаем сами (иначе shift+drag перехватит OrbitControls)
+
+if (this.globe) {
+    this.controls.minPolarAngle = 1e-4;
+    this.controls.maxPolarAngle = Math.PI - 1e-4;
+    this.controls.enablePan  = false;
+    this.controls.enableZoom = false;
+}
+
 },
 
 easeTo(options) {
@@ -250,6 +260,13 @@ getZoom(): number {
 },
 
 getCenter(): [number, number] {
+    if (this.globe) {
+        const p = this._tempVec3a.copy(this.camera.position);
+        this.worldGroup.worldToLocal(p);
+        p.normalize().multiplyScalar(this.R);      // точка в центре экрана
+        const g = this.surface.geodeticFromWorld(p);
+        return [g.lon, g.lat];
+    }
     const off = this.worldGroup.position;
     return this.unprojectToLonLat(
         this.controls.target.x - off.x,
@@ -353,6 +370,7 @@ setMaxBounds(bounds) {
  * 1 unprojectToLonLat + 1 projectLonLat на каждый кадр.
  */
 _enforceMaxBounds() {
+    if (this.globe) return;
     if (!this._maxBounds) return;
     if (!this.controls || !this.worldGroup) return;
 
@@ -438,24 +456,29 @@ getTargetDistanceForZoom(z: number): number {
     const canvas = this.renderer?.domElement;
     const H = canvas ? canvas.clientHeight : 0;
     const fov = this.camera?.fov ?? 45;
+    let h;
     if (H <= 0) {
-        return this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
+        h = this.BASE_DISTANCE * Math.pow(0.5, z - this.BASE_ZOOM);
+    } else {
+        const tanHalfFov = Math.tan((fov * Math.PI) / 360);
+        h = (this.WORLD_SIZE / Math.pow(2, z)) * H / (2 * this.TILE_PIXELS * tanHalfFov);
     }
-    const tanHalfFov = Math.tan((fov * Math.PI) / 360);
-    return (this.WORLD_SIZE / Math.pow(2, z)) * H / (2 * this.TILE_PIXELS * tanHalfFov);
+    // Для глобуса дистанция до центра = R + высота над поверхностью
+    return this.globe ? this.R + h : h;
 },
 
 getZoomForDistance(d: number): number {
     if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
+    // Для глобуса d — это дистанция до центра, вычитаем радиус
+    const h = this.globe ? Math.max(1, d - this.R) : d;
     const canvas = this.renderer?.domElement;
     const H = canvas ? canvas.clientHeight : 0;
     const fov = this.camera?.fov ?? 45;
-    if (H <= 0) return this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / d);
+    if (H <= 0) return this.BASE_ZOOM + Math.log2(this.BASE_DISTANCE / h);
     const tanHalfFov = Math.tan((fov * Math.PI) / 360);
     const K = H / (2 * this.TILE_PIXELS * tanHalfFov);
-    return Math.log2((this.WORLD_SIZE * K) / d);
+    return Math.log2((this.WORLD_SIZE * K) / h);
 },
-
 // ───────────────────────────────────────────────────────────────────────
 // Optimized _resolveCameraPlacement:
 //
@@ -618,6 +641,7 @@ moveCameraTo(lon, lat, targetZoom = null) {
 },
 
 _wrapLongitudeIfNeeded() {
+    if (this.globe) return;
     if (this._maxBounds) return;
     if (!this._wrapsLongitude()) return;
     const now = performance.now();
@@ -827,7 +851,7 @@ applyZoomDistance() {
 
     const zoomDiff  = Math.abs(this.continuousZoom - this.targetContinuousZoom);
     const zoomActive = zoomDiff > 0.0005;          // ← добавлено
-    const pivotActive = this._zoomPivotActive && zoomActive;
+    const pivotActive = this._zoomPivotActive && zoomActive && !this.globe;
 
     this.camera.updateMatrixWorld(true);
 
@@ -934,6 +958,10 @@ _retargetToGround(): boolean {
 },
 
 syncControlsTarget() {
+    if (this.globe) {
+        this.controls.target.set(0, 0, 0);
+        return;
+    }
     this._retargetToGround();
 },
 

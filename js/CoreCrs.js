@@ -1,5 +1,6 @@
 // CoreCrs.ts
 import { Projections } from './Projections.js';
+import { createWorldSurface } from './WorldSurface.js';
 export const CoreCrsMixin = {
     getCrs() { return this.projection.code; },
     getProjection() { return this.projection; },
@@ -86,6 +87,7 @@ export const CoreCrsMixin = {
         // ── 6. Поменять проекцию и производные ────────────────────────────
         this.projection = newProj;
         this.R = newProj.meanRadius; // см. «R» ниже
+        this.surface = createWorldSurface(newProj, this.globe);
         this._refreshExtents(); // WORLD_SIZE / MAX_MERCATOR / WORLD_EXTENT
         this._calibrateBaseDistance?.(); // BASE_DISTANCE
         // ── 7. Сбросить pan-офсет и world-координатные кеши ───────────────

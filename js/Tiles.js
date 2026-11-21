@@ -309,6 +309,8 @@ export class TileManager {
         return true;
     }
     get _isDeformed() {
+        if (this.engine.globe)
+            return true;
         if (typeof this.engine._isLayerLinear === 'function') {
             return !this.engine._isLayerLinear(this.layer);
         }
@@ -762,6 +764,8 @@ export class TileManager {
     }
     /* ---------- Обновление видимых тайлов ---------- */
     update(camera, controlsTarget, continuousZoom, worldGroupPos) {
+        if (this.engine.globe)
+            return this._updateGlobe(camera, continuousZoom);
         if (this._pendingLayerMask) {
             const m = this._pendingLayerMask;
             this._pendingLayerMask = null;
@@ -1086,6 +1090,148 @@ export class TileManager {
         }
         return idealZ;
     }
+    _updateGlobe(camera, continuousZoom) {
+        if (!this._isVisible) {
+            this.setVisible(false);
+            return -1;
+        }
+        this.frame++;
+        const prevIdealZ = this._lastIdealZ;
+        let idealZ = Math.max(0, this._liveIdealZ());
+        if (idealZ !== prevIdealZ) {
+            this._zoomOut = idealZ < prevIdealZ;
+            this._lastIdealZ = idealZ;
+        }
+        const zoomOut = !!this._zoomOut;
+        const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
+        const _layerOffset = this.layer?.zoomOffset ?? 0;
+        const _minNZ = this.layer?.minNativeZoom ?? 0;
+        const _maxNZ = this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
+        const targetZ = Math.max(_minNZ, Math.min(_maxNZ, Math.round(targetCont + _layerOffset)));
+        const rapidZoom = Math.abs(targetZ - idealZ) >= RAPID_ZOOM_GAP;
+        // Камера → локальные координаты worldGroup (у нас identity, но так общее).
+        const camLocal = this._tmpCam || (this._tmpCam = new THREE.Vector3());
+        camLocal.copy(camera.position);
+        if (this.engine.worldGroup)
+            this.engine.worldGroup.worldToLocal(camLocal);
+        const tileCrs = this._layerCrs;
+        // Страховка от лавины: если диапазон слишком широкий — временно грубее LOD.
+        let ranges = null, tries = 0;
+        while (tries++ < 4) {
+            ranges = this.engine.surface.visibleTileRanges(camLocal, idealZ, tileCrs);
+            if (!ranges)
+                break;
+            let total = 0;
+            for (const r of ranges)
+                total += (r.xMax - r.xMin + 1) * (r.yMax - r.yMin + 1);
+            if (total <= 700 || idealZ <= 0)
+                break;
+            idealZ--;
+        }
+        if (!ranges || !ranges.length) {
+            if (this._visibleKeysPrev) {
+                for (const k of this._visibleKeysPrev) {
+                    const inst = this.tiles.get(k);
+                    if (inst?.mesh)
+                        inst.mesh.visible = false;
+                }
+                this._visibleKeysPrev = null;
+            }
+            return idealZ;
+        }
+        const renderSet = new Set();
+        // Создаем Frustum для отсечения невидимых тайлов
+        const frustum = new THREE.Frustum();
+        const projScreenMatrix = new THREE.Matrix4();
+        projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        frustum.setFromProjectionMatrix(projScreenMatrix);
+        const worldGroup = this.engine.worldGroup;
+        const tmpSphere = new THREE.Sphere();
+        const tmpVec = new THREE.Vector3();
+        const surface = this.engine.surface;
+        let loadBudget = 20; // Максимум новых тайлов за кадр
+        for (const rg of ranges) {
+            const { xMin, xMax, yMin, yMax } = rg;
+            const order = [];
+            for (let y = yMin; y <= yMax; y++) {
+                const dy = y + 0.5 - rg.cyTile, dy2 = dy * dy;
+                for (let vx = xMin; vx <= xMax; vx++) {
+                    const dx = vx + 0.5 - rg.cxTile;
+                    order.push({ vx, y, d: dx * dx + dy2 });
+                }
+            }
+            order.sort((a, b) => a.d - b.d);
+            for (const { vx, y } of order) {
+                // --- FRUSTUM CULLING ---
+                const n = 1 << idealZ;
+                const tileCenterX = ((vx + 0.5) / n) * 2 * tileCrs.halfExtentX - tileCrs.halfExtentX;
+                const tileCenterY = tileCrs.halfExtentY - ((y + 0.5) / n) * 2 * tileCrs.halfExtentY;
+                const lonLat = tileCrs.toLonLat([tileCenterX, tileCenterY]);
+                if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1]))
+                    continue;
+                surface.position(lonLat[0], lonLat[1], 0, tmpVec);
+                if (worldGroup)
+                    worldGroup.localToWorld(tmpVec);
+                // Примерный радиус тайла (с запасом)
+                const radius = this.engine.R * (Math.PI / n) * 1.5;
+                tmpSphere.center.copy(tmpVec);
+                tmpSphere.radius = radius;
+                // Если тайл не влезает в экран — пропускаем
+                if (!frustum.intersectsSphere(tmpSphere))
+                    continue;
+                // -----------------------
+                const k = getVirtKey(idealZ, vx, y);
+                let inst = this.tiles.get(k);
+                if (!inst) {
+                    if (!rapidZoom && loadBudget > 0) {
+                        loadBudget--;
+                        inst = this.ensureTile(idealZ, vx, y, k);
+                    }
+                }
+                else {
+                    inst.lastUsed = this.frame;
+                }
+                if (inst && inst.ready && inst.mesh) {
+                    renderSet.add(k);
+                    continue;
+                }
+                if (zoomOut) {
+                    if (!this._collectPartialChildren(idealZ, vx, y, renderSet)) {
+                        const anc = this.findReadyAncestor(idealZ, vx, y);
+                        if (anc)
+                            renderSet.add(this.key(anc.z, anc.virtX, anc.y));
+                    }
+                }
+                else {
+                    const anc = this.findReadyAncestor(idealZ, vx, y);
+                    if (anc)
+                        renderSet.add(this.key(anc.z, anc.virtX, anc.y));
+                    else
+                        this._collectPartialChildren(idealZ, vx, y, renderSet);
+                }
+            }
+        }
+        for (const k of renderSet) {
+            const inst = this.tiles.get(k);
+            if (!inst || !inst.mesh)
+                continue;
+            if (!inst.mesh.visible)
+                inst.mesh.visible = true;
+            inst.lastUsed = this.frame;
+        }
+        if (this._visibleKeysPrev) {
+            for (const k of this._visibleKeysPrev) {
+                if (renderSet.has(k))
+                    continue;
+                const inst = this.tiles.get(k);
+                if (inst && inst.mesh && inst.mesh.visible)
+                    inst.mesh.visible = false;
+            }
+        }
+        this._visibleKeysPrev = renderSet;
+        this.gc(renderSet);
+        return idealZ;
+    }
     /** Добавляет готовых детей (z+1); true если все 4 готовы. */
     _collectPartialChildren(z, virtX, y, renderSet) {
         if (z + 1 > this._maxNativeZoom)
@@ -1251,6 +1397,8 @@ export class TileManager {
         return inst.z >= this._minElevationNativeZoom;
     }
     createTileMesh(inst, texture) {
+        if (this.engine.globe)
+            return this._createGlobeTileMesh(inst, texture);
         if (this._isDeformed) {
             return this._createDeformedTileMesh(inst, texture);
         }
@@ -1408,6 +1556,24 @@ export class TileManager {
         mesh.renderOrder = this._baseRenderOrder + z;
         mesh.visible = false;
         mesh.userData.deformedTile = true;
+        return mesh;
+    }
+    _createGlobeTileMesh(inst, texture) {
+        const { z, virtX, y } = inst;
+        // Сегментов по зуму: на z=0 тайл — весь шар, нужна плотная сетка.
+        const SEG_TABLE = [64, 64, 48, 32, 24, 16, 12, 8];
+        const seg = this.hasElevation
+            ? this.engine.SEGMENTS
+            : SEG_TABLE[Math.min(z, SEG_TABLE.length - 1)];
+        const built = this.engine.surface.buildTileGeometry(z, virtX, y, seg, this._layerCrs, null);
+        if (!built)
+            return null;
+        const mesh = new THREE.Mesh(built.geometry, this._createTileMaterial(texture));
+        mesh.position.copy(built.center);
+        mesh.renderOrder = this._baseRenderOrder + z;
+        mesh.visible = false;
+        mesh.userData.deformedTile = true;
+        mesh.userData.globeTile = true;
         return mesh;
     }
     createStaticTileMesh(tileSize, originX, originZ, texture) {
@@ -1679,14 +1845,33 @@ export class TileManager {
         return promise;
     }
     applyHeightsToGeometry(inst, heights) {
+        if (this.engine.globe) {
+            // Делегируем расчет сферы в GlobeSurface, который правильно 
+            // сдвигает вершины вдоль нормали эллипсоида.
+            this.engine.surface.applyHeights(inst.geometry, heights);
+            inst.heightsApplied = true;
+            inst.ready = true;
+            if (this.tileLighting) {
+                inst.geometry.computeVertexNormals();
+            }
+            for (const cb of this.onTileHeightAppliedCallbacks) {
+                try {
+                    cb(inst);
+                }
+                catch (e) {
+                    console.warn('Tile overlay callback error', e);
+                }
+            }
+            return;
+        }
+        // --- Старый плоский путь ---
         const pos = inst.geometry.attributes.position.array;
         for (let i = 0; i < heights.length; i++)
             pos[i * 3 + 1] = heights[i];
         inst.geometry.attributes.position.needsUpdate = true;
         this.syncTileWithNeighbors(inst);
-        if (this.tileLighting) {
+        if (this.tileLighting)
             inst.geometry.computeVertexNormals();
-        }
         inst.heightsApplied = true;
         inst.ready = true;
         for (const cb of this.onTileHeightAppliedCallbacks) {
@@ -1699,6 +1884,8 @@ export class TileManager {
         }
     }
     syncTileWithNeighbors(inst) {
+        if (this.engine.globe)
+            return;
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]];
         for (const [dx, dy] of neighbors) {
             const nVirtX = inst.virtX + dx, nY = inst.y + dy;

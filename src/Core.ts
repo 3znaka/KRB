@@ -12,6 +12,8 @@ import { View } from './View.js';
 import { Graticule, GraticuleOptions } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';  
 import { Downloader } from './Downloader.js';
+import { createWorldSurface } from './WorldSurface.js';
+import type { FlatSurface, GlobeSurface } from './WorldSurface.js';
 
 
 // Примеси
@@ -47,6 +49,7 @@ export interface KrbMapOptions {
  */
 R?: number;
     segments?: number;
+    
     animDuration?: number;
     tileMargin?: number;
     tileMarginBg?: number;
@@ -74,6 +77,7 @@ dragRuler?: boolean;
     panFriction?: number;
     backgroundColor?: string | number;
     debug?: boolean;
+    globe?: boolean;
 maxBounds?: [[number, number], [number, number]];
 }
 
@@ -142,6 +146,7 @@ export class KrbMap {
     hasTileLayers: boolean;
     R: number;
     WORLD_SIZE: number;
+    _globeDragStartPoint: any = null; 
     MAX_MERCATOR: number;
     WORLD_EXTENT: number;
     TILE_PIXELS: number;
@@ -169,6 +174,11 @@ export class KrbMap {
     currentDiscreteZoom: number;
     tileCRS: any;
     deformedTiles: boolean;
+    /** Глобус-режим (см. KrbMapOptions.globe). */
+    globe: boolean;
+    /** Поверхность мира: плоскость или эллипсоид. Создаётся в конструкторе. */
+    surface: FlatSurface | GlobeSurface;
+
 dragRuler: boolean;
     _rulerDragging: boolean = false; 
     
@@ -203,6 +213,9 @@ _padding: { top: number; right: number; bottom: number; left: number } | null = 
 _maxBounds: { minLon: number; maxLon: number; minLat: number; maxLat: number } | null = null;
 _lastBoundsCheck: { tx: number; tz: number; wx: number; wz: number } | null = null;
 _uiHandle: { destroy: () => void } | null = null;
+
+_globeGrabActive: boolean = false;
+_globeGrabDir: any;
 
     // --- Three.js объекты (пока any, т.к. THREE из tpb.js) ---
     scene: any;
@@ -277,6 +290,8 @@ _uiHandle: { destroy: () => void } | null = null;
     isDragging: boolean;
     _mouseDownX: number;
     _mouseDownY: number;
+    _globeLastX: number;
+    _globeLastY: number;
     _mouseMoved: boolean;
     touchState: TouchState;
 
@@ -361,6 +376,8 @@ this.dragRuler = options.dragRuler ?? true;
             );
         }
         this.projection = Projections.getWorld(options.crs ?? options.projection ?? 'EPSG:3857');
+        this.globe = options.globe === true;
+this.surface = createWorldSurface(this.projection, this.globe);
         this._resolveViewCenter();
 
         this.inputCRS = options.inputCRS
@@ -373,6 +390,8 @@ this._rebuildRasterRegistry();
         this._surfaceMaxHeightCache = new Map();
         this._surfaceMaxHeightCacheMaxSize = 500;
         this.lastVisibleUpdateTime = 0;
+
+        this._globeGrabDir = new THREE.Vector3();
 
         this._defaultZoomOffset = options.zoomOffset ?? 0;
         this._defaultMinReliefZ = undefined;
@@ -421,6 +440,7 @@ this._refreshExtents();
         this.SEGMENTS = options.segments ?? DEFAULTS.SEGMENTS;
         this.ANIM_DURATION = options.animDuration ?? DEFAULTS.ANIM_DURATION;
         this.MIN_ZOOM = this.view.minZoom;
+        if (this.globe) this.MIN_ZOOM = Math.min(this.MIN_ZOOM, -3);
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
@@ -471,6 +491,12 @@ this._initEvents();
 this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
         this.initControls();
+        if (this.globe) {
+    this.controls.minDistance = this.R + 100; // Не даем зайти внутрь планеты
+    this.controls.maxDistance = this.R + 50000000; // Ограничиваем отдаление
+    // Для глобуса панорамирование обычно отключают (или меняют на вращение)
+    this.controls.enablePan = false; 
+}
         this.initDragTools();
         this.touchDragActive = false;
         this.touchDragLocalPoint = new THREE.Vector3();
@@ -486,6 +512,8 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
         this._rotatePivotY = 0;
         this._rotateLastX = 0;
         this._rotateLastY = 0;
+                this._globeLastX = 0;
+        this._globeLastY = 0;
 
         this._tempVec3a = new THREE.Vector3();
         this._tempVec3b = new THREE.Vector3();
@@ -502,20 +530,37 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
             idx: 0
         };
 
-        const [cx, cz] = this.view.center!;
-        const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
-        const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
+const [cx, cz] = this.view.center!;
+const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
+const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
 
-        this.controls.target.set(cx, 0, cz);
-        const dist = this.getTargetDistanceForZoom(this.view.zoom);
-        const sinP = Math.sin(initialPitchRad);
-        const cosP = Math.cos(initialPitchRad);
-        this.camera.position.set(
-            cx - dist * sinP * Math.sin(initialBearingRad),
-            dist * cosP,
-            cz + dist * sinP * Math.cos(initialBearingRad)
-        );
-        this.controls.update();
+if (this.globe) {
+    this.controls.target.set(0, 0, 0);
+    this.controls.enablePan = false;
+    this.controls.enableRotate = false;
+    this.controls.minDistance = this.R + 1;
+    this.controls.maxDistance = this.R + 50000000;
+    this.camera.up.set(0, 1, 0);
+
+    // камера на орбите над view.center
+    const [lon0, lat0] = this.projection.toLonLat([cx, cz]);
+    const dir = this.surface.position(lon0, lat0, 0, this._tempVec3a).normalize();
+    this.camera.position.copy(
+        dir.multiplyScalar(this.getTargetDistanceForZoom(this.view.zoom))
+    );
+} else {
+    // Старый плоский путь
+    this.controls.target.set(cx, 0, cz);
+    const dist = this.getTargetDistanceForZoom(this.view.zoom);
+    const sinP = Math.sin(initialPitchRad);
+    const cosP = Math.cos(initialPitchRad);
+    this.camera.position.set(
+        cx - dist * sinP * Math.sin(initialBearingRad),
+        dist * cosP,
+        cz + dist * sinP * Math.cos(initialBearingRad)
+    );
+}
+this.controls.update();
 
         this.worldGroup = new THREE.Group();
         this.worldGroup.position.set(0, 0, 0);
@@ -604,7 +649,7 @@ for (const layer of objectsToAdd) {
 
         this.staticBgGroup = new THREE.Group();
         this.worldGroup.add(this.staticBgGroup);
-if (this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
+if (!this.globe && this._rasterLayers.length > 0 && this.staticBgZoom > 0) {
     this.createStaticBackgroundLayer();
 }
 

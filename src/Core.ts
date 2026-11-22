@@ -299,6 +299,19 @@ _globeGrabDir: any;
     _zoomPivotX: number;
     _zoomPivotY: number;
 
+    // ── Глобус: поворот (bearing) и наклон (pitch) ──
+    /** Наклон камеры, рад (0 = строго сверху). Действует с зума ≥ 5–6. */
+    _globePitch: number;
+    /** Азимут вида, рад (0 = север сверху). */
+    _globeBearing: number;
+    /** Куда плавно доводится pitch/bearing (setPitch/setBearing/rotateToNorth). */
+    _globePitchTarget: number;
+    _globeBearingTarget: number;
+    /** Якорь правого драга на глобусе: точка поверхности под курсором. */
+    _globeRotateAnchor: any;
+    _globeRotateAnchorX: number;
+    _globeRotateAnchorY: number;
+
     _rotatePivotActive: boolean;
     _rotatePivot: any;
     _rotatePivotX: number;
@@ -492,8 +505,9 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
         this.initThree();
         this.initControls();
         if (this.globe) {
-    this.controls.minDistance = this.R + 100; // Не даем зайти внутрь планеты
-    this.controls.maxDistance = this.R + 50000000; // Ограничиваем отдаление
+    // Дистанция на глобусе — до цели на поверхности (высота над ней).
+    this.controls.minDistance = 1;
+    this.controls.maxDistance = 1e9;
     // Для глобуса панорамирование обычно отключают (или меняют на вращение)
     this.controls.enablePan = false; 
 }
@@ -505,6 +519,13 @@ this._backgroundExplicit = options.backgroundColor !== undefined;
         this._zoomPivotActive = false;
         this._zoomPivotX = 0;
         this._zoomPivotY = 0;
+        this._globePitch = 0;
+        this._globeBearing = 0;
+        this._globePitchTarget = 0;
+        this._globeBearingTarget = 0;
+        this._globeRotateAnchor = null;
+        this._globeRotateAnchorX = 0;
+        this._globeRotateAnchorY = 0;
 
         this._rotatePivotActive = false;
         this._rotatePivot = null;
@@ -535,27 +556,27 @@ const initialPitchRad = (this.view.pitch ?? 0) * Math.PI / 180;
 const initialBearingRad = (this.view.bearing ?? 0) * Math.PI / 180;
 
 if (this.globe) {
-    this.controls.target.set(0, 0, 0);
     this.controls.enablePan = false;
     this.controls.enableRotate = false;
-    this.controls.minDistance = this.R + 1;
-    this.controls.maxDistance = this.R + 50000000;
+    // Дистанция теперь считается до ЦЕЛИ на поверхности, а не до центра
+    // Земли, поэтому лимиты — «высота над поверхностью».
+    this.controls.minDistance = 1;
+    this.controls.maxDistance = 1e9;
     this.camera.up.set(0, 1, 0);
 
     // Камера на орбите над view.center.
     // ВАЖНО: view.center хранит ПЛОСКИЕ world-координаты [x, z], где
     // z = -y (см. _resolveViewCenter/projectLonLat). Поэтому в toLonLat
     // y надо передавать как -cz; старый вызов toLonLat([cx, cz])
-    // переворачивал широту (Москва → 56.75° ю.ш.).
+    // переворачивал широту (Москва → 56.75° ю.ш.). Берём канонический
+    // центр, который _resolveViewCenter всегда заполняет.
     const [lon0, lat0] = this.view.centerLonLat
         ?? this.projection.toLonLat([cx, -cz]);
-    const dir = this.surface.position(lon0, lat0, 0, this._tempVec3a).normalize();
-    this.camera.position.copy(
-        // Высота калибруется по широте центра (h·cos φ — см.
-        // getTargetDistanceForZoom), поэтому lat0 передаём явно:
-        // камеры ещё нет и _globeSubCameraLat() вернул бы 0.
-        dir.multiplyScalar(this.getTargetDistanceForZoom(this.view.zoom, lat0))
-    );
+
+    // Цель — точка поверхности в центре экрана; поза — строго сверху,
+    // север сверху (pitch/bearing = 0; гейт всё равно обнулит их ниже z=5).
+    this.controls.target.copy(this.surface.position(lon0, lat0, 0, this._tempVec3a));
+    this._globeApplyPose(this.getTargetDistanceForZoom(this.view.zoom, lat0), 0, 0);
 } else {
     // Старый плоский путь
     this.controls.target.set(cx, 0, cz);

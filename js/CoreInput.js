@@ -122,9 +122,10 @@ export const CoreInputMixin = {
     },
     /**
      * Дифференциальный драг глобуса. Без якоря и без накопленной ошибки:
-     * каждый кадр заново измеряем две точки ОДНОЙ камерой и двигаем её
-     * на разницу. Разворот мыши инвертирует знак в том же кадре.
-     * Радиус орбиты сохраняется → зум не дрейфует.
+     * каждый кадр заново измеряем две точки ОДНОЙ камерой и переносим ТОЧКУ
+     * ОБЗОРА (цель) на эту разницу. Камера ставится относительно цели с тем
+     * же pitch/bearing, поэтому вся картинка поворачивается как единое целое
+     * вокруг центра Земли — при наклоне/повороте это тоже корректно.
      */
     _globeOrbit(dx, dy) {
         if (!this.globe || !this.worldGroup)
@@ -134,12 +135,12 @@ export const CoreInputMixin = {
         const cam = this.camera;
         const wg = this.worldGroup;
         const H = this.renderer.domElement.clientHeight || 1;
-        _gCam.copy(cam.position);
+        _gCam.copy(this.controls.target);
         wg.worldToLocal(_gCam);
-        const d = _gCam.length();
-        if (!(d > 1e-6))
+        const dT = _gCam.length();
+        if (!(dT > 1e-6))
             return;
-        _gN.copy(_gCam).divideScalar(d);
+        _gN.copy(_gCam).divideScalar(dT);
         const x0 = this._globeLastX, y0 = this._globeLastY;
         const x1 = x0 + dx, y1 = y0 + dy;
         // ОБА луча — до перемещения камеры. Это и есть весь фикс.
@@ -180,7 +181,7 @@ export const CoreInputMixin = {
             // один из лучей ушёл с диска — продолжаем в том же масштабе
             let s = this._globeRadPerPx;
             if (!(s > 0)) {
-                const h = Math.max(d - this.R, 1);
+                const h = Math.max(cam.position.distanceTo(this.controls.target), 1);
                 s = (2 * h * Math.tan(cam.fov * Math.PI / 360)) / H / this.R;
             }
             s = Math.min(s, Math.PI / H);
@@ -201,12 +202,10 @@ export const CoreInputMixin = {
         const eff = newLat - lat;
         if (eff !== 0)
             _gN.applyAxisAngle(_gAxis, eff);
-        _gCam.copy(_gN).multiplyScalar(d);
-        wg.localToWorld(_gCam);
-        cam.position.copy(_gCam);
-        cam.up.set(0, 1, 0);
-        cam.lookAt(this.controls.target);
-        cam.updateMatrixWorld(true);
+        // Новая точка обзора на поверхности + поза с прежним наклоном/азимутом.
+        this._globeSetTargetDir(_gN);
+        const dist = this.getTargetDistanceForZoom(this.continuousZoom);
+        this._globeApplyPose(dist, this._globePitchNow(), this._globeBearingNow());
         this.controls.update();
         this._globeLastX = x1;
         this._globeLastY = y1;
@@ -228,10 +227,17 @@ export const CoreInputMixin = {
         this._panVelX = 0;
         this._panVelZ = 0;
         if (e.button === 2) {
-            if (this.globe)
+            if (this.globe) {
+                // На глобусе поворот/наклон включаются только с зума ≈6
+                // (когда Земля занимает весь кадр) — см. _globeTiltEnabled().
+                if (!this._globeTiltEnabled())
+                    return;
+                if (!this.allowRotate && !this.allowPitch)
+                    return;
+            }
+            else if (!this.allowRotate) {
                 return;
-            if (!this.allowRotate)
-                return;
+            }
             this._rotatePivotActive = true;
             this._rotatePivotX = e.clientX;
             this._rotatePivotY = e.clientY;
@@ -246,6 +252,12 @@ export const CoreInputMixin = {
             if (!hit) {
                 // горизонт/небо — фолбэк на классическое вращение вокруг target
                 this._rotatePivot.copy(this.controls.target);
+            }
+            if (this.globe) {
+                // Якорь вращения на весь жест: точка, схваченная курсором.
+                this._globeRotateAnchor = this._rotatePivot.clone();
+                this._globeRotateAnchorX = e.clientX;
+                this._globeRotateAnchorY = e.clientY;
             }
             return;
         }
@@ -335,6 +347,8 @@ export const CoreInputMixin = {
         if (this._rotatePivotActive) {
             this._rotatePivotActive = false;
             // _rotatePivot НЕ обнуляем — переиспользуется на следующем mousedown.
+            // Якорь глобуса — сбрасываем: следующий жест схватит новую точку.
+            this._globeRotateAnchor = null;
             return;
         }
         if (!this.isDragging)
@@ -409,6 +423,11 @@ export const CoreInputMixin = {
         return out;
     },
     _rotateAroundPivot(dxPixels, dyPixels, pivot) {
+        if (this.globe) {
+            // Глобус: вращение вокруг точки под курсором в местном базисе.
+            this._globeRotateAroundPivot(dxPixels, dyPixels, pivot);
+            return;
+        }
         const rotateSpeed = this.controls.rotateSpeed;
         const H = this.renderer.domElement.clientHeight || 1;
         // Знаки соответствуют конвенции OrbitControls:
@@ -598,12 +617,20 @@ export const CoreInputMixin = {
             ts.candidateGesture = null;
             ts.candidateFrames = 0;
             ts.lastSwitchTime = 0;
-            const target = this.controls.target;
-            const dir = this._tempVec3a.subVectors(this.camera.position, target);
-            const d = dir.length();
-            ts.prevAzimuth = Math.atan2(dir.z, dir.x);
-            ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
-            ts.startPitch = ts.prevPitch;
+            if (this.globe) {
+                // На глобусе pitch/bearing — состояние в локальном базисе.
+                ts.prevAzimuth = this._globeBearingNow();
+                ts.prevPitch = this._globePitchNow();
+                ts.startPitch = ts.prevPitch;
+            }
+            else {
+                const target = this.controls.target;
+                const dir = this._tempVec3a.subVectors(this.camera.position, target);
+                const d = dir.length();
+                ts.prevAzimuth = Math.atan2(dir.z, dir.x);
+                ts.prevPitch = Math.acos(Math.max(-1, Math.min(1, dir.y / d)));
+                ts.startPitch = ts.prevPitch;
+            }
         }
     },
     findTouchById(touches, id) {
@@ -669,27 +696,102 @@ export const CoreInputMixin = {
             if (curDist < 1e-3)
                 return;
             if (this.globe) {
-                // Pinch: зум «от середины пальцев» + панорама по движению середины.
-                // Пивот для zoom-to-cursor — средняя точка касаний.
+                // ── Pinch на глобусе ────────────────────────────────────────────
+                // Та же идея, что в плоской ветке: классифицируем жест на «tilt» и
+                // «zoom+rotate» (EMA-пороги + 3 стабильных кадра), чтобы вертикальное
+                // движение двух пальцев не мешало зуму/повороту и наоборот.
+                const angleDelta = _wrapPi(curAngle - ts.prevAngle);
+                const dDist = Math.abs(curDist - ts.prevDist);
+                const dRotate = this.allowRotate ? Math.abs(angleDelta) * curDist * 0.5 : 0;
+                const dMidY = this.allowPitch ? Math.abs(midY - ts.prevMidY) : 0;
+                const EMA = 0.3;
+                ts.smoothZoom = (1 - EMA) * ts.smoothZoom + EMA * dDist;
+                ts.smoothRotate = (1 - EMA) * ts.smoothRotate + EMA * dRotate;
+                ts.smoothTilt = (1 - EMA) * ts.smoothTilt + EMA * dMidY;
+                const smoothTotal = ts.smoothZoom + ts.smoothRotate + ts.smoothTilt;
+                if (smoothTotal < 0.5) {
+                    ts.candidateGesture = null;
+                    ts.candidateFrames = 0;
+                    ts.prevDist = curDist;
+                    ts.prevAngle = curAngle;
+                    ts.prevMidX = midX;
+                    ts.prevMidY = midY;
+                    return;
+                }
+                const tiltWeighted = ts.smoothTilt / 0.9;
+                const winner = (this.allowPitch && tiltWeighted > Math.max(ts.smoothZoom, ts.smoothRotate))
+                    ? 'tilt' : 'zoomRotate';
+                if (winner !== ts.activeGesture) {
+                    if (winner === ts.candidateGesture)
+                        ts.candidateFrames++;
+                    else {
+                        ts.candidateGesture = winner;
+                        ts.candidateFrames = 1;
+                    }
+                    const now = performance.now();
+                    const canSwitch = ts.activeGesture === null || now - ts.lastSwitchTime > 120;
+                    if (ts.candidateFrames >= 3 && canSwitch) {
+                        ts.activeGesture = winner;
+                        ts.lastSwitchTime = now;
+                        ts.candidateGesture = null;
+                        ts.candidateFrames = 0;
+                        // Перебазирование входящего жеста.
+                        if (winner === 'tilt') {
+                            ts.startMidY = midY;
+                            ts.startPitch = this._globePitchNow();
+                        }
+                        ts.prevDist = curDist;
+                        ts.prevAngle = curAngle;
+                        ts.prevMidX = midX;
+                        ts.prevMidY = midY;
+                    }
+                }
+                else {
+                    ts.candidateGesture = null;
+                    ts.candidateFrames = 0;
+                }
+                if (ts.activeGesture === 'tilt') {
+                    // Вертикальное движение середины → наклон камеры.
+                    const H2 = this.renderer.domElement.clientHeight || 1;
+                    const TILT_FULL_RANGE_PX = H2 * 0.30;
+                    const maxPitch = this._globeMaxPitch();
+                    const tiltDeltaPx = ts.startMidY - midY;
+                    const newPitch = ts.startPitch + tiltDeltaPx * (maxPitch / TILT_FULL_RANGE_PX);
+                    this._globePitch = Math.max(0, Math.min(maxPitch, newPitch));
+                    this._globePitchTarget = this._globePitch;
+                    this._globeApplyPose(this.getTargetDistanceForZoom(this.continuousZoom), this._globePitchNow(), this._globeBearingNow());
+                    ts.prevDist = curDist;
+                    ts.prevAngle = curAngle;
+                    ts.prevMidX = midX;
+                    ts.prevMidY = midY;
+                    this.maybeUpdateVisibleTiles();
+                    return;
+                }
+                // ── zoom + rotate + панорама ──
                 this._zoomPivotActive = true;
                 this._zoomPivotX = midX;
                 this._zoomPivotY = midY;
                 const zd = Math.log2(curDist / ts.prevDist);
                 if (isFinite(zd) && zd !== 0)
                     this.applyZoomDelta(zd);
+                // Поворот карты по углу между пальцами (знак как в плоской ветке).
+                if (this.allowRotate && angleDelta !== 0) {
+                    this._globeBearing -= angleDelta;
+                    this._globeBearingTarget = this._globeBearing;
+                    this._globeApplyPose(this.getTargetDistanceForZoom(this.continuousZoom), this._globePitchNow(), this._globeBearingNow());
+                }
+                // Панорама по смещению середины (пивот — предыдущая середина).
                 const mdx = midX - ts.prevMidX;
                 const mdy = midY - ts.prevMidY;
-                ts.prevDist = curDist;
-                ts.prevAngle = curAngle;
-                ts.prevMidX = midX;
-                ts.prevMidY = midY;
                 if (mdx !== 0 || mdy !== 0) {
-                    // _globeOrbit меряет лучи от _globeLastX/Y — это должна быть
-                    // ПРЕДЫДУЩАЯ середина, иначе жест «съезжает» на величину шага.
                     this._globeLastX = midX - mdx;
                     this._globeLastY = midY - mdy;
                     this._globeOrbit(mdx, mdy);
                 }
+                ts.prevDist = curDist;
+                ts.prevAngle = curAngle;
+                ts.prevMidX = midX;
+                ts.prevMidY = midY;
                 return;
             }
             // ─────────────────────────────────────────────────────────────

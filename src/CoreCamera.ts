@@ -9,6 +9,24 @@ const _pivotA = new THREE.Vector3();
 const _pivotB = new THREE.Vector3();
 const _pivotZero = new THREE.Vector3();
 
+// ── Глобус: поворот (bearing) и наклон (pitch) ──────────────────────
+// До GLOBE_TILT_ZOOM_MIN поворот/pitch выключены: глобус выглядит как
+// обычный шар «север сверху». Между MIN и FULL значения плавно
+// «выпрямляются» при отдалении — см. _globeTiltGate().
+const GLOBE_TILT_ZOOM_MIN = 5;
+const GLOBE_TILT_ZOOM_FULL = 6;
+const GLOBE_MAX_PITCH = (85 * Math.PI) / 180;
+// Чуть-чуть не сверху: при pitch=0 «up» камеры (местная нормаль) параллелен
+// направлению взгляда, и lookAt вырождается (крен становится произвольным).
+// Плоская ветка делает то же через controls.minPolarAngle.
+const GLOBE_MIN_PITCH = 0.001;
+const _globTmp = new THREE.Vector3();
+const _globTmp2 = new THREE.Vector3();
+const _globUp = new THREE.Vector3();
+const _globNorth = new THREE.Vector3();
+const _globEast = new THREE.Vector3();
+const _globGeo = { lon: 0, lat: 0, h: 0 };
+
 export interface CoreCameraMethods {
     setAllowPitch(v: boolean): void;
 setAllowRotate(v: boolean): void;
@@ -17,7 +35,22 @@ setAllowRotate(v: boolean): void;
     getZoomForDistance(d: number): number;
     _globeSubCameraLat(): number;
     _globeLatScale(latDeg: number): number;
-    _globeZoomToPivot(P_before: any, sx: number, sy: number): boolean;
+    _globeZoomToPivot(P_before: any, sx: number, sy: number, dist: number): boolean;
+    _globeTiltGate(z?: number): number;
+    _globePitchNow(): number;
+    _globeBearingNow(): number;
+    _globeTiltEnabled(): boolean;
+    _globeMaxPitch(): number;
+    _globeTargetGeo(out?: any): any;
+    _globeFrame(up: any, north: any, east: any): void;
+    _globeApplyPose(dist: number, pitch: number, bearing: number): void;
+    _globeSetTargetDir(dirLocal: any): void;
+    _globeSnapTarget(): void;
+    _globeRetarget(): void;
+    _globeProjectTarget(): void;
+    _globeSyncStateFromCamera(): void;
+    _globeRotateAroundPivot(dxPixels: number, dyPixels: number, pivot: any): void;
+    _applyGlobeZoomDistance(): void;
     setPitch(pitchDeg: number, duration?: number): void;
     setBearing(bearingDeg: number, duration?: number): void;
     _startCameraAnimationLoopIfNeeded(): void;
@@ -270,10 +303,8 @@ getZoom(): number {
 
 getCenter(): [number, number] {
     if (this.globe) {
-        const p = this._tempVec3a.copy(this.camera.position);
-        this.worldGroup.worldToLocal(p);
-        p.normalize().multiplyScalar(this.R);      // точка в центре экрана
-        const g = this.surface.geodeticFromWorld(p);
+        // Центр экрана — цель (точка обзора на поверхности).
+        const g = this._globeTargetGeo(_globGeo);
         return [g.lon, g.lat];
     }
     const off = this.worldGroup.position;
@@ -284,6 +315,7 @@ getCenter(): [number, number] {
 },
 
 getPitch(): number {
+    if (this.globe) return (this._globePitchNow() * 180) / Math.PI;
     const cam = this.camera.position;
     const tgt = this.controls.target;
     const dx = cam.x - tgt.x, dy = cam.y - tgt.y, dz = cam.z - tgt.z;
@@ -294,6 +326,12 @@ getPitch(): number {
 },
 
 getBearing(): number {
+    if (this.globe) {
+        let deg = (this._globeBearingNow() * 180) / Math.PI;
+        while (deg > 180) deg -= 360;
+        while (deg < -180) deg += 360;
+        return deg;
+    }
     const cam = this.camera.position;
     const tgt = this.controls.target;
     const dx = cam.x - tgt.x, dz = cam.z - tgt.z;
@@ -462,11 +500,14 @@ _applyPadding(padding) {
 },
 
 /**
- * Широта точки под камерой (град): полярный угол вектора
- * «target → camera». В режиме глобуса камера смотрит в центр Земли,
- * поэтому это ровно центр экрана; используется для калибровки высоты.
+ * Широта точки обзора (град) — по ней калибруется высота глобуса
+ * (h·cos φ), т.к. масштаб считается в центре экрана.
  */
 _globeSubCameraLat(): number {
+    if (this.globe && this.controls?.target) {
+        const g = this._globeTargetGeo(_globGeo);
+        if (Number.isFinite(g.lat)) return g.lat;
+    }
     const cam = this.camera;
     if (!cam) return 0;
     const tgt = this.controls?.target;
@@ -477,6 +518,164 @@ _globeSubCameraLat(): number {
     if (!(len > 1e-9)) return 0;
     const s = Math.max(-1, Math.min(1, dy / len));
     return (Math.asin(s) * 180) / Math.PI;
+},
+
+/**
+ * Коэффициент «включённости» поворота/pitch по зуму: 0 до z=5, 1 с z=6.
+ * Промежуток — плавное выпрямление при отдалении.
+ */
+_globeTiltGate(z: number = this.continuousZoom): number {
+    if (!this.globe) return 1;
+    if (!(z > GLOBE_TILT_ZOOM_MIN)) return 0;
+    if (z >= GLOBE_TILT_ZOOM_FULL) return 1;
+    const t = (z - GLOBE_TILT_ZOOM_MIN) / (GLOBE_TILT_ZOOM_FULL - GLOBE_TILT_ZOOM_MIN);
+    return t * t * (3 - 2 * t);
+},
+
+/** Фактический pitch (рад, 0 = взгляд сверху) с учётом гейта. */
+_globePitchNow(): number {
+    return (this._globePitch || 0) * this._globeTiltGate();
+},
+
+/** Фактический bearing (рад, 0 = север сверху) с учётом гейта. */
+_globeBearingNow(): number {
+    return (this._globeBearing || 0) * this._globeTiltGate();
+},
+
+    /** Разрешён ли сейчас поворот/наклон глобуса (zoom ≥ 6). */
+    _globeTiltEnabled(): boolean {
+        return this.globe === true && this._globeTiltGate() >= 0.999;
+    },
+
+    /** Максимальный наклон камеры глобуса (рад). */
+    _globeMaxPitch(): number {
+        return GLOBE_MAX_PITCH;
+    },
+
+/** Геодезические координаты точки обзора (controls.target). */
+_globeTargetGeo(out: any = _globGeo): any {
+    _globTmp.copy(this.controls.target);
+    if (this.worldGroup) this.worldGroup.worldToLocal(_globTmp);
+    return this.surface.geodeticFromWorld(_globTmp, out);
+},
+
+/**
+ * Локальный базис в точке обзора (мировые единицы):
+ * up — нормаль эллипсоида, north — на север по касательной, east — на восток.
+ */
+_globeFrame(up: any, north: any, east: any): void {
+    const g = this._globeTargetGeo(_globGeo);
+    this.surface.normal(g.lon, g.lat, up);
+    if (this.worldGroup) up.transformDirection(this.worldGroup.matrixWorld);
+    up.normalize();
+    // north = Y - (Y·up)·up (на полюсе выражается — берём произвольный)
+    north.set(0, 1, 0).addScaledVector(up, -up.y);
+    if (north.lengthSq() < 1e-12) north.set(1, 0, 0);
+    else north.normalize();
+    east.crossVectors(north, up).normalize();
+},
+
+/**
+ * Поставить камеру по состоянию глобуса: цель на поверхности, расстояние
+ * dist до неё, pitch (0 = строго сверху) и bearing (0 = север сверху).
+ */
+_globeApplyPose(dist: number, pitch: number, bearing: number): void {
+    const tgt = this.controls?.target;
+    if (!tgt || !this.camera) return;
+    const up = _globUp, north = _globNorth, east = _globEast;
+    this._globeFrame(up, north, east);
+    const p = Math.max(GLOBE_MIN_PITCH, Math.min(GLOBE_MAX_PITCH, pitch));
+    const cp = Math.cos(p), sp = Math.sin(p);
+    const cb = Math.cos(bearing), sb = Math.sin(bearing);
+    // Горизонтальное направление взгляда: north·cosB + east·sinB.
+    // Камера смещена ПРОТИВ него и приподнята на cos(pitch).
+    const hx = north.x * cb + east.x * sb;
+    const hy = north.y * cb + east.y * sb;
+    const hz = north.z * cb + east.z * sb;
+    this.camera.position.set(
+        tgt.x + dist * (up.x * cp - hx * sp),
+        tgt.y + dist * (up.y * cp - hy * sp),
+        tgt.z + dist * (up.z * cp - hz * sp),
+    );
+    this.camera.up.copy(up);
+    this.camera.lookAt(tgt);
+    this.camera.updateMatrixWorld(true);
+},
+
+/** Поставить цель в точку эллипсоида по направлению (локальный единичный вектор). */
+_globeSetTargetDir(dirLocal: any): void {
+    const g = this.surface.geodeticFromWorld(
+        _globTmp2.copy(dirLocal).multiplyScalar(this.R), _globGeo);
+    if (!Number.isFinite(g.lon) || !Number.isFinite(g.lat)) return;
+    const p = this.surface.position(g.lon, g.lat, 0, _globTmp);
+    if (this.worldGroup) this.worldGroup.localToWorld(p);
+    this.controls.target.copy(p);
+},
+
+/** Перепроецировать цель на эллипсоид по её текущим lon/lat. */
+_globeSnapTarget(): void {
+    const g = this._globeTargetGeo(_globGeo);
+    if (!Number.isFinite(g.lon) || !Number.isFinite(g.lat)) return;
+    const p = this.surface.position(g.lon, g.lat, 0, _globTmp);
+    if (this.worldGroup) this.worldGroup.localToWorld(p);
+    this.controls.target.copy(p);
+},
+
+/** Пере-целиться по центру экрана (после доворота камеры вокруг пивота). */
+_globeRetarget(): void {
+    const el = this.renderer?.domElement;
+    if (!el) return;
+    const rect = typeof (this as any)._getCanvasRect === 'function'
+        ? (this as any)._getCanvasRect()
+        : el.getBoundingClientRect();
+    const hit = this._raycastToGround(
+        rect.left + rect.width * 0.5, rect.top + rect.height * 0.5, _globTmp);
+    if (!hit) return;
+    const loc = _globTmp2.copy(hit);
+    if (this.worldGroup) this.worldGroup.worldToLocal(loc);
+    const g = this.surface.geodeticFromWorld(loc, _globGeo);
+    if (!Number.isFinite(g.lon) || !Number.isFinite(g.lat)) return;
+    const p = this.surface.position(g.lon, g.lat, 0, _globTmp);
+    if (this.worldGroup) this.worldGroup.localToWorld(p);
+    this.controls.target.copy(p);
+},
+
+/**
+ * Обратное к _globeApplyPose: восстановить _globePitch/_globeBearing
+ * из фактической геометрии камеры (после правого драга).
+ */
+_globeSyncStateFromCamera(): void {
+    const tgt = this.controls?.target;
+    const cam = this.camera;
+    if (!tgt || !cam) return;
+    const gate = this._globeTiltGate();
+    if (gate <= 0) return;
+    const up = _globUp, north = _globNorth, east = _globEast;
+    this._globeFrame(up, north, east);
+    const dx = cam.position.x - tgt.x;
+    const dy = cam.position.y - tgt.y;
+    const dz = cam.position.z - tgt.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(d > 1e-9)) return;
+    const cosP = (dx * up.x + dy * up.y + dz * up.z) / d;
+    const pitch = Math.acos(Math.max(-1, Math.min(1, cosP)));
+
+    // Горизонтальная составляющая направления взгляда.
+    let vx = -dx, vy = -dy, vz = -dz;
+    const vUp = vx * up.x + vy * up.y + vz * up.z;
+    vx -= vUp * up.x; vy -= vUp * up.y; vz -= vUp * up.z;
+    let bearing = this._globeBearing || 0;
+    if (Math.hypot(vx, vy, vz) > 1e-9) {
+        bearing = Math.atan2(
+            vx * east.x + vy * east.y + vz * east.z,
+            vx * north.x + vy * north.y + vz * north.z,
+        );
+    }
+
+    this._globePitch = Math.max(GLOBE_MIN_PITCH, Math.min(GLOBE_MAX_PITCH, pitch)) / gate;
+    this._globeBearing = bearing / gate;
+    this._globePitchTarget = this._globePitch;
+    this._globeBearingTarget = this._globeBearing;
 },
 
 /**
@@ -496,21 +695,19 @@ _globeLatScale(latDeg: number): number {
 },
 
 /**
- * Zoom-to-cursor для глобуса: доворачивает камеру вокруг центра Земли
- * так, чтобы точка P_before (та, что была под курсором ДО изменения
+ * Zoom-to-cursor для глобуса: поворачивает точку обзора вокруг центра
+ * Земли так, чтобы точка P_before (та, что была под курсором ДО изменения
  * дистанции) снова оказалась под курсором (sx, sy).
  *
- * Итеративно: минимальный поворот переводит текущую точку под курсором
- * в P_before; жёсткий доворот камеры сохраняет пиксель, после чего крен
- * восстанавливается по мировой оси Y (север сверху). Возврат крена даёт
- * ошибку первого порядка, поэтому шаг повторяется 2–4 раза — за это
- * время ошибка падает до долей пикселя (см. проверку сходимости).
- * Дистанция пересчитывается под новую широту (h·cos φ).
+ * Поворот идёт вокруг центра Земли, поэтому локальный базис в цели
+ * поворачивается вместе с ней — pitch/bearing сохраняются, «север сверху»
+ * не сбивается. Итерации нужны из-за пересчёта дистанции под новую
+ * широту (h·cos φ) — на каждой итерации ошибка перемеряется.
  */
-_globeZoomToPivot(P_before: any, sx: number, sy: number): boolean {
+_globeZoomToPivot(P_before: any, sx: number, sy: number, dist: number): boolean {
     const cam = this.camera;
     if (!P_before || !cam) return false;
-    const center = this.controls?.target ?? _pivotZero;
+    const center = this.worldGroup ? this.worldGroup.position : _pivotZero;
     const el = this.renderer?.domElement;
     const W = el ? el.clientWidth : 0;
     const H = el ? el.clientHeight : 0;
@@ -539,19 +736,12 @@ _globeZoomToPivot(P_before: any, sx: number, sy: number): boolean {
         _pivotQ.setFromUnitVectors(_pivotA, _pivotB);
         if (!Number.isFinite(_pivotQ.x) || !Number.isFinite(_pivotQ.w)) break;
 
-        cam.position.sub(center).applyQuaternion(_pivotQ).add(center);
-
-        // Дистанция зависит от широты (h·cos φ) — выставляем под новую.
-        _pivotA.copy(cam.position).sub(center);
-        const dl = _pivotA.length();
-        if (dl > 1e-9) {
-            const dist = this.getTargetDistanceForZoom(this.continuousZoom, this._globeSubCameraLat());
-            cam.position.copy(center).addScaledVector(_pivotA.divideScalar(dl), dist);
-        }
-
-        cam.up.set(0, 1, 0);
-        cam.lookAt(center);
-        cam.updateMatrixWorld(true);
+        // Поворачиваем цель (и весь базис) вокруг центра Земли.
+        this.controls.target.sub(center).applyQuaternion(_pivotQ).add(center);
+        this._globeSnapTarget();
+        // Дистанция зависит от широты (h·cos φ) — переставляем под новую.
+        const d = this.getTargetDistanceForZoom(this.continuousZoom, this._globeSubCameraLat());
+        this._globeApplyPose(d, this._globePitchNow(), this._globeBearingNow());
         moved = true;
     }
     if (moved) this.controls?.update?.();
@@ -571,8 +761,8 @@ getTargetDistanceForZoom(z: number, latDeg?: number): number {
     }
     if (!this.globe) return h;
 
-    // ── Глобус: высота = «плоское» h, поправленное на масштаб проекции
-    // под камерой. ──────────────────────────────────────────────────
+    // ── Глобус: дистанция до ЦЕЛИ (точки обзора на поверхности), ─────
+    // поправленная на масштаб проекции в этой широте. ────────────────
     // В Web Mercator тайл z-уровня на широте φ покрывает
     // WORLD_SIZE/2^z · cos φ метров ЗЕМЛИ (проекция растягивает высокие
     // широты), а на глобусе он лежит на сфере в своём истинном размере.
@@ -582,17 +772,16 @@ getTargetDistanceForZoom(z: number, latDeg?: number): number {
     // metersPerPixel = cos φ · C / (2^z · tileSize)), высота должна быть
     // h · cos φ — у полюсов камера садится ниже.
     const lat = latDeg ?? this._globeSubCameraLat();
-    return this.R + h * this._globeLatScale(lat);
+    return h * this._globeLatScale(lat);
 },
 
 getZoomForDistance(d: number): number {
     if (!(d > 0) || !isFinite(d)) return this.continuousZoom;
     let h;
     if (this.globe) {
-        // Для глобуса d — дистанция до центра Земли; переводим её в
-        // «эквивалентную плоскую» высоту, отменяя поправку cos φ.
+        // d — дистанция от камеры до цели на поверхности; отменяем поправку cos φ.
         const cosLat = this._globeLatScale(this._globeSubCameraLat());
-        h = Math.max(1, (d - this.R) / cosLat);
+        h = Math.max(1e-3, d / cosLat);
     } else {
         h = d;
     }
@@ -667,6 +856,13 @@ _resolveCameraPlacement(target, desiredDist, desiredPitch, azimuth, outPos) {
 },
 
 setPitch(pitchDeg, duration = 0.3) {
+    if (this.globe) {
+        // Глобус: pitch — состояние в локальном базисе, доводится
+        // плавно в _applyGlobeZoomDistance() (гейт сам обнулит ниже z=5).
+        this._globePitchTarget = Math.max(0, Math.min(GLOBE_MAX_PITCH, pitchDeg * Math.PI / 180));
+        if (!(duration > 0)) this._globePitch = this._globePitchTarget;
+        return;
+    }
     const pitchRad = pitchDeg * Math.PI / 180;
     const clampedRad = Math.max(0.001, Math.min(pitchRad, this.controls.maxPolarAngle));
     const target = this._tempVec3a.copy(this.controls.target);
@@ -681,6 +877,11 @@ setPitch(pitchDeg, duration = 0.3) {
 
 setBearing(bearingDeg, duration = 0.3) {
     if (!this.allowRotate) return;
+    if (this.globe) {
+        this._globeBearingTarget = bearingDeg * Math.PI / 180;
+        if (!(duration > 0)) this._globeBearing = this._globeBearingTarget;
+        return;
+    }
     const bearingRad = bearingDeg * Math.PI / 180;
     const target = this._tempVec3a.copy(this.controls.target);
     const currentPos = this._tempVec3b.copy(this.camera.position);
@@ -799,6 +1000,17 @@ moveCameraToSlow(lon: number, lat: number, duration = 1.0, targetZoom: number | 
 rotateToNorth(duration = 0.3, resetPitch = true) {
     if (this._disposed || this._cameraAnimation) return;
     if (!this.allowRotate) return; 
+    if (this.globe) {
+        // Плавно к «север сверху» (и, если просили, к виду сверху).
+        // Доведение делает _applyGlobeZoomDistance(); при duration=0 — сразу.
+        this._globeBearingTarget = 0;
+        if (resetPitch) this._globePitchTarget = 0;
+        if (!(duration > 0)) {
+            this._globeBearing = 0;
+            if (resetPitch) this._globePitch = 0;
+        }
+        return;
+    }
     const startTarget = new THREE.Vector3().copy(this.controls.target);
     const startPos = new THREE.Vector3().copy(this.camera.position);
     const dir = new THREE.Vector3().subVectors(startPos, startTarget);
@@ -973,6 +1185,10 @@ applyZoomDistance() {
         this._zoomPivotActive = false;
         return;
     }
+    if (this.globe) {
+        this._applyGlobeZoomDistance();
+        return;
+    }
 
     const zoomDiff  = Math.abs(this.continuousZoom - this.targetContinuousZoom);
     const zoomActive = zoomDiff > 0.0005;          // ← добавлено
@@ -980,8 +1196,6 @@ applyZoomDistance() {
     // на нём дистанция делает последний шаг, и без ещё одной коррекции
     // точка под курсором уезжает на доли пикселя. Снимаем флаг в конце
     // кадра, чтобы он не «прилип» к следующему зуму (например, кнопкой UI).
-    // Пивот работает и в плоском режиме (сдвиг worldGroup), и на глобусе
-    // (доворот камеры вокруг центра Земли) — см. коррекцию ниже.
     const pivotActive = this._zoomPivotActive && (zoomActive || zoomDiff < 0.001);
 
     this.camera.updateMatrixWorld(true);
@@ -1005,11 +1219,7 @@ applyZoomDistance() {
     // КЛЮЧЕВОЕ: если зум не активен — стартуем с текущего расстояния,
     // чтобы _resolveCameraPlacement только приподнимал над рельефом,
     // но не «сдёргивал» камеру назад к desiredDist каждый кадр.
-    //
-    // Для глобуса высота зависит не только от зума, но и от широты под
-    // камерой (h·cos φ), поэтому её надо пересчитывать каждый кадр:
-    // иначе после перетаскивания на другую широту масштаб «уезжает».
-    const desiredDist = (zoomActive || this.globe)
+    const desiredDist = zoomActive
         ? this.getTargetDistanceForZoom(this.continuousZoom)
         : d0;
 
@@ -1019,22 +1229,15 @@ applyZoomDistance() {
     this.camera.updateMatrixWorld(true);
 
     if (pivotActive && P_before) {
+        const P_after = this._raycastToGround(pivotSx, pivotSy, this._tempVec3b);
         let shiftX = 0, shiftZ = 0;
-        if (this.globe) {
-            // Глобус: не сдвигаем мир (он прибит к центру Земли в
-            // worldGroup), а доворачиваем камеру так, чтобы точка под
-            // курсором осталась под курсором.
-            this._globeZoomToPivot(P_before, pivotSx, pivotSy);
-        } else {
-            const P_after = this._raycastToGround(pivotSx, pivotSy, this._tempVec3b);
-            if (P_after) {
-                shiftX = P_after.x - P_before.x;
-                shiftZ = P_after.z - P_before.z;
-                this.worldGroup.position.x += shiftX;
-                this.worldGroup.position.z += shiftZ;
-                // worldGroup changed — invalidate cached bounds check
-                (this as any)._lastBoundsCheck = null;
-            }
+        if (P_after) {
+            shiftX = P_after.x - P_before.x;
+            shiftZ = P_after.z - P_before.z;
+            this.worldGroup.position.x += shiftX;
+            this.worldGroup.position.z += shiftZ;
+            // worldGroup changed — invalidate cached bounds check
+            (this as any)._lastBoundsCheck = null;
         }
         if ((window as any).__krbDebugZoom) {
             console.log(
@@ -1050,6 +1253,133 @@ applyZoomDistance() {
 
     // Зум доехал — точка привязки больше не нужна.
     if (!zoomActive) this._zoomPivotActive = false;
+},
+
+/**
+ * Покадровое обновление камеры глобуса:
+ *  - плавное доведение pitch/bearing (setPitch/setBearing/rotateToNorth);
+ *  - постановка камеры по состоянию: цель на поверхности, дистанция по
+ *    зуму и широте (h·cos φ), фактический наклон с учётом гейта;
+ *  - zoom-to-cursor (доворот цели вокруг центра Земли).
+ *
+ * Гейт _globeTiltGate() сам «выпрямляет» поворот при отдалении ниже z=5.
+ */
+_applyGlobeZoomDistance() {
+    const dt = this._currentDeltaTime > 0 ? this._currentDeltaTime : 1 / 60;
+    const k = Math.min(1, 10 * dt);
+
+    if (this._globePitch === undefined) this._globePitch = 0;
+    if (this._globeBearing === undefined) this._globeBearing = 0;
+    if (this._globePitchTarget === undefined) this._globePitchTarget = this._globePitch;
+    if (this._globeBearingTarget === undefined) this._globeBearingTarget = this._globeBearing;
+
+    const dp = this._globePitchTarget - this._globePitch;
+    const db = this._globeBearingTarget - this._globeBearing;
+    if (Math.abs(dp) > 1e-4 || Math.abs(db) > 1e-4) {
+        this._globePitch += dp * k;
+        this._globeBearing += db * k;
+    } else {
+        this._globePitch = this._globePitchTarget;
+        this._globeBearing = this._globeBearingTarget;
+    }
+
+    const zoomDiff = Math.abs(this.continuousZoom - this.targetContinuousZoom);
+    const zoomActive = zoomDiff > 0.0005;
+    const pivotActive = this._zoomPivotActive && (zoomActive || zoomDiff < 0.001);
+
+    let P_before: any = null;
+    let pivotSx = 0, pivotSy = 0;
+    if (pivotActive) {
+        pivotSx = this._zoomPivotX;
+        pivotSy = this._zoomPivotY;
+        this.camera.updateMatrixWorld(true);
+        P_before = this._raycastToGround(pivotSx, pivotSy, this._tempVec3a);
+    }
+
+    // Дистанция до цели зависит от зуму и широты центра (h·cos φ).
+    const dist = this.getTargetDistanceForZoom(this.continuousZoom);
+    this._globeApplyPose(dist, this._globePitchNow(), this._globeBearingNow());
+
+    if (pivotActive && P_before) {
+        this._globeZoomToPivot(P_before, pivotSx, pivotSy, dist);
+    }
+    if (!zoomActive) this._zoomPivotActive = false;
+},
+
+/**
+ * Пере-целиться вдоль луча «камера → текущая цель» до поверхности.
+ * Нужно после доворота камеры: её ориентация ещё «старая», поэтому
+ * луч к повёрнутой цели — это и есть новый центр кадра.
+ */
+_globeProjectTarget(): void {
+    const cam = this.camera;
+    const tgt = this.controls?.target;
+    if (!cam || !tgt) return;
+    _globTmp.copy(tgt).sub(cam.position);
+    const len = _globTmp.length();
+    if (!(len > 1e-6)) return;
+    _globTmp.divideScalar(len);
+    this._tempRaycaster.set(cam.position, _globTmp);
+    const hit = this.surface.raycast(this._tempRaycaster, _globTmp2, this.worldGroup);
+    if (hit) this.controls.target.copy(hit);
+},
+
+/**
+ * Правая кнопка на глобусе (zoom ≥ 6): «орбитальная» камера как в плоской
+ * ветке — вокруг ЦЕНТРА экрана, только теперь вертикаль в точке обзора
+ * местная (нормаль эллипсоида), а не мировая Y.
+ *
+ *   dTheta — yaw вокруг местной вертикали (работает всегда);
+ *   dPhi   — наклон в диапазоне 0…85°, как minPolarAngle/maxPolarAngle
+ *            в плоском случае: на упоре наклон стоит, а yaw продолжает
+ *            вращать карту — никакого переворота.
+ *
+ * Вращение вокруг центра (а не вокруг курсора) сохраняет дистанцию, поэтому
+ * зум не «прыгает» и картинка не дёргается кадр от кадра.
+ */
+_globeRotateAroundPivot(dxPixels: number, dyPixels: number, pivot: any): void {
+    const cam = this.camera;
+    const tgt = this.controls?.target;
+    if (!cam || !tgt) return;
+    const el = this.renderer?.domElement;
+    const H = el ? el.clientHeight : 0;
+    if (!(H > 0)) return;
+
+    const speed = this.controls?.rotateSpeed ?? 1;
+    // Знак yaw — как в плоской ветке: тянем ВПРАВО → мир поворачивается
+    // ПРОТИВ часовой, тянем ВЛЕВО → по часовой.
+    const dTheta = (2 * Math.PI * dxPixels * speed) / H;
+    const dPhi   = (-2 * Math.PI * dyPixels * speed) / H;
+
+    // Местная вертикаль в центре экрана (точке обзора).
+    const up = _globUp, north = _globNorth, east = _globEast;
+    this._globeFrame(up, north, east);
+
+    // Ось yaw — местная вертикаль; ось наклона — «восток»-направление
+    // (горизонталь, перпендикулярная текущему «взгляду сверху»).
+    let bearing = this._globeBearingNow();
+    const pitch0 = this._globePitchNow();
+
+    if (this.allowRotate && dTheta !== 0) bearing += dTheta;
+
+    let pitch = pitch0;
+    if (this.allowPitch && dPhi !== 0) {
+        pitch = Math.max(GLOBE_MIN_PITCH, Math.min(GLOBE_MAX_PITCH, pitch0 + dPhi));
+    }
+
+    // Если гейт ещё не пустил поворот (zoom < 6), ничего не трогаем.
+    if (this._globeTiltGate() <= 0) return;
+
+    const dist = this.getTargetDistanceForZoom(this.continuousZoom);
+    this._globeBearing = bearing;
+    this._globePitch = pitch;
+    this._globeBearingTarget = bearing;
+    this._globePitchTarget = pitch;
+
+    this._globeApplyPose(dist, pitch, bearing);
+
+    this.controls?.update?.();
+    this.maybeUpdateVisibleTiles();
 },
 
 applyZoomDelta(delta) {
@@ -1102,10 +1432,8 @@ _retargetToGround(): boolean {
 },
 
 syncControlsTarget() {
-    if (this.globe) {
-        this.controls.target.set(0, 0, 0);
-        return;
-    }
+    // На глобусе цель — это и есть точка обзора (центр экрана), трогать нечего.
+    if (this.globe) return;
     this._retargetToGround();
 },
 

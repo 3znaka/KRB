@@ -15,11 +15,6 @@ const MAX_TEXTURE_LOADS = 6;
 const STABILITY_DELAY_MS = 400;
 const ZOOM_STABLE_EPSILON = 0.001;
 const RAPID_ZOOM_GAP = 2;
-// Бюджет тайлов в видимом наборе для глобуса (см. _updateGlobe).
-const GLOBE_MAX_VISIBLE_TILES = 700;
-// Насколько уровней максимум разрешено «сгрубить» LOD, если видимый
-// набор не влезает в бюджет.
-const GLOBE_MAX_LOD_DROP = 3;
 // Temps для конуса взгляда глобуса (без аллокаций на кадр).
 const _globeViewDir = new THREE.Vector3();
 const _globeInvMatrix = new THREE.Matrix4();
@@ -1105,18 +1100,13 @@ export class TileManager {
         }
         this.frame++;
         const prevIdealZ = this._lastIdealZ;
-        // «Живой» уровень по зуму — до возможного LOD-фолбэка.
-        const liveIdealZ = Math.max(0, this._liveIdealZ());
-        let idealZ = liveIdealZ;
+        const idealZ = Math.max(0, this._liveIdealZ());
         const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
         const _layerOffset = this.layer?.zoomOffset ?? 0;
         const _minNZ = this.layer?.minNativeZoom ?? 0;
         const _maxNZ = this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
         const targetZ = Math.max(_minNZ, Math.min(_maxNZ, Math.round(targetCont + _layerOffset)));
-        // rapidZoom — про активный зум пользователя, а не про бюджет тайлов,
-        // поэтому считается по живому уровню (иначе LOD-фолбэк сам себя
-        // «запирал»: rapidZoom=true и ни один тайл не грузился).
-        const rapidZoom = Math.abs(targetZ - liveIdealZ) >= RAPID_ZOOM_GAP;
+        const rapidZoom = Math.abs(targetZ - idealZ) >= RAPID_ZOOM_GAP;
         // Камера → локальные координаты worldGroup (у нас identity, но так общее).
         const camLocal = this._tmpCam || (this._tmpCam = new THREE.Vector3());
         camLocal.copy(camera.position);
@@ -1125,8 +1115,8 @@ export class TileManager {
         const tileCrs = this._layerCrs;
         // ── Конус взгляда в локальном СК worldGroup ──────────────────────
         // Без него GlobeSurface ограничивался только горизонтом: для камеры
-        // у поверхности это почти полушарие, диапазон упирался в MAX_SPAN
-        // (128×128), и LOD-фолбэк ниже уезжал на несколько уровней вниз.
+        // у поверхности это почти полушарие, и диапазон всегда упирался
+        // в MAX_SPAN (128×128) даже в виде сверху.
         _globeViewDir.set(0, 0, -1);
         camera.getWorldDirection(_globeViewDir);
         if (this.engine.worldGroup) {
@@ -1134,31 +1124,25 @@ export class TileManager {
             _globeViewDir.transformDirection(_globeInvMatrix).normalize();
         }
         const view = { dir: _globeViewDir, fovY: camera.fov, aspect: camera.aspect };
-        // Страховка от лавины: если диапазон слишком широкий — временно грубее LOD.
+        // ── Уровень детализации ──────────────────────────────────────────
+        // Как в плоской ветке: уровень тайлов определяется зумом, а не
+        // геометрией кадра. При сильном наклоне в кадр попадает большая
+        // часть диска, и «урезать» его дополнительно сбрасыванием z — это
+        // резкое загрубление (плоская карта так не делает: там горизонт
+        // всегда есть, но тайлы остаются нужного уровня).
         //
-        // ВАЖНО: ranges пересчитываются на КАЖДОМ шаге, поэтому после выхода
-        // из цикла они всегда соответствуют текущему idealZ. В прежней версии
-        // диапазоны считались для старого z (например, для 11), а idealZ
-        // уменьшался до 7 — индексы тайлов оказывались вне [0, n-1], все
-        // отбраковывались, и глобус при zoom > 10 становился белым.
-        let ranges = null;
-        for (let drop = 0;; drop++) {
-            ranges = this.engine.surface.visibleTileRanges(camLocal, idealZ, tileCrs, view);
-            if (!ranges || !ranges.length || idealZ <= 0 || drop >= GLOBE_MAX_LOD_DROP)
-                break;
-            let total = 0;
-            for (const r of ranges)
-                total += (r.xMax - r.xMin + 1) * (r.yMax - r.yMin + 1);
-            if (total <= GLOBE_MAX_VISIBLE_TILES)
-                break;
-            idealZ--;
+        // Бесконечности не боимся: GlobeSurface.visibleTileRanges() и так
+        // клампит бокс до MAX_SPAN (как и раньше), а вне видимого конуса
+        // тайлы отбрасываются фрустумом ниже.
+        // ВАЖНО: ranges должны считаться ИМЕННО для idealZ — иначе индексы
+        // выходят за [0, n-1] и все тайлы отбраковываются (белый глобус).
+        const ranges = this.engine.surface.visibleTileRanges(camLocal, idealZ, tileCrs, view);
+        // Синхронизируем bookkeeping: _lastIdealZ участвует в проверках
+        // «протухших» текстурных загрузок.
+        if (idealZ !== prevIdealZ) {
+            this._zoomOut = idealZ < prevIdealZ;
+            this._lastIdealZ = idealZ;
         }
-        // Синхронизируем bookkeeping с фактически отрисованным уровнем
-        // (после возможного LOD-фолбэка): _lastIdealZ участвует в проверках
-        // «протухших» текстурных загрузок, и рассинхрон с реально
-        // запрошенными тайлами приводил к их выбрасыванию из очереди.
-        this._zoomOut = idealZ < prevIdealZ;
-        this._lastIdealZ = idealZ;
         const zoomOut = !!this._zoomOut;
         if (!ranges || !ranges.length) {
             if (this._visibleKeysPrev) {

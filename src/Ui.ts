@@ -15,6 +15,19 @@ export interface UIMap {
     worldGroup: { position: any };
     controls: { target: any };
     R?: number;
+    /** Глобус-режим: координаты/pitch/bearing считаются иначе (см. getCenter и др.). */
+    globe?: boolean;
+    /** Поверхность мира (GlobeSurface в режиме глобуса) — для переводов lon/lat ↔ world. */
+    surface?: {
+        position(lon: number, lat: number, h: number, out: any): any;
+        geodeticFromWorld(local: any, out?: any): any;
+        raycast(raycaster: any, out: any, worldGroup: any): any;
+    };
+    // ── Публичный API карты (учитывает режим: плоскость/глобус) ──
+    getCenter?(): [number, number];
+    getPitch?(): number;
+    getBearing?(): number;
+    getZoom?(): number;
     applyZoomDelta(delta: number): void;
     resetBearing(): void;
     unprojectToLonLat(x: number, z: number): [number, number];
@@ -428,13 +441,68 @@ if (dragRulerEnabled) {
 
     /**
      * Вычисляет угол направления камеры (bearing) в градусах.
+     *
+     * Всегда берём значение у карты: getBearing() — единый источник истины
+     * для обоих режимов (в глобусе «север» местный — нормаль эллипсоида,
+     * в плоском — мировая Y). Своя формула по камере давала 180° в
+     * плоском режиме (смотрела в обратную сторону от getBearing) и мусор
+     * на глобусе.
      */
     function computeBearingDeg(): number {
+        if (typeof map.getBearing === 'function') {
+            const b = map.getBearing();
+            if (Number.isFinite(b)) return b;
+        }
+        if (map.globe) return 0;
         _dirVec.subVectors(map.controls.target, map.camera.position);
         _dirVec.y = 0;
         if (_dirVec.lengthSq() < 1e-12) return 0;
         const bearingRad = Math.atan2(_dirVec.x, -_dirVec.z);
         return bearingRad * 180 / Math.PI;
+    }
+
+    /**
+     * Точка поверхности под экранной координатой (мировые координаты
+     * сцены) — в плоском режиме по плоскости y = 0, на глобусе — по
+     * эллипсоиду. null — луч мимо.
+     */
+    function pickSurfaceAt(screenX: number, screenY: number, out: any): any | null {
+        const rect = map.renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
+
+        _ndc.set(ndcX, ndcY);
+        _raycaster.setFromCamera(_ndc, map.camera);
+
+        if (map.globe) {
+            const surf = map.surface;
+            if (!surf) return null;
+            return surf.raycast(_raycaster, out, map.worldGroup) ?? null;
+        }
+        return _raycaster.ray.intersectPlane(_plane, out) ? out : null;
+    }
+
+    /**
+     * Геодезическая точка (lon, lat) для мировой точки, с учётом режима.
+     * Для плоской карты — через проекцию; для глобуса — через эллипсоид.
+     */
+    function lonLatFromWorld(worldPoint: any): [number, number] | null {
+        const worldPos = map.worldGroup.position;
+        const local = {
+            x: worldPoint.x - worldPos.x,
+            y: worldPoint.y - worldPos.y,
+            z: worldPoint.z - worldPos.z,
+        };
+        if (map.globe && map.surface) {
+            const g = map.surface.geodeticFromWorld(local);
+            if (!g || !Number.isFinite(g.lon) || !Number.isFinite(g.lat)) return null;
+            return [g.lon, g.lat];
+        }
+        const v = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(local.x, local.z)
+            : map.unprojectToLonLat(local.x, local.z);
+        return v && Number.isFinite(v[0]) && Number.isFinite(v[1]) ? v : null;
     }
 
 const BAR_LENGTH_PX = 100;
@@ -446,36 +514,20 @@ const BAR_LENGTH_PX = 100;
  */
 function computeScaleAt(screenX: number, screenY: number): boolean {
     if (!map.worldGroup || !map.controls || !map.renderer) return false;
-    const worldPos = map.worldGroup.position;
     const rect = map.renderer.domElement.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
 
-    const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
-    const ndcY = -((screenY - rect.top) / rect.height) * 2 + 1;
-
     // Точка 1: под якорем
-    _ndc.set(ndcX, ndcY);
-    _raycaster.setFromCamera(_ndc, map.camera);
-    if (!_raycaster.ray.intersectPlane(_plane, _hit1)) return false;
+    if (!pickSurfaceAt(screenX, screenY, _hit1)) return false;
 
     // Точка 2: на BAR_LENGTH_PX правее по экрану (горизонтальный масштаб)
-    const ndcOffsetX = (2 * BAR_LENGTH_PX) / rect.width;
-    _ndc.set(ndcX + ndcOffsetX, ndcY);
-    _raycaster.setFromCamera(_ndc, map.camera);
-    if (!_raycaster.ray.intersectPlane(_plane, _hit2)) return false;
+    if (!pickSurfaceAt(screenX + BAR_LENGTH_PX, screenY, _hit2)) return false;
 
-    const toLonLatSafe = (wx: number, wz: number): [number, number] | null => {
-        if (map.unprojectToLonLatSafe) return map.unprojectToLonLatSafe(wx, wz);
-        const v = map.unprojectToLonLat(wx, wz);
-        return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-            && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-    };
-
-    const h1 = toLonLatSafe(_hit1.x - worldPos.x, _hit1.z - worldPos.z);
+    const h1 = lonLatFromWorld(_hit1);
     if (!h1) { scaleLabel.textContent = ''; return false; }
     const [lon1, lat1] = h1;
 
-    const h2 = toLonLatSafe(_hit2.x - worldPos.x, _hit2.z - worldPos.z);
+    const h2 = lonLatFromWorld(_hit2);
     if (!h2) { scaleLabel.textContent = ''; return false; }
     const [lon2, lat2] = h2;
 
@@ -526,26 +578,41 @@ if (map._rulerDragging && rulerStartRect) {
     computeScaleAt(anchorX, anchorY);
 
     // ── Координаты / pitch / bearing (для debug) — всегда для центра карты ──
-    const worldPos = map.worldGroup.position;
-    const target   = map.controls.target;
-    const centerX = target.x - worldPos.x;
-    const centerZ = target.z - worldPos.z;
-    const centerLL = map.unprojectToLonLatSafe
-        ? map.unprojectToLonLatSafe(centerX, centerZ)
-        : (() => {
-            const v = map.unprojectToLonLat(centerX, centerZ);
-            return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
-                && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
-        })();
-    if (map.debug && coordLabel && centerLL) {
-        const [lon, lat] = centerLL;
+    // В режиме глобуса берём значения из карты: у неё это центр обзора
+    // (точка поверхности) и честные местные pitch/bearing. Плоский путь
+    // по камере на глобусе даёт мусор (ось наклона местная, а не мировая Y).
+    let centerLL: [number, number] | null = null;
+    let pitchDeg = '0.0';
+
+    if (map.globe) {
+        if (typeof map.getCenter === 'function') {
+            const c = map.getCenter();
+            if (c && Number.isFinite(c[0]) && Number.isFinite(c[1])) centerLL = [c[0], c[1]];
+        }
+        const p = typeof map.getPitch === 'function' ? map.getPitch() : 0;
+        pitchDeg = (Number.isFinite(p) ? p : 0).toFixed(1);
+    } else {
+        const worldPos = map.worldGroup.position;
+        const target = map.controls.target;
+        const centerX = target.x - worldPos.x;
+        const centerZ = target.z - worldPos.z;
+        centerLL = map.unprojectToLonLatSafe
+            ? map.unprojectToLonLatSafe(centerX, centerZ)
+            : (() => {
+                const v = map.unprojectToLonLat(centerX, centerZ);
+                return v && Number.isFinite(v[0]) && Number.isFinite(v[1])
+                    && Math.abs(v[0]) <= 180.0001 && Math.abs(v[1]) <= 90.0001 ? v : null;
+            })();
         _dirVec.subVectors(map.camera.position, target);
         const dist = _dirVec.length();
         const pitchRad = dist > 1e-6 ? Math.acos(_dirVec.y / dist) : 0;
-        const pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
-        const bearingDeg = computeBearingDeg().toFixed(1);
+        pitchDeg = (pitchRad * 180 / Math.PI).toFixed(1);
+    }
+
+    if (map.debug && coordLabel && centerLL) {
+        const [lon, lat] = centerLL;
         coordLabel.textContent =
-            `${lon.toFixed(3)}, ${lat.toFixed(3)} · ${pitchDeg}° / ${bearingDeg}°`;
+            `${lon.toFixed(3)}, ${lat.toFixed(3)} · ${pitchDeg}° / ${computeBearingDeg().toFixed(1)}°`;
     }
 
     if (map.debug && zoomValueLabel) {

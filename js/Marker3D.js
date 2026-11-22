@@ -741,11 +741,15 @@ export class Marker3D extends SpatialObject {
             const delta = this._mixerClock.getDelta();
             this._mixer.update(delta);
         }
-        const [absWorldX, absWorldZ] = map.project(this._coord, this._crs);
-        const wgPos = map.worldGroup.position;
-        const worldX = absWorldX + wgPos.x;
-        const worldZ = absWorldZ + wgPos.z;
-        let worldY = 0;
+        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, this._worldPosition);
+        if (!surfacePoint) {
+            this._applyHidden();
+            this._isVisible = false;
+            return;
+        }
+        const worldX = surfacePoint.x;
+        const worldZ = surfacePoint.z;
+        let worldY = surfacePoint.y;
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > 500) {
@@ -753,15 +757,42 @@ export class Marker3D extends SpatialObject {
                 this._cachedWorldY = map.getSurfaceHeightAt(worldX, worldZ);
                 this._lastHeightUpdateTime = now;
             }
-            worldY = this._cachedWorldY + this._altitude;
+            if (map.globe) {
+                map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition);
+                worldY = this._worldPosition.y;
+            }
+            else {
+                worldY = this._cachedWorldY + this._altitude;
+            }
+        }
+        else if (map.globe) {
+            map.projectSurfacePoint(this._coord, this._crs, this._altitude + this._nodeHeight, this._worldPosition);
+            worldY = this._worldPosition.y;
         }
         else {
-            worldY = this._altitude;
+            worldY = this._altitude + this._nodeHeight;
         }
-        // 3-я координата — аддитивно, как nodeH у Polyline/Polygon и у Marker.
-        worldY += this._nodeHeight;
-        this._object3D.position.set(absWorldX, worldY, absWorldZ);
+        if (!map.globe) {
+            // Плоский режим: высота узла аддитивна, модель стоит вдоль мировой Y.
+            worldY += this._nodeHeight;
+        }
+        this._object3D.position.set(worldX, worldY, worldZ);
         this._worldPosition.set(worldX, worldY, worldZ);
+        // На глобусе модель должна «стоять» вдоль МЕСТНОЙ нормали, а не мировой Y.
+        if (map.globe && map.surface) {
+            const crs = this._crsCode ? Projections.get(this._crsCode) : null;
+            const ll = crs ? crs.toLonLat([this._coord[0], this._coord[1]])
+                : [this._coord[0], this._coord[1]];
+            if (ll && Number.isFinite(ll[0]) && Number.isFinite(ll[1])) {
+                const n = map.getVec3().set(0, 0, 0);
+                map.surface.normal(ll[0], ll[1], n);
+                if (map.worldGroup)
+                    n.transformDirection(map.worldGroup.matrixWorld);
+                n.normalize();
+                const up = map.getVec3().set(0, 1, 0);
+                this._object3D.quaternion.setFromUnitVectors(up, n);
+            }
+        }
         if (map.view.objectRenderDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(this._worldPosition);
             if (dist > map.maxObjectDistance) {
@@ -769,6 +800,14 @@ export class Marker3D extends SpatialObject {
                 this._isVisible = false;
                 return;
             }
+        }
+        // Глобус: модель на обратной стороне Земли не показываем — ни меш,
+        // ни подпись (TextManager ориентируется на isVisible()).
+        if (map.globe && typeof map.isWorldPointOccluded === 'function'
+            && map.isWorldPointOccluded(this._worldPosition)) {
+            this._applyHidden();
+            this._isVisible = false;
+            return;
         }
         this._tempProjScreenMatrix.multiplyMatrices(map.camera.projectionMatrix, map.camera.matrixWorldInverse);
         this._tempFrustum.setFromProjectionMatrix(this._tempProjScreenMatrix);

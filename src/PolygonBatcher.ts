@@ -6,7 +6,7 @@ import { applyGapMaskToMaterial } from './PolygonUtils.js';
 const RENDER_ORDER = { BOTTOM: 900, SIDE: 901, TOP: 902, STROKE: 903 };
 const DEFAULT_PATTERN_SCALE = 64;
 
-/** Совместимо с ZoomInterpolation из SpatialObject / Polygon. */
+/** РЎРѕРІРјРµСЃС‚РёРјРѕ СЃ ZoomInterpolation РёР· SpatialObject / Polygon. */
 export interface ZoomInterpolationLike {
     fillOpacity?: Array<[number, number]>;
 }
@@ -22,9 +22,15 @@ interface Batchable {
 
 export interface BatchGeometryData {
     worldCoords: Array<[number, number]>;
-    heights: number[];             // Y TOP-вершин
-    indices: ArrayLike<number>;    // CCW-индексы top
-    ringStarts: number[];          // границы колец в worldCoords
+    /**
+     * Р“РѕС‚РѕРІС‹Рµ РјРёСЂРѕРІС‹Рµ 3D-РїРѕР·РёС†РёРё РІРµСЂС€РёРЅ (x, y, z РЅР° РєР°Р¶РґСѓСЋ РІРµСЂС€РёРЅСѓ).
+     * Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ РЅР° РіР»РѕР±СѓСЃРµ вЂ” С‚Р°Рј Сѓ РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅС‹ СЃРІРѕСЏ РІС‹СЃРѕС‚Р° Y,
+     * Рё РїР»РѕСЃРєРѕСЃС‚СЊ (x, height, z) РЅРµРІРµСЂРЅР°.
+     */
+    worldPositions?: Float32Array | null;
+    heights: number[];             // Y TOP-РІРµСЂС€РёРЅ (РґР»СЏ РїР»РѕСЃРєРѕРіРѕ СЂРµР¶РёРјР°)
+    indices: ArrayLike<number>;    // CCW-РёРЅРґРµРєСЃС‹ top
+    ringStarts: number[];          // РіСЂР°РЅРёС†С‹ РєРѕР»РµС† РІ worldCoords
     extruded: boolean;
     height: number;                // top - bottom
     fillColor: string | number;
@@ -48,9 +54,9 @@ export interface BatchGeometryData {
     maxZoom: number;
     altitudeMode: string;
     /**
-     * Опционально: per-batch анимация прозрачности по зуму.
-     * Заполняется Polygon._getBatchGeometryData() когда в Polygon снят
-     * блокер `if (this._zoomInterpolations) return null;`.
+     * РћРїС†РёРѕРЅР°Р»СЊРЅРѕ: per-batch Р°РЅРёРјР°С†РёСЏ РїСЂРѕР·СЂР°С‡РЅРѕСЃС‚Рё РїРѕ Р·СѓРјСѓ.
+     * Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ Polygon._getBatchGeometryData() РєРѕРіРґР° РІ Polygon СЃРЅСЏС‚
+     * Р±Р»РѕРєРµСЂ `if (this._zoomInterpolations) return null;`.
      */
     zoomInterpolations?: ZoomInterpolationLike | null;
 }
@@ -76,16 +82,19 @@ class BatchedGroup {
     private _unregister: (() => void) | null = null;
     private _map: any = null;
     private _anchorX = 0;
+    private _anchorY = 0;
     private _anchorZ = 0;
-    /** Центр сферы в local worldGroup координатах (anchor уже учтён). */
+    /** Вершины заданы мировыми 3D-позициями (глобус) — меш не сдвигаем по Y. */
+    private _usesWorldPositions = false;
+    /** Р¦РµРЅС‚СЂ СЃС„РµСЂС‹ РІ local worldGroup РєРѕРѕСЂРґРёРЅР°С‚Р°С… (anchor СѓР¶Рµ СѓС‡С‚С‘РЅ). */
     private _boundingSphere: { center: any; radius: number } | null = null;
-    /** Переиспользуемый вектор для getBoundingSphere (мир. координаты). */
+    /** РџРµСЂРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Р№ РІРµРєС‚РѕСЂ РґР»СЏ getBoundingSphere (РјРёСЂ. РєРѕРѕСЂРґРёРЅР°С‚С‹). */
     private _boundingSphereWorldCenter: any = null;
     private _minZoom = -Infinity;
     private _maxZoom = Infinity;
-    /** Разделяемая текстура паттерна — владелец PolygonBatcher. */
+    /** Р Р°Р·РґРµР»СЏРµРјР°СЏ С‚РµРєСЃС‚СѓСЂР° РїР°С‚С‚РµСЂРЅР° вЂ” РІР»Р°РґРµР»РµС† PolygonBatcher. */
     private _patternTexture: any = null;
-    /** Интерполяция прозрачности по зуму (если была в данных). */
+    /** РРЅС‚РµСЂРїРѕР»СЏС†РёСЏ РїСЂРѕР·СЂР°С‡РЅРѕСЃС‚Рё РїРѕ Р·СѓРјСѓ (РµСЃР»Рё Р±С‹Р»Р° РІ РґР°РЅРЅС‹С…). */
     private _zoomFillOpacity: Array<[number, number]> | null = null;
     private _baseFillOpacity = 1;
     private _baseStrokeOpacity = 1;
@@ -107,10 +116,25 @@ class BatchedGroup {
         }
         if (datas.length === 0) return;
 
-        let sx = 0, sz = 0;
-        for (const { data } of datas) { sx += data.centroidX; sz += data.centroidZ; }
+        let sx = 0, sz = 0, sy = 0, syCount = 0;
+        for (const { data } of datas) {
+            sx += data.centroidX;
+            sz += data.centroidZ;
+            // Р“Р»РѕР±СѓСЃ: СЃРµСЂРµРґРёРЅР° РїРѕ Y вЂ” РёРЅР°С‡Рµ Р±Р°С‚С‡ В«РїСЂРёР»РёРїР°РµС‚В» Рє y = 0.
+            const wp = data.worldPositions;
+            if (wp && wp.length >= 3) {
+                let acc = 0;
+                for (let i = 1; i < wp.length; i += 3) acc += wp[i];
+                sy += acc / (wp.length / 3);
+                syCount++;
+            }
+        }
         this._anchorX = sx / datas.length;
         this._anchorZ = sz / datas.length;
+        this._anchorY = syCount > 0 ? sy / syCount : 0;
+        // Есть ли в батче 3D-позиции (глобус)? Тогда vertex Y — мировые
+        // координаты, и меш нельзя опускать в y = 0.
+        this._usesWorldPositions = datas.some(({ data }) => !!data.worldPositions);
 
         const d0 = datas[0].data;
         this._minZoom = d0.minZoom;
@@ -122,7 +146,7 @@ class BatchedGroup {
             this._patternTexture = getPatternTexture(d0.fillPatternSource);
         }
 
-        // Zoom-интерполяция прозрачности (готово к шагу B).
+        // Zoom-РёРЅС‚РµСЂРїРѕР»СЏС†РёСЏ РїСЂРѕР·СЂР°С‡РЅРѕСЃС‚Рё (РіРѕС‚РѕРІРѕ Рє С€Р°РіСѓ B).
         const zi = d0.zoomInterpolations?.fillOpacity;
         if (zi && zi.length >= 2) {
             this._zoomFillOpacity = zi as Array<[number, number]>;
@@ -169,10 +193,23 @@ class BatchedGroup {
                 }
             };
 
-            // ── TOP ──
+            // в”Ђв”Ђ TOP в”Ђв”Ђ
+            // worldPositions вЂ” РіРѕС‚РѕРІС‹Рµ 3D-РїРѕР·РёС†РёРё (РіР»РѕР±СѓСЃ: С‚РѕС‡РєРё СЌР»Р»РёРїСЃРѕРёРґР°).
+            // Р‘РµР· РЅРёС… СЃС‚СЂРѕРёРј РїР»РѕСЃРєРѕСЃС‚СЊ (x, height, z), РєР°Рє СЂР°РЅСЊС€Рµ.
+            const wp = data.worldPositions;
             for (let i = 0; i < n; i++) {
                 const [wx, wz] = wc[i];
-                positions.push(wx - this._anchorX, heights[i] ?? 0, wz - this._anchorZ);
+                if (wp) {
+                    // Абсолютные мировые координаты: сдвигаем только X/Z на
+                    // anchor (меш возвращает их через mesh.position).
+                    // Y НЕ трогаем — на глобусе это высота над эллипсоидом,
+                    // а mesh.position.y = 0 (иначе Y уехал бы дважды).
+                    positions.push(wp[i * 3] - this._anchorX,
+                                   wp[i * 3 + 1],
+                                   wp[i * 3 + 2] - this._anchorZ);
+                } else {
+                    positions.push(wx - this._anchorX, heights[i] ?? 0, wz - this._anchorZ);
+                }
                 pushUV(wx, wz);
             }
             const idx = data.indices;
@@ -183,7 +220,7 @@ class BatchedGroup {
 
             if (!isExtruded) continue;
 
-            // ── BOTTOM ──
+            // в”Ђв”Ђ BOTTOM в”Ђв”Ђ
             const bottomBase = positions.length / 3;
             for (let i = 0; i < n; i++) {
                 const [wx, wz] = wc[i];
@@ -199,7 +236,7 @@ class BatchedGroup {
                 triPoly.push(poly);
             }
 
-            // ── SIDES (per-ring) ──
+            // в”Ђв”Ђ SIDES (per-ring) в”Ђв”Ђ
             const ringStarts = (data.ringStarts && data.ringStarts.length > 0) ? data.ringStarts : [0];
 for (let r = 0; r < ringStarts.length; r++) {
     const start = ringStarts[r];
@@ -260,14 +297,14 @@ for (let r = 0; r < ringStarts.length; r++) {
         geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
         geom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
         geom.setIndex(indices);
-        // Нормали нужны MeshStandardMaterial (extruded). Для MeshBasic
-        // они не используются — пропускаем, экономим цикл на rebuild.
+        // РќРѕСЂРјР°Р»Рё РЅСѓР¶РЅС‹ MeshStandardMaterial (extruded). Р”Р»СЏ MeshBasic
+        // РѕРЅРё РЅРµ РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ вЂ” РїСЂРѕРїСѓСЃРєР°РµРј, СЌРєРѕРЅРѕРјРёРј С†РёРєР» РЅР° rebuild.
         if (d0.extruded) geom.computeVertexNormals();
         geom.computeBoundingBox();
         geom.computeBoundingSphere();
 
-        // Если будет zoom-анимация прозрачности — материал должен быть
-        // transparent с самого начала, иначе анимация к 0 работать не будет.
+        // Р•СЃР»Рё Р±СѓРґРµС‚ zoom-Р°РЅРёРјР°С†РёСЏ РїСЂРѕР·СЂР°С‡РЅРѕСЃС‚Рё вЂ” РјР°С‚РµСЂРёР°Р» РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ
+        // transparent СЃ СЃР°РјРѕРіРѕ РЅР°С‡Р°Р»Р°, РёРЅР°С‡Рµ Р°РЅРёРјР°С†РёСЏ Рє 0 СЂР°Р±РѕС‚Р°С‚СЊ РЅРµ Р±СѓРґРµС‚.
         const animatedOpacity = !!this._zoomFillOpacity;
         const isTransparent = animatedOpacity || d0.fillOpacity < 1;
 
@@ -311,16 +348,20 @@ for (let r = 0; r < ringStarts.length; r++) {
             mesh.castShadow = d0.castShadow;
             mesh.receiveShadow = d0.receiveShadow;
         }
-        mesh.position.set(this._anchorX, 0, this._anchorZ);
+        // ВАЖНО: на глобусе Y вершин — абсолютная высота над эллипсоидом
+        // (его нельзя «сдвигать» в плоскость), поэтому меш ставим в y = 0.
+        // На плоскости высоты относительные — сдвигаем на anchorY, как раньше.
+        mesh.position.set(this._anchorX, this._usesWorldPositions ? 0 : this._anchorY, this._anchorZ);
         mesh.userData.batchedGroup = this;
         this.mesh = mesh;
 
-        // ── Штрих: LineSegments по рёбрам top ──
+        // в”Ђв”Ђ РЁС‚СЂРёС…: LineSegments РїРѕ СЂС‘Р±СЂР°Рј top в”Ђв”Ђ
         if (d0.strokeWidth > 0 && d0.strokeOpacity > 0 && d0.strokeColor != null) {
             const strokePos: number[] = [];
             for (const { data } of datas) {
                 const wc = data.worldCoords;
                 const h = data.heights;
+                const wpS = data.worldPositions;
                 const n = wc.length;
                 const rs = (data.ringStarts && data.ringStarts.length > 0) ? data.ringStarts : [0];
                 for (let r = 0; r < rs.length; r++) {
@@ -331,10 +372,18 @@ for (let r = 0; r < ringStarts.length; r++) {
                     for (let i = 0; i < count; i++) {
                         const j = (i + 1) % count;
                         const a = start + i, b = start + j;
-                        strokePos.push(
-                            wc[a][0] - this._anchorX, h[a] ?? 0, wc[a][1] - this._anchorZ,
-                            wc[b][0] - this._anchorX, h[b] ?? 0, wc[b][1] - this._anchorZ,
-                        );
+                        if (wpS) {
+                            // Глобус: обводка по тем же 3D-точкам, что и заливка.
+                            strokePos.push(
+                                wpS[a * 3] - this._anchorX, wpS[a * 3 + 1], wpS[a * 3 + 2] - this._anchorZ,
+                                wpS[b * 3] - this._anchorX, wpS[b * 3 + 1], wpS[b * 3 + 2] - this._anchorZ,
+                            );
+                        } else {
+                            strokePos.push(
+                                wc[a][0] - this._anchorX, h[a] ?? 0, wc[a][1] - this._anchorZ,
+                                wc[b][0] - this._anchorX, h[b] ?? 0, wc[b][1] - this._anchorZ,
+                            );
+                        }
                     }
                 }
             }
@@ -351,7 +400,7 @@ for (let r = 0; r < ringStarts.length; r++) {
             applyGapMaskToMaterial(sMat,  this._map);
             const line = new THREE.LineSegments(sGeom, sMat);
             line.renderOrder = RENDER_ORDER.STROKE;
-            line.position.set(this._anchorX, 0, this._anchorZ);
+            line.position.set(this._anchorX, this._usesWorldPositions ? 0 : this._anchorY, this._anchorZ);
             this.strokeLine = line;
             this.strokeMaterial = sMat;
         }
@@ -376,10 +425,10 @@ for (let r = 0; r < ringStarts.length; r++) {
         if (this._unregister) { this._unregister(); this._unregister = null; }
         this._unregister = map.interaction.register(this, {
             getMeshes: () => this.mesh ? [this.mesh] : [],
-            // Возвращаем центр в МИРОВЫХ координатах — в отличие от
-            // прежней версии, которая отдавала локальные (без
-            // worldGroup.position). Из-за этого каллинг ломался
-            // при панорамировании (worldGroup сдвигается).
+            // Р’РѕР·РІСЂР°С‰Р°РµРј С†РµРЅС‚СЂ РІ РњРР РћР’Р«РҐ РєРѕРѕСЂРґРёРЅР°С‚Р°С… вЂ” РІ РѕС‚Р»РёС‡РёРµ РѕС‚
+            // РїСЂРµР¶РЅРµР№ РІРµСЂСЃРёРё, РєРѕС‚РѕСЂР°СЏ РѕС‚РґР°РІР°Р»Р° Р»РѕРєР°Р»СЊРЅС‹Рµ (Р±РµР·
+            // worldGroup.position). РР·-Р·Р° СЌС‚РѕРіРѕ РєР°Р»Р»РёРЅРі Р»РѕРјР°Р»СЃСЏ
+            // РїСЂРё РїР°РЅРѕСЂР°РјРёСЂРѕРІР°РЅРёРё (worldGroup СЃРґРІРёРіР°РµС‚СЃСЏ).
             getBoundingSphere: () => {
                 if (!this._boundingSphere) return null;
                 const wgPos = map.worldGroup.position;
@@ -425,8 +474,8 @@ for (let r = 0; r < ringStarts.length; r++) {
         if (this.strokeLine) this.strokeLine.visible = visible;
         if (!visible) return;
 
-        // Zoom-анимация прозрачности. Работает только если
-        // BatchGeometryData.zoomInterpolations был передан Polygon'ом.
+        // Zoom-Р°РЅРёРјР°С†РёСЏ РїСЂРѕР·СЂР°С‡РЅРѕСЃС‚Рё. Р Р°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ РµСЃР»Рё
+        // BatchGeometryData.zoomInterpolations Р±С‹Р» РїРµСЂРµРґР°РЅ Polygon'РѕРј.
         if (this._zoomFillOpacity) {
             const [z0, o0] = this._zoomFillOpacity[0];
             const [z1, o1] = this._zoomFillOpacity[1];
@@ -457,7 +506,7 @@ for (let r = 0; r < ringStarts.length; r++) {
             this.strokeLine.material?.dispose();
             if (this.strokeLine.parent) this.strokeLine.parent.remove(this.strokeLine);
         }
-        // Паттерн НЕ наш — им владеет PolygonBatcher (кэш по URL).
+        // РџР°С‚С‚РµСЂРЅ РќР• РЅР°С€ вЂ” РёРј РІР»Р°РґРµРµС‚ PolygonBatcher (РєСЌС€ РїРѕ URL).
         this._patternTexture = null;
         this.mesh = null;
         this.strokeLine = null;
@@ -520,7 +569,7 @@ export class PolygonBatcher {
         this._dirtyTime = performance.now();
     }
 
-    /** Общая текстура паттерна по URL (для всех батчей слоя). */
+    /** РћР±С‰Р°СЏ С‚РµРєСЃС‚СѓСЂР° РїР°С‚С‚РµСЂРЅР° РїРѕ URL (РґР»СЏ РІСЃРµС… Р±Р°С‚С‡РµР№ СЃР»РѕСЏ). */
     private _getPatternTexture(url: string): any {
         let tex = this._patternTextures.get(url);
         if (tex) return tex;
@@ -619,8 +668,8 @@ export class PolygonBatcher {
             }
         }
 
-        // Полигоны, которые больше не входят ни в один батч,
-        // разбатчиваем — у них пересоберётся своя геометрия.
+        // РџРѕР»РёРіРѕРЅС‹, РєРѕС‚РѕСЂС‹Рµ Р±РѕР»СЊС€Рµ РЅРµ РІС…РѕРґСЏС‚ РЅРё РІ РѕРґРёРЅ Р±Р°С‚С‡,
+        // СЂР°Р·Р±Р°С‚С‡РёРІР°РµРј вЂ” Сѓ РЅРёС… РїРµСЂРµСЃРѕР±РµСЂС‘С‚СЃСЏ СЃРІРѕСЏ РіРµРѕРјРµС‚СЂРёСЏ.
         for (const p of oldPolygons) {
             if (!this._polygonToBatch.has(p)) {
                 p._onBatchChange?.(false, null);
@@ -642,3 +691,4 @@ import { Layer } from './Layers.js';
 if (typeof Layer.setBatcherFactory === 'function') {
     Layer.setBatcherFactory((layer: any) => new PolygonBatcher(layer));
 }
+

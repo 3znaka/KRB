@@ -1,6 +1,122 @@
 // CoreCoordinates.ts
+import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
+// ── Temp-объекты для проверки перекрытия глобусом (без аллокаций на кадр) ──
+const _occPoint = new THREE.Vector3();
+const _occCam = new THREE.Vector3();
+const _occDir = new THREE.Vector3();
+const _occHit = new THREE.Vector3();
+const _occRay = new THREE.Raycaster();
 export const CoreCoordinatesMixin = {
+    /**
+     * Перевод (coord в произвольной СК, высота) → мировая точка сцены.
+     *
+     * Плоский режим — прежнее поведение: (x, height, -y).
+     * Глобус — точка эллипсоида через GlobeSurface.position, высота идёт
+     * вдоль геодезической нормали, т.е. «над точкой», а не «над плоскостью».
+     */
+    projectSurfacePoint(coord, fromCrs, height, out) {
+        const h = Number.isFinite(height) ? height : 0;
+        if (!this.globe || !this.surface) {
+            const [x, z] = this.project(coord, fromCrs ?? this.inputCRS);
+            if (!Number.isFinite(x) || !Number.isFinite(z))
+                return null;
+            return out.set(x, h, z);
+        }
+        // На глобусе: любую координату приводим к lon/lat и кладём на эллипсоид.
+        const crs = fromCrs
+            ? (typeof fromCrs === 'string' ? Projections.get(fromCrs) : fromCrs)
+            : null;
+        const lonLat = crs && crs !== this.projection ? crs.toLonLat(coord) : coord;
+        if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1]))
+            return null;
+        this.surface.position(lonLat[0], lonLat[1], h, out);
+        if (this.worldGroup)
+            this.worldGroup.localToWorld(out);
+        return out;
+    },
+    /** Мировые координаты сцены → [lon, lat] (обратное к projectSurfacePoint). */
+    surfacePointToLonLat(worldPoint) {
+        if (!worldPoint)
+            return null;
+        if (this.globe && this.surface) {
+            const loc = worldPoint.clone ? worldPoint.clone() : { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z };
+            if (this.worldGroup)
+                this.worldGroup.worldToLocal(loc);
+            const g = this.surface.geodeticFromWorld(loc);
+            if (!g || !Number.isFinite(g.lon) || !Number.isFinite(g.lat))
+                return null;
+            return [g.lon, g.lat];
+        }
+        return this.unprojectToLonLatSafe(worldPoint.x - this.worldGroup.position.x, worldPoint.z - this.worldGroup.position.z);
+    },
+    /** Локальная (worldGroup) точка → мировая (на глобусе — без сдвига мира). */
+    _surfacePointIntoWorld(local, out) {
+        out.copy(local);
+        if (this.worldGroup)
+            this.worldGroup.localToWorld(out);
+        return out;
+    },
+    /**
+     * Вершина объекта в локальных координатах его группы.
+     *
+     * Плоский режим: (x − originX, height, z − originZ) — прежнее поведение.
+     * Глобус: точка поверхности + смещение на height вдоль МЕСТНОЙ нормали,
+     * минус origin. Из-за этого Y у каждой вершины свой — геометрия реально
+     * облегает сферу, а не лежит в плоскости.
+     */
+    projectSurfaceVertex(coord, fromCrs, height, origin, out) {
+        const h = Number.isFinite(height) ? height : 0;
+        const originX = origin ? origin.x : 0;
+        const originY = origin ? origin.y : 0;
+        const originZ = origin ? origin.z : 0;
+        if (!this.globe || !this.surface) {
+            const [x, z] = this.project(coord, fromCrs ?? this.inputCRS);
+            if (!Number.isFinite(x) || !Number.isFinite(z))
+                return null;
+            return out.set(x - originX, h - originY, z - originZ);
+        }
+        // Мировая точка на поверхности + высота вдоль нормали.
+        const wp = this.projectSurfacePoint(coord, fromCrs, h, _occDir);
+        if (!wp)
+            return null;
+        return out.set(wp.x - originX, wp.y - originY, wp.z - originZ);
+    },
+    /**
+     * Точка на обратной стороне глобуса?
+     *
+     * Проверка по «горизонту»: точка видна, пока направление на неё не уходит
+     * за касательную к эллипсоиду. Для камеры на расстоянии C от центра и
+     * точки на радиусе r условие видимости: cos θ > R / C, где θ — угол между
+     * «центр→камера» и «центр→точка», R — минимальный радиус эллипсоида.
+     * Чем выше точка над поверхностью (r > R), тем шире её собственный
+     * горизонт — учитываем множителем R/r.
+     * На плоскости горизонтного ограничения нет — всегда `false`.
+     */
+    isWorldPointOccluded(worldPoint) {
+        if (!this.globe || !this.surface || !worldPoint)
+            return false;
+        // Работаем в локальных координатах глобуса (центр — в нуле).
+        const loc = THREE.Vector3.prototype.copy.call(_occPoint, worldPoint);
+        if (this.worldGroup)
+            this.worldGroup.worldToLocal(loc);
+        const camLocal = THREE.Vector3.prototype.copy.call(_occCam, this.camera.position);
+        if (this.worldGroup)
+            this.worldGroup.worldToLocal(camLocal);
+        const camDist = camLocal.length();
+        const ptDist = loc.length();
+        if (!(camDist > 1e-6) || !(ptDist > 1e-6))
+            return false;
+        const R = this.surface.b ?? this.R;
+        // Косинус угла «центр→камера» / «центр→точка».
+        const cos = (loc.x * camLocal.x + loc.y * camLocal.y + loc.z * camLocal.z)
+            / (ptDist * camDist);
+        // Точка на поверхности (r ≈ R): видна, если cos > R/C.
+        // Поднятая над поверхностью (r > R) — чуть «за» горизонтом тоже видна,
+        // поэтому порог домножаем на R/r.
+        const rRatio = Math.min(1, R / ptDist);
+        return cos < (R / camDist) * rRatio;
+    },
     unprojectToLonLatSafe(x, z) {
         const coord = [x, -z];
         const raw = this.projection?._raw ?? this.projection; // на случай ScaledProjection без делегата
@@ -201,6 +317,12 @@ export const CoreCoordinatesMixin = {
     },
     get maxObjectDistance() {
         if (!this.objectRenderDistanceFactor)
+            return Infinity;
+        // На глобусе множитель «×N от дистанции до цели» неприменим: точки
+        // обратной стороны Земли по 3D ближе видимых, и такой отсечкой их
+        // можно срезать неверно. Невидимое полушарие убирает
+        // isWorldPointOccluded(), поэтому дальность не ограничиваем.
+        if (this.globe)
             return Infinity;
         const distToTarget = this.camera.position.distanceTo(this.controls.target);
         return distToTarget * this.objectRenderDistanceFactor;

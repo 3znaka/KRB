@@ -444,16 +444,17 @@ export class ClusterLayer extends Layer {
                 continue;
             if (!m._element)
                 continue;
-            // Координаты маркера → метры проекции карты.
-            const [wx, wz] = map.project(m._coord, m._crs);
-            const wgPos = map.worldGroup.position;
-            const worldX = wx + wgPos.x;
-            const worldZ = wz + wgPos.z;
-            let worldY = 0;
-            if (m._altitudeMode === 'clampToGround') {
-                worldY = map.getSurfaceHeightAt(worldX, worldZ);
+            // Координаты маркера → мировая точка поверхности (на глобусе —
+            // точка эллипсоида, высота вдоль местной нормали).
+            const worldPos = new THREE.Vector3();
+            const sp = typeof map.projectSurfacePoint === 'function'
+                ? map.projectSurfacePoint(m._coord, m._crs, 0, worldPos)
+                : null;
+            if (!sp)
+                continue;
+            if (m._altitudeMode === 'clampToGround' && !map.globe) {
+                worldPos.y = map.getSurfaceHeightAt(worldPos.x, worldPos.z);
             }
-            const worldPos = new THREE.Vector3(worldX, worldY, worldZ);
             const screenPos = worldPos.clone().project(map.camera);
             if (screenPos.z > 1)
                 continue;

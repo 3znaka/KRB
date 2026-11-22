@@ -728,9 +728,20 @@ export class PopupManager {
         const crsObj = crs
             ? (typeof crs === 'string' ? Projections.get(crs) : crs)
             : map.inputCRS;
-        const [absX, absZ] = map.project([lonLat[0], lonLat[1]], crsObj);
-        const wgPos = map.worldGroup.position;
-        const vec = new THREE.Vector3(absX + wgPos.x, alt + wgPos.y, absZ + wgPos.z);
+        // Высота прибавляется вдоль местной нормали — на глобусе это
+        // «над точкой», а не «над плоскостью».
+        const vec = new THREE.Vector3();
+        const pt = typeof map.projectSurfacePoint === 'function'
+            ? map.projectSurfacePoint([lonLat[0], lonLat[1]], crsObj, alt, vec)
+            : null;
+        if (pt) {
+            vec.copy(pt);
+        }
+        else {
+            const [absX, absZ] = map.project([lonLat[0], lonLat[1]], crsObj);
+            const wgPos = map.worldGroup.position;
+            vec.set(absX + wgPos.x, alt + wgPos.y, absZ + wgPos.z);
+        }
         vec.project(map.camera);
         if (vec.z > 1 || Math.abs(vec.x) > 1 || Math.abs(vec.y) > 1)
             return null;

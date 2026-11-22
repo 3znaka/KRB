@@ -327,6 +327,7 @@ _hasAntimeridianWrap(this: Polygon): boolean {
 
         this._worldCoords.length = 0;
         this._nodeHeights.length = 0;
+        this._vertexLonLat.length = 0;
         this._ringStartIndices.length = 0;
         this._sideEdgeIJ.length = 0;
         this._sideEdgeLengths.length = 0;
@@ -340,7 +341,7 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         const ringStartIndices: number[] = [];
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
-            const { worldCoords, heights } = rings[ringIdx];
+            const { worldCoords, heights, lonLats } = rings[ringIdx];
             if (worldCoords.length < 3) {
                 console.warn(`Polygon: hole ring ${ringIdx} must have at least 3 points`);
                 continue;
@@ -358,6 +359,9 @@ _hasAntimeridianWrap(this: Polygon): boolean {
                 points2D.push(new THREE.Vector2(absX, absZ));
                 this._worldCoords.push([absX, absZ]);
                 this._nodeHeights.push(heights[i] ?? 0);
+                // Геодезические координаты вершины — на глобусе по ним
+                // вершина кладётся на эллипсоид (а не в плоскость).
+                this._vertexLonLat.push(lonLats ? (lonLats[i] ?? null) : null);
             }
         }
 

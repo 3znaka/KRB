@@ -1,10 +1,12 @@
 /**
- * PolygonUpdate.ts — per-frame update (видимость, высоты, обводка, экранный
- * centroid), depth-флаги, bounds / visual center / screen bbox.
+ * PolygonUpdate.ts вЂ” per-frame update (РІРёРґРёРјРѕСЃС‚СЊ, РІС‹СЃРѕС‚С‹, РѕР±РІРѕРґРєР°, СЌРєСЂР°РЅРЅС‹Р№
+ * centroid), depth-С„Р»Р°РіРё, bounds / visual center / screen bbox.
  */
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { DEFAULT_FILL_PATTERN_SCALE, approxVisualCenter } from './PolygonUtils.js';
+/** Temp-РІРµРєС‚РѕСЂ РґР»СЏ РїРµСЂРµСЃС‡С‘С‚Р° РІРµСЂС€РёРЅ (Р±РµР· Р°Р»Р»РѕРєР°С†РёР№ РЅР° РєР°РґСЂ). */
+const _v3 = new THREE.Vector3();
 export const PolygonUpdateMixin = {
     _update(_mapArg) {
         const map = this._map;
@@ -85,6 +87,53 @@ export const PolygonUpdateMixin = {
         }
         this._updateCentroidScreenPos();
     },
+    /**
+ * Р“РµРѕРґРµР·РёС‡РµСЃРєРёРµ РєРѕРѕСЂРґРёРЅР°С‚С‹ i-Р№ РІРµСЂС€РёРЅС‹ РєРѕР»СЊС†Р° (РІ РїРѕСЂСЏРґРєРµ `_worldCoords`).
+ * РќР° РіР»РѕР±СѓСЃРµ РїРѕ РЅРёРј РІРµСЂС€РёРЅР° РєР»Р°РґС‘С‚СЃСЏ РЅР° СЌР»Р»РёРїСЃРѕРёРґ.
+ */
+    _vertexLonLatOf(i) {
+        const ll = this._vertexLonLat?.[i];
+        return Array.isArray(ll) ? ll : null;
+    },
+    /**
+     * Развернуть треугольники, смотрящие ВНУТРЬ сферы.
+     *
+     * Триангуляция (earcut) считается в плоской проекции, поэтому на глобусе
+     * обход части граней оказывается «лицом к центру Земли» — такие грани
+     * пропадают из-за backface culling, и заливка выглядит рваной.
+     * Здесь на каждый треугольник считаем нормаль и сравниваем её с
+     * направлением от центра Земли: если смотрит внутрь — меняем обход.
+     */
+    _orientIndicesOutward(posArr, origin) {
+        const geo = this._fillGeometry;
+        const idx = geo.index?.array;
+        if (!idx)
+            return;
+        const ox = origin ? origin.x : 0;
+        const oy = origin ? origin.y : 0;
+        const oz = origin ? origin.z : 0;
+        for (let t = 0; t < idx.length; t += 3) {
+            const ia = idx[t], ib = idx[t + 1], ic = idx[t + 2];
+            const ax = posArr[ia * 3], ay = posArr[ia * 3 + 1], az = posArr[ia * 3 + 2];
+            const bx = posArr[ib * 3], by = posArr[ib * 3 + 1], bz = posArr[ib * 3 + 2];
+            const cx = posArr[ic * 3], cy = posArr[ic * 3 + 1], cz = posArr[ic * 3 + 2];
+            // нормаль треугольника
+            const ux = bx - ax, uy = by - ay, uz = bz - az;
+            const vx = cx - ax, vy = cy - ay, vz = cz - az;
+            const nx = uy * vz - uz * vy;
+            const ny = uz * vx - ux * vz;
+            const nz = ux * vy - uy * vx;
+            // направление «наружу» = из центра на центр треугольника
+            const mx = (ax + bx + cx) / 3 + ox;
+            const my = (ay + by + cy) / 3 + oy;
+            const mz = (az + bz + cz) / 3 + oz;
+            if (nx * mx + ny * my + nz * mz < 0) {
+                idx[t + 1] = ic;
+                idx[t + 2] = ib;
+            }
+        }
+        geo.index.needsUpdate = true;
+    },
     _updateHeights() {
         if (this._invalidGeometry)
             return false;
@@ -136,16 +185,62 @@ export const PolygonUpdateMixin = {
             }
             this._cachedStrokeHeights[i] = base + (this._strokeNodeHeights[i] ?? 0) + this._minHeight + extrude;
         }
+        // РќР° РіР»РѕР±СѓСЃРµ РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅРµ РЅСѓР¶РЅС‹ РЎР’РћР X/Y/Z (С‚РѕС‡РєР° РЅР° СЌР»Р»РёРїСЃРѕРёРґРµ),
+        // РёРЅР°С‡Рµ РІСЃСЏ РіРµРѕРјРµС‚СЂРёСЏ РѕСЃС‚Р°С‘С‚СЃСЏ РІ РїР»РѕСЃРєРѕСЃС‚Рё y = const.
+        const globe = map.globe === true && !!map.surface;
+        const origin = this._centroidWorld;
+        // РљРѕРѕСЂРґРёРЅР°С‚Р° РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅС‹ РІ Р»РѕРєР°Р»СЊРЅРѕРј РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІРµ РіСЂСѓРїРїС‹.
+        const localPos = new Float32Array(n * 3);
+        if (globe) {
+            for (let i = 0; i < n; i++) {
+                const ll = this._vertexLonLatOf(i);
+                const v = _v3;
+                const p = ll
+                    ? map.projectSurfaceVertex(ll, 'EPSG:4326', this._cachedHeights[i], origin, v)
+                    : null;
+                // РќРµС‚ РєРѕРѕСЂРґРёРЅР°С‚С‹ (Р°РЅРѕРјР°Р»РёСЏ) вЂ” РѕСЃС‚Р°РІР»СЏРµРј РїСЂРµР¶РЅСЋСЋ РїРѕР·РёС†РёСЋ.
+                const src = this._fillGeometry.attributes.position.array;
+                const k = i * 3;
+                localPos[k] = p ? v.x : src[k];
+                localPos[k + 1] = p ? v.y : src[k + 1];
+                localPos[k + 2] = p ? v.z : src[k + 2];
+            }
+        }
         const topPos = this._fillGeometry.attributes.position.array;
-        for (let i = 0; i < n; i++)
-            topPos[i * 3 + 1] = this._cachedHeights[i];
+        if (globe) {
+            topPos.set(localPos);
+            this._orientIndicesOutward(topPos, origin);
+        }
+        else {
+            for (let i = 0; i < n; i++)
+                topPos[i * 3 + 1] = this._cachedHeights[i];
+        }
         this._fillGeometry.attributes.position.needsUpdate = true;
+        this._fillGeometry.computeVertexNormals?.();
         this._fillGeometry.computeBoundingSphere();
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array;
             const height = this._height;
-            for (let i = 0; i < n; i++)
-                bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
+            if (globe) {
+                for (let i = 0; i < n; i++) {
+                    const ll = this._vertexLonLatOf(i);
+                    const p = ll
+                        ? map.projectSurfaceVertex(ll, 'EPSG:4326', this._cachedHeights[i] - height, origin, _v3)
+                        : null;
+                    const k = i * 3;
+                    if (p) {
+                        bottomPos[k] = _v3.x;
+                        bottomPos[k + 1] = _v3.y;
+                        bottomPos[k + 2] = _v3.z;
+                    }
+                    else
+                        bottomPos[k + 1] = this._cachedHeights[i] - height;
+                }
+            }
+            else {
+                for (let i = 0; i < n; i++)
+                    bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
+            }
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
         }
@@ -305,12 +400,12 @@ export const PolygonUpdateMixin = {
             for (const pt of ring) {
                 if (!pt || pt.length < 2)
                     continue;
-                // Нормализуем с src, а не обязательно с this._crs:
-                // getBounds() может вызываться до attach.
+                // РќРѕСЂРјР°Р»РёР·СѓРµРј СЃ src, Р° РЅРµ РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ СЃ this._crs:
+                // getBounds() РјРѕР¶РµС‚ РІС‹Р·С‹РІР°С‚СЊСЃСЏ РґРѕ attach.
                 const nn = this._normalizeCoord(pt, src);
                 let x, y;
                 if (nn.lonLat) {
-                    // 3D ECEF: точные геодезические координаты.
+                    // 3D ECEF: С‚РѕС‡РЅС‹Рµ РіРµРѕРґРµР·РёС‡РµСЃРєРёРµ РєРѕРѕСЂРґРёРЅР°С‚С‹.
                     const conv = dst.fromLonLat(nn.lonLat);
                     x = conv[0];
                     y = conv[1];
@@ -351,8 +446,8 @@ export const PolygonUpdateMixin = {
             return null;
         const wgsRings = rings.map(r => r.map(pt => {
             const nn = this._normalizeCoord(pt, src);
-            // ECEF 3D → точные lon/lat.
-            // Обычная CRS → src.toLonLat(coord).
+            // ECEF 3D в†’ С‚РѕС‡РЅС‹Рµ lon/lat.
+            // РћР±С‹С‡РЅР°СЏ CRS в†’ src.toLonLat(coord).
             const ll = nn.lonLat ?? src.toLonLat(nn.coord);
             return [ll[0], ll[1]];
         }));

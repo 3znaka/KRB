@@ -75,6 +75,12 @@ export class Polygon extends SpatialObject {
     _cachedStrokeHeights = [];
     _cachedTopIndices = null;
     _nodeHeights = [];
+    /**
+     * lon/lat каждой вершины кольца (индекс — как в `_worldCoords`).
+     * Нужен глобусу: вершины геометрии кладутся на эллипсоид по своим
+     * координатам, а не в плоскую плоскость.
+     */
+    _vertexLonLat = [];
     _strokeNodeHeights = [];
     _lastHeightUpdateTime = 0;
     _heightUpdateInterval = 500;
@@ -217,6 +223,7 @@ export class Polygon extends SpatialObject {
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
+        this._vertexLonLat.length = 0;
         this._strokeNodeHeights.length = 0;
         this._ringStartIndices.length = 0;
         this._cachedTopIndices = null;
@@ -317,8 +324,35 @@ export class Polygon extends SpatialObject {
         for (let i = 0; i < heights.length; i++) {
             heights[i] = base + (this._nodeHeights[i] ?? 0);
         }
+        // Глобус: у вершин разные X/Y/Z (точки эллипсоида). Батчер по
+        // умолчанию строит плоскость (x, height, z) — отдаём ему готовые
+        // мировые позиции, иначе полигоны ложатся в плоскость экватора.
+        let worldPositions = null;
+        const map = this._map;
+        if (map?.globe && map.surface && typeof map.projectSurfaceVertex === 'function') {
+            const n = this._worldCoords.length;
+            worldPositions = new Float32Array(n * 3);
+            const v = new THREE.Vector3();
+            let ok = true;
+            for (let i = 0; i < n; i++) {
+                const ll = this._vertexLonLat?.[i];
+                const p = ll
+                    ? map.projectSurfaceVertex(ll, 'EPSG:4326', heights[i], null, v)
+                    : null;
+                if (!p) {
+                    ok = false;
+                    break;
+                }
+                worldPositions[i * 3] = v.x;
+                worldPositions[i * 3 + 1] = v.y;
+                worldPositions[i * 3 + 2] = v.z;
+            }
+            if (!ok)
+                worldPositions = null;
+        }
         return {
             worldCoords: this._worldCoords,
+            worldPositions,
             heights,
             indices,
             zoomInterpolations: this._zoomInterpolations ?? null,
@@ -599,6 +633,7 @@ export class Polygon extends SpatialObject {
         this._worldCoords.length = 0;
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
+        this._vertexLonLat.length = 0;
         this._strokeNodeHeights.length = 0;
         this._ringStartIndices.length = 0;
         this._cachedTopIndices = null;

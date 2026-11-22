@@ -137,6 +137,8 @@ export class Marker extends SpatialObject implements GeoJSONExportable {
     private _isMobile = false;
     private _lastHeightUpdateTime = 0;
     private _cachedWorldY = 0;
+    /** Переиспользуемый вектор мировой позиции (без аллокаций на кадр). */
+    private _worldPos = new THREE.Vector3();
 
     constructor(options: MarkerOptions) {
         super();
@@ -564,36 +566,37 @@ export class Marker extends SpatialObject implements GeoJSONExportable {
             return;
         }
 
-        const [absWorldX, absWorldZ] = map.project(this._coord, this._crs);
-        const wgPos = map.worldGroup.position;
-        const worldX = absWorldX + wgPos.x;
-        const worldZ = absWorldZ + wgPos.z;
-        let worldY = 0;
-
-        switch (this._altitudeMode) {
-            case 'absolute':
-                worldY = this._altitude;
-                break;
-            case 'clampToGround': {
-                const now = performance.now();
-                if (now - this._lastHeightUpdateTime > 500) {
-                    map.ensureTileForPoint(worldX, worldZ);
-                    this._cachedWorldY = map.getSurfaceHeightAt(worldX, worldZ);
-                    this._lastHeightUpdateTime = now;
-                }
-                worldY = this._cachedWorldY + this._altitude;
-                break;
-            }
-            case 'ground':
-            default:
-                worldY = this._altitude;
-                break;
+        // Позиция на поверхности: плоскость — (x, 0, z), глобус — точка
+        // эллипсоида. Высота откладывается вдоль МЕСТНОЙ нормали (внутри
+        // projectSurfacePoint), поэтому маркер стоит на Земле.
+        const wp = this._worldPos;
+        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, wp);
+        if (!surfacePoint) {
+            this._applyHidden();
+            return;
         }
 
-        // Высота узла (3-я координата) — аддитивно, как в Polyline/Polygon.
-        worldY += this._nodeHeight;
+        // Подъём над поверхностью: высота режима + высота узла (3-я координата).
+        // На глобусе откладывается вдоль местной нормали, на плоскости — по Y.
+        let lift = this._altitude + this._nodeHeight;
 
-        const worldPos = new THREE.Vector3(worldX, worldY + wgPos.y, worldZ);
+        if (this._altitudeMode === 'clampToGround') {
+            const now = performance.now();
+            if (now - this._lastHeightUpdateTime > 500) {
+                map.ensureTileForPoint(surfacePoint.x, surfacePoint.z);
+                this._cachedWorldY = map.getSurfaceHeightAt(surfacePoint.x, surfacePoint.z);
+                this._lastHeightUpdateTime = now;
+            }
+            lift += this._cachedWorldY;
+        }
+
+        if (map.globe) {
+            if (lift) map.projectSurfacePoint(this._coord, this._crs, lift, wp);
+        } else {
+            wp.y = lift;
+        }
+
+        const worldPos = wp;
 
         if (map.view.objectRenderDistanceFactor > 0) {
             const dist = map.camera.position.distanceTo(worldPos);
@@ -601,6 +604,14 @@ export class Marker extends SpatialObject implements GeoJSONExportable {
                 this._applyHidden();
                 return;
             }
+        }
+
+        // Глобус: точка на обратной стороне Земли не должна показываться —
+        // ни иконка, ни подпись (TextManager ориентируется на isVisible()).
+        if (map.globe && typeof map.isWorldPointOccluded === 'function'
+            && map.isWorldPointOccluded(worldPos)) {
+            this._applyHidden();
+            return;
         }
 
         const screenPos = worldPos.clone().project(map.camera);

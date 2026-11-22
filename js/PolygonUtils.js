@@ -9,6 +9,57 @@ export const POLYGON_RENDER_ORDER = {
 export const INVALID_EDGE_FRACTION = 8;
 export const DEFAULT_FILL_PATTERN_SCALE = 64;
 export const REBUILD_DEBOUNCE_MS = 60;
+/**
+ * Геодезическая интерполяция между двумя точками поверхности.
+ *
+ * На плоскости — линейная (обратная совместимость: результат совпадает с
+ * прежним `lerp` по worldCoords).
+ * На глобусе — проверка «дороже порога?» идёт по углу между
+ * направлениями из центра Земли; промежуточные точки берутся сферической
+ * интерполяцией (slerp) и нормируются на радиус поверхности, поэтому
+ * дуга идёт по эллипсоиду, а не хордой сквозь него.
+ *
+ * @param t  0…1
+ * @param a,b мировые точки (см. WorldPoint3)
+ * @param R  радиус эллипсоида (world). Плоскому режиму не нужен.
+ */
+export function interpolateSurface(a, b, t, R) {
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const la = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    const lb = Math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    // Плоский мир (или вырожденные входы) — линейная интерполяция.
+    if (!(R > 0) || !(la > 1e-6) || !(lb > 1e-6)) {
+        return { x: a.x + dx * t, y: a.y + dy * t, z: a.z + dz * t };
+    }
+    // Угол между направлениями из центра — «цена» хорды.
+    const cosA = Math.max(-1, Math.min(1, (a.x * b.x + a.y * b.y + a.z * b.z) / (la * lb)));
+    const omega = Math.acos(cosA);
+    if (!(omega > 1e-9))
+        return { x: a.x + dx * t, y: a.y + dy * t, z: a.z + dz * t };
+    const sinO = Math.sin(omega);
+    const wa = Math.sin((1 - t) * omega) / sinO;
+    const wb = Math.sin(t * omega) / sinO;
+    const x = a.x * wa + b.x * wb;
+    const y = a.y * wa + b.y * wb;
+    const z = a.z * wa + b.z * wb;
+    const len = Math.sqrt(x * x + y * y + z * z);
+    // Радиус — линейно между фактическими |a| и |b| (учитывает высоты).
+    const r = la + (lb - la) * t;
+    const k = len > 1e-9 ? r / len : 1;
+    return { x: x * k, y: y * k, z: z * k };
+}
+/**
+ * Угол (рад) между направлениями из центра Земли на две точки.
+ * Для плоского режима возвращает NaN — вызывающий использует длину хорды.
+ */
+export function centralAngle(a, b) {
+    const la = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    const lb = Math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    if (!(la > 1e-6) || !(lb > 1e-6))
+        return NaN;
+    const c = (a.x * b.x + a.y * b.y + a.z * b.z) / (la * lb);
+    return Math.acos(Math.max(-1, Math.min(1, c)));
+}
 // =====================================================================
 // Pure helpers
 // =====================================================================

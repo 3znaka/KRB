@@ -16,6 +16,15 @@ const MAX_TEXTURE_LOADS = 6;
 const STABILITY_DELAY_MS = 400;
 const ZOOM_STABLE_EPSILON = 0.001;
 const RAPID_ZOOM_GAP = 2;
+// Бюджет тайлов в видимом наборе для глобуса (см. _updateGlobe).
+const GLOBE_MAX_VISIBLE_TILES = 700;
+// Насколько уровней максимум разрешено «сгрубить» LOD, если видимый
+// набор не влезает в бюджет.
+const GLOBE_MAX_LOD_DROP = 3;
+
+// Temps для конуса взгляда глобуса (без аллокаций на кадр).
+const _globeViewDir = new THREE.Vector3();
+const _globeInvMatrix = new THREE.Matrix4();
 
 // Горизонтное расширение применяется только при stable-камере
 // и ограничено — иначе AABB разрастается в разы и мы тонем в lookup'ах.
@@ -1093,19 +1102,19 @@ if (isDeformed) {
     this.frame++;
 
     const prevIdealZ = this._lastIdealZ;
-    let idealZ = Math.max(0, this._liveIdealZ());
-    if (idealZ !== prevIdealZ) {
-        this._zoomOut = idealZ < prevIdealZ;
-        this._lastIdealZ = idealZ;
-    }
-    const zoomOut = !!this._zoomOut;
+    // «Живой» уровень по зуму — до возможного LOD-фолбэка.
+    const liveIdealZ = Math.max(0, this._liveIdealZ());
+    let idealZ = liveIdealZ;
 
     const targetCont = this.engine.targetContinuousZoom ?? continuousZoom;
     const _layerOffset = this.layer?.zoomOffset ?? 0;
     const _minNZ = this.layer?.minNativeZoom ?? 0;
     const _maxNZ = this.layer?.maxNativeZoom ?? this.engine.MAX_ZOOM;
     const targetZ = Math.max(_minNZ, Math.min(_maxNZ, Math.round(targetCont + _layerOffset)));
-    const rapidZoom = Math.abs(targetZ - idealZ) >= RAPID_ZOOM_GAP;
+    // rapidZoom — про активный зум пользователя, а не про бюджет тайлов,
+    // поэтому считается по живому уровню (иначе LOD-фолбэк сам себя
+    // «запирал»: rapidZoom=true и ни один тайл не грузился).
+    const rapidZoom = Math.abs(targetZ - liveIdealZ) >= RAPID_ZOOM_GAP;
 
     // Камера → локальные координаты worldGroup (у нас identity, но так общее).
     const camLocal = this._tmpCam || (this._tmpCam = new THREE.Vector3());
@@ -1114,16 +1123,43 @@ if (isDeformed) {
 
     const tileCrs = this._layerCrs;
 
+    // ── Конус взгляда в локальном СК worldGroup ──────────────────────
+    // Без него GlobeSurface ограничивался только горизонтом: для камеры
+    // у поверхности это почти полушарие, диапазон упирался в MAX_SPAN
+    // (128×128), и LOD-фолбэк ниже уезжал на несколько уровней вниз.
+    _globeViewDir.set(0, 0, -1);
+    camera.getWorldDirection(_globeViewDir);
+    if (this.engine.worldGroup) {
+        _globeInvMatrix.copy(this.engine.worldGroup.matrixWorld).invert();
+        _globeViewDir.transformDirection(_globeInvMatrix).normalize();
+    }
+    const view = { dir: _globeViewDir, fovY: camera.fov, aspect: camera.aspect };
+
     // Страховка от лавины: если диапазон слишком широкий — временно грубее LOD.
-    let ranges = null, tries = 0;
-    while (tries++ < 4) {
-        ranges = this.engine.surface.visibleTileRanges(camLocal, idealZ, tileCrs);
-        if (!ranges) break;
+    //
+    // ВАЖНО: ranges пересчитываются на КАЖДОМ шаге, поэтому после выхода
+    // из цикла они всегда соответствуют текущему idealZ. В прежней версии
+    // диапазоны считались для старого z (например, для 11), а idealZ
+    // уменьшался до 7 — индексы тайлов оказывались вне [0, n-1], все
+    // отбраковывались, и глобус при zoom > 10 становился белым.
+    let ranges = null;
+    for (let drop = 0; ; drop++) {
+        ranges = this.engine.surface.visibleTileRanges(camLocal, idealZ, tileCrs, view);
+        if (!ranges || !ranges.length || idealZ <= 0 || drop >= GLOBE_MAX_LOD_DROP) break;
         let total = 0;
         for (const r of ranges) total += (r.xMax - r.xMin + 1) * (r.yMax - r.yMin + 1);
-        if (total <= 700 || idealZ <= 0) break;
+        if (total <= GLOBE_MAX_VISIBLE_TILES) break;
         idealZ--;
     }
+
+    // Синхронизируем bookkeeping с фактически отрисованным уровнем
+    // (после возможного LOD-фолбэка): _lastIdealZ участвует в проверках
+    // «протухших» текстурных загрузок, и рассинхрон с реально
+    // запрошенными тайлами приводил к их выбрасыванию из очереди.
+    this._zoomOut = idealZ < prevIdealZ;
+    this._lastIdealZ = idealZ;
+    const zoomOut = !!this._zoomOut;
+
     if (!ranges || !ranges.length) {
         if (this._visibleKeysPrev) {
             for (const k of this._visibleKeysPrev) {
@@ -1162,9 +1198,11 @@ if (isDeformed) {
         }
         order.sort((a, b) => a.d - b.d);
 
+        const n = 1 << idealZ;
         for (const { vx, y } of order) {
+            // Страховка: диапазон обязан лежать в сетке текущего уровня.
+            if (vx < 0 || vx >= n || y < 0 || y >= n) continue;
             // --- FRUSTUM CULLING ---
-            const n = 1 << idealZ;
             const tileCenterX = ((vx + 0.5) / n) * 2 * tileCrs.halfExtentX - tileCrs.halfExtentX;
             const tileCenterY = tileCrs.halfExtentY - ((y + 0.5) / n) * 2 * tileCrs.halfExtentY;
             const lonLat = tileCrs.toLonLat([tileCenterX, tileCenterY]);

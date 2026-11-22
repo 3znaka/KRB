@@ -186,15 +186,42 @@ raycast(raycaster, out, worldGroup = null) {
      *
      * @returns массив { xMin, xMax, yMin, yMax, cxTile, cyTile } | null
      */
-    visibleTileRanges(camLocal, z, tileCrs) {
-        const dist = camLocal.length();
-        if (!Number.isFinite(dist) || dist < 1) return null;
+visibleTileRanges(camLocal, z, tileCrs, view = null) {
+    const dist = camLocal.length();
+    if (!Number.isFinite(dist) || dist < 1) return null;
+    const geo = ecefToGeodetic(camLocal.x, -camLocal.z, camLocal.y, this.ellipsoid);
+    if (!Number.isFinite(geo.lon) || !Number.isFinite(geo.lat)) return null;
 
-        const geo = ecefToGeodetic(camLocal.x, -camLocal.z, camLocal.y, this.ellipsoid);
-        if (!Number.isFinite(geo.lon) || !Number.isFinite(geo.lat)) return null;
+    const R = this.b;                                    // минимальный радиус — консервативно
+    let gamma = Math.acos(Math.min(1, R / dist));        // горизонт (как было)
 
-        const gamma = Math.acos(Math.min(1, this.b / dist));
-        const gDeg = gamma * RAD;
+    // ── NEW: дальше внешней образующей конуса взгляда ничего не видно ──
+    if (view) {
+        const { dir, fovY, aspect } = view;              // dir — единичный forward в local СК
+        _v1.copy(camLocal).divideScalar(dist);           // n = подкамерное направление
+        const cosA = Math.max(-1, Math.min(1, -_v1.dot(dir)));
+        const alpha = Math.acos(cosA);                   // угол «взгляд ↔ вниз»
+        const ty = Math.tan(fovY * DEG / 2);
+        const theta = Math.atan(Math.hypot(ty, ty * aspect));  // half-diagonal FOV
+        const psi = alpha + theta;
+        if (psi < Math.PI / 2) {
+            const s = dist * Math.sin(psi);
+            if (s < R) {
+                const t = dist * Math.cos(psi) - Math.sqrt(R * R - s * s);
+                if (t > 0) {
+                    // asin, не acos — устойчиво при малых γ.
+                    // Запас ТОЛЬКО относительный (5%): абсолютный +0.2°
+                    // на больших z раздувал бокс на десятки тайлов
+                    // (угловой размер тайла ~ 360°/2^z), из-за чего
+                    // LOD-фолбэк срабатывал всегда и картинка грубела.
+                    const gView = Math.asin(Math.min(1, (t * Math.sin(psi)) / R));
+                    gamma = Math.min(gamma, gView * 1.05);
+                }
+            }
+        }
+    }
+
+    const gDeg = gamma * RAD;
 
         const n = 1 << z;
         const hx = tileCrs.halfExtentX, hy = tileCrs.halfExtentY;
@@ -210,28 +237,36 @@ raycast(raycaster, out, worldGroup = null) {
         };
 
         // ── широтный диапазон ──
-        let latMin = geo.lat - gDeg;
-        let latMax = geo.lat + gDeg;
+        // Широту подкамерной точки сразу ограничиваем доменом сетки:
+        // выше maxLatDeg тайлов нет. Без этого при |lat| > maxLatDeg
+        // (глобус позволяет увести камеру почти на полюс) получалось
+        // latMin > latMax → пустой диапазон → полностью белый экран.
+        const mLat = tileCrs.maxLatDeg;
+        const lat0 = mLat != null
+            ? Math.max(-mLat, Math.min(mLat, geo.lat))
+            : geo.lat;
+        let latMin = lat0 - gDeg;
+        let latMax = lat0 + gDeg;
         let fullLon = gDeg >= 180 || latMin <= -90 || latMax >= 90;
         latMin = Math.max(-90, latMin);
         latMax = Math.min(90, latMax);
-        const mLat = tileCrs.maxLatDeg;
         if (mLat != null) {
             if (latMin < -mLat) latMin = -mLat;
             if (latMax > mLat) latMax = mLat;
         }
-        if (latMax <= latMin) return null;
+        if (latMax < latMin) return null;
 
         // ── долготный диапазон ──
         let lonMin = -180, lonMax = 180;
         if (!fullLon) {
             const sinG = Math.sin(gamma);
-            const cosLat0 = Math.cos(geo.lat * DEG);
+            const cosLat0 = Math.cos(lat0 * DEG);
             if (sinG >= cosLat0) {
                 fullLon = true;      // колпак накрывает полюс
             } else {
-                // Δλ = asin(sin γ / cos φ0); ×1.02 + 0.5° — страховочный запас.
-                const dLon = Math.asin(Math.min(1, sinG / cosLat0)) * RAD * 1.02 + 0.5;
+                // Δλ = asin(sin γ / cos φ0) — точная полуширина бокса
+                // (проверено численно по границе колпака); ×1.02 — запас.
+                const dLon = Math.asin(Math.min(1, sinG / cosLat0)) * RAD * 1.02;
                 lonMin = geo.lon - dLon;
                 lonMax = geo.lon + dLon;
                 if (lonMax - lonMin >= 360) fullLon = true;
@@ -243,8 +278,19 @@ raycast(raycaster, out, worldGroup = null) {
         const yMin = Math.max(0, Math.floor(yOfLat(latMax)) - PAD);
         const yMax = Math.min(n - 1, Math.floor(yOfLat(latMin)) + PAD);
         const cxTile = xOfLon(geo.lon);
-        const cyTile = Math.max(0, Math.min(n - 1, yOfLat(geo.lat)));
-        const mk = (xMin, xMax) => ({ xMin, xMax, yMin, yMax, cxTile, cyTile });
+        const cyTile = Math.max(0, Math.min(n - 1, yOfLat(lat0)));
+ const MAX_SPAN = 128;
+    const clampSpan = (lo, hi, c) => {
+        if (hi - lo + 1 <= MAX_SPAN) return [lo, hi];
+        let a = Math.round(c) - (MAX_SPAN >> 1);
+        a = Math.max(lo, Math.min(a, hi - MAX_SPAN + 1));
+        return [a, a + MAX_SPAN - 1];
+    };
+    const mk = (xMin, xMax) => {
+        const [xa, xb] = clampSpan(xMin, xMax, cxTile);
+        const [ya, yb] = clampSpan(yMin, yMax, cyTile);
+        return { xMin: xa, xMax: xb, yMin: ya, yMax: yb, cxTile, cyTile };
+    };
 
         if (fullLon) return [mk(0, n - 1)];
 

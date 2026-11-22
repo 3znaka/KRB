@@ -409,8 +409,9 @@ onWheel(e: WheelEvent) {
 
     const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
 
-    // запоминаем точку-пивот для zoom-to-cursor
-    this._zoomPivotActive = !this.globe; 
+    // запоминаем точку-пивот для zoom-to-cursor: работает и на плоской
+    // карте, и на глобусе (там камера доворачивается, а не сдвигается мир)
+    this._zoomPivotActive = true;
     this._zoomPivotX = e.clientX;
     this._zoomPivotY = e.clientY;
 
@@ -735,17 +736,6 @@ onTouchMove(e: TouchEvent) {
     if (this.touchState.isPinching && e.touches.length === 2) {
         e.preventDefault();
 
-if (this.globe) {
-    e.preventDefault();
-    const t = e.touches[0];
-    const dx = t.clientX - this._globeLastX;
-    const dy = t.clientY - this._globeLastY;
-    this._globeLastX = t.clientX;
-    this._globeLastY = t.clientY;
-    if (dx !== 0 || dy !== 0) this._globeOrbit(dx, dy);
-    return;
-}
-
         const ts = this.touchState;
         const t0 = this.findTouchById(e.touches, ts.id0);
         const t1 = this.findTouchById(e.touches, ts.id1);
@@ -760,13 +750,25 @@ if (this.globe) {
         if (curDist < 1e-3) return;
 
 if (this.globe) {
+    // Pinch: зум «от середины пальцев» + панорама по движению середины.
+    // Пивот для zoom-to-cursor — средняя точка касаний.
+    this._zoomPivotActive = true;
+    this._zoomPivotX = midX;
+    this._zoomPivotY = midY;
     const zd = Math.log2(curDist / ts.prevDist);
     if (isFinite(zd) && zd !== 0) this.applyZoomDelta(zd);
+
     const mdx = midX - ts.prevMidX;
     const mdy = midY - ts.prevMidY;
     ts.prevDist = curDist; ts.prevAngle = curAngle;
     ts.prevMidX = midX;    ts.prevMidY = midY;
-    if (mdx !== 0 || mdy !== 0) this._globeOrbit(mdx, mdy);
+    if (mdx !== 0 || mdy !== 0) {
+        // _globeOrbit меряет лучи от _globeLastX/Y — это должна быть
+        // ПРЕДЫДУЩАЯ середина, иначе жест «съезжает» на величину шага.
+        this._globeLastX = midX - mdx;
+        this._globeLastY = midY - mdy;
+        this._globeOrbit(mdx, mdy);
+    }
     return;
 }
 

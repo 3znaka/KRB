@@ -1,6 +1,11 @@
 // CoreCamera.ts
 import { THREE, OrbitControls } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
+// ── Zoom-to-cursor для глобуса: temps без аллокаций на кадр ──
+const _pivotQ = new THREE.Quaternion();
+const _pivotA = new THREE.Vector3();
+const _pivotB = new THREE.Vector3();
+const _pivotZero = new THREE.Vector3();
 export const CoreCameraMixin = {
     setAllowPitch(v) {
         this.allowPitch = v;
@@ -357,7 +362,104 @@ export const CoreCameraMixin = {
             this.camera.setViewOffset(W, H, -dx, -dy, W, H);
         }
     },
-    getTargetDistanceForZoom(z) {
+    /**
+     * Широта точки под камерой (град): полярный угол вектора
+     * «target → camera». В режиме глобуса камера смотрит в центр Земли,
+     * поэтому это ровно центр экрана; используется для калибровки высоты.
+     */
+    _globeSubCameraLat() {
+        const cam = this.camera;
+        if (!cam)
+            return 0;
+        const tgt = this.controls?.target;
+        const dx = cam.position.x - (tgt ? tgt.x : 0);
+        const dy = cam.position.y - (tgt ? tgt.y : 0);
+        const dz = cam.position.z - (tgt ? tgt.z : 0);
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!(len > 1e-9))
+            return 0;
+        const s = Math.max(-1, Math.min(1, dy / len));
+        return (Math.asin(s) * 180) / Math.PI;
+    },
+    /**
+     * Широта, по которой калибруется высота глобуса. Поправка cos φ — это
+     * масштабный коэффициент Web Mercator (1/cos φ), поэтому применяем её
+     * только к меркаторским сеткам тайлов; для остальных CRS оставляем 1,
+     * чтобы не менять прежнее поведение.
+     */
+    _globeLatScale(latDeg) {
+        const crs = this.tileCRS ?? this.projection;
+        if (!crs || crs.isMercator !== true)
+            return 1;
+        const mLat = crs.maxLatDeg;
+        const lat = mLat != null
+            ? Math.max(-mLat, Math.min(mLat, latDeg))
+            : Math.max(-90, Math.min(90, latDeg));
+        return Math.max(1e-4, Math.cos((lat * Math.PI) / 180));
+    },
+    /**
+     * Zoom-to-cursor для глобуса: доворачивает камеру вокруг центра Земли
+     * так, чтобы точка P_before (та, что была под курсором ДО изменения
+     * дистанции) снова оказалась под курсором (sx, sy).
+     *
+     * Итеративно: минимальный поворот переводит текущую точку под курсором
+     * в P_before; жёсткий доворот камеры сохраняет пиксель, после чего крен
+     * восстанавливается по мировой оси Y (север сверху). Возврат крена даёт
+     * ошибку первого порядка, поэтому шаг повторяется 2–4 раза — за это
+     * время ошибка падает до долей пикселя (см. проверку сходимости).
+     * Дистанция пересчитывается под новую широту (h·cos φ).
+     */
+    _globeZoomToPivot(P_before, sx, sy) {
+        const cam = this.camera;
+        if (!P_before || !cam)
+            return false;
+        const center = this.controls?.target ?? _pivotZero;
+        const el = this.renderer?.domElement;
+        const W = el ? el.clientWidth : 0;
+        const H = el ? el.clientHeight : 0;
+        if (!(W > 0 && H > 0))
+            return false;
+        let moved = false;
+        for (let iter = 0; iter < 4; iter++) {
+            // Где сейчас проецируется наша точка?
+            _pivotA.copy(P_before).project(cam);
+            const errX = (_pivotA.x + 1) * 0.5 * W - sx;
+            const errY = (1 - _pivotA.y) * 0.5 * H - sy;
+            if (Math.sqrt(errX * errX + errY * errY) < 0.1)
+                break;
+            // Что под курсором сейчас?
+            const P_after = this._raycastToGround(sx, sy, this._tempVec3b);
+            if (!P_after)
+                break;
+            _pivotA.copy(P_after).sub(center);
+            _pivotB.copy(P_before).sub(center);
+            const la = _pivotA.length();
+            const lb = _pivotB.length();
+            if (!(la > 1e-6) || !(lb > 1e-6))
+                break;
+            _pivotA.divideScalar(la);
+            _pivotB.divideScalar(lb);
+            _pivotQ.setFromUnitVectors(_pivotA, _pivotB);
+            if (!Number.isFinite(_pivotQ.x) || !Number.isFinite(_pivotQ.w))
+                break;
+            cam.position.sub(center).applyQuaternion(_pivotQ).add(center);
+            // Дистанция зависит от широты (h·cos φ) — выставляем под новую.
+            _pivotA.copy(cam.position).sub(center);
+            const dl = _pivotA.length();
+            if (dl > 1e-9) {
+                const dist = this.getTargetDistanceForZoom(this.continuousZoom, this._globeSubCameraLat());
+                cam.position.copy(center).addScaledVector(_pivotA.divideScalar(dl), dist);
+            }
+            cam.up.set(0, 1, 0);
+            cam.lookAt(center);
+            cam.updateMatrixWorld(true);
+            moved = true;
+        }
+        if (moved)
+            this.controls?.update?.();
+        return moved;
+    },
+    getTargetDistanceForZoom(z, latDeg) {
         const canvas = this.renderer?.domElement;
         const H = canvas ? canvas.clientHeight : 0;
         const fov = this.camera?.fov ?? 45;
@@ -369,14 +471,34 @@ export const CoreCameraMixin = {
             const tanHalfFov = Math.tan((fov * Math.PI) / 360);
             h = (this.WORLD_SIZE / Math.pow(2, z)) * H / (2 * this.TILE_PIXELS * tanHalfFov);
         }
-        // Для глобуса дистанция до центра = R + высота над поверхностью
-        return this.globe ? this.R + h : h;
+        if (!this.globe)
+            return h;
+        // ── Глобус: высота = «плоское» h, поправленное на масштаб проекции
+        // под камерой. ──────────────────────────────────────────────────
+        // В Web Mercator тайл z-уровня на широте φ покрывает
+        // WORLD_SIZE/2^z · cos φ метров ЗЕМЛИ (проекция растягивает высокие
+        // широты), а на глобусе он лежит на сфере в своём истинном размере.
+        // Поэтому при постоянной высоте глобус на широте Москвы показывает
+        // в 1/cos φ ≈ 1.8 раза больше площади, чем плоская карта на том же
+        // зуме. Чтобы «метров на пиксель» совпадали (как в Mapbox:
+        // metersPerPixel = cos φ · C / (2^z · tileSize)), высота должна быть
+        // h · cos φ — у полюсов камера садится ниже.
+        const lat = latDeg ?? this._globeSubCameraLat();
+        return this.R + h * this._globeLatScale(lat);
     },
     getZoomForDistance(d) {
         if (!(d > 0) || !isFinite(d))
             return this.continuousZoom;
-        // Для глобуса d — это дистанция до центра, вычитаем радиус
-        const h = this.globe ? Math.max(1, d - this.R) : d;
+        let h;
+        if (this.globe) {
+            // Для глобуса d — дистанция до центра Земли; переводим её в
+            // «эквивалентную плоскую» высоту, отменяя поправку cos φ.
+            const cosLat = this._globeLatScale(this._globeSubCameraLat());
+            h = Math.max(1, (d - this.R) / cosLat);
+        }
+        else {
+            h = d;
+        }
         const canvas = this.renderer?.domElement;
         const H = canvas ? canvas.clientHeight : 0;
         const fov = this.camera?.fov ?? 45;
@@ -785,7 +907,13 @@ export const CoreCameraMixin = {
         }
         const zoomDiff = Math.abs(this.continuousZoom - this.targetContinuousZoom);
         const zoomActive = zoomDiff > 0.0005; // ← добавлено
-        const pivotActive = this._zoomPivotActive && zoomActive && !this.globe;
+        // Пивот доживает до кадра, в котором зум уже «доехал» (zoomDiff ≈ 0):
+        // на нём дистанция делает последний шаг, и без ещё одной коррекции
+        // точка под курсором уезжает на доли пикселя. Снимаем флаг в конце
+        // кадра, чтобы он не «прилип» к следующему зуму (например, кнопкой UI).
+        // Пивот работает и в плоском режиме (сдвиг worldGroup), и на глобусе
+        // (доворот камеры вокруг центра Земли) — см. коррекцию ниже.
+        const pivotActive = this._zoomPivotActive && (zoomActive || zoomDiff < 0.001);
         this.camera.updateMatrixWorld(true);
         let P_before = null;
         let pivotSx = 0, pivotSy = 0;
@@ -805,7 +933,11 @@ export const CoreCameraMixin = {
         // КЛЮЧЕВОЕ: если зум не активен — стартуем с текущего расстояния,
         // чтобы _resolveCameraPlacement только приподнимал над рельефом,
         // но не «сдёргивал» камеру назад к desiredDist каждый кадр.
-        const desiredDist = zoomActive
+        //
+        // Для глобуса высота зависит не только от зума, но и от широты под
+        // камерой (h·cos φ), поэтому её надо пересчитывать каждый кадр:
+        // иначе после перетаскивания на другую широту масштаб «уезжает».
+        const desiredDist = (zoomActive || this.globe)
             ? this.getTargetDistanceForZoom(this.continuousZoom)
             : d0;
         this._resolveCameraPlacement(target, desiredDist, pitch, azimuth, this._tempPlacementOut);
@@ -813,22 +945,31 @@ export const CoreCameraMixin = {
         this.camera.lookAt(target);
         this.camera.updateMatrixWorld(true);
         if (pivotActive && P_before) {
-            const P_after = this._raycastToGround(pivotSx, pivotSy, this._tempVec3b);
             let shiftX = 0, shiftZ = 0;
-            if (P_after) {
-                shiftX = P_after.x - P_before.x;
-                shiftZ = P_after.z - P_before.z;
-                this.worldGroup.position.x += shiftX;
-                this.worldGroup.position.z += shiftZ;
-                // worldGroup changed — invalidate cached bounds check
-                this._lastBoundsCheck = null;
+            if (this.globe) {
+                // Глобус: не сдвигаем мир (он прибит к центру Земли в
+                // worldGroup), а доворачиваем камеру так, чтобы точка под
+                // курсором осталась под курсором.
+                this._globeZoomToPivot(P_before, pivotSx, pivotSy);
+            }
+            else {
+                const P_after = this._raycastToGround(pivotSx, pivotSy, this._tempVec3b);
+                if (P_after) {
+                    shiftX = P_after.x - P_before.x;
+                    shiftZ = P_after.z - P_before.z;
+                    this.worldGroup.position.x += shiftX;
+                    this.worldGroup.position.z += shiftZ;
+                    // worldGroup changed — invalidate cached bounds check
+                    this._lastBoundsCheck = null;
+                }
             }
             if (window.__krbDebugZoom) {
                 console.log('[zoom] z=%s dist=%s shift=(%s,%s) frameDt=%s', this.continuousZoom.toFixed(3), this.camera.position.distanceTo(this.controls.target).toFixed(1), shiftX.toFixed(3), shiftZ.toFixed(3), (this._currentDeltaTime * 1000).toFixed(1));
             }
-            if (zoomDiff < 0.001)
-                this._zoomPivotActive = false;
         }
+        // Зум доехал — точка привязки больше не нужна.
+        if (!zoomActive)
+            this._zoomPivotActive = false;
     },
     applyZoomDelta(delta) {
         this.targetContinuousZoom += delta;

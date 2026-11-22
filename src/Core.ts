@@ -542,11 +542,19 @@ if (this.globe) {
     this.controls.maxDistance = this.R + 50000000;
     this.camera.up.set(0, 1, 0);
 
-    // камера на орбите над view.center
-    const [lon0, lat0] = this.projection.toLonLat([cx, cz]);
+    // Камера на орбите над view.center.
+    // ВАЖНО: view.center хранит ПЛОСКИЕ world-координаты [x, z], где
+    // z = -y (см. _resolveViewCenter/projectLonLat). Поэтому в toLonLat
+    // y надо передавать как -cz; старый вызов toLonLat([cx, cz])
+    // переворачивал широту (Москва → 56.75° ю.ш.).
+    const [lon0, lat0] = this.view.centerLonLat
+        ?? this.projection.toLonLat([cx, -cz]);
     const dir = this.surface.position(lon0, lat0, 0, this._tempVec3a).normalize();
     this.camera.position.copy(
-        dir.multiplyScalar(this.getTargetDistanceForZoom(this.view.zoom))
+        // Высота калибруется по широте центра (h·cos φ — см.
+        // getTargetDistanceForZoom), поэтому lat0 передаём явно:
+        // камеры ещё нет и _globeSubCameraLat() вернул бы 0.
+        dir.multiplyScalar(this.getTargetDistanceForZoom(this.view.zoom, lat0))
     );
 } else {
     // Старый плоский путь

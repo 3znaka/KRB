@@ -853,7 +853,12 @@ setNodeHeight(height: number): this {
             this._mixer.update(delta);
         }
 
-        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, this._worldPosition);
+        // ВАЖНО: объект лежит в worldGroup, который сам смещается при панораме.
+        // Поэтому берём ЛОКАЛЬНЫЕ координаты группы (origin = worldGroup),
+        // иначе сдвиг мира применился бы дважды.
+        const wg = map.worldGroup ? map.worldGroup.position : { x: 0, y: 0, z: 0 };
+        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, this._worldPosition,
+            wg);
         if (!surfacePoint) {
             this._applyHidden();
             this._isVisible = false;
@@ -871,14 +876,14 @@ if (this._altitudeMode === 'clampToGround') {
         this._lastHeightUpdateTime = now;
     }
     if (map.globe) {
-        map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition);
+        map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition, wg);
         worldY = this._worldPosition.y;
     } else {
         worldY = this._cachedWorldY + this._altitude;
     }
 } else if (map.globe) {
     map.projectSurfacePoint(this._coord, this._crs,
-        this._altitude + this._nodeHeight, this._worldPosition);
+        this._altitude + this._nodeHeight, this._worldPosition, wg);
     worldY = this._worldPosition.y;
 } else {
     worldY = this._altitude + this._nodeHeight;

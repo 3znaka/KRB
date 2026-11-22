@@ -35,7 +35,7 @@ export interface CoreCoordinatesMethods {
      * на глобусе — точка эллипсоида (ECEF-подобные world-оси).
      * `height` — высота над поверхностью вдоль местной нормали.
      */
-    projectSurfacePoint(coord: number[], fromCrs: any, height: number, out: any): any | null;
+    projectSurfacePoint(coord: number[], fromCrs: any, height: number, out: any, origin?: any): any | null;
     /** Обратное к projectSurfacePoint: мировые координаты → [lon, lat]. */
     surfacePointToLonLat(worldPoint: any): [number, number] | null;
     /** Мировые координаты → точка под ними у поверхности (для hit-тестов). */
@@ -61,16 +61,31 @@ export const CoreCoordinatesMixin: CoreCoordinatesMethods & ThisType<KrbMap> = {
 /**
  * Перевод (coord в произвольной СК, высота) → мировая точка сцены.
  *
- * Плоский режим — прежнее поведение: (x, height, -y).
- * Глобус — точка эллипсоида через GlobeSurface.position, высота идёт
- * вдоль геодезической нормали, т.е. «над точкой», а не «над плоскостью».
+ * Плоский режим — (x, height, z) ПЛЮС сдвиг worldGroup (карта панорамируется
+ * сдвигом группы), т.е. реальная мировая позиция.
+ * Глобус — точка эллипсоида через GlobeSurface.position, высота идёт вдоль
+ * геодезической нормали.
+ *
+ * `origin` — если задан, из результата вычитается он (для объектов,
+ * лежащих ВНУТРИ worldGroup: их локальные координаты не должны включать
+ * сдвиг мира).
  */
-projectSurfacePoint(coord, fromCrs, height, out) {
+projectSurfacePoint(coord, fromCrs, height, out, origin?) {
     const h = Number.isFinite(height) ? height : 0;
+    const originX = origin ? origin.x : 0;
+    const originY = origin ? origin.y : 0;
+    const originZ = origin ? origin.z : 0;
+
     if (!this.globe || !this.surface) {
         const [x, z] = this.project(coord, fromCrs ?? this.inputCRS);
         if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
-        return out.set(x, h, z);
+        // ПЛОСКИЙ режим: карта живёт в worldGroup, который панорамируется.
+        const wg = this.worldGroup ? this.worldGroup.position : null;
+        return out.set(
+            x + (wg ? wg.x : 0) - originX,
+            h + (wg ? wg.y : 0) - originY,
+            z + (wg ? wg.z : 0) - originZ,
+        );
     }
     // На глобусе: любую координату приводим к lon/lat и кладём на эллипсоид.
     const crs = fromCrs
@@ -120,13 +135,8 @@ projectSurfaceVertex(coord, fromCrs, height, origin, out) {
     const originY = origin ? origin.y : 0;
     const originZ = origin ? origin.z : 0;
 
-    if (!this.globe || !this.surface) {
-        const [x, z] = this.project(coord, fromCrs ?? this.inputCRS);
-        if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
-        return out.set(x - originX, h - originY, z - originZ);
-    }
-
-    // Мировая точка на поверхности + высота вдоль нормали.
+    // Обе ветки — через projectSurfacePoint, чтобы сдвиг мира
+    // (worldGroup.position) учитывался одинаково.
     const wp = this.projectSurfacePoint(coord, fromCrs, h, _occDir);
     if (!wp) return null;
     return out.set(wp.x - originX, wp.y - originY, wp.z - originZ);

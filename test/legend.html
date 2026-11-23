@@ -114,6 +114,7 @@ await KRB.addCrs(['ADPKP:0072']);
 
 const map = new KRB.Map({
     target: 'map',
+    globe: true,
     crs: 'ADPKP:0072',
     graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
     view: new KRB.View({
@@ -286,6 +287,24 @@ buttons.forEach(btn => {
 });
 
 setActiveButton(currentType);
+
+const rect = map.renderer.domElement.getBoundingClientRect();
+const x = 400, y = 300; // <- точка клика (канвас-координаты)
+const ndc = new map.constructor === undefined ? null : null;
+const ndcX = (x / rect.width) * 2 - 1, ndcY = -(y / rect.height) * 2 + 1;
+const rc = map._tempRaycaster;
+rc.setFromCamera({ x: ndcX, y: ndcY }, map.camera);
+const out = [];
+for (const e of map.interaction._entries) {
+  if (!e.getMeshes) continue;
+  const meshes = e.getMeshes();
+  if (!meshes.length) continue;
+  const bs = e.getBoundingSphere ? e.getBoundingSphere() : null;
+  const bsHit = bs ? rc.ray.intersectsSphere(new bs.center.constructor().copy(bs.center) && (() => { const s = new (rc.ray.origin.constructor)(); return bs; })()) : 'no-bs';
+  const triHits = rc.intersectObjects(meshes, false);
+  out.push({ obj: e.obj?.constructor?.name, bsRadius: bs?.radius, bsCenter: bs && [bs.center.x, bs.center.y, bs.center.z].map(v => +v.toFixed(0)), triHits: triHits.length, firstSide: triHits[0] ? (triHits[0].face && triHits[0].face.normal ? 'front/back?' : '?') : null });
+}
+console.table(out);
 
 
 

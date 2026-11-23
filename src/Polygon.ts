@@ -135,6 +135,10 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
 
     _boundingSphereRadius = 0;
     _boundingSphereWorldCenter: any;
+    // Глобус: временные объекты для мирового bounding sphere (без аллокаций на hit).
+    _globeBox: any = null;
+    _globeCorners: any[] | null = null;
+    _globeSize: any = null;
     _raycastMeshesCache: any[] | null = null;
 
     _heightsDirty = true;
@@ -524,8 +528,15 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         const callbacks: Record<string, any> = {
             getMeshes: () => this._getRaycastMeshes(),
             getBoundingSphere: () => {
-                if (this._boundingSphereRadius <= 0) return null;
                 const wgPos = map.worldGroup.position;
+                // Глобус: полигон лежит на эллипсоиде, а его плоский радиус и
+                // центр (_group.position = плоский centroid) не описывают 3D-
+                // геометрию. Используем реальный bounding sphere мешей в мире.
+                if (map.globe === true) {
+                    const bs = this._globeWorldBoundingSphere(wgPos);
+                    if (bs) return bs;
+                }
+                if (this._boundingSphereRadius <= 0) return null;
                 this._boundingSphereWorldCenter.set(
                     this._group.position.x + wgPos.x,
                     this._group.position.y + wgPos.y,
@@ -540,6 +551,47 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         if (this._onClick) callbacks.onClick = (e: MouseEvent) => this._onClick!(e, this);
 
         this._unregisterInteraction = map.interaction.register(this, callbacks);
+    }
+
+    /**
+     * @internal
+     * Глобус: bounding sphere полигона в МИРОВЫХ координатах по реальной
+     * геометрии мешей (а не по плоскому радиусу). Для каждого меша берём
+     * bounding sphere геометрии, переводим центр в мир через matrixWorld и
+     * расширяем радиус на масштаб матрицы. Объединяем в одну сферу.
+     */
+    _globeWorldBoundingSphere(wgPos: any): { center: any; radius: number } | null {
+        const meshes = this._getRaycastMeshes();
+        if (!meshes.length) return null;
+
+        const box = this._globeBox || (this._globeBox = new THREE.Box3());
+        box.makeEmpty();
+        for (const m of meshes) {
+            if (!m || !m.geometry) continue;
+            // Бокс — кэш; сбрасывается при смене позиций (см. PolygonUpdate).
+            if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+            const gb = m.geometry.boundingBox;
+            if (!gb) continue;
+            // Box в мировых координатах: 8 углов через matrixWorld.
+            m.updateMatrixWorld(true);
+            const corners = this._globeCorners || (this._globeCorners = new Array(8).fill(0).map(() => new THREE.Vector3()));
+            const mn = gb.min, mx = gb.max;
+            const xs = [mn.x, mx.x], ys = [mn.y, mx.y], zs = [mn.z, mx.z];
+            let k = 0;
+            for (const x of xs) for (const y of ys) for (const z of zs) {
+                corners[k++].set(x, y, z).applyMatrix4(m.matrixWorld);
+            }
+            for (const c of corners) box.expandByPoint(c);
+        }
+        if (box.isEmpty()) return null;
+
+        const center = this._boundingSphereWorldCenter;
+        box.getCenter(center);
+        // Радиус — половина диагонали мирового бокса: сфера гарантированно
+        // содержит все углы (а значит и всю геометрию полигона).
+        const size = box.getSize(this._globeSize || (this._globeSize = new THREE.Vector3()));
+        const radius = size.length() * 0.5;
+        return { center, radius };
     }
 
     /** @internal */

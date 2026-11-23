@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Globe polygon hit-test</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    #map { position: absolute; inset: 0; }
+    #debug {
+        position: absolute; top: 12px; left: 12px; z-index: 1000;
+        background: rgba(255,255,255,.95); border: 1px solid #ccc;
+        padding: 10px 12px; font: 12px/1.45 monospace; max-width: 480px;
+        max-height: 80vh; overflow: auto; white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="debug">Кликните или наведите на полигон.</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+import { THREE } from '../js/js_TP/tpb.js';
+
+const map = new KRB.Map({
+    target: 'map',
+    globe: true,
+    graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
+    view: new KRB.View({ centerLonLat: [10, 20], zoom: 2, minZoom: 0, maxZoom: 8 }),
+});
+
+// Один полигон: квадрат около Африки/Европы.
+const square = {
+    type: 'Feature',
+    properties: { name: 'test-square' },
+    geometry: {
+        type: 'Polygon',
+        coordinates: [[[-10, -10], [30, -10], [30, 30], [-10, 30], [-10, -10]]],
+    },
+};
+
+new KRB.GeoJSONLayer({
+    data: { type: 'FeatureCollection', features: [square] },
+    crs: 'EPSG:4326',
+    tooltipOnHover: true,
+    tooltip: (p) => `<b>${p.name}</b>`,
+}).addTo(map);
+
+// ── Дебаг: каждый шаг hit-теста, в читаемом виде ─────────────────
+const debugEl = document.getElementById('debug');
+const canvas = map.renderer.domElement;
+const sphere = new THREE.Sphere();
+
+function diagnose(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const px = clientX - rect.left, py = clientY - rect.top;
+    const ndc = new THREE.Vector2((px / rect.width) * 2 - 1, -(py / rect.height) * 2 + 1);
+
+    const rc = map._tempRaycaster;
+    rc.setFromCamera(ndc, map.camera);
+
+    const out = [
+        `click px = (${px.toFixed(0)}, ${py.toFixed(0)})`,
+        `camera   = (${map.camera.position.x.toFixed(0)}, ${map.camera.position.y.toFixed(0)}, ${map.camera.position.z.toFixed(0)})`,
+        '',
+    ];
+
+    let count = 0;
+    for (const entry of map.interaction._entries) {
+        const meshes = entry.getMeshes ? entry.getMeshes() : [];
+        if (!meshes.length) continue;
+        count++;
+
+        // Шаг 1 — broad-phase: тот же тест, что Interaction._collectMeshes.
+        const bs = entry.getBoundingSphere ? entry.getBoundingSphere() : null;
+        let broad = 'no sphere (always tested)';
+        if (bs) {
+            sphere.center.copy(bs.center);
+            sphere.radius = bs.radius;
+            broad = rc.ray.intersectsSphere(sphere)
+                ? 'PASS'
+                : 'CULLED  <-- луч проходит мимо сферы, треугольники не проверяются';
+        }
+
+        // Шаг 2 — точный raycast по треугольникам.
+        const hits = rc.intersectObjects(meshes, false);
+        const first = hits[0];
+        let face = '-';
+        if (first && first.face) {
+            const facing = rc.ray.direction.dot(first.face.normal) < 0;
+            face = facing ? 'front (виден)' : 'BACK (отбрасывается FrontSide)';
+        }
+
+        out.push(
+            `${entry.obj?.constructor?.name ?? 'entry'} #${count}`,
+            `  broad-phase : ${broad}`,
+            `  sphere r    : ${bs ? bs.radius.toFixed(0) : '-'}`,
+            `  triangles   : ${hits.length} hit(s)`,
+            `  first face  : ${face}`,
+            '',
+        );
+    }
+    if (!count) out.push('нет полигонов с мешами');
+    debugEl.textContent = out.join('\n');
+}
+
+canvas.addEventListener('click', (e) => diagnose(e.clientX, e.clientY));
+canvas.addEventListener('pointermove', (e) => { if (e.buttons === 0) diagnose(e.clientX, e.clientY); });
+</script>
+</body>
+</html>

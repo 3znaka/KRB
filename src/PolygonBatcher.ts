@@ -95,6 +95,10 @@ class BatchedGroup {
     private _boundingSphere: { center: any; radius: number } | null = null;
     /** РџРµСЂРµРёСЃРїРѕР»СЊР·СѓРµРјС‹Р№ РІРµРєС‚РѕСЂ РґР»СЏ getBoundingSphere (РјРёСЂ. РєРѕРѕСЂРґРёРЅР°С‚С‹). */
     private _boundingSphereWorldCenter: any = null;
+    // Глобус: кэш временных объектов для мирового bounding box (без аллокаций на hover).
+    private _globeBox: any = null;
+    private _globeCorner: any = null;
+    private _globeSize: any = null;
     private _minZoom = -Infinity;
     private _maxZoom = Infinity;
     /** Р Р°Р·РґРµР»СЏРµРјР°СЏ С‚РµРєСЃС‚СѓСЂР° РїР°С‚С‚РµСЂРЅР° вЂ” РІР»Р°РґРµР»РµС† PolygonBatcher. */
@@ -438,8 +442,32 @@ for (let r = 0; r < ringStarts.length; r++) {
             // worldGroup.position). РР·-Р·Р° СЌС‚РѕРіРѕ РєР°Р»Р»РёРЅРі Р»РѕРјР°Р»СЃСЏ
             // РїСЂРё РїР°РЅРѕСЂР°РјРёСЂРѕРІР°РЅРёРё (worldGroup СЃРґРІРёРіР°РµС‚СЃСЏ).
             getBoundingSphere: () => {
-                if (!this._boundingSphere) return null;
                 const wgPos = map.worldGroup.position;
+                // Глобус: геометрия на эллипсоиде — сфера по мировому боксу мешей
+                // (плоский anchor + bs.center не описывает 3D-положение).
+                if (map.globe === true && this.mesh) {
+                    const mesh = this.mesh;
+                    // Пересчёт каждый раз: позиции могут меняться (см. PolygonUpdate).
+                    mesh.geometry.computeBoundingBox();
+                    const gb = mesh.geometry.boundingBox;
+                    if (gb) {
+                        mesh.updateMatrixWorld(true);
+                        const box = this._globeBox || (this._globeBox = new THREE.Box3());
+                        const c = this._globeCorner || (this._globeCorner = new THREE.Vector3());
+                        box.makeEmpty();
+                        for (const x of [gb.min.x, gb.max.x]) for (const y of [gb.min.y, gb.max.y]) for (const z of [gb.min.z, gb.max.z]) {
+                            c.set(x, y, z).applyMatrix4(mesh.matrixWorld);
+                            box.expandByPoint(c);
+                        }
+                        if (!box.isEmpty()) {
+                            const center = this._boundingSphereWorldCenter;
+                            box.getCenter(center);
+                            const size = this._globeSize || (this._globeSize = new THREE.Vector3());
+                            return { center, radius: box.getSize(size).length() * 0.5 };
+                        }
+                    }
+                }
+                if (!this._boundingSphere) return null;
                 this._boundingSphereWorldCenter.set(
                     this._boundingSphere.center.x + wgPos.x,
                     this._boundingSphere.center.y + wgPos.y,

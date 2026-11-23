@@ -142,9 +142,27 @@ _orientIndicesOutward(posArr: Float32Array, origin: any): void {
     const geo = this._fillGeometry;
     const idx = geo.index?.array as ArrayLike<number> | undefined;
     if (!idx) return;
-    const ox = origin ? origin.x : 0;
-    const oy = origin ? origin.y : 0;
-    const oz = origin ? origin.z : 0;
+    // Глобус: «наружу» — от центра Земли. Позиция вершины в мировых осях =
+    // local + истинный ECEF-якорь (а не плоский _centroidWorld). Якорь берём
+    // из lon/lat центроида на эллипсоиде.
+    const map = (this as any)._map;
+    let ox = origin ? origin.x : 0;
+    let oy = origin ? origin.y : 0;
+    let oz = origin ? origin.z : 0;
+    if (map && map.globe === true && typeof map.projectSurfacePoint === 'function') {
+        const ll = this._centroidLonLat?.();
+        if (ll) {
+            const a = map.projectSurfacePoint(ll, 'EPSG:4326', 0, this._tmpAnchor || (this._tmpAnchor = new (origin.constructor)()), null);
+            if (a) {
+                // projectSurfacePoint возвращает мировую точку с учётом worldGroup;
+                // для центра Земли нужна точка в СК worldGroup — вычитаем его сдвиг.
+                const wg = map.worldGroup?.position;
+                ox = a.x - (wg ? wg.x : 0);
+                oy = a.y - (wg ? wg.y : 0);
+                oz = a.z - (wg ? wg.z : 0);
+            }
+        }
+    }
 
     for (let t = 0; t < idx.length; t += 3) {
         const ia = idx[t], ib = idx[t + 1], ic = idx[t + 2];
@@ -256,6 +274,8 @@ _updateHeights(this: Polygon): boolean {
         this._fillGeometry.attributes.position.needsUpdate = true;
         this._fillGeometry.computeVertexNormals?.();
         this._fillGeometry.computeBoundingSphere();
+        // Бокс для hit-теста на глобусе кэшируется — после смены позиций сбрасываем.
+        this._fillGeometry.boundingBox = null;
 
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array as Float32Array;

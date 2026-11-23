@@ -165,6 +165,9 @@ export class Graticule {
     _scratchVy = new Float64Array(SAMPLE_COUNT + 2);
     _scratchVz = new Float64Array(SAMPLE_COUNT + 2);
     _tmpVec = new THREE.Vector3();
+    /** Центр и радиус силуэта глобуса на экране (для выбора переходов). */
+    _silCenter = null;
+    _silRadius = null;
     _mvMatrix = new THREE.Matrix4();
     constructor(options = {}) {
         this._crsCode = options.crs ?? 'EPSG:4326';
@@ -411,6 +414,199 @@ export class Graticule {
     _isGlobe() {
         const m = this._map;
         return !!(m && m.globe && m.surface && typeof m.projectSurfaceVertex === 'function');
+    }
+    /**
+     * Глобус, параллель: подписи слева и справа от видимой дуги.
+     * Видимая точка — не за горизонтом и попадает в экран. Левый якорь — видимая точка
+     * с наименьшим экранным X, правый — с наибольшим.
+     */
+    _assignParallelSilhouetteAnchors(info, pts, mvMatrix, projMatrix, W, H, nearZ) {
+        // Силуэт глобуса на экране: центр диска и радиус (в пикселях).
+        const disk = this._silhouetteDisk(mvMatrix, projMatrix, W, H, nearZ);
+        if (!disk) {
+            for (const lbl of info.labels) {
+                lbl.screenPos = null;
+                lbl.visibleOnScreen = false;
+            }
+            return;
+        }
+        const OUTSET = 30; // px наружу от силуэта
+        // Центр и радиус силуэта — для выбора переходов на самом краю диска.
+        this._silCenter = { x: disk.cx, y: disk.cy };
+        this._silRadius = disk.r;
+        // Экранные точки параллели (null — за горизонтом или вне near).
+        const scr = new Array(pts.length);
+        for (let i = 0; i < pts.length; i++) {
+            if (this._isPointOccluded(pts[i])) {
+                scr[i] = null;
+                continue;
+            }
+            const v = this._tmpVec.set(pts[i][0], pts[i][1], pts[i][2]).applyMatrix4(mvMatrix);
+            scr[i] = this._projectPointToScreen(v.x, v.y, v.z, projMatrix, W, H, nearZ);
+        }
+        for (const lbl of info.labels) {
+            const edge = this._findSilhouetteCrossing(scr, lbl.side, pts, mvMatrix, projMatrix, W, H, nearZ);
+            if (!edge) {
+                lbl.screenPos = null;
+                lbl.visibleOnScreen = false;
+                continue;
+            }
+            lbl.anchorIdx = edge.idx;
+            // Итоговая позиция — после всех расчётов: левые на OUTSET px левее,
+            // правые на OUTSET px правее (по X).
+            const dxSide = lbl.side === 'left' ? -OUTSET : OUTSET;
+            lbl.screenPos = {
+                x: edge.x + dxSide,
+                y: edge.y,
+            };
+            lbl.renderSide = lbl.side;
+            lbl.visibleOnScreen = true;
+        }
+    }
+    /**
+     * Точка силуэта на параллели: граница видимой дуги (переход видно ↔ невидно между
+     * соседними сэмплами), интерполированная по экрану. Выбираем переход на нужной стороне:
+     * для 'left' — тот, у которого экранный X минимален, для 'right' — максимален.
+     * Интерполяция даёт непрерывную позицию, поэтому подпись плавно скользит по параллели.
+     */
+    _findSilhouetteCrossing(scr, side, pts, mvMatrix, projMatrix, W, H, nearZ) {
+        // Порог видимости: точка на силуэте, если cos(угла между нормалью и камерой) = R/C.
+        const surf = this._map?.surface;
+        const R = surf?.b ?? surf?.a ?? 6378137;
+        const camLocal = this._tmpVec.set(0, 0, 0).applyMatrix4(this._mvMatrix.clone().invert());
+        const C = camLocal.length();
+        const thr = C > 0 ? R / C : 1;
+        // cos в точке p (локальные координаты) относительно направления на камеру
+        const cosAt = (p) => {
+            const pl = Math.hypot(p[0], p[1], p[2]) || 1;
+            return (p[0] * camLocal.x + p[1] * camLocal.y + p[2] * camLocal.z) / (pl * C);
+        };
+        let best = null;
+        let bestScore = Infinity;
+        const n = scr.length;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            const a = scr[i];
+            const b = scr[j];
+            // переход видимость ↔ невидимость между соседними сэмплами
+            if (!!a === !!b)
+                continue;
+            const iv = a ? i : j; // видимый сэмпл
+            const ih = a ? j : i; // невидимый
+            const vis = a ?? b;
+            // Интерполяция по cos: находим долю t между видимым и невидимым,
+            // где cos проходит через порог → точка на силуэте, плавно меняется.
+            const cv = cosAt(pts[iv]);
+            const ch = cosAt(pts[ih]);
+            const den = cv - ch;
+            const t = Math.abs(den) > 1e-12 ? Math.min(1, Math.max(0, (cv - thr) / den)) : 0;
+            const pa = pts[iv], pb = pts[ih];
+            const p = [
+                pa[0] + (pb[0] - pa[0]) * t,
+                pa[1] + (pb[1] - pa[1]) * t,
+                pa[2] + (pb[2] - pa[2]) * t,
+            ];
+            const v = this._tmpVec.set(p[0], p[1], p[2]).applyMatrix4(mvMatrix);
+            const sp = this._projectPointToScreen(v.x, v.y, v.z, projMatrix, W, H, nearZ)
+                ?? { x: vis.x, y: vis.y };
+            // Переход должен лежать НА силуэте, а не внутри диска: берём только тех, у кого
+            // радиус от центра диска не меньше радиуса силуэта (с запасом на погрешность).
+            const cx = this._silCenter?.x ?? sp.x;
+            const cy = this._silCenter?.y ?? sp.y;
+            const rad = Math.hypot(sp.x - cx, sp.y - cy);
+            const rimR = this._silRadius ?? rad;
+            if (rad < rimR * 0.97)
+                continue;
+            // Среди силуэтных переходов выбираем нужную сторону по экранному X
+            // (min для left, max для right) — это стабильнее, чем минимум по всем.
+            const score = side === 'left' ? sp.x : -sp.x;
+            if (score < bestScore) {
+                bestScore = score;
+                best = { x: sp.x, y: sp.y, idx: iv };
+            }
+        }
+        return best;
+    }
+    /**
+     * Края глобуса видны, если диск целиком помещается в экран. Если диск выходит
+     * за границы (глобус заполняет экран), силуэтные подписи не имеют смысла.
+     */
+    _silhouetteVisible(mvMatrix, projMatrix, W, H, nearZ) {
+        const disk = this._silhouetteDisk(mvMatrix, projMatrix, W, H, nearZ);
+        if (!disk)
+            return false;
+        return disk.cx - disk.r >= 0 && disk.cx + disk.r <= W
+            && disk.cy - disk.r >= 0 && disk.cy + disk.r <= H;
+    }
+    /**
+     * Силуэт глобуса на экране: центр диска (проекция центра Земли) и его радиус.
+     * Радиус — проекция точки на видимом краю: расстояние от центра до камеры C,
+     * угловой радиус диска α = asin(R/C), точка края — на касательной плоскости.
+     */
+    _silhouetteDisk(mvMatrix, projMatrix, W, H, nearZ) {
+        const surf = this._map?.surface;
+        const R = surf?.b ?? surf?.a ?? 6378137;
+        // камера в системе worldGroup — обратная матрица mv
+        const camLocal = this._tmpVec.set(0, 0, 0).applyMatrix4(this._mvMatrix.clone().invert());
+        const C = camLocal.length();
+        if (!(C > R * 1.0001))
+            return null;
+        // центр Земли (начало координат local) → экран; mvMatrix переводит в view-space
+        const cRaw = this._projectRaw(0, 0, 0, projMatrix, W, H, mvMatrix);
+        if (!cRaw)
+            return null;
+        // точка края диска: сдвиг от центра по направлению, перпендикулярному к камере
+        const d = R * R / C; // расстояние до плоскости края
+        const rEdge = R * Math.sqrt(1 - (R * R) / (C * C)); // радиус края в мировых ед.
+        const n = camLocal.clone().normalize(); // направление на камеру
+        // перпендикуляр к n (любой, в плоскости края)
+        const up = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+        const e1 = new THREE.Vector3().crossVectors(n, up).normalize();
+        const edgePt = n.clone().multiplyScalar(d).add(e1.multiplyScalar(rEdge));
+        const eRaw = this._projectRaw(edgePt.x, edgePt.y, edgePt.z, projMatrix, W, H, mvMatrix);
+        if (!eRaw)
+            return null;
+        const r = Math.hypot(eRaw.x - cRaw.x, eRaw.y - cRaw.y);
+        return { cx: cRaw.x, cy: cRaw.y, r };
+    }
+    /** Проекция точки без отсечения по экрану (для центра и края диска). */
+    _projectRaw(x, y, z, projMatrix, W, H, mvMatrix) {
+        const v = this._tmpVec.set(x, y, z);
+        if (mvMatrix)
+            v.applyMatrix4(mvMatrix);
+        const t = v.applyMatrix4(projMatrix);
+        const sx = (t.x * 0.5 + 0.5) * W;
+        const sy = (-t.y * 0.5 + 0.5) * H;
+        if (!Number.isFinite(sx) || !Number.isFinite(sy))
+            return null;
+        return { x: sx, y: sy };
+    }
+    /** View-space точка → экранные координаты; null, если за near или вне экрана. */
+    _projectPointToScreen(x, y, z, projMatrix, W, H, nearZ) {
+        if (z > nearZ)
+            return null;
+        const t = this._tmpVec.set(x, y, z).applyMatrix4(projMatrix);
+        const sx = (t.x * 0.5 + 0.5) * W;
+        const sy = (-t.y * 0.5 + 0.5) * H;
+        if (!Number.isFinite(sx) || !Number.isFinite(sy))
+            return null;
+        if (sx < 0 || sx > W || sy < 0 || sy > H)
+            return null;
+        return { x: sx, y: sy };
+    }
+    /**
+     * Точка сетки (в local-координатах worldGroup, как points3D) за горизонтом?
+     * Переводим в мировые координаты и спрашиваем карту (isWorldPointOccluded).
+     */
+    _isPointOccluded(p) {
+        const m = this._map;
+        if (!m || typeof m.isWorldPointOccluded !== 'function')
+            return false;
+        const v = this._tmpVec.set(p[0], p[1], p[2]);
+        const wg = m.worldGroup;
+        if (wg)
+            v.applyMatrix4(wg.matrixWorld);
+        return !!m.isWorldPointOccluded(v);
     }
     addTo(map) {
         if (this._map === map)
@@ -863,6 +1059,16 @@ export class Graticule {
             source._anchor = anchor;
             return anchor;
         };
+        // Глобус: меридианы подписываем на экваторе (середина по широте), параллели —
+        // на силуэте (индекс выбирается динамически в _updateLabelScreenPositions).
+        // Меридианы на глобусе: обе подписи (bottom/top) создаём всегда; экваторный якорь
+        // ставим на кадре, только когда силуэт виден (см. _updateLabelScreenPositions).
+        if (this._isGlobe() && kind === 'meridian') {
+            const eq = makeAnchor(true, 'bottom');
+            eq.anchorIdx = Math.floor(SAMPLE_COUNT / 2); // lat ≈ 0 при равномерной выборке по широте
+            const topA = makeAnchor(false, 'top');
+            return [eq, topA];
+        }
         return [
             makeAnchor(true, startSide),
             makeAnchor(false, endSide),
@@ -1246,6 +1452,9 @@ export class Graticule {
         const isEndpointVisible = (idx) => {
             if (vz[idx] > nearZ)
                 return null;
+            // Глобус: конец за горизонтом не считается видимым, даже если попадает в экран.
+            if (this._isGlobe() && this._isPointOccluded(pts[idx]))
+                return null;
             const p = projectViewPoint(vx[idx], vy[idx], vz[idx]);
             if (!p)
                 return null;
@@ -1263,6 +1472,7 @@ export class Graticule {
             }
         }
         const total = ranges.length ? ranges[ranges.length - 1][1] : 0;
+        const pts = info.points3D;
         if (isStart) {
             // Правило 1: начальный конец всей линии виден?
             if (total > 0) {
@@ -1272,9 +1482,11 @@ export class Graticule {
                 }
             }
             // Правило 3: первое пересечение с экраном, идя от начала — только
-            // внутри сегментов (без «прыжка» между лепестками).
+            // внутри сегментов (без «прыжка» между лепестками) и только на видимой стороне.
             for (const [s, e] of ranges) {
                 for (let i = s; i < e - 1; i++) {
+                    if (this._isGlobe() && (this._isPointOccluded(pts[i]) || this._isPointOccluded(pts[i + 1])))
+                        continue;
                     const hit = this._getClippedSegmentScreenIntersection(vx[i], vy[i], vz[i], vx[i + 1], vy[i + 1], vz[i + 1], W, H, nearZ, projMatrix);
                     if (hit) {
                         return { x: clampX(hit.x), y: clampY(hit.y), side: hit.edge, isEdge: true };
@@ -1295,6 +1507,8 @@ export class Graticule {
             for (let k = ranges.length - 1; k >= 0; k--) {
                 const [s, e] = ranges[k];
                 for (let i = e - 2; i >= s; i--) {
+                    if (this._isGlobe() && (this._isPointOccluded(pts[i]) || this._isPointOccluded(pts[i + 1])))
+                        continue;
                     const hit = this._getClippedSegmentScreenIntersection(vx[i + 1], vy[i + 1], vz[i + 1], vx[i], vy[i], vz[i], W, H, nearZ, projMatrix);
                     if (hit) {
                         return { x: clampX(hit.x), y: clampY(hit.y), side: hit.edge, isEdge: true };
@@ -1302,7 +1516,23 @@ export class Graticule {
                 }
             }
         }
-        // Правило 5: ни край, ни пересечение не найдены.
+        // Правило 5 (вариант А, только глобус): пересечения с краем нет, но видимая дуга
+        // есть — ставим подпись на её видимом конце (ближайшем к нужной стороне).
+        if (this._isGlobe()) {
+            const scan = isStart
+                ? (k) => k
+                : (k) => total - 1 - k;
+            for (let k = 0; k < total; k++) {
+                const idx = scan(k);
+                if (this._isPointOccluded(pts[idx]))
+                    continue;
+                const p = this._projectPointToScreen(vx[idx], vy[idx], vz[idx], projMatrix, W, H, nearZ);
+                if (p) {
+                    return { x: p.x, y: p.y, side: defaultSide, isEdge: false };
+                }
+            }
+        }
+        // Правило 6: ни край, ни пересечение не найдены.
         return null;
     }
     _getClippedSegmentScreenIntersection(vx1, vy1, vz1, vx2, vy2, vz2, W, H, nearZ, projMatrix) {
@@ -1397,8 +1627,31 @@ export class Graticule {
         const projMatrix = camera.projectionMatrix;
         const isOrtho = !!camera.isOrthographicCamera;
         const nearZ = isOrtho ? Infinity : -Math.max(1e-4, camera.near || 0.1);
+        const silVisible = this._isGlobe() && this._silhouetteVisible(mvMatrix, projMatrix, W, H, nearZ);
         for (const info of this._lineInfos) {
             const pts = info.points3D;
+            // Глобус, края не видны: меридианы — как на плоской карте (сверху/снизу).
+            // Экваторный якорь отключаем, чтобы сработала плоская ветка _findLineEndLabel.
+            if (this._isGlobe() && info.kind === 'meridian') {
+                for (const lbl of info.labels) {
+                    if (silVisible) {
+                        if (lbl.side === 'bottom')
+                            lbl.anchorIdx = Math.floor(SAMPLE_COUNT / 2);
+                        else
+                            lbl.anchorIdx = undefined;
+                    }
+                    else {
+                        lbl.anchorIdx = undefined;
+                    }
+                }
+            }
+            // Глобус, края видны: параллели подписываются снаружи силуэта.
+            // Глобус, края не видны (диск заполняет экран): как на плоской карте — подпись
+            // в точке пересечения линии с краем экрана (ветка _findLineEndLabel ниже).
+            if (this._isGlobe() && info.kind === 'parallel' && pts.length >= 2 && this._silhouetteVisible(mvMatrix, projMatrix, W, H, nearZ)) {
+                this._assignParallelSilhouetteAnchors(info, pts, mvMatrix, projMatrix, W, H, nearZ);
+                continue;
+            }
             if (pts.length < 2) {
                 for (const lbl of info.labels) {
                     lbl.visibleOnScreen = false;
@@ -1419,7 +1672,25 @@ export class Graticule {
                 vz[i] = tmp.z;
             }
             for (const lbl of info.labels) {
+                // Глобус с явным якорем: подпись садится на выбранную точку линии.
+                if (this._isGlobe() && lbl.anchorIdx !== undefined) {
+                    const idx = lbl.anchorIdx;
+                    const occluded = this._isPointOccluded(pts[idx]);
+                    const sp = occluded ? null : this._projectPointToScreen(vx[idx], vy[idx], vz[idx], projMatrix, W, H, nearZ);
+                    if (sp) {
+                        lbl.screenPos = { x: sp.x, y: sp.y };
+                        lbl.renderSide = lbl.side;
+                        lbl.visibleOnScreen = true;
+                    }
+                    else {
+                        lbl.screenPos = null;
+                        lbl.visibleOnScreen = false;
+                    }
+                    continue;
+                }
                 const res = this._findLineEndLabel(info, lbl.isStart, lbl.side, vx, vy, vz, W, H, nearZ, projMatrix);
+                // Видимость решает _findLineEndLabel: он уже отбрасывает невидимые точки
+                // (правила 3–5), поэтому здесь отдельную проверку конца линии не делаем.
                 if (res && (!res.isEdge || this._labelSides.has(res.side))) {
                     lbl.screenPos = { x: res.x, y: res.y };
                     lbl.renderSide = res.side;

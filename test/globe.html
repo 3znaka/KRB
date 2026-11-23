@@ -33,9 +33,9 @@ const tiles =  new KRB.Tile({
 
 const map = new KRB.Map({
     target: 'map',
-// globe: true,
+ globe: true,
     layers: [
-       tiles,
+      // tiles,
     ],
     view: new KRB.View({
        centerLonLat: [37.6178, 55.7558],
@@ -59,7 +59,7 @@ new KRB.Marker({
 
   const world = new KRB.GeoJSONLayer({
         url: 'world.geojson',
-       extendAntarctica: true,
+     //  extendAntarctica: true,
         defaultStrokeColor: '#000000',
         defaultStrokeWidth: 0.3,
     }).addTo(map);

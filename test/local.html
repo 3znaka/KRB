@@ -19,7 +19,7 @@ await KRB.addCrs(['ADPKP:0072']);
 
 const map = new KRB.Map({
     target: 'map',
-    crs: 'ADPKP:0072',
+        globe: true,
     graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
     view: new KRB.View({
         centerLonLat: [10, 20],
@@ -33,6 +33,7 @@ const map = new KRB.Map({
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
     crs: 'EPSG:4326',
+
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
     
@@ -115,7 +116,7 @@ new KRB.GeoJSONLayer({
     },
 }).addTo(map);
 
-map.setCrs('EPSG:3857');
+
 
 </script>
 </body>

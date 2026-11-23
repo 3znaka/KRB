@@ -19,9 +19,12 @@
 
 import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation } from './SpatialObject.js';
 import { THREE } from './js_TP/tpb.js';
-import type { Vector3D, Vector3DPosition, Easing } from './Vector3D.js';
+import type { Vector3D, Vector3DPosition, Easing, PathAdapter } from './Vector3D.js';
+import type { Polyline } from './Polyline.js';
+import type { Polygon } from './Polygon.js';
 import { createPrimitiveMesh } from './Marker3D.js';
 import type { PrimitiveType, SizeSpec } from './Marker3D.js';
+import { Projections } from './Projections.js';
 
 // =====================================================================
 // Типы
@@ -96,8 +99,17 @@ export interface MoveSpec {
     onLoop?: () => void;
 }
 
+/**
+ * Источник пути:
+ *  - Vector3D / любой PathAdapter — ломаная, публикующая точки;
+ *  - Polyline — ломаная по своим вершинам;
+ *  - Polygon — движение по кругу вдоль ВНЕШНЕГО кольца (первое кольцо,
+ *    замыкается автоматически).
+ */
+export type PathSource = PathAdapter | Vector3D | Polyline | Polygon;
+
 export interface PathFollowerOptions {
-    path: Vector3D; // PathAdapter; пока принимаем Vector3D напрямую
+    path: PathSource;
 
     visual?: VisualInput;
     /** Размер в px (sizeMode='px') или world-метры (sizeMode='world'). */
@@ -146,7 +158,11 @@ const _EPS = 1e-9;
 
 export class PathFollower extends SpatialObject {
     // ── путь ──
-    private _path: Vector3D;
+    private _path: PathAdapter;
+    /** Исходный источник (Vector3D / Polyline / Polygon / PathAdapter). */
+    private _pathSource: PathSource;
+    /** Для Polyline/Polygon: ключ сигнатуры, по которому понимаем, что точки устарели. */
+    private _pathSig = '';
     private _unsubRebuild: (() => void) | null = null;
     private _unsubDestroy: (() => void) | null = null;
     private _cachedPoints: ReadonlyArray<Vector3DPosition> = [];
@@ -207,12 +223,19 @@ export class PathFollower extends SpatialObject {
     private _tmpRight = new THREE.Vector3();
     private _tmpMtx = new THREE.Matrix4();
     private _tmpQuat = new THREE.Quaternion();
+    private _tmpQuat2 = new THREE.Quaternion();
+    private _tmpUp = new THREE.Vector3(0, 1, 0);
+    private _tmpBasisF = new THREE.Vector3();
+    private _tmpBasisUp = new THREE.Vector3();
     private _upY = new THREE.Vector3(0, 1, 0);
+    private _axisX = new THREE.Vector3(1, 0, 0);
+    private _axisZ = new THREE.Vector3(0, 0, 1);
 
     constructor(o: PathFollowerOptions) {
         super();
         if (!o?.path) throw new Error('PathFollower: options.path is required');
-        this._path = o.path;
+        this._pathSource = o.path;
+        this._path = resolveAdapter(o.path);
 
         this._minZoom = o.minZoom ?? -Infinity;
         this._maxZoom = o.maxZoom ?? Infinity;
@@ -263,11 +286,7 @@ protected _onAttached(map: any): void {
         this.setVisual(this._visualInput);
     }
 
-    this._unsubRebuild = this._path.onPathRebuild(() => { this._pathValid = false; });
-        this._unsubDestroy = this._path.onPathDestroy(() => {
-            // Путь убрали с карты — аккуратно убираем и себя.
-            this.remove();
-        });
+    this._bindAdapter(this._path);
 
         this._pathValid = false;
         this._ensurePathData();
@@ -298,6 +317,7 @@ protected _onAttached(map: any): void {
         this._textLabel = null;
 
         if (this._group.parent) this._group.parent.remove(this._group);
+        if (this._path instanceof LivePathAdapter) this._path.detach();
 
         this._disposeVisual();
         this._pathValid = false;
@@ -339,7 +359,22 @@ protected _onAttached(map: any): void {
     // PathAdapter — внутренняя копия
     // =================================================================
 
+    /** Подписка на перестройку/удаление адаптера пути. */
+    private _bindAdapter(adapter: PathAdapter): void {
+        this._unsubRebuild?.(); this._unsubDestroy?.();
+        // Live-адаптер (Polyline/Polygon) нужно знать карту, чтобы строить точки.
+        if (this._map && adapter instanceof LivePathAdapter) adapter.attach(this._map);
+        this._unsubRebuild = adapter.onPathRebuild(() => { this._pathValid = false; });
+        this._unsubDestroy = adapter.onPathDestroy(() => this.remove());
+    }
+
     private _ensurePathData(): boolean {
+        // Polyline/Polygon: точки зависят от карты и зума — проверяем сигнатуру.
+        const sig = this._path.getPathSignature?.() ?? '';
+        if (sig !== this._pathSig) {
+            this._pathSig = sig;
+            this._pathValid = false;
+        }
         if (this._pathValid) return this._cachedTotal > 0;
 
         const pts = this._path.getPathPoints();
@@ -590,15 +625,15 @@ setSpeed(speed: SpeedSpec): this {
     // Переназначение пути
     // =================================================================
 
-    setPath(newPath: Vector3D): this {
-        if (newPath === this._path) return this;
+    setPath(newPath: PathSource): this {
+        if (newPath === this._pathSource) return this;
         this._unsubRebuild?.(); this._unsubDestroy?.();
-        this._path = newPath;
-        if (this._map) {
-            this._unsubRebuild = newPath.onPathRebuild(() => { this._pathValid = false; });
-            this._unsubDestroy = newPath.onPathDestroy(() => this.remove());
-        }
+        this._unsubRebuild = null; this._unsubDestroy = null;
+        this._pathSource = newPath;
+        this._path = resolveAdapter(newPath);
+        if (this._map) this._bindAdapter(this._path);
         this._pathValid = false;
+        this._pathSig = '';
         this._ensurePathData();
         // Обрезать текущую позицию под новый путь
         this._currentDist = Math.max(0, Math.min(this._cachedTotal, this._currentDist));
@@ -647,15 +682,27 @@ setSpeed(speed: SpeedSpec): this {
             return;
         }
 
-        // lateral offset
-        if (this._lateralOffset !== 0) {
-            this._tmpRight.set(-this._tmpTangent.z, 0, this._tmpTangent.x);
-            if (this._tmpRight.lengthSq() > 1e-12) this._tmpRight.normalize();
-            this._tmpPos.x += this._tmpRight.x * this._lateralOffset;
-            this._tmpPos.z += this._tmpRight.z * this._lateralOffset;
+        const globe = !!(map.globe && map.surface);
+
+        // Глобус: «вверх» объекта — местная нормаль эллипсоида в точке пути.
+        // Плоскость: нормаль — мировая Y.
+        if (globe) {
+            this._sampleNormal(map, this._tmpPos, this._tmpUp);
+        } else {
+            this._tmpUp.set(0, 1, 0);
         }
-        // altitude
-        this._tmpPos.y += this._altitude + this._altitudeOffset;
+
+        // lateral offset: вбок в касательной плоскости (перпендикуляр к
+        // касательной и к нормали). На плоскости нормаль = Y → прежняя формула.
+        if (this._lateralOffset !== 0) {
+            this._tmpRight.crossVectors(this._tmpTangent, this._tmpUp);
+            if (this._tmpRight.lengthSq() > 1e-12) this._tmpRight.normalize();
+            this._tmpPos.addScaledVector(this._tmpRight, this._lateralOffset);
+        }
+        // altitude: вдоль нормали (на глобусе — «вверх» от поверхности,
+        // на плоскости — по Y, как раньше).
+        const lift = this._altitude + this._altitudeOffset;
+        if (lift !== 0) this._tmpPos.addScaledVector(this._tmpUp, lift);
 
         // родитель
         if (this._group.parent !== map.worldGroup) {
@@ -664,10 +711,24 @@ setSpeed(speed: SpeedSpec): this {
         }
 
         this._group.position.copy(this._tmpPos);
-        if (this._alignToPath) this._orientToTangent(this._tmpTangent);
+        if (this._alignToPath) this._orientToTangent(this._tmpTangent, this._tmpUp);
+        else if (globe) this._orientToNormal(this._tmpUp);
 
         // масштаб
         this._applySize(map, this._group.position);
+
+        // Глобус: за горизонтом — скрываем (как Vector3D/Marker).
+        if (globe && typeof map.isWorldPointOccluded === 'function') {
+            const wgPos = map.worldGroup.position;
+            const tmp = map.getVec3().set(
+                this._tmpPos.x + wgPos.x, this._tmpPos.y + wgPos.y, this._tmpPos.z + wgPos.z,
+            );
+            if (map.isWorldPointOccluded(tmp)) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
+        }
 
         this._group.visible = true;
         this._isVisible = true;
@@ -726,14 +787,71 @@ setSpeed(speed: SpeedSpec): this {
         }
     }
 
-    private _orientToTangent(t: any): void {
+    /**
+     * Ориентация по касательной. На плоскости — прежнее поведение
+     * (setFromUnitVectors по касательной). На глобусе — базис
+     * (forward = касательная, up = нормаль), чтобы модель «стояла» на сфере.
+     */
+    private _orientToTangent(t: any, up: any): void {
         const axis = this._forwardAxis === 'x'
-            ? new THREE.Vector3(1, 0, 0)
+            ? this._axisX
             : this._forwardAxis === 'z'
-                ? new THREE.Vector3(0, 0, 1)
+                ? this._axisZ
                 : this._upY;
-        this._tmpQuat.setFromUnitVectors(axis, t);
+
+        // Плоскость (нормаль = Y): прежнее поведение — поворот от оси к касательной.
+        if (!up || this._isFlatUp(up)) {
+            this._tmpQuat.setFromUnitVectors(axis, t);
+            this._group.quaternion.copy(this._tmpQuat);
+            return;
+        }
+
+        // Глобус: поворот, переводящий ось модели в касательную,
+        // с последующим выравниванием «верха» модели по нормали.
+        // 1) касательная, выпрямленная относительно нормали (forward ⟂ up);
+        const fwd = this._tmpBasisF.copy(t);
+        fwd.addScaledVector(up, -fwd.dot(up));
+        if (fwd.lengthSq() < 1e-12) fwd.copy(t);
+        fwd.normalize();
+        // 2) базовый поворот: ось модели → fwd;
+        this._tmpQuat.setFromUnitVectors(axis, fwd);
+        // 3) затем доворот вокруг fwd, чтобы верх модели (Y) совпал с нормалью.
+        this._tmpBasisUp.copy(this._upY).applyQuaternion(this._tmpQuat);
+        this._tmpQuat2.setFromUnitVectors(this._tmpBasisUp, up);
+        this._tmpQuat2.multiply(this._tmpQuat);
+        this._group.quaternion.copy(this._tmpQuat2);
+    }
+
+    /** Только нормаль по глобусу (без касательной) — для alignToPath=false. */
+    private _orientToNormal(up: any): void {
+        this._tmpQuat.setFromUnitVectors(this._upY, up);
         this._group.quaternion.copy(this._tmpQuat);
+    }
+
+    private _isFlatUp(up: any): boolean {
+        return Math.abs(up.x) < 1e-9 && Math.abs(up.z) < 1e-9 && Math.abs(up.y - 1) < 1e-9;
+    }
+
+    /**
+     * Местная нормаль эллипсоида в точке `worldPos` (локальные координаты
+     * worldGroup). Нормаль берётся по геодезическим lon/lat точки пути.
+     */
+    private _sampleNormal(map: any, localPos: any, out: any): void {
+        const g = map.surfacePointToLonLat?.(
+            map.getVec3().set(
+                localPos.x + map.worldGroup.position.x,
+                localPos.y + map.worldGroup.position.y,
+                localPos.z + map.worldGroup.position.z,
+            ),
+        );
+        if (!g || !Number.isFinite(g[0]) || !Number.isFinite(g[1])) {
+            out.set(0, 1, 0);
+            return;
+        }
+        const n = map.getVec3().set(0, 0, 0);
+        map.surface.normal(g[0], g[1], n);
+        if (map.worldGroup) n.transformDirection(map.worldGroup.matrixWorld);
+        out.copy(n.normalize());
     }
 
     private _applySize(map: any, worldPos: any): void {
@@ -931,6 +1049,181 @@ private _resolveSpeed(spec?: SpeedSpec): number | null {
             scale: this._scale, alignToPath: this._alignToPath,
         });
         console.groupEnd();
+    }
+}
+
+// =====================================================================
+// Адаптеры пути: Vector3D / Polyline / Polygon → PathAdapter
+// =====================================================================
+
+/**
+ * Превращает источник пути в PathAdapter.
+ *  - Vector3D и любой уже готовый PathAdapter (есть getPathPoints) — как есть;
+ *  - Polyline — точки по её позициям (getPositions) на поверхности карты;
+ *  - Polygon — ВНЕШНЕЕ кольцо (getRings()[0]), замкнутое в цикл.
+ *
+ * Точки строятся в координатах worldGroup, как у Vector3D, поэтому
+ * PathFollower использует их без изменений. Для Polyline/Polygon точки
+ * пересчитываются при привязке к карте (см. LiveRingAdapter.getPathPoints).
+ */
+function resolveAdapter(src: PathSource): PathAdapter {
+    const s: any = src;
+    if (s && typeof s.getPathPoints === 'function' && typeof s.onPathRebuild === 'function') {
+        return s as PathAdapter;
+    }
+    if (s && typeof s.getRings === 'function') {
+        return new LivePathAdapter(s, /*ring*/ true);
+    }
+    if (s && typeof s.getPositions === 'function') {
+        return new LivePathAdapter(s, /*ring*/ false);
+    }
+    throw new Error('PathFollower: unsupported path source');
+}
+
+/**
+ * Адаптер Polyline/Polygon. Точки берутся из публичных данных источника и
+ * переводятся на поверхность текущей карты (тот же контракт, что Vector3D).
+ */
+class LivePathAdapter implements PathAdapter {
+    private _src: any;
+    private _isRing: boolean;
+    private _rebuildListeners = new Set<() => void>();
+    private _destroyListeners = new Set<() => void>();
+    private _points: Vector3DPosition[] = [];
+    private _sig = '';
+    private _lastTimeBucket = -1;
+
+    constructor(src: any, isRing: boolean) {
+        this._src = src;
+        this._isRing = isRing;
+    }
+
+    /** Список lon/lat исходных точек пути (замкнут для полигона). */
+    private _lonLats(): Array<[number, number]> {
+        const crs = this._src.getCRS?.() ?? null;
+        const raw: any[] = this._isRing
+            ? (this._src.getRings()[0] ?? [])
+            : (this._src.getPositions() ?? []);
+        const out: Array<[number, number]> = [];
+        for (const p of raw) {
+            if (!Array.isArray(p) || p.length < 2) continue;
+            const ll = crs && Projections.get(crs)
+                ? Projections.get(crs).toLonLat([p[0], p[1]])
+                : [p[0], p[1]];
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
+            out.push([ll[0], ll[1]]);
+        }
+        // Полигон — замыкаем кольцо, чтобы движение шло по кругу.
+        if (this._isRing && out.length > 2) {
+            const a = out[0], b = out[out.length - 1];
+            if (a[0] !== b[0] || a[1] !== b[1]) out.push([a[0], a[1]]);
+        }
+        return out;
+    }
+
+    /** Карта, к которой привязан PathFollower (задаётся через attach). */
+    private _attachedMap: any = null;
+
+    attach(map: any): void { this._attachedMap = map; this._sig = ''; this._points = []; }
+    detach(): void { this._attachedMap = null; this._points = []; this._sig = ''; }
+
+    private _map(): any { return this._attachedMap; }
+
+    getPathSignature(): string {
+        const map = this._map();
+        if (!map) return '';
+        // Для clampToGround рельеф меняется — обновляем точки раз в ~0.5 с.
+        const clamp = this._src.getAltitudeMode?.() === 'clampToGround';
+        const bucket = clamp ? Math.floor(performance.now() / 500) : 0;
+        return `${map.globe ? 'g' : 'p'}|${bucket}|${this._src.getPositions?.().length ?? ''}`;
+    }
+
+    getPathPoints(): ReadonlyArray<Vector3DPosition> {
+        const map = this._map();
+        if (!map) return [];
+        const sig = this.getPathSignature();
+        if (sig === this._sig && this._points.length) return this._points;
+        this._sig = sig;
+
+        const lonLats = this._lonLats();
+        const pts: Vector3DPosition[] = [];
+        const v = new THREE.Vector3();
+        const wg = map.worldGroup;
+        const h = this._src.getAltitude?.() ?? 0;
+
+        for (const ll of lonLats) {
+            if (map.globe && map.surface) {
+                const p = map.projectSurfaceVertex(ll, 'EPSG:4326', h, null, v);
+                if (!p) continue;
+                if (wg) wg.worldToLocal(p);
+                pts.push([p.x, p.y, p.z]);
+            } else {
+                const xy = map.projectSafe(ll, 'EPSG:4326');
+                if (!xy) continue;
+                pts.push([xy[0], h, xy[1]]);
+            }
+        }
+        this._points = pts;
+        this._emitRebuild();
+        return pts;
+    }
+
+    getPathLength(): number {
+        const p = this.getPathPoints();
+        let total = 0;
+        for (let i = 1; i < p.length; i++) {
+            const dx = p[i][0] - p[i - 1][0], dy = p[i][1] - p[i - 1][1], dz = p[i][2] - p[i - 1][2];
+            total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        return total;
+    }
+
+    samplePathAt(t: number, outPos: any, outTangent: any): boolean {
+        const p = this.getPathPoints();
+        if (p.length < 2) return false;
+        const L = this.getPathLength();
+        if (L <= 0) return false;
+        const target = (((t % 1) + 1) % 1) * L;
+        let acc = 0;
+        for (let i = 1; i < p.length; i++) {
+            const a = p[i - 1], b = p[i];
+            const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+            const seg = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (acc + seg >= target || i === p.length - 1) {
+                const u = seg > 0 ? (target - acc) / seg : 0;
+                outPos.set(a[0] + dx * u, a[1] + dy * u, a[2] + dz * u);
+                outTangent.set(dx, dy, dz);
+                if (outTangent.lengthSq() < 1e-12) outTangent.set(0, 1, 0);
+                else outTangent.normalize();
+                return true;
+            }
+            acc += seg;
+        }
+        return false;
+    }
+
+    onPathRebuild(cb: () => void): () => void {
+        this._rebuildListeners.add(cb);
+        return () => this._rebuildListeners.delete(cb);
+    }
+
+    onPathDestroy(cb: () => void): () => void {
+        this._destroyListeners.add(cb);
+        return () => this._destroyListeners.delete(cb);
+    }
+
+    private _emitRebuild(): void {
+        for (const cb of [...this._rebuildListeners]) {
+            try { cb(); } catch (e) { console.error('[PathFollower] rebuild listener threw', e); }
+        }
+    }
+
+    /** Вызывается PathFollower/картой при уничтожении источника. */
+    destroy(): void {
+        for (const cb of [...this._destroyListeners]) {
+            try { cb(); } catch (e) { console.error('[PathFollower] destroy listener threw', e); }
+        }
+        this._destroyListeners.clear();
     }
 }
 

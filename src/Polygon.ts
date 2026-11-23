@@ -643,6 +643,11 @@ _normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
         return this._rings.map(ring => ring.map(pt => [...pt] as PolygonCoord));
     }
 
+    /** CRS, в которой заданы кольца (null — CRS карты). */
+    getCRS(): string | null {
+        return this._crsCode;
+    }
+
     /**
  * Экспорт в GeoJSON. Берём исходные `_rings`, а не LOD-кэш
  * `_renderRings`: пользователь ждёт заданную геометрию, а не

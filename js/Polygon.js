@@ -607,6 +607,10 @@ export class Polygon extends SpatialObject {
     getRings() {
         return this._rings.map(ring => ring.map(pt => [...pt]));
     }
+    /** CRS, в которой заданы кольца (null — CRS карты). */
+    getCRS() {
+        return this._crsCode;
+    }
     /**
  * Экспорт в GeoJSON. Берём исходные `_rings`, а не LOD-кэш
  * `_renderRings`: пользователь ждёт заданную геометрию, а не

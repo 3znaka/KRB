@@ -140,6 +140,14 @@ private _nodeHeight = 0;
     private _raycastMeshesCache: any[] | null = null;
     private _tempBox: any;
 
+    // ── Глобус: скретч-векторы (без аллокаций на кадр) ──
+    private _worldPosScratch: any = new THREE.Vector3();
+    private _worldWorldScratch: any = new THREE.Vector3();
+    private _worldUp: any = new THREE.Vector3();
+    private _globeBox: any = null;
+    private _globeCorners: any[] | null = null;
+    private _globeSize: any = null;
+
     constructor(options: Area3DOptions) {
         super();
 
@@ -222,7 +230,9 @@ this._userData = options.userData ?? {};
             : map.inputCRS;
 this._normalizedOuter = null;
         this._calculatePolygonParams();
+        // На глобусе позиция группы пересчитывается в _update (через эллипсоид).
         this._group.position.set(this._centroidWorld.x, 0, this._centroidWorld.z);
+        this._group.quaternion.identity();
         map.worldGroup.add(this._group);
 
         if (this._modelUrl) {
@@ -266,6 +276,9 @@ this._normalizedOuter = null;
         this._crs = null;
         this._normalizedOuter = null;
         this._raycastMeshesCache = null;
+        this._globeBox = null;
+        this._globeCorners = null;
+        this._globeSize = null;
         this._boundingRadius = 0;
         this._boundingCenterYLocal = 0;
         this._centroidScreenPos = null;
@@ -329,6 +342,12 @@ this._normalizedOuter = null;
         const callbacks: Record<string, any> = {
             getMeshes: () => this._getRaycastMeshes(),
             getBoundingSphere: () => {
+                // Глобус: объект лежит на эллипсоиде, плоский центр/радиус
+                // неверны — берём bounding sphere реальных мировых мешей.
+                if (map.globe === true) {
+                    const bs = this._globeWorldBoundingSphere();
+                    if (bs) return bs;
+                }
                 if (this._boundingRadius <= 0) return null;
                 const wgPos = map.worldGroup.position;
                 this._boundingSphereWorldCenter.set(
@@ -355,6 +374,41 @@ this._normalizedOuter = null;
         }
 
         this._unregisterInteraction = map.interaction.register(this, callbacks);
+    }
+
+    /**
+     * Глобус: bounding sphere по мировым углам AABB всех мешей объекта.
+     * Сфера гарантированно содержит всю геометрию (радиус — половина
+     * диагонали мирового бокса), в отличие от плоского _boundingRadius.
+     */
+    private _globeWorldBoundingSphere(): { center: any; radius: number } | null {
+        const meshes = this._getRaycastMeshes();
+        if (!meshes.length) return null;
+
+        const box = this._globeBox || (this._globeBox = new THREE.Box3());
+        box.makeEmpty();
+        const corners = this._globeCorners
+            || (this._globeCorners = new Array(8).fill(0).map(() => new THREE.Vector3()));
+        for (const m of meshes) {
+            if (!m || !m.geometry) continue;
+            if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+            const gb = m.geometry.boundingBox;
+            if (!gb) continue;
+            m.updateMatrixWorld(true);
+            let k = 0;
+            for (const x of [gb.min.x, gb.max.x])
+                for (const y of [gb.min.y, gb.max.y])
+                    for (const z of [gb.min.z, gb.max.z]) {
+                        corners[k++].set(x, y, z).applyMatrix4(m.matrixWorld);
+                    }
+            for (const c of corners) box.expandByPoint(c);
+        }
+        if (box.isEmpty()) return null;
+
+        const center = this._boundingSphereWorldCenter;
+        box.getCenter(center);
+        const size = box.getSize(this._globeSize || (this._globeSize = new THREE.Vector3()));
+        return { center, radius: size.length() * 0.5 };
     }
 
     private _getRaycastMeshes(): any[] {
@@ -702,8 +756,11 @@ getPosition(): [number, number] {
         if (!this._map) return this;
 this._normalizedOuter = null;
         this._calculatePolygonParams();
-        this._group.position.x = this._centroidWorld.x;
-        this._group.position.z = this._centroidWorld.z;
+        if (!(this._map.globe && this._map.surface)) {
+            this._group.position.x = this._centroidWorld.x;
+            this._group.position.z = this._centroidWorld.z;
+        }
+        this._lastHeightUpdateTime = 0; // пересчитать высоту/позицию на следующем кадре
         this._applyModelTransform();
         return this;
     }
@@ -851,6 +908,31 @@ this._normalizedOuter = null;
         this._group.visible = true;
         this._isVisible = true;
 
+        if (map.globe && map.surface) {
+            this._updateGlobePlacement(map);
+        } else {
+            this._updateFlatPlacement(map);
+        }
+
+        // Глобус: объект на обратной стороне Земли не показываем — ни меш,
+        // ни подпись (TextManager ориентируется на isVisible()).
+        if (map.globe && typeof map.isWorldPointOccluded === 'function'
+            && map.isWorldPointOccluded(this._group.getWorldPosition(this._worldWorldScratch))) {
+            this._applyHidden();
+            this._isVisible = false;
+            return;
+        }
+
+        if (this._mixer && this._mixerClock) {
+            const delta = this._mixerClock.getDelta();
+            this._mixer.update(delta);
+        }
+    }
+
+    /** Плоский режим: как раньше — центроид в мире, высота по Y. */
+    private _updateFlatPlacement(map: any): void {
+        // Группа лежит в worldGroup: её позиция — локальная (без сдвига мира).
+        this._group.quaternion.identity();
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > this._heightUpdateInterval ||
@@ -863,16 +945,72 @@ this._normalizedOuter = null;
                 this._lastWorldGroupPos.copy(map.worldGroup.position);
             }
             this._group.position.y = this._cachedSurfaceHeight + this._altitude + this._nodeHeight;
-            this._group.updateMatrixWorld(true);
         } else {
             this._group.position.y = this._altitude + this._nodeHeight;
-            this._group.updateMatrixWorld(true);
+        }
+        this._group.updateMatrixWorld(true);
+    }
+
+    /**
+     * Глобус: центроид кладётся на эллипсоид (локальные координаты worldGroup),
+     * высота откладывается вдоль местной нормали, а сама группа
+     * ориентируется «вверх» по нормали — как Marker3D / Polygon на глобусе.
+     */
+    private _updateGlobePlacement(map: any): void {
+        const crs = this._crs ?? (this._crsCode ? Projections.get(this._crsCode) : null);
+        const ll = this._centroidLonLat(crs);
+        if (!ll) return;
+
+        let lift = this._altitude + this._nodeHeight;
+        if (this._altitudeMode === 'clampToGround') {
+            // Рельеф на глобусе: высота поверхности в точке центроида.
+            const now = performance.now();
+            if (now - this._lastHeightUpdateTime > this._heightUpdateInterval) {
+                const sp = this._surfaceWorldPoint(map, ll, 0);
+                if (sp) {
+                    map.ensureTileForPoint?.(sp.x, sp.z);
+                    this._cachedSurfaceHeight = map.getSurfaceHeightAt(sp.x, sp.z);
+                }
+                this._lastHeightUpdateTime = now;
+            }
+            lift += this._cachedSurfaceHeight;
         }
 
-        if (this._mixer && this._mixerClock) {
-            const delta = this._mixerClock.getDelta();
-            this._mixer.update(delta);
+        // Группа живёт внутри worldGroup → нужна ЛОКАЛЬНАЯ позиция:
+        // переводим мировую точку эллипсоида обратно в систему worldGroup.
+        const p = this._surfaceWorldPoint(map, ll, lift);
+        if (!p) return;
+        if (map.worldGroup) map.worldGroup.worldToLocal(p);
+        this._group.position.copy(p);
+
+        // Местная нормаль → ориентация группы (up = нормаль).
+        const n = map.getVec3().set(0, 0, 0);
+        map.surface.normal(ll[0], ll[1], n);
+        if (map.worldGroup) n.transformDirection(map.worldGroup.matrixWorld);
+        n.normalize();
+        this._group.quaternion.setFromUnitVectors(this._worldUp.set(0, 1, 0), n);
+
+        this._group.updateMatrixWorld(true);
+    }
+
+    /** Мировая точка эллипсоида над [lon, lat] на высоте `h` (без сдвига origin). */
+    private _surfaceWorldPoint(map: any, ll: [number, number], h: number): any | null {
+        return map.projectSurfacePoint(ll, 'EPSG:4326', h, this._worldPosScratch, null);
+    }
+
+    /** Lon/lat центроида внешнего кольца в WGS84. */
+    private _centroidLonLat(crs: any): [number, number] | null {
+        const norm = this._getNormalizedOuter();
+        if (!norm.length) return null;
+        let sx = 0, sy = 0, n = 0;
+        for (const nn of norm) {
+            const ll = nn.lonLat
+                ?? (crs ? crs.toLonLat(nn.coord) : null);
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
+            sx += ll[0]; sy += ll[1]; n++;
         }
+        if (!n) return null;
+        return [sx / n, sy / n];
     }
 
     private _updateScreenPosition(): void {

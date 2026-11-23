@@ -19,6 +19,7 @@
 import { SpatialObject } from './SpatialObject.js';
 import { THREE } from './js_TP/tpb.js';
 import { createPrimitiveMesh } from './Marker3D.js';
+import { Projections } from './Projections.js';
 // =====================================================================
 // PathFollower
 // =====================================================================
@@ -26,6 +27,10 @@ const _EPS = 1e-9;
 export class PathFollower extends SpatialObject {
     // ── путь ──
     _path;
+    /** Исходный источник (Vector3D / Polyline / Polygon / PathAdapter). */
+    _pathSource;
+    /** Для Polyline/Polygon: ключ сигнатуры, по которому понимаем, что точки устарели. */
+    _pathSig = '';
     _unsubRebuild = null;
     _unsubDestroy = null;
     _cachedPoints = [];
@@ -79,12 +84,19 @@ export class PathFollower extends SpatialObject {
     _tmpRight = new THREE.Vector3();
     _tmpMtx = new THREE.Matrix4();
     _tmpQuat = new THREE.Quaternion();
+    _tmpQuat2 = new THREE.Quaternion();
+    _tmpUp = new THREE.Vector3(0, 1, 0);
+    _tmpBasisF = new THREE.Vector3();
+    _tmpBasisUp = new THREE.Vector3();
     _upY = new THREE.Vector3(0, 1, 0);
+    _axisX = new THREE.Vector3(1, 0, 0);
+    _axisZ = new THREE.Vector3(0, 0, 1);
     constructor(o) {
         super();
         if (!o?.path)
             throw new Error('PathFollower: options.path is required');
-        this._path = o.path;
+        this._pathSource = o.path;
+        this._path = resolveAdapter(o.path);
         this._minZoom = o.minZoom ?? -Infinity;
         this._maxZoom = o.maxZoom ?? Infinity;
         this._properties = o.properties ?? {};
@@ -127,11 +139,7 @@ export class PathFollower extends SpatialObject {
         if (!this._visualRoot && typeof this._visualInput === 'function') {
             this.setVisual(this._visualInput);
         }
-        this._unsubRebuild = this._path.onPathRebuild(() => { this._pathValid = false; });
-        this._unsubDestroy = this._path.onPathDestroy(() => {
-            // Путь убрали с карты — аккуратно убираем и себя.
-            this.remove();
-        });
+        this._bindAdapter(this._path);
         this._pathValid = false;
         this._ensurePathData();
         map.worldGroup.add(this._group);
@@ -158,6 +166,8 @@ export class PathFollower extends SpatialObject {
         this._textLabel = null;
         if (this._group.parent)
             this._group.parent.remove(this._group);
+        if (this._path instanceof LivePathAdapter)
+            this._path.detach();
         this._disposeVisual();
         this._pathValid = false;
         this._cachedPoints = [];
@@ -190,7 +200,23 @@ export class PathFollower extends SpatialObject {
     // =================================================================
     // PathAdapter — внутренняя копия
     // =================================================================
+    /** Подписка на перестройку/удаление адаптера пути. */
+    _bindAdapter(adapter) {
+        this._unsubRebuild?.();
+        this._unsubDestroy?.();
+        // Live-адаптер (Polyline/Polygon) нужно знать карту, чтобы строить точки.
+        if (this._map && adapter instanceof LivePathAdapter)
+            adapter.attach(this._map);
+        this._unsubRebuild = adapter.onPathRebuild(() => { this._pathValid = false; });
+        this._unsubDestroy = adapter.onPathDestroy(() => this.remove());
+    }
     _ensurePathData() {
+        // Polyline/Polygon: точки зависят от карты и зума — проверяем сигнатуру.
+        const sig = this._path.getPathSignature?.() ?? '';
+        if (sig !== this._pathSig) {
+            this._pathSig = sig;
+            this._pathValid = false;
+        }
         if (this._pathValid)
             return this._cachedTotal > 0;
         const pts = this._path.getPathPoints();
@@ -439,16 +465,18 @@ export class PathFollower extends SpatialObject {
     // Переназначение пути
     // =================================================================
     setPath(newPath) {
-        if (newPath === this._path)
+        if (newPath === this._pathSource)
             return this;
         this._unsubRebuild?.();
         this._unsubDestroy?.();
-        this._path = newPath;
-        if (this._map) {
-            this._unsubRebuild = newPath.onPathRebuild(() => { this._pathValid = false; });
-            this._unsubDestroy = newPath.onPathDestroy(() => this.remove());
-        }
+        this._unsubRebuild = null;
+        this._unsubDestroy = null;
+        this._pathSource = newPath;
+        this._path = resolveAdapter(newPath);
+        if (this._map)
+            this._bindAdapter(this._path);
         this._pathValid = false;
+        this._pathSig = '';
         this._ensurePathData();
         // Обрезать текущую позицию под новый путь
         this._currentDist = Math.max(0, Math.min(this._cachedTotal, this._currentDist));
@@ -491,16 +519,28 @@ export class PathFollower extends SpatialObject {
             this._isVisible = false;
             return;
         }
-        // lateral offset
+        const globe = !!(map.globe && map.surface);
+        // Глобус: «вверх» объекта — местная нормаль эллипсоида в точке пути.
+        // Плоскость: нормаль — мировая Y.
+        if (globe) {
+            this._sampleNormal(map, this._tmpPos, this._tmpUp);
+        }
+        else {
+            this._tmpUp.set(0, 1, 0);
+        }
+        // lateral offset: вбок в касательной плоскости (перпендикуляр к
+        // касательной и к нормали). На плоскости нормаль = Y → прежняя формула.
         if (this._lateralOffset !== 0) {
-            this._tmpRight.set(-this._tmpTangent.z, 0, this._tmpTangent.x);
+            this._tmpRight.crossVectors(this._tmpTangent, this._tmpUp);
             if (this._tmpRight.lengthSq() > 1e-12)
                 this._tmpRight.normalize();
-            this._tmpPos.x += this._tmpRight.x * this._lateralOffset;
-            this._tmpPos.z += this._tmpRight.z * this._lateralOffset;
+            this._tmpPos.addScaledVector(this._tmpRight, this._lateralOffset);
         }
-        // altitude
-        this._tmpPos.y += this._altitude + this._altitudeOffset;
+        // altitude: вдоль нормали (на глобусе — «вверх» от поверхности,
+        // на плоскости — по Y, как раньше).
+        const lift = this._altitude + this._altitudeOffset;
+        if (lift !== 0)
+            this._tmpPos.addScaledVector(this._tmpUp, lift);
         // родитель
         if (this._group.parent !== map.worldGroup) {
             this._group.parent?.remove(this._group);
@@ -508,9 +548,21 @@ export class PathFollower extends SpatialObject {
         }
         this._group.position.copy(this._tmpPos);
         if (this._alignToPath)
-            this._orientToTangent(this._tmpTangent);
+            this._orientToTangent(this._tmpTangent, this._tmpUp);
+        else if (globe)
+            this._orientToNormal(this._tmpUp);
         // масштаб
         this._applySize(map, this._group.position);
+        // Глобус: за горизонтом — скрываем (как Vector3D/Marker).
+        if (globe && typeof map.isWorldPointOccluded === 'function') {
+            const wgPos = map.worldGroup.position;
+            const tmp = map.getVec3().set(this._tmpPos.x + wgPos.x, this._tmpPos.y + wgPos.y, this._tmpPos.z + wgPos.z);
+            if (map.isWorldPointOccluded(tmp)) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
+        }
         this._group.visible = true;
         this._isVisible = true;
         // позиция для подписи
@@ -587,14 +639,62 @@ export class PathFollower extends SpatialObject {
             }
         }
     }
-    _orientToTangent(t) {
+    /**
+     * Ориентация по касательной. На плоскости — прежнее поведение
+     * (setFromUnitVectors по касательной). На глобусе — базис
+     * (forward = касательная, up = нормаль), чтобы модель «стояла» на сфере.
+     */
+    _orientToTangent(t, up) {
         const axis = this._forwardAxis === 'x'
-            ? new THREE.Vector3(1, 0, 0)
+            ? this._axisX
             : this._forwardAxis === 'z'
-                ? new THREE.Vector3(0, 0, 1)
+                ? this._axisZ
                 : this._upY;
-        this._tmpQuat.setFromUnitVectors(axis, t);
+        // Плоскость (нормаль = Y): прежнее поведение — поворот от оси к касательной.
+        if (!up || this._isFlatUp(up)) {
+            this._tmpQuat.setFromUnitVectors(axis, t);
+            this._group.quaternion.copy(this._tmpQuat);
+            return;
+        }
+        // Глобус: поворот, переводящий ось модели в касательную,
+        // с последующим выравниванием «верха» модели по нормали.
+        // 1) касательная, выпрямленная относительно нормали (forward ⟂ up);
+        const fwd = this._tmpBasisF.copy(t);
+        fwd.addScaledVector(up, -fwd.dot(up));
+        if (fwd.lengthSq() < 1e-12)
+            fwd.copy(t);
+        fwd.normalize();
+        // 2) базовый поворот: ось модели → fwd;
+        this._tmpQuat.setFromUnitVectors(axis, fwd);
+        // 3) затем доворот вокруг fwd, чтобы верх модели (Y) совпал с нормалью.
+        this._tmpBasisUp.copy(this._upY).applyQuaternion(this._tmpQuat);
+        this._tmpQuat2.setFromUnitVectors(this._tmpBasisUp, up);
+        this._tmpQuat2.multiply(this._tmpQuat);
+        this._group.quaternion.copy(this._tmpQuat2);
+    }
+    /** Только нормаль по глобусу (без касательной) — для alignToPath=false. */
+    _orientToNormal(up) {
+        this._tmpQuat.setFromUnitVectors(this._upY, up);
         this._group.quaternion.copy(this._tmpQuat);
+    }
+    _isFlatUp(up) {
+        return Math.abs(up.x) < 1e-9 && Math.abs(up.z) < 1e-9 && Math.abs(up.y - 1) < 1e-9;
+    }
+    /**
+     * Местная нормаль эллипсоида в точке `worldPos` (локальные координаты
+     * worldGroup). Нормаль берётся по геодезическим lon/lat точки пути.
+     */
+    _sampleNormal(map, localPos, out) {
+        const g = map.surfacePointToLonLat?.(map.getVec3().set(localPos.x + map.worldGroup.position.x, localPos.y + map.worldGroup.position.y, localPos.z + map.worldGroup.position.z));
+        if (!g || !Number.isFinite(g[0]) || !Number.isFinite(g[1])) {
+            out.set(0, 1, 0);
+            return;
+        }
+        const n = map.getVec3().set(0, 0, 0);
+        map.surface.normal(g[0], g[1], n);
+        if (map.worldGroup)
+            n.transformDirection(map.worldGroup.matrixWorld);
+        out.copy(n.normalize());
     }
     _applySize(map, worldPos) {
         let pxFactor = 1;
@@ -779,6 +879,187 @@ export class PathFollower extends SpatialObject {
             scale: this._scale, alignToPath: this._alignToPath,
         });
         console.groupEnd();
+    }
+}
+// =====================================================================
+// Адаптеры пути: Vector3D / Polyline / Polygon → PathAdapter
+// =====================================================================
+/**
+ * Превращает источник пути в PathAdapter.
+ *  - Vector3D и любой уже готовый PathAdapter (есть getPathPoints) — как есть;
+ *  - Polyline — точки по её позициям (getPositions) на поверхности карты;
+ *  - Polygon — ВНЕШНЕЕ кольцо (getRings()[0]), замкнутое в цикл.
+ *
+ * Точки строятся в координатах worldGroup, как у Vector3D, поэтому
+ * PathFollower использует их без изменений. Для Polyline/Polygon точки
+ * пересчитываются при привязке к карте (см. LiveRingAdapter.getPathPoints).
+ */
+function resolveAdapter(src) {
+    const s = src;
+    if (s && typeof s.getPathPoints === 'function' && typeof s.onPathRebuild === 'function') {
+        return s;
+    }
+    if (s && typeof s.getRings === 'function') {
+        return new LivePathAdapter(s, /*ring*/ true);
+    }
+    if (s && typeof s.getPositions === 'function') {
+        return new LivePathAdapter(s, /*ring*/ false);
+    }
+    throw new Error('PathFollower: unsupported path source');
+}
+/**
+ * Адаптер Polyline/Polygon. Точки берутся из публичных данных источника и
+ * переводятся на поверхность текущей карты (тот же контракт, что Vector3D).
+ */
+class LivePathAdapter {
+    _src;
+    _isRing;
+    _rebuildListeners = new Set();
+    _destroyListeners = new Set();
+    _points = [];
+    _sig = '';
+    _lastTimeBucket = -1;
+    constructor(src, isRing) {
+        this._src = src;
+        this._isRing = isRing;
+    }
+    /** Список lon/lat исходных точек пути (замкнут для полигона). */
+    _lonLats() {
+        const crs = this._src.getCRS?.() ?? null;
+        const raw = this._isRing
+            ? (this._src.getRings()[0] ?? [])
+            : (this._src.getPositions() ?? []);
+        const out = [];
+        for (const p of raw) {
+            if (!Array.isArray(p) || p.length < 2)
+                continue;
+            const ll = crs && Projections.get(crs)
+                ? Projections.get(crs).toLonLat([p[0], p[1]])
+                : [p[0], p[1]];
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                continue;
+            out.push([ll[0], ll[1]]);
+        }
+        // Полигон — замыкаем кольцо, чтобы движение шло по кругу.
+        if (this._isRing && out.length > 2) {
+            const a = out[0], b = out[out.length - 1];
+            if (a[0] !== b[0] || a[1] !== b[1])
+                out.push([a[0], a[1]]);
+        }
+        return out;
+    }
+    /** Карта, к которой привязан PathFollower (задаётся через attach). */
+    _attachedMap = null;
+    attach(map) { this._attachedMap = map; this._sig = ''; this._points = []; }
+    detach() { this._attachedMap = null; this._points = []; this._sig = ''; }
+    _map() { return this._attachedMap; }
+    getPathSignature() {
+        const map = this._map();
+        if (!map)
+            return '';
+        // Для clampToGround рельеф меняется — обновляем точки раз в ~0.5 с.
+        const clamp = this._src.getAltitudeMode?.() === 'clampToGround';
+        const bucket = clamp ? Math.floor(performance.now() / 500) : 0;
+        return `${map.globe ? 'g' : 'p'}|${bucket}|${this._src.getPositions?.().length ?? ''}`;
+    }
+    getPathPoints() {
+        const map = this._map();
+        if (!map)
+            return [];
+        const sig = this.getPathSignature();
+        if (sig === this._sig && this._points.length)
+            return this._points;
+        this._sig = sig;
+        const lonLats = this._lonLats();
+        const pts = [];
+        const v = new THREE.Vector3();
+        const wg = map.worldGroup;
+        const h = this._src.getAltitude?.() ?? 0;
+        for (const ll of lonLats) {
+            if (map.globe && map.surface) {
+                const p = map.projectSurfaceVertex(ll, 'EPSG:4326', h, null, v);
+                if (!p)
+                    continue;
+                if (wg)
+                    wg.worldToLocal(p);
+                pts.push([p.x, p.y, p.z]);
+            }
+            else {
+                const xy = map.projectSafe(ll, 'EPSG:4326');
+                if (!xy)
+                    continue;
+                pts.push([xy[0], h, xy[1]]);
+            }
+        }
+        this._points = pts;
+        this._emitRebuild();
+        return pts;
+    }
+    getPathLength() {
+        const p = this.getPathPoints();
+        let total = 0;
+        for (let i = 1; i < p.length; i++) {
+            const dx = p[i][0] - p[i - 1][0], dy = p[i][1] - p[i - 1][1], dz = p[i][2] - p[i - 1][2];
+            total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        return total;
+    }
+    samplePathAt(t, outPos, outTangent) {
+        const p = this.getPathPoints();
+        if (p.length < 2)
+            return false;
+        const L = this.getPathLength();
+        if (L <= 0)
+            return false;
+        const target = (((t % 1) + 1) % 1) * L;
+        let acc = 0;
+        for (let i = 1; i < p.length; i++) {
+            const a = p[i - 1], b = p[i];
+            const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+            const seg = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (acc + seg >= target || i === p.length - 1) {
+                const u = seg > 0 ? (target - acc) / seg : 0;
+                outPos.set(a[0] + dx * u, a[1] + dy * u, a[2] + dz * u);
+                outTangent.set(dx, dy, dz);
+                if (outTangent.lengthSq() < 1e-12)
+                    outTangent.set(0, 1, 0);
+                else
+                    outTangent.normalize();
+                return true;
+            }
+            acc += seg;
+        }
+        return false;
+    }
+    onPathRebuild(cb) {
+        this._rebuildListeners.add(cb);
+        return () => this._rebuildListeners.delete(cb);
+    }
+    onPathDestroy(cb) {
+        this._destroyListeners.add(cb);
+        return () => this._destroyListeners.delete(cb);
+    }
+    _emitRebuild() {
+        for (const cb of [...this._rebuildListeners]) {
+            try {
+                cb();
+            }
+            catch (e) {
+                console.error('[PathFollower] rebuild listener threw', e);
+            }
+        }
+    }
+    /** Вызывается PathFollower/картой при уничтожении источника. */
+    destroy() {
+        for (const cb of [...this._destroyListeners]) {
+            try {
+                cb();
+            }
+            catch (e) {
+                console.error('[PathFollower] destroy listener threw', e);
+            }
+        }
+        this._destroyListeners.clear();
     }
 }
 // =====================================================================

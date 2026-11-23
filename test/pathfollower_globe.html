@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>PathFollower на глобусе: Vector3D / Polyline / Polygon</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    #panel {
+        position: absolute; top: 12px; left: 12px; z-index: 1000;
+        background: rgba(255,255,255,.95); border: 1px solid #ccc; border-radius: 6px;
+        padding: 10px 12px; font: 13px/1.5 system-ui, sans-serif; max-width: 320px;
+    }
+    #panel h3 { margin: 0 0 6px; font-size: 14px; }
+    #panel label { display: block; margin: 4px 0; }
+    #panel .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    #panel button {
+        border: 1px solid #888; background: #fff; border-radius: 4px; padding: 3px 8px; cursor: pointer;
+    }
+    #log { font: 12px/1.4 monospace; margin-top: 8px; white-space: pre; color: #333; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+    <h3>PathFollower на глобусе</h3>
+    <div>Три объекта едут по разным источникам пути:
+        <ul style="margin: 4px 0 0 18px; padding: 0">
+            <li><b>Vector3D</b> — стрелка (Африка)</li>
+            <li><b>Polyline</b> — ломаная (Азия)</li>
+            <li><b>Polygon</b> — по кругу, внешнее кольцо (Южная Америка)</li>
+        </ul>
+    </div>
+    <label><input type="checkbox" id="globeToggle" checked> globe: true (переключение перезагрузит карту)</label>
+    <div class="row">
+        <button id="pauseAll">Пауза</button>
+        <button id="resumeAll">Продолжить</button>
+    </div>
+    <div id="log"></div>
+</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// Глобус включаем параметром ?flat=1 для сравнения с плоскостью.
+const params = new URLSearchParams(location.search);
+const GLOBE = params.get('flat') !== '1';
+
+const map = new KRB.Map({
+    target: 'map',
+    globe: GLOBE,
+    graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
+    view: new KRB.View({ centerLonLat: [20, 10], zoom: 2, minZoom: 0, maxZoom: 8 }),
+});
+
+// ── 1. VECTOR3D: стрелка над Африкой ───────────────────────────────
+const vector = new KRB.Vector3D({
+    positions: [
+        [-5, 35, 0],
+        [10, 40, 0],
+        [25, 30, 0],
+        [35, 15, 0],
+    ],
+    crs: 'EPSG:4326',
+    color: '#e53935',
+    width: 3,
+    arrowSize: 12,
+    tooltip: '<b>Vector3D</b><br>стрелка',
+    animation: { type: 'none' },
+}).addTo(map);
+
+const vectorFollower = new KRB.PathFollower({
+    path: vector,
+    visual: KRB.createPrimitiveVisual({ primitiveType: 'sphere', color: '#ffeb3b' }),
+    size: 14,
+    sizeMode: 'px',
+    alignToPath: true,
+    title: 'Vector3D',
+    tooltip: 'Едет по Vector3D',
+    titleStyle: { color: '#c62828', fontWeight: 'bold', fontSize: '12px' },
+}).addTo(map);
+vectorFollower.moveTo({ from: 0, to: 1, duration: 14, loop: 'restart' });
+
+// ── 2. POLYLINE: ломаная над Азией ─────────────────────────────────
+const polyline = new KRB.Polyline({
+    positions: [
+        [60, 30],
+        [75, 45],
+        [95, 35],
+        [110, 50],
+        [130, 40],
+    ],
+    crs: 'EPSG:4326',
+    color: '#1e88e5',
+    width: 3,
+    tooltip: '<b>Polyline</b>',
+}).addTo(map);
+
+const polylineFollower = new KRB.PathFollower({
+    path: polyline,
+    visual: KRB.createPrimitiveVisual({ primitiveType: 'cone', color: '#0d47a1' }),
+    size: 14,
+    sizeMode: 'px',
+    alignToPath: true,
+    title: 'Polyline',
+    titleStyle: { color: '#0d47a1', fontWeight: 'bold', fontSize: '12px' },
+}).addTo(map);
+polylineFollower.moveTo({ from: 0, to: 1, duration: 16, loop: 'restart' });
+
+// ── 3. POLYGON: по кругу вдоль внешнего кольца, Южная Америка ──────
+const polygon = new KRB.Polygon({
+    rings: [[
+        [-70, -10],
+        [-50, -10],
+        [-40, -25],
+        [-55, -35],
+        [-70, -25],
+    ]],
+    crs: 'EPSG:4326',
+    fillColor: '#43a047',
+    fillOpacity: 0.25,
+    strokeColor: '#2e7d32',
+    strokeWidth: 2,
+    tooltip: '<b>Polygon</b><br>движение по внешнему кольцу',
+}).addTo(map);
+
+const polygonFollower = new KRB.PathFollower({
+    path: polygon,
+    visual: KRB.createPrimitiveVisual({ primitiveType: 'box', color: '#1b5e20' }),
+    size: 14,
+    sizeMode: 'px',
+    alignToPath: true,
+    title: 'Polygon',
+    titleStyle: { color: '#1b5e20', fontWeight: 'bold', fontSize: '12px' },
+}).addTo(map);
+polygonFollower.moveTo({ from: 0, to: 1, duration: 18, loop: 'restart' });
+
+// ── Панель: пауза / продолжить и лог прогресса ─────────────────────
+const followers = { vector: vectorFollower, polyline: polylineFollower, polygon: polygonFollower };
+document.getElementById('pauseAll').onclick = () =>
+    Object.values(followers).forEach(f => f.pause());
+document.getElementById('resumeAll').onclick = () =>
+    Object.values(followers).forEach(f => f.play());
+
+const logEl = document.getElementById('log');
+function tick() {
+    const lines = Object.entries(followers).map(([name, f]) => {
+        const p = f.getProgress();
+        return `${name.padEnd(9)} t=${p.fraction.toFixed(3)}  v=${p.speed.toFixed(1)} м/с  L=${f.getTotalPathLength().toFixed(0)} м`;
+    });
+    logEl.textContent = lines.join('\n');
+    requestAnimationFrame(tick);
+}
+tick();
+
+document.getElementById('globeToggle').onchange = (e) => {
+    const url = new URL(location.href);
+    url.searchParams.set('flat', e.target.checked ? '0' : '1');
+    location.href = url.toString();
+};
+</script>
+</body>
+</html>

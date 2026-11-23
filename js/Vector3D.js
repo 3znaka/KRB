@@ -51,6 +51,8 @@ export class Vector3D extends SpatialObject {
     _lastSegLen = 0;
     _labels = [];
     _worldPoints = [];
+    /** Глобус: lon/lat вершин (для пересчёта высот и точных позиций). */
+    _vertexLonLat = [];
     // ── Анимации ──
     _animList = [];
     _animPolyline = null;
@@ -682,12 +684,17 @@ export class Vector3D extends SpatialObject {
             this._localOriginValid = true;
             return;
         }
-        let sx = 0, sz = 0;
+        let sx = 0, sy = 0, sz = 0;
         for (let i = 0; i < pts.length; i++) {
             sx += pts[i][0];
+            sy += pts[i][1];
             sz += pts[i][2];
         }
-        this._localOrigin.set(sx / pts.length, 0, sz / pts.length);
+        // Глобус: точки лежат на сфере, Y у них большой и меняется —
+        // origin должен быть центром всех трёх осей (точность Float32).
+        // На плоскости Y ≈ высоте узла, сохраняем прежнее поведение (0).
+        const oy = this._map?.globe ? sy / pts.length : 0;
+        this._localOrigin.set(sx / pts.length, oy, sz / pts.length);
         this._localOriginValid = true;
     }
     // =================================================================
@@ -1077,9 +1084,11 @@ export class Vector3D extends SpatialObject {
         // Сдвигаем в локальный origin (Float32-стабильность LineSegments2).
         this._ensureLocalOrigin();
         const ox = this._localOrigin.x;
+        const oy = this._localOrigin.y;
         const oz = this._localOrigin.z;
         for (let i = 0; i < positions.length; i += 3) {
             positions[i] -= ox;
+            positions[i + 1] -= oy;
             positions[i + 2] -= oz;
         }
         anim.overlay.position.copy(this._localOrigin);
@@ -1191,6 +1200,11 @@ export class Vector3D extends SpatialObject {
     _recomputeWorldPoints() {
         if (!this._map)
             return;
+        const map = this._map;
+        if (map.globe && map.surface) {
+            this._recomputeGlobeWorldPoints();
+            return;
+        }
         const worldPts = [];
         const wgPos = this._map.worldGroup.position;
         const clamp = this._altitudeMode === 'clampToGround';
@@ -1217,6 +1231,70 @@ export class Vector3D extends SpatialObject {
             worldPts.push([xy[0], worldY, xy[1]]);
         }
         this._worldPoints = worldPts;
+        this._vertexLonLat = this._collectVertexLonLat();
+    }
+    /**
+     * Глобус: каждая вершина — точка эллипсоида над своими lon/lat, высота
+     * узла откладывается вдоль местной нормали (как у Polyline/Polygon).
+     * `_worldPoints` остаётся в координатах worldGroup, поэтому переводим
+     * мировую точку в локальную через worldToLocal.
+     */
+    _recomputeGlobeWorldPoints() {
+        const map = this._map;
+        const worldPts = [];
+        const lonLats = [];
+        const v = new THREE.Vector3();
+        const clamp = this._altitudeMode === 'clampToGround';
+        for (let i = 0; i < this._positions.length; i++) {
+            const p = this._positions[i];
+            if (!Array.isArray(p) || p.length < 2)
+                continue;
+            const n = this._normalizePosition(p, this._crs);
+            const ll = this._lonLatOfNormalized(n);
+            if (!ll)
+                continue;
+            let surfaceH = 0;
+            if (clamp) {
+                // Рельеф в точке узла: поверхность эллипсоида → высота рельефа.
+                const sp = map.projectSurfacePoint(ll, 'EPSG:4326', 0, v, null);
+                if (sp)
+                    surfaceH = map.getSurfaceHeightAt(sp.x, sp.z);
+            }
+            const h = surfaceH + n.nodeHeight * this._heightScale + this._altitude;
+            const wp = map.projectSurfaceVertex(ll, 'EPSG:4326', h, null, v);
+            if (!wp)
+                continue;
+            // projectSurfaceVertex без origin отдаёт мировые координаты сцены;
+            // переводим в систему worldGroup, как и остальные точки Vector3D.
+            if (map.worldGroup)
+                map.worldGroup.worldToLocal(wp);
+            worldPts.push([wp.x, wp.y, wp.z]);
+            lonLats.push(ll);
+        }
+        this._worldPoints = worldPts;
+        this._vertexLonLat = lonLats;
+    }
+    /** lon/lat вершин в WGS84 (для глобуса) — по нормализованным позициям. */
+    _collectVertexLonLat() {
+        const out = [];
+        for (const p of this._positions) {
+            if (!Array.isArray(p) || p.length < 2)
+                continue;
+            out.push(this._lonLatOfNormalized(this._normalizePosition(p, this._crs)));
+        }
+        return out;
+    }
+    /** lon/lat нормализованной позиции (ECEF → точный lonLat, иначе через CRS). */
+    _lonLatOfNormalized(n) {
+        if (n.lonLat)
+            return [n.lonLat[0], n.lonLat[1]];
+        const crs = this._crs ?? this._map?.inputCRS;
+        if (!crs)
+            return null;
+        const ll = crs.toLonLat(n.coord);
+        if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+            return null;
+        return [ll[0], ll[1]];
     }
     _buildLine(map) {
         this._geometry = new LineGeometry();
@@ -1389,6 +1467,27 @@ export class Vector3D extends SpatialObject {
                 return;
             }
         }
+        // ── глобус: вектор полностью за горизонтом — скрываем ──
+        // Видимость — по самой «ближней» к камере вершине: если хотя бы одна
+        // точка пути видна, линия (и её подписи) остаются.
+        if (map.globe && typeof map.isWorldPointOccluded === 'function'
+            && this._worldPoints.length >= 2) {
+            const wgPos = map.worldGroup.position;
+            const tmp = map.getVec3();
+            let anyVisible = false;
+            for (const p of this._worldPoints) {
+                tmp.set(p[0] + wgPos.x, p[1] + wgPos.y, p[2] + wgPos.z);
+                if (!map.isWorldPointOccluded(tmp)) {
+                    anyVisible = true;
+                    break;
+                }
+            }
+            if (!anyVisible) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
+        }
         // ── apply positions (rebuild Line2 if dirty) ──
         if (!this._applyPositions()) {
             this._isVisible = false;
@@ -1421,6 +1520,7 @@ export class Vector3D extends SpatialObject {
         this._line.position.copy(this._localOrigin);
         const pts = this._simplifiedPoints;
         const ox = this._localOrigin.x;
+        const oy = this._localOrigin.y;
         const oz = this._localOrigin.z;
         const n = pts.length;
         const arr = new Float32Array(n * 3);
@@ -1429,7 +1529,7 @@ export class Vector3D extends SpatialObject {
         for (let i = 0; i < n; i++) {
             const p = pts[i];
             let x = p[0] - ox;
-            let y = p[1];
+            let y = p[1] - oy;
             let z = p[2] - oz;
             if (!Number.isFinite(x))
                 x = 0;

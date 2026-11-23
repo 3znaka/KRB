@@ -20,6 +20,7 @@ await KRB.Projections.addCrs('EPSG:4978');
 
 const map = new KRB.Map({
     target: 'map',
+    globe: true,
     layers: [
         new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
@@ -63,7 +64,7 @@ marker2.addTo(map);
 const msk = KRB.geodeticToEcef(37.6178, 55.7558, 500, KRB.ELLIPSOIDS.wgs84);
 const spb = KRB.geodeticToEcef(30.3141, 59.9386, 500, KRB.ELLIPSOIDS.wgs84);
 
-const line = new KRB.Polyline({
+const line = new KRB.Vector3D({
     positions: [
         [msk.X, msk.Y, msk.Z],
         [spb.X, spb.Y, spb.Z],

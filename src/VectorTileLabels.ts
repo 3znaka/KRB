@@ -21,7 +21,9 @@ class VectorPointLabelSource {
 
     constructor(map: any, worldX: number, worldZ: number, text: string, options: Record<string, any> = {}) {
         this.map = map;
-        this.worldPos = new THREE.Vector3(worldX, 0, worldZ);
+        // Глобус: высота над поверхностью задаётся options.worldY (мировой Y точки).
+        const worldY = Number.isFinite(options.worldY) ? options.worldY : 0;
+        this.worldPos = new THREE.Vector3(worldX, worldY, worldZ);
         this.text = text;
         this.options = options;
     }
@@ -94,7 +96,16 @@ class VectorPointLabelSource {
     getTitleVerticalAlign() { return this.options.textVerticalAlign || 'center'; }
     getTitleOffset() { return this.options.textOffset || [0, 0]; }
     getTextZoomBounds() { return this.options.zoomBounds || { min: 0, max: 24 }; }
-    isVisible() { return this.options.visible !== false; }
+    isVisible() {
+        if (this.options.visible === false) return false;
+        // Глобус: точка за горизонтом не показывается (как в Marker).
+        const map = this.map;
+        if (map.globe === true && typeof map.isWorldPointOccluded === 'function') {
+            const v = map.getVec3().copy(this.worldPos).add(map.worldGroup.position);
+            if (map.isWorldPointOccluded(v)) return false;
+        }
+        return true;
+    }
 }
 
 // ============================================================================
@@ -341,6 +352,8 @@ const halo = _getLayerHalo(this._styles, layerName);
     const halo = _getLayerHalo(this._styles, layerName);
 
 source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.position.z, pt.text, {
+                    // Глобус: мировой Y точки (на плоскости 0).
+                    worldY: this._map.globe === true ? (pt.y ?? 0) + group.position.y : 0,
                     textColor: pt.textColor, fontSize: pt.fontSize, fontFamily: pt.fontFamily,
                     fontWeight: pt.fontWeight, textShadow: pt.textShadow, textTransform: pt.textTransform,
                     textFontStyle: pt.textFontStyle, textLetterSpacing: pt.textLetterSpacing,
@@ -398,6 +411,9 @@ source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.p
         const maxLabelDistSq = maxLabelDist * maxLabelDist;
         const camPosX = cameraPos.x, camPosY = cameraPos.y, camPosZ = cameraPos.z;
         const tempVec = this._tempVec3;
+        const globe = map.globe === true && !!map.surface;
+        const isOccluded = (p: THREE.Vector3): boolean =>
+            typeof map.isWorldPointOccluded === 'function' && map.isWorldPointOccluded(p);
         const candidates: LabelCandidate[] = [];
         const rectW = rect.width, rectH = rect.height;
         const screenMarginX = rectW > 0 ? cullMargin / rectW : 0;
@@ -420,11 +436,17 @@ source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.p
                     if (continuousZoom < zb.min || continuousZoom > zb.max) continue;
 
                     const wx = pt.x + gx, wz = pt.z + gz;
-                    const cdx = wx - camPosX, cdy = -camPosY, cdz = wz - camPosZ;
+                    // Глобус: точка на сфере (3D), иначе — плоская (x, 0, z).
+                    const wy = globe ? (pt.y ?? 0) + group.position.y + worldOffset.y : 0;
+                    const cdx = wx - camPosX, cdy = wy - camPosY, cdz = wz - camPosZ;
                     const d2 = cdx * cdx + cdy * cdy + cdz * cdz;
                     if (d2 > maxLabelDistSq) continue;
 
-                    tempVec.set(wx, 0, wz).project(camera);
+                    tempVec.set(wx, wy, wz);
+                    // Глобус: точка на обратной стороне шара не подписывается
+                    // (тот же критерий, что у Marker — isWorldPointOccluded).
+                    if (globe && isOccluded(tempVec)) continue;
+                    tempVec.project(camera);
                     if (tempVec.z > 1 || tempVec.z < -1) continue;
 
                     const sx = (tempVec.x * 0.5 + 0.5) * rectW;
@@ -461,11 +483,15 @@ source = new VectorPointLabelSource(map, pt.x + group.position.x, pt.z + group.p
 
                     for (let k = 0; k < pts.length; k += step) {
                         const wx = pts[k].x + gx, wz = pts[k].z + gz;
-                        const cdx = wx - camPosX, cdy = -camPosY, cdz = wz - camPosZ;
+                        // Глобус: 3D-точка на сфере; плоскость — y=0.
+                        const wy = globe ? (pts[k].y ?? 0) + group.position.y + worldOffset.y : 0;
+                        const cdx = wx - camPosX, cdy = wy - camPosY, cdz = wz - camPosZ;
                         const d2 = cdx * cdx + cdy * cdy + cdz * cdz;
                         if (d2 < minDistSq) minDistSq = d2;
 
-                        tempVec.set(wx, 0, wz).project(camera);
+                        tempVec.set(wx, wy, wz);
+                        if (globe && isOccluded(tempVec)) continue;
+                        tempVec.project(camera);
                         if (tempVec.z > -1 && tempVec.z < 1) {
                             hasValidPoints = true;
                             if (tempVec.x < minTx) minTx = tempVec.x;

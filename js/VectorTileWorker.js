@@ -8,6 +8,9 @@ export const _DEFAULT_WORKER_SCRIPTS = [
     new URL('./js_TP/earcut.js', _MODULE_DIR).href,
 ];
 const _workerBlobUrlCache = new Map();
+// Временные объекты для ориентации точек на глобусе (без аллокаций на тайл).
+const _UP = new THREE.Vector3(0, 1, 0);
+const _tmpN = new THREE.Vector3();
 function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const key = tpbUrl + '|' + earcutUrl;
     const cached = _workerBlobUrlCache.get(key);
@@ -103,6 +106,25 @@ export const VectorTileWorkerMixin = {
         pending.resolve(group);
     },
     // ── Деформация tile-CRS → map-CRS ─────────────────────────────────────
+    /** Глобус-режим карты и есть ли у неё поверхность эллипсоида. */
+    _isGlobeMode() {
+        return this._map?.globe === true && !!this._map?.surface;
+    },
+    /**
+     * Параметры эллипсоида и tile-сетки для воркера (сериализуемые числа).
+     * Эллипсоид берём у поверхности карты, чтобы растр и вектор совпадали.
+     */
+    _globeWorkerParams() {
+        const ell = this._map.surface.ellipsoid;
+        const tileCrs = this._tileCrs;
+        return {
+            a: ell.a,
+            e2: ell.e2,
+            halfX: tileCrs.halfExtentX,
+            halfY: tileCrs.halfExtentY,
+            maxLatDeg: tileCrs.maxLatDeg ?? null,
+        };
+    },
     _computeTileDeform(z, tileCX, tileCZ) {
         const K = z < 6 ? 64 : z < 9 ? 32 : 16;
         const tileCrs = this._tileCrs;
@@ -228,6 +250,12 @@ export const VectorTileWorkerMixin = {
     _buildGroupFromWorkerResult(group, result, sourceZoom) {
         this._removeTextLabelsForGroup(group);
         group.renderOrder = this._tileGroupRenderOrder;
+        // ── Глобус: позиции уже на эллипсоиде, центр — в result.centerX/Y/Z.
+        // Деформация плоскости здесь не нужна и НЕ применяется.
+        if (result.globe) {
+            group.position.set(result.centerX ?? 0, result.centerY ?? 0, result.centerZ ?? 0);
+            return this._populateGroup(group, result, null);
+        }
         const tileCX = result.centerX ?? 0;
         const tileCZ = result.centerZ ?? 0;
         let df = null;
@@ -237,6 +265,10 @@ export const VectorTileWorkerMixin = {
                 return false; // тайл вне домена / вырожден — пропускаем целиком
         }
         group.position.set(df ? df.mapCX : tileCX, 0, df ? df.mapCZ : tileCZ);
+        return this._populateGroup(group, result, df);
+    },
+    /** Наполняет группу мешами по результату воркера. df — плоская деформация (null на глобусе). */
+    _populateGroup(group, result, df) {
         while (group.children.length) {
             const child = group.children[0];
             if (child.geometry && !this._managedGeometries.has(child.geometry))
@@ -332,7 +364,11 @@ export const VectorTileWorkerMixin = {
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
-            mesh.position.set(pt.x, 0, pt.z);
+            mesh.position.set(pt.x, pt.y ?? 0, pt.z);
+            // Глобус: диск ложится касательно к поверхности (нормаль — геодезическая).
+            if (pt.normal) {
+                mesh.quaternion.setFromUnitVectors(_UP, _tmpN.set(pt.normal[0], pt.normal[1], pt.normal[2]));
+            }
             mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
@@ -561,10 +597,13 @@ export const VectorTileWorkerMixin = {
         const tileHalfY = this._tileCrs.halfExtentY;
         const tileSizeX = (2 * tileHalfX) / (1 << z);
         const tileSizeY = (2 * tileHalfY) / (1 << z);
+        const globeOn = this._isGlobeMode();
         const msg = {
             type: 'process', id, buffer, z, x, y,
             tileSizeX, tileSizeY,
             maxMercX: tileHalfX, maxMercY: tileHalfY,
+            // Глобус: воркер сферизует геометрию сам (см. processTile/globeParams).
+            globe: globeOn ? this._globeWorkerParams() : null,
             is3d,
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,

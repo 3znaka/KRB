@@ -391,6 +391,10 @@ export interface VectorTile {
     _initWorker(): Promise<void>;
     _onWorkerMessage(data: any): void;
     _buildGroupFromWorkerResult(group: THREE.Group, result: any): void;
+    _populateGroup(group: THREE.Group, result: any, df: any): boolean;
+    _isGlobeMode(): boolean;
+    _globeWorkerParams(): { a: number; e2: number; halfX: number; halfY: number; maxLatDeg: number | null };
+    _getVisibleTileKeysGlobe(z: number): Set<string>;
     _fatLineSegmentsFromPositions(positions: Float32Array | ArrayLike<number> | undefined): Float32Array | null;
     _addFatLineFromPositions(group: THREE.Group, positions: any, material: any, renderOrder: number | undefined): void;
     _sendToWorker(buffer: ArrayBuffer, z: number, x: number, y: number, is3d: boolean,

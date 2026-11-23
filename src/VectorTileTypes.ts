@@ -102,6 +102,10 @@ export interface WorkerStroke {
 export interface WorkerPoint {
     layerName: string; color: number; opacity: number;
     radius: number; x: number; z: number; renderOrder?: number;
+    /** Глобус: высота над origin тайла (world Y); на плоскости отсутствует. */
+    y?: number;
+    /** Глобус: геодезическая нормаль в точке (для ориентации диска). */
+    normal?: [number, number, number];
 }
 
 export interface WorkerTextPoint {
@@ -113,6 +117,10 @@ export interface WorkerTextPoint {
     featureId?: string | number;
     id?: string | number;
     x: number; z: number; text: string;
+    /** Глобус: world Y; на плоскости отсутствует. */
+    y?: number;
+    /** Глобус: геодезическая нормаль в точке. */
+    normal?: [number, number, number];
     textColor?: string; fontSize?: string; fontFamily?: string; fontWeight?: string;
     textShadow?: string; textTransform?: string; textFontStyle?: string; textLetterSpacing?: string;
     textOffset?: [number, number]; textAlign?: string; textVerticalAlign?: string;
@@ -129,7 +137,8 @@ properties?: Record<string, any>;
 }
 
 export interface WorkerTextLine {
-    points: Array<{ x: number; z: number }>;
+    /** y — мировая высота точки; заполняется только на глобусе. */
+    points: Array<{ x: number; y?: number; z: number }>;
     priority?: number;
     zoomBounds?: { min: number; max: number };
 }
@@ -137,6 +146,10 @@ export interface WorkerTextLine {
 export interface WorkerResult {
     centerX?: number;
     centerZ?: number;
+    /** Глобус: центр тайла по Y (world); на плоскости отсутствует. */
+    centerY?: number;
+    /** Признак: геометрия уже сферизована воркером. */
+    globe?: boolean;
     fills?: WorkerFill[];
     buildings?: WorkerBuilding[];
     lines?: WorkerLine[];

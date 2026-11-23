@@ -221,10 +221,14 @@ export class VectorLineLabelSource {
         const pts = this.lineData.points;
         if (!pts || pts.length < 2)
             return null;
+        // Глобус: точки линии лежат на эллипсоиде, у них есть y (мировой).
+        // Смещение по Y — worldGroup.y + group.y (на плоскости обе 0).
+        const map = this.map;
+        const offY = (map.worldGroup?.position.y ?? 0) + (this.group.position.y ?? 0);
         const n = pts.length;
         const points3D = new Array(n);
         for (let i = 0; i < n; i++) {
-            points3D[i] = new THREE.Vector3(pts[i].x + offX, 0, pts[i].z + offZ);
+            points3D[i] = new THREE.Vector3(pts[i].x + offX, (pts[i].y ?? 0) + offY, pts[i].z + offZ);
         }
         const segLengths = new Array(n - 1);
         let totalLen = 0;
@@ -321,6 +325,9 @@ export class VectorLineLabelSource {
         };
         const samples = 40;
         const flags = [];
+        // Глобус: точка за горизонтом не считается видимой (как у POI).
+        const globeOcc = map.globe === true && typeof map.isWorldPointOccluded === 'function';
+        const occTmp = new THREE.Vector3();
         for (let i = 0; i <= samples; i++) {
             const px = (i / samples) * totalLenPx;
             const p = this._samplePx(probe, px);
@@ -332,6 +339,15 @@ export class VectorLineLabelSource {
             if (!(w > 1e-6)) {
                 flags.push(false);
                 continue;
+            }
+            if (globeOcc) {
+                const t = this._pxToT(probe, px);
+                const ptIdx = Math.min(points3D.length - 1, Math.round(t * (points3D.length - 1)));
+                occTmp.copy(points3D[ptIdx]);
+                if (map.isWorldPointOccluded(occTmp)) {
+                    flags.push(false);
+                    continue;
+                }
             }
             flags.push(p.z >= -1 && p.z <= 1 &&
                 p.x >= 0 && p.x <= W &&
@@ -357,7 +373,7 @@ export class VectorLineLabelSource {
                 tMidVisible = (tMinVisible + tMaxVisible) / 2;
             }
         }
-        const vc = new THREE.Vector3(offX, 0, offZ).project(camera);
+        const vc = new THREE.Vector3(offX, offY, offZ).project(camera);
         const tileCenterScreen = {
             x: (vc.x * 0.5 + 0.5) * W,
             y: (-vc.y * 0.5 + 0.5) * H

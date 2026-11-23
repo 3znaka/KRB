@@ -76,6 +76,7 @@ const result = processTile(
     exclusionPolygons, exclusionLayers,
     maxTextPointsPerTile, maxTextLinesPerTile,
     styleZoom ?? continuousZoom ?? z,
+    msg.globe ?? null,
 );
             const transferList = [];
             const payload = { id, result };
@@ -1157,10 +1158,127 @@ function subdivideFillGeometry(positions, indices, maxSegLen) {
     };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// ГЛОБУС: сферизация геометрии тайла
+// ════════════════════════════════════════════════════════════════════════
+// Геометрия строится плоской (tile-local, earcut и т.д. — топология не меняется),
+// затем на выходе ОДИН проход переводит каждую вершину на эллипсоид:
+//   lon/lat ← обратная Web Mercator (tile-CRS), высота h — по месту вершины,
+//   world = (X, Z, -Y) как в WorldSurface.position (правосторонняя тройка).
+// Центр тайла вычитается здесь же (float32-точность); результат — в
+// group.position, как и у плоского/деформированного пути.
+
+const GLOBE_DEG = Math.PI / 180;
+
+/**
+ * Параметры globe-режима, переданные из главного потока.
+ * @param {{a:number,e2:number,halfX:number,halfY:number,maxLatDeg:number|null}} g
+ */
+function makeGlobeContext(g, z, x, y, tileSizeX, tileSizeY) {
+    const n = 1 << z;
+    // Mercator: lon = X·(180/halfX); lat = atan(sinh(Y·π/halfY)) (Y — север, +).
+    // В tile-CRS world-Z = -projY, поэтому projY = -worldZ (см. processTile).
+    const lonScale = 180 / g.halfX;
+    const yScale = Math.PI / g.halfY;
+    return {
+        a: g.a, e2: g.e2,
+        halfX: g.halfX, halfY: g.halfY,
+        maxLatDeg: g.maxLatDeg ?? 85.05112878,
+        lonScale, yScale,
+        n, tileSizeX, tileSizeY,
+    };
+}
+
+/** tile-CRS world (wx, wz) → lon/lat (градусы). Возвращает false вне домена. */
+function globeLonLat(ctx, wx, wz, out) {
+    const lon = wx * ctx.lonScale;
+    const projY = -wz;
+    let lat = Math.atan(Math.sinh(projY * ctx.yScale)) / GLOBE_DEG;
+    const m = ctx.maxLatDeg;
+    if (lat > m) lat = m; else if (lat < -m) lat = -m;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
+    out[0] = lon; out[1] = lat;
+    return true;
+}
+
+/**
+ * Перевод (lon, lat, h) в world-координаты глобуса (без смещения центра).
+ * Оси: X=ECEF.X, Y=ECEF.Z, Z=-ECEF.Y — ровно как WorldSurface.position.
+ */
+function globePoint(ctx, lon, lat, h, out, off) {
+    const latR = lat * GLOBE_DEG, lonR = lon * GLOBE_DEG;
+    const sinLat = Math.sin(latR), cosLat = Math.cos(latR);
+    const sinLon = Math.sin(lonR), cosLon = Math.cos(lonR);
+    const N = ctx.a / Math.sqrt(1 - ctx.e2 * sinLat * sinLat);
+    const X = (N + h) * cosLat * cosLon;
+    const Y = (N + h) * cosLat * sinLon;
+    const Z = (N * (1 - ctx.e2) + h) * sinLat;
+    out[off] = X;
+    out[off + 1] = Z;
+    out[off + 2] = -Y;
+}
+
+/** Геодезическая нормаль (world-оси) для lon/lat. */
+function globeNormal(lon, lat, out, off) {
+    const latR = lat * GLOBE_DEG, lonR = lon * GLOBE_DEG;
+    const cosLat = Math.cos(latR);
+    out[off] = cosLat * Math.cos(lonR);
+    out[off + 1] = Math.sin(latR);
+    out[off + 2] = -cosLat * Math.sin(lonR);
+}
+
+/**
+ * Сферизация плоского буфера позиций (шаг 3, [x,y,z] tile-local).
+ * y — высота над эллипсоидом (метры) как есть; x/z — tile-world.
+ * NaN-разделители (линии) сохраняются. Возвращает Float32Array в world-осях
+ * глобуса относительно центра тайла (cx, cy, cz).
+ */
+function sphereizePositions(pos, ctx, centerWX, centerWZ, out3) {
+    const ll = [0, 0];
+    const c = [0, 0, 0];
+    for (let i = 0; i < pos.length; i += 3) {
+        const lx = pos[i], hy = pos[i + 1], lz = pos[i + 2];
+        if (Number.isNaN(lx)) { out3[i] = NaN; out3[i + 1] = NaN; out3[i + 2] = NaN; continue; }
+        if (!globeLonLat(ctx, lx + centerWX, lz + centerWZ, ll)) {
+            out3[i] = 0; out3[i + 1] = 0; out3[i + 2] = 0;
+            continue;
+        }
+        globePoint(ctx, ll[0], ll[1], hy, out3, i);
+    }
+    return out3;
+}
+
+/** Вычитает центр тайла из world-позиций (float32-точность). */
+function recenterPositions(arr, cx, cy, cz) {
+    for (let i = 0; i < arr.length; i += 3) {
+        if (Number.isNaN(arr[i])) continue;
+        arr[i] -= cx; arr[i + 1] -= cy; arr[i + 2] -= cz;
+    }
+    return arr;
+}
+
+/** Центр тайла на эллипсоиде (среднее по сетке 3×3 вершин тайла). */
+function globeTileCenter(ctx, centerWX, centerWZ, tileSizeX, tileSizeY) {
+    const ll = [0, 0];
+    const p = [0, 0, 0];
+    let sx = 0, sy = 0, sz = 0, k = 0;
+    for (let j = 0; j <= 2; j++) {
+        for (let i = 0; i <= 2; i++) {
+            const wx = centerWX + (i - 1) * tileSizeX * 0.5;
+            const wz = centerWZ + (j - 1) * tileSizeY * 0.5;
+            if (!globeLonLat(ctx, wx, wz, ll)) continue;
+            globePoint(ctx, ll[0], ll[1], 0, p, 0);
+            sx += p[0]; sy += p[1]; sz += p[2]; k++;
+        }
+    }
+    if (k === 0) return null;
+    return { x: sx / k, y: sy / k, z: sz / k };
+}
+
 function processTile(tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is3d,
                      visibleLayers, invisibleLayers, buildingEdges,
                      exclusionPolygons, exclusionLayers,
-                     maxTextPointsPerTile, maxTextLinesPerTile, styleZoom) {
+                     maxTextPointsPerTile, maxTextLinesPerTile, styleZoom, globeParams = null) {
   const eps = Math.min(tileSizeX, tileSizeY) * 0.5 / 4096;
     const pointScale = computePointScale(styleZoom);
    const halfTileX = tileSizeX / 2;
@@ -1638,7 +1756,144 @@ renderOrder: semanticOrder - 0.5,
         stroke.positions = subdivideLinePositions(stroke.positions, maxSegLen);
     }
 
+    // ── Глобус: единый проход сферизации ──────────────────────────────
+    if (globeParams) {
+        sphereizeTileResult(result, globeParams, z, centerX, centerZ, tileSizeX, tileSizeY);
+    }
+
     return result;
+}
+
+/**
+ * Переводит все позиции результата тайла на эллипсоид.
+ * Вызывается один раз в конце processTile; центр тайла возвращается в
+ * result.centerX/Y/Z (world-оси глобуса), позиции — относительно него.
+ */
+function sphereizeTileResult(result, globeParams, z, centerWX, centerWZ, tileSizeX, tileSizeY) {
+    const ctx = makeGlobeContext(globeParams, z, 0, 0, tileSizeX, tileSizeY);
+    const c = globeTileCenter(ctx, centerWX, centerWZ, tileSizeX, tileSizeY);
+    if (!c) {
+        result.fills = []; result.lines = []; result.strokes = []; result.buildings = [];
+        result.points = []; result.textPoints = []; result.textLines = [];
+        return;
+    }
+
+    // Вершины на сфере в tile-local (относительно centerWX/Z), затем минус центр.
+    const sph = (arr) => {
+        const out = new Float32Array(arr.length);
+        sphereizePositions(arr, ctx, centerWX, centerWZ, out);
+        return recenterPositions(out, c.x, c.y, c.z);
+    };
+
+    for (const f of result.fills) f.positions = sph(f.positions);
+    for (const b of result.buildings) {
+        // Нормали — по ПЛОСКИМ позициям (нужна tile-координата вершины).
+        const flatN = sphereizeBuildingNormals(b.normals, b.positions, ctx, centerWX, centerWZ);
+        b.positions = sph(b.positions);
+        b.normals = flatN;
+        if (b.edgePositions) b.edgePositions = sph(b.edgePositions);
+    }
+    for (const l of result.lines) l.positions = sph(l.positions);
+    for (const s of result.strokes) s.positions = sph(s.positions);
+
+    // Точки: CircleGeometry ориентируется по геодезической нормали.
+    // Точка вне домена проекции отбрасывается (а не остаётся плоской).
+    const ll = [0, 0];
+    const keptPoints = [];
+    for (const p of result.points) {
+        const wx = p.x + centerWX, wz = p.z + centerWZ;
+        if (!globeLonLat(ctx, wx, wz, ll)) continue;
+        const q = [0, 0, 0];
+        globePoint(ctx, ll[0], ll[1], 0, q, 0);
+        p.x = q[0] - c.x; p.y = q[1] - c.y; p.z = q[2] - c.z;
+        p.normal = [0, 0, 0];
+        globeNormal(ll[0], ll[1], p.normal, 0);
+        keptPoints.push(p);
+    }
+    result.points = keptPoints;
+
+    // Точечные подписи (POI): та же сферизация, что и у точек.
+    const keptText = [];
+    for (const tp of result.textPoints) {
+        const wx = tp.x + centerWX, wz = tp.z + centerWZ;
+        if (!globeLonLat(ctx, wx, wz, ll)) continue;
+        const q = [0, 0, 0];
+        globePoint(ctx, ll[0], ll[1], 0, q, 0);
+        tp.x = q[0] - c.x; tp.y = q[1] - c.y; tp.z = q[2] - c.z;
+        tp.normal = [0, 0, 0];
+        globeNormal(ll[0], ll[1], tp.normal, 0);
+        keptText.push(tp);
+    }
+    result.textPoints = keptText;
+    // Линейные подписи: каждая точка линии сферизуется. Точка вне домена
+    // проекции разрывает линию — куски короче 2 точек отбрасываются.
+    const keptLines = [];
+    for (const tl of result.textLines) {
+        const chains = [];
+        let cur = [];
+        for (const p of tl.points) {
+            const wx = p.x + centerWX, wz = p.z + centerWZ;
+            if (!globeLonLat(ctx, wx, wz, ll)) {
+                if (cur.length >= 2) chains.push(cur);
+                cur = [];
+                continue;
+            }
+            const q = [0, 0, 0];
+            globePoint(ctx, ll[0], ll[1], 0, q, 0);
+            cur.push({ x: q[0] - c.x, y: q[1] - c.y, z: q[2] - c.z });
+        }
+        if (cur.length >= 2) chains.push(cur);
+        // Линия может распасться на несколько кусков; каждый — отдельная подпись.
+        for (const chain of chains) {
+            keptLines.push({ ...tl, points: chain });
+        }
+    }
+    result.textLines = keptLines;
+
+    result.globe = true;
+    result.centerX = c.x;
+    result.centerY = c.y;
+    result.centerZ = c.z;
+}
+
+/**
+ * Нормали зданий на сфере.
+ * Плоские нормали экструзии заданы в tile-local (x=восток, y=вверх, z=север
+ * на плоскости). На глобусе их нужно повернуть в локальный ENU-базис вершины:
+ *   east  = (-sinλ, 0, cosλ) в ECEF-осях,
+ *   north = (-sinφ·cosλ, cosφ, -sinφ·sinλ),
+ *   up    = геодезическая нормаль (cosφ·cosλ, sinφ, cosφ·sinλ).
+ * Итог — нормаль в world-осях (X, Z, -Y). Крыша (up) остаётся «вверх»
+ * относительно поверхности, стены — перпендикулярны ей.
+ */
+/**
+ * Нормали зданий → глобус, по вершинам.
+ * Плоская нормаль экструзии (nx: восток, ny: вверх, nz: север — в tile-local)
+ * поворачивается в ENU-базис САМОЙ вершины. Для этого нужна tile-координата
+ * вершины, поэтому вызывается из sphereizeTileResult с исходными плоскими
+ * позициями (flatPos), до их сферизации.
+ */
+function sphereizeBuildingNormals(nrm, flatPos, ctx, centerWX, centerWZ) {
+    const out = new Float32Array(nrm.length);
+    const ll = [0, 0];
+    for (let i = 0; i < nrm.length; i += 3) {
+        const wx = flatPos[i] + centerWX;
+        const wz = flatPos[i + 2] + centerWZ;
+        if (!globeLonLat(ctx, wx, wz, ll)) { out[i + 1] = 1; continue; }
+        const sLo = Math.sin(ll[0] * GLOBE_DEG), cLo = Math.cos(ll[0] * GLOBE_DEG);
+        const sLa = Math.sin(ll[1] * GLOBE_DEG), cLa = Math.cos(ll[1] * GLOBE_DEG);
+        // Базис (world = ECEF с осями X, Z, -Y):
+        //   east  → (-sLo, 0, -cLo)
+        //   up    → ( cLa·cLo, sLa, -cLa·sLo)
+        //   north → (-sLa·cLo, cLa, sLa·sLo)
+        // Плоский мир: +x — восток, +y — вверх, +z — ЮГ (world-Z = -projY).
+        // Поэтому flat z переводим в -north, т.е. north-компонента = -fz.
+        const fx = nrm[i], fy = nrm[i + 1], fz = -nrm[i + 2];
+        out[i]     = fx * (-sLo)       + fy * (cLa * cLo)  + fz * (-sLa * cLo);
+        out[i + 1] = fy * sLa          + fz * cLa;
+        out[i + 2] = fx * (-cLo)       + fy * (-cLa * sLo) + fz * (sLa * sLo);
+    }
+    return out;
 }
 `;
 }

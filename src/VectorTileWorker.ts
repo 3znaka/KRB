@@ -12,6 +12,10 @@ export const _DEFAULT_WORKER_SCRIPTS = [
 
 const _workerBlobUrlCache = new Map<string, Promise<string>>();
 
+// Временные объекты для ориентации точек на глобусе (без аллокаций на тайл).
+const _UP = new THREE.Vector3(0, 1, 0);
+const _tmpN = new THREE.Vector3();
+
 function _getSharedWorkerBlobUrl(tpbUrl: string, earcutUrl: string): Promise<string> {
     const key = tpbUrl + '|' + earcutUrl;
     const cached = _workerBlobUrlCache.get(key);
@@ -120,6 +124,27 @@ export const VectorTileWorkerMixin = {
     },
 
     // ── Деформация tile-CRS → map-CRS ─────────────────────────────────────
+
+/** Глобус-режим карты и есть ли у неё поверхность эллипсоида. */
+_isGlobeMode(this: any): boolean {
+    return this._map?.globe === true && !!this._map?.surface;
+},
+
+/**
+ * Параметры эллипсоида и tile-сетки для воркера (сериализуемые числа).
+ * Эллипсоид берём у поверхности карты, чтобы растр и вектор совпадали.
+ */
+_globeWorkerParams(this: any) {
+    const ell = this._map.surface.ellipsoid;
+    const tileCrs = this._tileCrs;
+    return {
+        a: ell.a,
+        e2: ell.e2,
+        halfX: tileCrs.halfExtentX,
+        halfY: tileCrs.halfExtentY,
+        maxLatDeg: tileCrs.maxLatDeg ?? null,
+    };
+},
 
 _computeTileDeform(z, tileCX, tileCZ) {
 
@@ -272,6 +297,13 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
         this._removeTextLabelsForGroup(group);
         group.renderOrder = this._tileGroupRenderOrder;
 
+        // ── Глобус: позиции уже на эллипсоиде, центр — в result.centerX/Y/Z.
+        // Деформация плоскости здесь не нужна и НЕ применяется.
+        if (result.globe) {
+            group.position.set(result.centerX ?? 0, result.centerY ?? 0, result.centerZ ?? 0);
+            return this._populateGroup(group, result, null);
+        }
+
         const tileCX = result.centerX ?? 0;
         const tileCZ = result.centerZ ?? 0;
 
@@ -282,7 +314,16 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
         }
 
         group.position.set(df ? df.mapCX : tileCX, 0, df ? df.mapCZ : tileCZ);
+        return this._populateGroup(group, result, df);
+    },
 
+    /** Наполняет группу мешами по результату воркера. df — плоская деформация (null на глобусе). */
+    _populateGroup(
+        this: any,
+        group: THREE.Group,
+        result: WorkerResult,
+        df: TileDeform | null,
+    ): boolean {
         while (group.children.length) {
             const child = group.children[0] as any;
             if (child.geometry && !this._managedGeometries.has(child.geometry)) child.geometry.dispose();
@@ -388,7 +429,13 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
             const mat = this._getFillMaterial(fillKey);
             const geometry = this._getPointGeometry(pt.radius);
             const mesh = new THREE.Mesh(geometry, mat);
-            mesh.position.set(pt.x, 0, pt.z);
+            mesh.position.set(pt.x, pt.y ?? 0, pt.z);
+            // Глобус: диск ложится касательно к поверхности (нормаль — геодезическая).
+            if (pt.normal) {
+                mesh.quaternion.setFromUnitVectors(
+                    _UP, _tmpN.set(pt.normal[0], pt.normal[1], pt.normal[2]),
+                );
+            }
             mesh.renderOrder = pt.renderOrder ?? VECTOR_TILE_RENDER_ORDER.BUILDING;
             group.add(mesh);
         }
@@ -620,10 +667,13 @@ const tileHalfY = this._tileCrs.halfExtentY;
 const tileSizeX = (2 * tileHalfX) / (1 << z);
 const tileSizeY = (2 * tileHalfY) / (1 << z);
 
+        const globeOn = this._isGlobeMode();
         const msg = {
             type: 'process', id, buffer, z, x, y,
     tileSizeX, tileSizeY,
     maxMercX: tileHalfX, maxMercY: tileHalfY,
+            // Глобус: воркер сферизует геометрию сам (см. processTile/globeParams).
+            globe: globeOn ? this._globeWorkerParams() : null,
             is3d,
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,

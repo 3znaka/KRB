@@ -1,3 +1,5 @@
+// VectorTileLoading.ts
+import { THREE } from './js_TP/tpb.js';
 export const VectorTileLoadingMixin = {
     _prefetchNextZoom(z) {
         const map = this._map;
@@ -201,6 +203,8 @@ export const VectorTileLoadingMixin = {
     },
     _getVisibleTileKeys(z) {
         const map = this._map;
+        if (map.globe === true && map.surface)
+            return this._getVisibleTileKeysGlobe(z);
         const camera = map.camera;
         const numTiles = 1 << z;
         const maxTile = numTiles - 1;
@@ -430,6 +434,73 @@ export const VectorTileLoadingMixin = {
                     }
             }
         }
+        const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);
+        if (sorted.length > limit)
+            sorted.length = limit;
+        return new Set(sorted.map(([k]) => k));
+    },
+    /**
+     * Глобус: тайлы z-уровня, покрывающие видимый сегмент эллипсоида.
+     * Тот же алгоритм, что у растра (WorldSurface.visibleTileRanges + конус
+     * взгляда) — векторы и растр выбирают один и тот же набор тайлов.
+     */
+    _getVisibleTileKeysGlobe(z) {
+        const map = this._map;
+        const surface = map.surface;
+        const tileCrs = this._tileCrs;
+        const worldGroup = map.worldGroup;
+        const camera = map.camera;
+        camera.updateMatrixWorld();
+        const camLocal = this._tmpCamLocal || (this._tmpCamLocal = new THREE.Vector3());
+        camLocal.copy(camera.position);
+        if (worldGroup)
+            worldGroup.worldToLocal(camLocal);
+        const viewDir = this._tmpViewDir || (this._tmpViewDir = new THREE.Vector3());
+        camera.getWorldDirection(viewDir);
+        if (worldGroup) {
+            this._tmpInv = this._tmpInv || new THREE.Matrix4();
+            this._tmpInv.copy(worldGroup.matrixWorld).invert();
+            viewDir.transformDirection(this._tmpInv).normalize();
+        }
+        const view = { dir: viewDir, fovY: camera.fov, aspect: camera.aspect };
+        const ranges = surface.visibleTileRanges(camLocal, z, tileCrs, view);
+        const found = new Map();
+        if (!ranges || !ranges.length)
+            return new Set();
+        // Frustum-отсечение по сфере тайла (как у растра).
+        const frustum = this._tmpFrustum || (this._tmpFrustum = new THREE.Frustum());
+        const pv = this._tmpPV || (this._tmpPV = new THREE.Matrix4());
+        pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        frustum.setFromProjectionMatrix(pv);
+        const sphere = this._tmpSphere || (this._tmpSphere = new THREE.Sphere());
+        const tmp = this._tmpVec || (this._tmpVec = new THREE.Vector3());
+        const n = 1 << z;
+        const radius = map.R * (Math.PI / n) * 1.5;
+        const maxTile = n - 1;
+        for (const rg of ranges) {
+            for (let y = Math.max(0, rg.yMin); y <= Math.min(maxTile, rg.yMax); y++) {
+                for (let vx = Math.max(0, rg.xMin); vx <= Math.min(maxTile, rg.xMax); vx++) {
+                    const cx = ((vx + 0.5) / n) * 2 * tileCrs.halfExtentX - tileCrs.halfExtentX;
+                    const cy = tileCrs.halfExtentY - ((y + 0.5) / n) * 2 * tileCrs.halfExtentY;
+                    const ll = tileCrs.toLonLat([cx, cy]);
+                    if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                        continue;
+                    surface.position(ll[0], ll[1], 0, tmp);
+                    if (worldGroup)
+                        worldGroup.localToWorld(tmp);
+                    sphere.center.copy(tmp);
+                    sphere.radius = radius;
+                    if (!frustum.intersectsSphere(sphere))
+                        continue;
+                    const wx = ((vx % n) + n) % n;
+                    const key = `${z},${wx},${y}`;
+                    const dx = vx + 0.5 - rg.cxTile, dy = y + 0.5 - rg.cyTile;
+                    found.set(key, dx * dx + dy * dy);
+                }
+            }
+        }
+        // Ограничение бюджета: ближайшие к центру экрана тайлы.
+        const limit = this.maxVisibleTiles ?? 96;
         const sorted = Array.from(found.entries()).sort((a, b) => a[1] - b[1]);
         if (sorted.length > limit)
             sorted.length = limit;

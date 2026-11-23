@@ -220,6 +220,18 @@ this._tileCrs = this._crsCode
             this._lastWorldPos.copy(worldPos);
             this._lastMovementTime = performance.now();
         }
+        // Глобус: панорама вращает камеру, а не worldGroup, поэтому движение
+        // считаем по камере. Иначе подписи не пересчитываются при орбите и
+        // появляются только после изменения зума.
+        if (map.globe === true) {
+            const cam = map.camera.position;
+            if (!this._lastGlobeCamPos) this._lastGlobeCamPos = new THREE.Vector3().copy(cam);
+            if (this._lastGlobeCamPos.distanceToSquared(cam) > 0.01) {
+                this._lastGlobeCamPos.copy(cam);
+                this._lastMovementTime = performance.now();
+                this._labelsDirty = true;
+            }
+        }
         if (this._lineMaterialsSet.size > 0) {
             this._updateDynamicLineMaterials(
                 map.continuousZoom  + this.zoomOffset,
@@ -351,7 +363,16 @@ const tileSizeAtZoomX = (2 * tileHalfX) / (1 << sourceZoom);
 const tileSizeAtZoomY = (2 * tileHalfY) / (1 << sourceZoom);
 const target = map.controls.target;
 let targetX: number, targetZ: number;
-if (this._isDeformed) {
+if (map.globe === true && map.surface) {
+    // Глобус: цель в tile-CRS через геодезическую точку подкамерной цели.
+    const local = this._tmpTargetLocal || (this._tmpTargetLocal = new THREE.Vector3());
+    local.copy(target);
+    if (map.worldGroup) map.worldGroup.worldToLocal(local);
+    const g = map.surface.geodeticFromWorld(local);
+    const t = g ? this._tileCrs.fromLonLat([g.lon, g.lat]) : null;
+    targetX = t ? t[0] : 0;
+    targetZ = t ? -t[1] : 0;
+} else if (this._isDeformed) {
     const t = this._mapToTile(
         target.x - map.worldGroup.position.x,
         target.z - map.worldGroup.position.z,

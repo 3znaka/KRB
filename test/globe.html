@@ -35,8 +35,9 @@ const map = new KRB.Map({
     target: 'map',
  globe: true,
     layers: [
-      // tiles,
+     tiles,
     ],
+graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 } ,
     view: new KRB.View({
        centerLonLat: [37.6178, 55.7558],
         zoom: 8,

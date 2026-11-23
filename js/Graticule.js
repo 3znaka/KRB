@@ -407,6 +407,11 @@ export class Graticule {
     // ─────────────────────────────────────────────────────────────────
     // Layer lifecycle
     // ─────────────────────────────────────────────────────────────────
+    /** Режим глобуса: карта в globe-режиме и есть поверхность эллипсоида. */
+    _isGlobe() {
+        const m = this._map;
+        return !!(m && m.globe && m.surface && typeof m.projectSurfaceVertex === 'function');
+    }
     addTo(map) {
         if (this._map === map)
             return this;
@@ -594,12 +599,16 @@ export class Graticule {
     }
     _createMaterial() {
         const canvas = this._map.renderer.domElement;
+        // Глобус: включаем depthTest, чтобы эллипсоидный окклюдер (WorldSurface.createOccluder)
+        // закрывал обратную сторону сетки — так же, как у полилиний и полигонов.
+        // depthWrite оставляем выключенным: сетка не должна портить глубину других объектов.
+        const globe = this._isGlobe();
         const mat = new LineMaterial({
             color: this._color,
             linewidth: this._width,
             opacity: this._opacity,
             transparent: this._opacity < 1,
-            depthTest: false,
+            depthTest: globe,
             depthWrite: false,
             resolution: new THREE.Vector2(canvas.width, canvas.height),
             worldUnits: false,
@@ -613,7 +622,7 @@ export class Graticule {
             mat.gapSize = g;
             mat.dashOffset = this._lineDashOffset;
         }
-        if (this._maskEnabled) {
+        if (this._maskEnabled && !globe) {
             mat.stencilWrite = true;
             mat.stencilRef = 1;
             mat.stencilFunc = THREE.EqualStencilFunc ?? 514;
@@ -905,8 +914,18 @@ export class Graticule {
         if (!lobes) {
             const pts = [];
             const crs = [];
+            const globe = this._isGlobe();
+            const v = globe ? new THREE.Vector3() : null;
             for (let i = 0; i <= N; i++) {
                 const lon = -180 + 360 * (i / N);
+                if (globe) {
+                    const p = map.projectSurfaceVertex([lon, lat], 'EPSG:4326', this._altitude, null, v);
+                    if (!p)
+                        continue;
+                    pts.push([p.x, p.y, p.z]);
+                    crs.push([lon, lat]);
+                    continue;
+                }
                 const world = map.projectSafe([lon, lat], this._crsRaw);
                 if (!world)
                     continue;
@@ -958,8 +977,19 @@ export class Graticule {
             const pts = [];
             const crs = [];
             const latMin = -89.99, latMax = 89.99;
+            // Глобус: точка на поверхности эллипсоида (как полилиния), а не плоская проекция.
+            const globe = this._isGlobe();
+            const v = globe ? new THREE.Vector3() : null;
             for (let i = 0; i <= N; i++) {
                 const lat = latMin + (latMax - latMin) * (i / N);
+                if (globe) {
+                    const p = map.projectSurfaceVertex([lon, lat], 'EPSG:4326', this._altitude, null, v);
+                    if (!p)
+                        continue;
+                    pts.push([p.x, p.y, p.z]);
+                    crs.push([lon, lat]);
+                    continue;
+                }
                 const world = map.projectSafe([lon, lat], this._crsRaw);
                 if (!world)
                     continue;
@@ -1039,6 +1069,10 @@ export class Graticule {
     }
     _createStencilMask() {
         this._destroyStencilMask();
+        // Глобус: плоская маска (контур по projectSafe) не совпадает с видимым полушарием
+        // и не нужна — окклюзию даёт depthTest + эллипсоидный окклюдер.
+        if (this._isGlobe())
+            return;
         if (!this._maskEnabled || !this._map || !this._crsRaw)
             return;
         const realLobes = this._getLobes();

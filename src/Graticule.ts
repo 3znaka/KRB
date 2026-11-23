@@ -611,6 +611,12 @@ private _maskEnabled: boolean;
     // Layer lifecycle
     // ─────────────────────────────────────────────────────────────────
 
+    /** Режим глобуса: карта в globe-режиме и есть поверхность эллипсоида. */
+    private _isGlobe(): boolean {
+        const m = this._map;
+        return !!(m && m.globe && m.surface && typeof m.projectSurfaceVertex === 'function');
+    }
+
     addTo(map: any): this {
         if (this._map === map) return this;
         if (this._map) this.removeFromMap();
@@ -799,12 +805,16 @@ private _getEligibleLobesForLon(lon: number, lobes: any[]): any[] {
 
 private _createMaterial(): void {
     const canvas = this._map.renderer.domElement;
+    // Глобус: включаем depthTest, чтобы эллипсоидный окклюдер (WorldSurface.createOccluder)
+    // закрывал обратную сторону сетки — так же, как у полилиний и полигонов.
+    // depthWrite оставляем выключенным: сетка не должна портить глубину других объектов.
+    const globe = this._isGlobe();
     const mat = new LineMaterial({
         color: this._color as any,
         linewidth: this._width,
         opacity: this._opacity,
         transparent: this._opacity < 1,
-        depthTest: false,
+        depthTest: globe,
         depthWrite: false,
         resolution: new THREE.Vector2(canvas.width, canvas.height),
         worldUnits: false,
@@ -819,7 +829,7 @@ private _createMaterial(): void {
         mat.dashOffset = this._lineDashOffset;
     }
 
- if (this._maskEnabled) {
+ if (this._maskEnabled && !globe) {
         mat.stencilWrite = true;
         mat.stencilRef = 1;
         mat.stencilFunc = THREE.EqualStencilFunc ?? 514;
@@ -1134,8 +1144,17 @@ private _createMaterial(): void {
         if (!lobes) {
             const pts: Array<[number, number, number]> = [];
             const crs: Array<[number, number]> = [];
+            const globe = this._isGlobe();
+            const v = globe ? new THREE.Vector3() : null;
             for (let i = 0; i <= N; i++) {
                 const lon = -180 + 360 * (i / N);
+                if (globe) {
+                    const p = map.projectSurfaceVertex([lon, lat], 'EPSG:4326', this._altitude, null, v);
+                    if (!p) continue;
+                    pts.push([p.x, p.y, p.z]);
+                    crs.push([lon, lat]);
+                    continue;
+                }
                 const world = map.projectSafe([lon, lat], this._crsRaw);
                 if (!world) continue;
                 pts.push([world[0], this._altitude, world[1]]);
@@ -1190,8 +1209,18 @@ private _createMaterial(): void {
             const pts: Array<[number, number, number]> = [];
             const crs: Array<[number, number]> = [];
             const latMin = -89.99, latMax = 89.99;
+            // Глобус: точка на поверхности эллипсоида (как полилиния), а не плоская проекция.
+            const globe = this._isGlobe();
+            const v = globe ? new THREE.Vector3() : null;
             for (let i = 0; i <= N; i++) {
                 const lat = latMin + (latMax - latMin) * (i / N);
+                if (globe) {
+                    const p = map.projectSurfaceVertex([lon, lat], 'EPSG:4326', this._altitude, null, v);
+                    if (!p) continue;
+                    pts.push([p.x, p.y, p.z]);
+                    crs.push([lon, lat]);
+                    continue;
+                }
                 const world = map.projectSafe([lon, lat], this._crsRaw);
                 if (!world) continue;
                 pts.push([world[0], this._altitude, world[1]]);
@@ -1271,6 +1300,9 @@ private _createMaterial(): void {
 
 private _createStencilMask(): void {
     this._destroyStencilMask();
+    // Глобус: плоская маска (контур по projectSafe) не совпадает с видимым полушарием
+    // и не нужна — окклюзию даёт depthTest + эллипсоидный окклюдер.
+    if (this._isGlobe()) return;
     if (!this._maskEnabled || !this._map || !this._crsRaw) return;
 
     const realLobes = this._getLobes();

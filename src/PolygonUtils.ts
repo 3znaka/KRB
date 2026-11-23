@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PolygonUtils.ts — типы, константы и чистые вспомогательные функции
  * для Polygon.ts и PolygonLOD.ts.
  */
@@ -289,7 +289,14 @@ export function getSharedPatternTexture(url: string): any {
 
 export function hasGapMask(map: any): boolean {
     if (!map) return false;
-    
+
+    // Глобус: плоской stencil-маски нет (см. Graticule._createStencilMask), поэтому
+    // stencil-тест у полигонов и тайлов не нужен. Иначе они требуют Equal 1 и пропадают.
+    if (map.globe) {
+        map.__hasGapMaskCache = false;
+        return false;
+    }
+
     // Проверяем кэш (чтобы не тормозить)
     if (map.__hasGapMaskCache !== undefined) return map.__hasGapMaskCache;
 

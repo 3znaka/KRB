@@ -191,6 +191,12 @@ export function getSharedPatternTexture(url) {
 export function hasGapMask(map) {
     if (!map)
         return false;
+    // Глобус: плоской stencil-маски нет (см. Graticule._createStencilMask), поэтому
+    // stencil-тест у полигонов и тайлов не нужен. Иначе они требуют Equal 1 и пропадают.
+    if (map.globe) {
+        map.__hasGapMaskCache = false;
+        return false;
+    }
     // Проверяем кэш (чтобы не тормозить)
     if (map.__hasGapMaskCache !== undefined)
         return map.__hasGapMaskCache;

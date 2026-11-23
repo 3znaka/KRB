@@ -3,6 +3,7 @@
 import proj4 from './js_TP/proj4.js';
 import { Ellipsoid, ELLIPSOIDS, parseEllipsoid } from './Ellipsoid.js';
 import { createEcefProjection, isGeocentricDef } from './EcefProjection.js';
+import { DATUMS, convertDatum, datumFromProj, needsDatumShift } from './Datums.js';
 
 export { Ellipsoid, ELLIPSOIDS, parseEllipsoid };
 
@@ -346,6 +347,12 @@ constructor(code, def) {
         this._halfExtentX = undefined;
         this._halfExtentY = undefined;
 
+        // Датум, отличный от WGS-84 (ГСК-2011, СК-42, ...). Для остальных null,
+        // и поведение проекции не меняется.
+        this._datumShift = this.isGeographic && needsDatumShift(def)
+            ? datumFromProj(def)
+            : null;
+
         this._conv = null;                 // WGS84 <-> this
         this._convTo = new Map();          // this -> other.code
         this._fastMerc = this.isMercator && this._ellipsoid.isSphere
@@ -448,6 +455,11 @@ get radiusInDomain() {
         const lon = coord[0];
         const lat = Math.max(-maxLat, Math.min(maxLat, coord[1]));
         if (this.isGeographic) {
+            // Вход — WGS-84 градусы; для CRS с датумом переводим в её датум.
+            if (this._datumShift) {
+                const r = convertDatum([lon, lat, 0], DATUMS.wgs84, this._datumShift);
+                return [r[0], r[1]];
+            }
             return [lon, lat];
         }
         if (this._fastMerc) {
@@ -460,6 +472,11 @@ get radiusInDomain() {
     toLonLat(coord) {
         if (this.isGeographic) {
             const lat = Math.max(-89.999999, Math.min(89.999999, coord[1]));
+            // Выход — WGS-84 градусы; из датума CRS переводим в WGS-84.
+            if (this._datumShift) {
+                const r = convertDatum([coord[0], lat, 0], this._datumShift, DATUMS.wgs84);
+                return [r[0], r[1]];
+            }
             return [coord[0], lat];
         }
         if (this._fastMerc) {

@@ -19,8 +19,6 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
-await KRB.crs.add('EPSG:32637');
-
 const tiles =  new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
             attributionTitle: '2GIS',
@@ -46,17 +44,14 @@ graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 } ,
     debug:true,
 });
 
- new KRB.GeoTiffLayer({
-    source: 'bratkov.tif',
-asElevation: true,
-heightScale: 10000,
-    colorRamp: 'terrain',
-    opacity: 0.75,
-    onLoad: (layer) => {
-        const b = layer.getBounds();
-        if (b) map.fitToBounds(b, { duration: 1.0, padding: 40 });
-    }
-}).addTo(map);
+
+const img2 = new KRB.Image({
+    source: 'horse.png',
+    title: 'лошадь',
+    position: [37.6178, 55.7558, 100],
+    size: [40000, 40000],
+});
+img2.addTo(map);
 
 
 </script>

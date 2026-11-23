@@ -434,8 +434,25 @@ export class Image extends SpatialObject {
         if (!this._nodes || this._nodes.length < 3 || !this._map)
             return [];
         const map = this._map;
+        const globe = map.globe === true && !!map.surface;
+        // Глобус: каждый угол — точка на эллипсоиде (как Marker3D.projectSurfacePoint).
+        // Координаты — в СК worldGroup (origin = worldGroup.position), в которой
+        // живёт группа изображения.
+        const wg = map.worldGroup ? map.worldGroup.position : { x: 0, y: 0, z: 0 };
         const positions = this._nodes.map(node => {
             const nn = this._normalizePosition(this._nodeToPosition(node), this._crs);
+            if (globe) {
+                const ll = nn.lonLat ?? this._crs?.toLonLat?.(nn.coord);
+                const h = nn.nodeHeight + this._altitude;
+                // projectSurfacePoint на глобусе возвращает МИРОВЫЕ координаты
+                // (origin там не вычитается), а группа Image живёт в СК worldGroup —
+                // переводим в локальные, как и плоский путь (map.project).
+                const out = new THREE.Vector3();
+                const p = map.projectSurfacePoint(ll, 'EPSG:4326', h, out);
+                if (!p)
+                    return new THREE.Vector3();
+                return p.clone().sub(new THREE.Vector3(wg.x, wg.y, wg.z));
+            }
             // ECEF: точные lon/lat напрямую — глобально, без ограничения полусферой.
             const [x, z] = nn.lonLat
                 ? map.project(nn.lonLat, 'EPSG:4326')
@@ -443,7 +460,9 @@ export class Image extends SpatialObject {
             const y = nn.nodeHeight + this._altitude;
             return new THREE.Vector3(x, y, z);
         });
-        if (positions.length === 4) {
+        // Выравнивание 4-го узла к плоскости — только для плоской карты.
+        // На глобусе углы уже лежат на сфере, коррекция исказила бы их.
+        if (positions.length === 4 && !globe) {
             const [p0, p1, p2, p3] = positions;
             const normal = new THREE.Vector3().subVectors(p1, p0)
                 .cross(new THREE.Vector3().subVectors(p2, p0));
@@ -465,6 +484,10 @@ export class Image extends SpatialObject {
         const [width, height] = this._size;
         const [ax, ay] = this._anchor;
         const [rx, ry, rz] = this._rotation;
+        const map = this._map;
+        if (map.globe === true && map.surface) {
+            return this._computeGlobeCornersFromAnchor(nn, width, height, ax, ay, rx, ry, rz);
+        }
         const [worldX, worldZ] = nn.lonLat
             ? this._map.project(nn.lonLat, 'EPSG:4326')
             : this._map.project(nn.coord, this._crs);
@@ -483,6 +506,68 @@ export class Image extends SpatialObject {
         const quaternion = new THREE.Quaternion().setFromEuler(euler);
         const rotatedCorners = cornersLocal.map(local => local.clone().applyQuaternion(quaternion));
         return rotatedCorners.map(local => new THREE.Vector3(center.x + local.x, center.y + local.y, center.z + local.z));
+    }
+    /**
+     * Глобус: прямоугольник, касательный к эллипсоиду в точке привязки.
+     * Углы строятся в локальной касательной СК (восток/север/вверх) и
+     * переводятся в мировые оси через геодезическую нормаль; итог — в СК worldGroup.
+     */
+    _computeGlobeCornersFromAnchor(nn, width, height, ax, ay, rx, ry, rz) {
+        const map = this._map;
+        const wg = map.worldGroup ? map.worldGroup.position : { x: 0, y: 0, z: 0 };
+        const ll = nn.lonLat ?? this._crs?.toLonLat?.(nn.coord);
+        if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+            return [];
+        // Центр — точка на поверхности (высота nodeHeight + altitude).
+        const centerOut = new THREE.Vector3();
+        const c = map.projectSurfacePoint(ll, 'EPSG:4326', nn.nodeHeight + this._altitude, centerOut);
+        if (!c)
+            return [];
+        const center = c.clone().sub(new THREE.Vector3(wg.x, wg.y, wg.z));
+        // Касательный базис в мировых осях (та же конвенция, что WorldSurface).
+        const latR = ll[1] * Math.PI / 180, lonR = ll[0] * Math.PI / 180;
+        const sLo = Math.sin(lonR), cLo = Math.cos(lonR);
+        const sLa = Math.sin(latR), cLa = Math.cos(latR);
+        const east = new THREE.Vector3(-sLo, 0, -cLo);
+        const north = new THREE.Vector3(-sLa * cLo, cLa, sLa * sLo);
+        const up = new THREE.Vector3(cLa * cLo, sLa, -cLa * sLo);
+        // Поворот внутри касательной плоскости (rx — вокруг normal; остальные оси
+        // у Image плоские, поэтому используем только rz как угол в плоскости).
+        const cr = Math.cos(rz), sr = Math.sin(rz);
+        const halfW = width / 2, halfH = height / 2;
+        const anchorDx = (0.5 - ax) * width;
+        const anchorDy = (0.5 - ay) * height;
+        const local = [
+            [-halfW, -halfH], [halfW, -halfH], [-halfW, halfH], [halfW, halfH],
+        ];
+        // Каждый угол → геодезические координаты на эллипсоиде (через смещение
+        // в касательной плоскости), затем → точка на поверхности. Так угол лежит
+        // НА сфере, а не на касательной плоскости, как и узлы в nodes-режиме.
+        // Угол = смещение (u → восток, v → север) от центра в метрах по поверхности,
+        // переведённое обратно в геодезические координаты. Смещение задаётся
+        // в ДУГАХ: d/R по восток/север, поэтому размер картинки не перекашивается
+        // при удалении от экватора (в отличие от касательной плоскости).
+        const R = map.surface.a ?? 6378137;
+        // Единицы size в плоской ветке — world-единицы Mercator. На широте φ одна
+        // единица Mercator по Земле равна cos φ реальных метров (Mercator растягивает
+        // восток–запад в 1/cos φ). Поэтому size·cos φ — истинные метры на эллипсоиде,
+        // дающие тот же визуальный размер, что и на плоской карте.
+        const mercScale = cLa;
+        const cornerWorld = (u0, v0) => {
+            const u = u0 * mercScale, v = v0 * mercScale;
+            const ru = u * cr - v * sr; // восток
+            // Знак севера инвертирован относительно v: в плоской ветке верх картинки
+            // (+v) лежит на севере, на глобусе порядок углов даёт обратную ось —
+            // поэтому v → -север. Это согласует глобус с плоской ориентацией.
+            const rv = -(u * sr + v * cr); // север (ось v инвертирована)
+            const dLat = (rv / R) * 180 / Math.PI;
+            const dLon = (ru / (R * Math.max(1e-6, cLa))) * 180 / Math.PI;
+            const lat = Math.max(-89.9999, Math.min(89.9999, ll[1] + dLat));
+            const lon = ll[0] + dLon;
+            const p = map.projectSurfacePoint([lon, lat], 'EPSG:4326', nn.nodeHeight + this._altitude, new THREE.Vector3());
+            return p ? p.clone().sub(new THREE.Vector3(wg.x, wg.y, wg.z)) : center.clone();
+        };
+        return local.map(([u0, v0]) => cornerWorld(u0 + anchorDx, v0 + anchorDy));
     }
     _buildGeometry(map) {
         this._disposeGeometry();
@@ -527,6 +612,12 @@ export class Image extends SpatialObject {
                 pos.setXYZ(i, worldPositions[i].x - centroid.x, worldPositions[i].y - centroid.y, worldPositions[i].z - centroid.z);
             }
             pos.needsUpdate = true;
+            // UV — как у PlaneGeometry (верх-лево=(0,1), верх-право=(1,1),
+            // низ-лево=(0,0), низ-право=(1,0)), то есть соответствует плоскому
+            // порядку углов [-w,-h],[w,-h],[-w,h],[w,h] из _computeWorldPositionsFromAnchor.
+            // Плоская ветка при этом ориентирована правильно (север вверх) — не меняем.
+            // Глобус должен давать тот же порядок углов, см. _computeGlobeCornersFromAnchor.
+            geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0, 1, 1, 1, 0, 0, 1, 0]), 2));
             geometry.computeVertexNormals();
         }
         const onTop = this._alwaysOnTop;
@@ -637,6 +728,18 @@ export class Image extends SpatialObject {
                     this._isVisible = false;
                     return;
                 }
+            }
+        }
+        // Глобус: изображение на обратной стороне Земли не показываем
+        // (тот же критерий, что у Marker3D — isWorldPointOccluded).
+        if (map.globe && typeof map.isWorldPointOccluded === 'function') {
+            const worldCenter = this._tempVec3
+                .copy(this._group.position)
+                .add(map.worldGroup.position);
+            if (map.isWorldPointOccluded(worldCenter)) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
             }
         }
         this._group.visible = true;

@@ -520,19 +520,19 @@ function computeScaleAt(screenX: number, screenY: number): boolean {
     // Точка 1: под якорем
     if (!pickSurfaceAt(screenX, screenY, _hit1)) return false;
 
-    // Точка 2: на BAR_LENGTH_PX правее по экрану (горизонтальный масштаб)
-    if (!pickSurfaceAt(screenX + BAR_LENGTH_PX, screenY, _hit2)) return false;
-
     const h1 = lonLatFromWorld(_hit1);
     if (!h1) { scaleLabel.textContent = ''; return false; }
     const [lon1, lat1] = h1;
 
+    const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
+
+    // Точка 2: на BAR_LENGTH_PX правее по экрану (горизонтальный масштаб)
+    if (!pickSurfaceAt(screenX + BAR_LENGTH_PX, screenY, _hit2)) return false;
     const h2 = lonLatFromWorld(_hit2);
     if (!h2) { scaleLabel.textContent = ''; return false; }
     const [lon2, lat2] = h2;
 
-    const R = (Number.isFinite(map.R) && map.R! > 0) ? map.R! : 6371008.8;
- const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
+    const distance = haversineDistance(lon1, lat1, lon2, lat2, R);
     if (!(distance > 0)) {
         return false;
     }
@@ -542,14 +542,14 @@ function computeScaleAt(screenX: number, screenY: number): boolean {
     const newWidth = BAR_LENGTH_PX * ratio;
     const newText  = formatDistance(nice);
 
-    // Защита от резких скачков (>50% за кадр — явно артефакт проекции)
-    if (lastGoodWidth > 0) {
-        const jump = Math.abs(newWidth - lastGoodWidth) / lastGoodWidth;
-        if (jump > 0.5) {
-            // Скачок — игнорируем, оставляем предыдущее значение
-            return false;
-        }
+    // Защита от резких скачков по РАССТОЯНИЮ до округления (>50% за кадр —
+    // артефакт проекции). По ширине после округления нельзя: переход между
+    // ступенями (500 м → 1 км) даёт скачок 100% и залипает линейку.
+    if (lastGoodDistance > 0) {
+        const jump = Math.abs(distance - lastGoodDistance) / lastGoodDistance;
+        if (jump > 0.5) return false;
     }
+    lastGoodDistance = distance;
 
     scaleBar.style.width = newWidth + 'px';
     scaleLabel.textContent = newText;
@@ -559,6 +559,7 @@ function computeScaleAt(screenX: number, screenY: number): boolean {
 }
 
 let lastGoodWidth = 0;
+let lastGoodDistance = 0;
 let lastGoodText  = '';
 
 function updateScaleBar(): void {

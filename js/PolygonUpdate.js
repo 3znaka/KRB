@@ -480,6 +480,13 @@ export const PolygonUpdateMixin = {
                 }
             }
         }
+        // Глобус: центр за горизонтом (обратная сторона) — подпись скрываем так же,
+        // как Marker: иначе она попадает на экран по X/Y и висит на чужой стороне.
+        if (map.globe && typeof map.isWorldPointOccluded === 'function'
+            && map.isWorldPointOccluded(map.getVec3().set(px, py, pz))) {
+            this._centroidScreenPos = null;
+            return;
+        }
         const screenPos = map.getVec3().set(px, py, pz);
         screenPos.project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {

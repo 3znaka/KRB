@@ -1,4 +1,4 @@
-/**
+﻿/**
  * PolygonUtils.ts — типы, константы и чистые вспомогательные функции
  * для Polygon.ts и PolygonLOD.ts.
  */

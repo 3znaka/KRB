@@ -232,6 +232,7 @@ export let _rebuildSlotCounter = 0;
 // Constrained Delaunay triangulation (cdt2d)
 // ---------------------------------------------------------------------
 import cdt2d from './js_TP/cdt2d.js';
+import earcut from './js_TP/earcut.js';
 /**
  * @param coords — все вершины: сначала контуры (внешнее кольцо, затем дыры),
  *   затем Steiner-точки без ограничений.
@@ -239,6 +240,14 @@ import cdt2d from './js_TP/cdt2d.js';
  * @param contourCount — сколько первых вершин принадлежат контурам (внешнее
  *   кольцо + дыры). Всё после них — Steiner, рёбер-ограничений не получает.
  */
+/**
+ * Полярные и разорванные по антимеридиану полигоны: earcut по контуру без
+ * Steiner и CDT. Для них constrained-триангуляция в lon/lat даёт клинья и
+ * пустоты, а earcut ведёт себя предсказуемо (как в исходной версии).
+ */
+export function triangulatePolygonEarcut(coords, holeIndices) {
+    return earcut(coords, holeIndices, 2);
+}
 export function triangulatePolygonCDT(coords, holeIndices, contourCount) {
     const n = coords.length / 2;
     if (n < 3)
@@ -260,50 +269,32 @@ export function triangulatePolygonCDT(coords, holeIndices, contourCount) {
         for (let i = 0; i < len; i++)
             edges.push([s + i, s + ((i + 1) % len)]);
     }
-    // DEBUG (временно): диагностика constraint-рёбер
-    {
-        const seen = new Set();
-        let dupPts = 0, selfEdge = 0, dupEdge = 0;
-        for (const [a, b] of edges) {
-            if (a === b)
-                selfEdge++;
-            const k = a < b ? `${a},${b}` : `${b},${a}`;
-            if (seen.has(k))
-                dupEdge++;
-            else
-                seen.add(k);
-        }
-        const pk = new Set();
-        for (let i = 0; i < n; i++) {
-            const k = `${points[i][0]},${points[i][1]}`;
-            if (pk.has(k))
-                dupPts++;
-            else
-                pk.add(k);
-        }
-        console.log('[CDT-DEBUG]', JSON.stringify({ n, contourCount, edges: edges.length, selfEdge, dupEdge, dupPts, holes: holeIndices.length }));
-    }
-    const tris = cdt2d(points, edges, { delaunay: true, interior: true, exterior: false });
-    // DEBUG (временно): есть ли в выходе длинные рёбра (признак зигзага).
-    {
-        let longCount = 0, maxLen = 0;
-        for (const t of tris) {
-            for (let k = 0; k < 3; k++) {
-                const a = points[t[k]], b = points[t[(k + 1) % 3]];
-                const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
-                if (L > maxLen)
-                    maxLen = L;
-                if (L > 15)
-                    longCount++;
+    // Берём ВСЕ треугольники и сами отбираем внутренние: flood-fill cdt2d
+    // (interior) отбрасывает всё, когда контур разорван антимеридианом или
+    // полюсом. Критерий — центроид треугольника внутри полигона (even-odd).
+    const tris = cdt2d(points, edges, { delaunay: true, interior: true, exterior: true });
+    const inside = (x, y) => {
+        let c = false;
+        for (let s = 0; s < starts.length; s++) {
+            const a = starts[s], b = ends[s];
+            for (let i = a, j = b - 1; i < b; j = i++) {
+                const xi = points[i][0], yi = points[i][1];
+                const xj = points[j][0], yj = points[j][1];
+                if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+                    c = !c;
             }
         }
-        console.log('[CDT-OUT]', JSON.stringify({ n, contourCount, tris: tris.length, longEdges15deg: longCount, maxEdgeDeg: +maxLen.toFixed(2) }));
-    }
-    const out = new Array(tris.length * 3);
-    for (let t = 0; t < tris.length; t++) {
-        out[t * 3] = tris[t][0];
-        out[t * 3 + 1] = tris[t][1];
-        out[t * 3 + 2] = tris[t][2];
+        return c;
+    };
+    const out = [];
+    for (const t of tris) {
+        const a = points[t[0]], b = points[t[1]], c = points[t[2]];
+        // Треугольник, у которого ребро пересекает разрыв развёртки (скачок
+        // долготы около 180°), — ложный: на сфере он лежит снаружи. Отбрасываем.
+        const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3;
+        if (!inside(cx, cy))
+            continue;
+        out.push(t[0], t[1], t[2]);
     }
     return out;
 }

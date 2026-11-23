@@ -47,6 +47,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
 
     // ── LOD ──
     _simplify = true;
+    /** true, если simplify задан пользователем явно (тогда глобус его не переопределяет). */
+    _simplifyExplicit = false;
     _simplifyTolerance = 0.5;
     _simplifyZoomBucket = 1;
     _simplifyCache = new Map<number, RenderRing[]>();
@@ -154,6 +156,7 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
 
         this._rings = options.rings;
         this._simplify = options.simplify ?? true;
+        this._simplifyExplicit = options.simplify !== undefined;
         this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
         this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
 
@@ -232,6 +235,11 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         if (map.globe === true && !this._depthFlagsExplicit) {
             this._depthTest = true;
             this._depthWrite = true;
+        }
+        // Глобус: упрощение выключено, чтобы общие границы соседних полигонов
+        // стыковались (каждый полигон иначе режется по своему контуру).
+        if (map.globe === true && !this._simplifyExplicit) {
+            this._simplify = false;
         }
         this._loadFillPattern();
 

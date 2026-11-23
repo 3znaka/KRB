@@ -32,6 +32,8 @@ export class Polygon extends SpatialObject {
     _tooltipOnHover;
     // ── LOD ──
     _simplify = true;
+    /** true, если simplify задан пользователем явно (тогда глобус его не переопределяет). */
+    _simplifyExplicit = false;
     _simplifyTolerance = 0.5;
     _simplifyZoomBucket = 1;
     _simplifyCache = new Map();
@@ -122,6 +124,7 @@ export class Polygon extends SpatialObject {
         }
         this._rings = options.rings;
         this._simplify = options.simplify ?? true;
+        this._simplifyExplicit = options.simplify !== undefined;
         this._simplifyTolerance = options.simplifyTolerance ?? 0.5;
         this._simplifyZoomBucket = options.simplifyZoomBucket ?? 1;
         this._crsCode = options.crs ?? null;
@@ -187,6 +190,11 @@ export class Polygon extends SpatialObject {
         if (map.globe === true && !this._depthFlagsExplicit) {
             this._depthTest = true;
             this._depthWrite = true;
+        }
+        // Глобус: упрощение выключено, чтобы общие границы соседних полигонов
+        // стыковались (каждый полигон иначе режется по своему контуру).
+        if (map.globe === true && !this._simplifyExplicit) {
+            this._simplify = false;
         }
         this._loadFillPattern();
         this._currentSimplifyBucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);

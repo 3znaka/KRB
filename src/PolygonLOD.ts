@@ -5,10 +5,17 @@ import { THREE } from './js_TP/tpb.js';
 import { simplifyRingIndices } from './Simplify.js';
 import {
     type RenderRing, type PolygonRing,
-    crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, globeSteinerLonLat,
+    crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat,
     interpolateSurface, centralAngle,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
+
+/**
+ * Допуск упрощения контура в пикселях экрана. Один на всю карту: уровень
+ * детализации зависит только от зума, поэтому соседние полигоны стыкуются.
+ * 0.1 px давал заметное падение производительности, 0.5 px — грубые страны.
+ */
+const GLOBE_LOD_PIXELS = 0.25;
 
 export interface PolygonLOD {
     _worldPerPixel(z: number): number;
@@ -211,14 +218,16 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         }
 
         const z = bucket * this._simplifyZoomBucket;
-        const tolWorld = this._worldPerPixel(z) * this._simplifyTolerance;
+        // Единый допуск для ВСЕХ полигонов и всех колец (контур и дыры): уровень
+        // детализации зависит только от зума карты, поэтому соседние полигоны
+        // одинаково упрощаются и их стыки совпадают.
+        const tolWorld = this._worldPerPixel(z) * GLOBE_LOD_PIXELS;
         const full = this._getFullRenderRings();
 
-        const result: RenderRing[] = full.map((ring, ringIdx) => {
+        const result: RenderRing[] = full.map((ring) => {
             const { worldCoords, heights } = ring;
             if (worldCoords.length < 4) return ring;
-            const tol = ringIdx === 0 ? tolWorld : tolWorld * 0.5;
-            const keptIdx = simplifyRingIndices(worldCoords, tol);
+            const keptIdx = simplifyRingIndices(worldCoords, tolWorld);
 
             let effective = keptIdx.length;
             if (effective >= 2) {
@@ -228,13 +237,8 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
             }
             if (effective < 3 || keptIdx.length === worldCoords.length) return ring;
 
-            let area2 = 0;
-            for (let k = 0; k < keptIdx.length - 1; k++) {
-                const a = worldCoords[keptIdx[k]];
-                const b = worldCoords[keptIdx[k + 1]];
-                area2 += a[0] * b[1] - b[0] * a[1];
-            }
-            if (Math.abs(area2) * 0.5 < tolWorld * tolWorld) return ring;
+            // Проверку «мелкий полигон не упрощаем» убрали: она делала стыки
+            // соседних полигонов несовпадающими (один упрощён, другой нет).
 
             const sWC: [number, number][] = new Array(keptIdx.length);
             const sH: number[] = new Array(keptIdx.length);
@@ -248,6 +252,7 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
             }
             return { worldCoords: sWC, heights: sH, lonLats: sLL };
         });
+
 
         this._simplifyCache.set(bucket, result);
         this._renderRings = result;
@@ -323,8 +328,13 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         const contourCount = coords.length / 2;
         this._contourVertexCount = contourCount;
 
+        // Полярные и разорванные по антимеридиану — earcut без Steiner (как в основной сборке).
+        const useEarcut = this._isPolarOrWrapping();
+
         // Глобус: Steiner-точки внутри полигона (сетка вдоль меридианов).
-        const steiner = this._globeSteinerPoints();
+        const steiner = useEarcut
+            ? { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> }
+            : this._globeSteinerPoints();
         for (let k = 0; k < steiner.world.length; k++) {
             const [wx, wz] = steiner.world[k];
             const ll = steiner.lonLat[k];
@@ -335,7 +345,13 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
             this._vertexLonLat.push(ll);
         }
 
-        const indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
+        let indices: number[];
+        if (useEarcut) {
+            indices = triangulatePolygonEarcut(triCoords, holeIndices);
+            if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
+        } else {
+            indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
+        }
         if (indices.length === 0) { this._cachedTopIndices = null; return; }
         const p2d = new Array(this._worldCoords.length);
         for (let i = 0; i < this._worldCoords.length; i++) {

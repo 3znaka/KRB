@@ -7,13 +7,14 @@ import {
     type UVParams,
     POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE,
     crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial,
-    triangulatePolygonCDT,
+    triangulatePolygonCDT, triangulatePolygonEarcut,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
 
 
 export interface PolygonGeometry {
     _disposeMeshes(): void;
+    _isPolarOrWrapping(): boolean;
     _loadFillPattern(): void;
     _configureFillPatternTexture(): void;
     _applyFillPatternToMaterials(): void;
@@ -30,6 +31,24 @@ export interface PolygonGeometry {
 }
 
 export const PolygonGeometryMixin = {
+    /**
+     * Полигон разорван антимеридианом (скачок долготы больше 180° между соседними
+     * вершинами) или касается полюса (|широта| ≥ 80°). Для таких полигонов lon/lat
+     * развёртка не отражает форму на сфере, и используется earcut без Steiner.
+     */
+    _isPolarOrWrapping(this: Polygon): boolean {
+        const ll = this._vertexLonLat;
+        if (!ll || !ll.length) return false;
+        let prev: [number, number] | null = null;
+        for (const p of ll) {
+            if (!p) continue;
+            if (Math.abs(p[1]) >= 80) return true;
+            if (prev && Math.abs(p[0] - prev[0]) > 180) return true;
+            prev = p;
+        }
+        return false;
+    },
+
     _disposeMeshes(this: Polygon): void {
         if (this._group) {
             while (this._group.children.length > 0) this._group.remove(this._group.children[0]);
@@ -314,7 +333,9 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         if (coords.length < 6) return [];
 
         const contourCount = Math.min(this._contourVertexCount || wc.length, wc.length);
-        const indices = triangulatePolygonCDT(coords, holeIndices, contourCount);
+        const indices = this._isPolarOrWrapping()
+            ? triangulatePolygonEarcut(coords, holeIndices)
+            : triangulatePolygonCDT(coords, holeIndices, contourCount);
         if (!indices.length) return [];
 
         const p2d: Array<{ x: number; y: number }> = new Array(coords.length / 2);
@@ -408,8 +429,13 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         const contourCount = points2D.length;
         this._contourVertexCount = contourCount;
 
+        // Полярные и разорванные по антимеридиану полигоны — earcut без Steiner.
+        const useEarcut = this._isPolarOrWrapping();
+
         // Глобус: Steiner-точки внутри полигона (те же, что в _refreshWorldCoordsForBatch).
-        const steiner = this._globeSteinerPoints();
+        const steiner = useEarcut
+            ? { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> }
+            : this._globeSteinerPoints();
         for (let k = 0; k < steiner.world.length; k++) {
             const [sx, sz] = steiner.world[k];
             const ll = steiner.lonLat[k];
@@ -421,7 +447,15 @@ _hasAntimeridianWrap(this: Polygon): boolean {
             this._vertexLonLat.push(ll);
         }
 
-        const indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
+        // lon/lat-развёртка разрывна у антимеридиана и полюса (Марокко, Чили,
+        // Антарктида): CDT там может вернуть пусто. Тогда пробуем мировые (x,z).
+        let indices: number[];
+        if (useEarcut) {
+            indices = triangulatePolygonEarcut(triCoords, holeIndices);
+            if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
+        } else {
+            indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
+        }
         if (indices.length === 0) {
             console.warn('Polygon: triangulation returned no triangles');
             return;

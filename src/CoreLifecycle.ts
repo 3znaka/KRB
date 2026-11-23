@@ -65,6 +65,8 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
     _resetInertia() {
         this._panVelX = 0;
         this._panVelZ = 0;
+        this._globeOrbitVelX = 0;
+        this._globeOrbitVelY = 0;
     },
 
     _doPause() {
@@ -233,9 +235,71 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
         if (this._cameraAnimation) {
             this._panVelX = 0;
             this._panVelZ = 0;
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
             return;
         }
         if (this.isDragging || this.touchDragActive) return;
+
+        // Глобус: инерция — это вращение орбиты (px/с), а не сдвиг мира.
+        if (this.globe) {
+            const vx = this._globeOrbitVelX;
+            const vy = this._globeOrbitVelY;
+            if (vx === 0 && vy === 0) return;
+
+            // Порог остановки — в пикселях/с, не зависит от дистанции камеры.
+            const speed = Math.hypot(vx, vy);
+            if (speed < 2) {
+                this._globeOrbitVelX = 0;
+                this._globeOrbitVelY = 0;
+                return;
+            }
+
+            // Масштаб: на дальнем зуме один пиксель соответствует большему углу
+            // (_globeOrbit это учитывает), поэтому броску даём усиление,
+            // пропорциональное дистанции камеры относительно её крупного вида.
+            // Так инерция ощущается одинаково на любом зуме.
+            const camDist = this.camera.position.distanceTo(this.controls.target);
+            const ref = Math.max(1e-6, this.R * 4);
+            const k = Math.max(1, Math.min(camDist / ref, 3));
+
+            // На дальних зумах (≤ 5) вертикальная инерция (вдоль меридиана,
+            // к полюсам) ослаблена в 8 раз относительно горизонтальной
+            // (вдоль параллелей), чтобы не «выкидывало» к полюсам.
+            const zoomNow = this.continuousZoom;
+            const vyScale = zoomNow <= 5 ? 1 / 8 : 1;
+
+            // Ограничиваем шаг за кадр в пикселях по исходной скорости (без k):
+            // иначе на отдалении усиленный бросок даёт неограниченный угловой шаг.
+            const H = this.renderer?.domElement?.clientHeight || 1;
+            // Предел шага за кадр: на зуме ≤ 1 инерция вообще не крутит глобус
+            // (там он «мяч»), выше — ограничена долей высоты экрана.
+            const zoomCap = zoomNow <= 1 ? 0 : (zoomNow <= 2 ? 0.02 : 0.25);
+            const maxStepPx = zoomCap * H;
+            if (maxStepPx <= 0) {
+                this._globeOrbitVelX = 0;
+                this._globeOrbitVelY = 0;
+                return;
+            }
+            let sx = vx * dt;
+            let sy = vy * dt * vyScale;
+            // Потолок итогового шага (с учётом k), чтобы глобус не крутился
+            // «как мяч» даже при сильном отдалении.
+            let fx = sx * k, fy = sy * k;
+            const finalLen = Math.hypot(fx, fy);
+            if (finalLen > maxStepPx) {
+                const f = maxStepPx / finalLen;
+                fx *= f; fy *= f;
+            }
+            this._globeOrbit(fx, fy);
+
+            // Та же константа плавности, что и в плоском панорамировании.
+            const decay = Math.pow(this.panFriction, dt);
+            this._globeOrbitVelX *= decay;
+            this._globeOrbitVelY *= decay;
+            return;
+        }
+
         if (this._panVelX === 0 && this._panVelZ === 0) return;
 
         const camDist = this.camera.position.distanceTo(this.controls.target);

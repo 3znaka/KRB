@@ -574,6 +574,11 @@ export const CoreCameraMixin = {
      * чтобы не менять прежнее поведение.
      */
     _globeLatScale(latDeg) {
+        // UX: глобус держит стабильный размер при панорамировании. Раньше дистанция
+        // ~ cos φ «дышала» при смене широты (и вместе с дискретными уровнями тайлов).
+        // Теперь размер постоянен, а изменения масштаба идут через continuousZoom.
+        if (this.globe)
+            return 1;
         const crs = this.tileCRS ?? this.projection;
         if (!crs || crs.isMercator !== true)
             return 1;
@@ -663,7 +668,11 @@ export const CoreCameraMixin = {
         // metersPerPixel = cos φ · C / (2^z · tileSize)), высота должна быть
         // h · cos φ — у полюсов камера садится ниже.
         const lat = latDeg ?? this._globeSubCameraLat();
-        return h * this._globeLatScale(lat);
+        // Калибровка обзорности: на глобусе при том же зуме камера должна давать
+        // ту же видимую площадь, что плоская карта (эталон — плоский pixel-perfect
+        // коэффициент). Без поправки глобус был шире (обзорность как при z≈8.8 вместо 8),
+        // поэтому дистанция уменьшается.
+        return h * this._globeLatScale(lat) * this.GLOBE_VIEW_SCALE;
     },
     getZoomForDistance(d) {
         if (!(d > 0) || !isFinite(d))

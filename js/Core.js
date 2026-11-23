@@ -64,6 +64,12 @@ export class KrbMap {
     GLOBE_CENTER_ZOOM_OUT_MAX;
     /** Глобус: при приближении с зума ≤ этого значения zoom-in идёт из центра, а не из курсора. */
     GLOBE_CENTER_ZOOM_IN_MAX;
+    /**
+     * Глобус: множитель дистанции камеры для совпадения обзорности с плоской картой
+     * (при том же zoom). Эталон: 2^-0.8 — глобус при z=8 давал обзорность как z≈8.8,
+     * т.е. был шире плоской карты, и дистанцию нужно УМЕНЬШИТЬ.
+     */
+    GLOBE_VIEW_SCALE;
     TILE_MARGIN;
     TILE_MARGIN_BG;
     VISIBLE_UPDATE_THROTTLE;
@@ -100,6 +106,12 @@ export class KrbMap {
     _panLastMoveTime;
     _panLastWorldX;
     _panLastWorldZ;
+    // ── Инерция вращения глобуса (px/с) ──
+    _globeOrbitVelX;
+    _globeOrbitVelY;
+    _globeOrbitLastMoveTime;
+    /** Последний шаг орбиты попал в диск глобуса (оба луча). */
+    _globeLastPickedHit;
     // ── события ──
     _eventHandlers;
     _lastCamState;
@@ -316,6 +328,7 @@ export class KrbMap {
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
         this.GLOBE_CENTER_ZOOM_OUT_MAX = options.globeCenterZoomOutMax ?? 5;
         this.GLOBE_CENTER_ZOOM_IN_MAX = options.globeCenterZoomInMax ?? 4;
+        this.GLOBE_VIEW_SCALE = options.globeViewScale ?? Math.pow(2, -0.8);
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
         this.TILE_MARGIN_BG = options.tileMarginBg ?? DEFAULTS.TILE_MARGIN_BG;
         this.VISIBLE_UPDATE_THROTTLE = options.visibleUpdateThrottle ?? DEFAULTS.VISIBLE_UPDATE_THROTTLE;
@@ -344,6 +357,10 @@ export class KrbMap {
         this._panLastMoveTime = 0;
         this._panLastWorldX = 0;
         this._panLastWorldZ = 0;
+        this._globeOrbitVelX = 0;
+        this._globeOrbitVelY = 0;
+        this._globeOrbitLastMoveTime = 0;
+        this._globeLastPickedHit = false;
         this._disposed = false;
         this._paused = false;
         this._pauseReasons = new Set();

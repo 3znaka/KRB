@@ -209,6 +209,22 @@ export const CoreInputMixin = {
         this.controls.update();
         this._globeLastX = x1;
         this._globeLastY = y1;
+        // ── EMA скорости вращения для инерции (px/с), коэффициенты как в плоском pan ──
+        // Копим только «честные» шаги (оба луча попали в диск). Если курсор/палец
+        // ушёл за пределы глобуса — скорость обнуляем, иначе она берётся из
+        // масштабированного фолбэка и при отпускании глобус раскручивается сам.
+        const nowT = performance.now();
+        this._globeLastPickedHit = picked;
+        if (picked) {
+            const dtMv = Math.max((nowT - this._globeOrbitLastMoveTime) / 1000, 0.001);
+            this._globeOrbitVelX = 0.6 * this._globeOrbitVelX + 0.4 * (dx / dtMv);
+            this._globeOrbitVelY = 0.6 * this._globeOrbitVelY + 0.4 * (dy / dtMv);
+        }
+        else {
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
+        }
+        this._globeOrbitLastMoveTime = nowT;
         this.maybeUpdateVisibleTiles();
     },
     _correctGlobeRoll() {
@@ -226,6 +242,9 @@ export const CoreInputMixin = {
         // ── останавливаем pan-инерцию ──
         this._panVelX = 0;
         this._panVelZ = 0;
+        // ── и инерцию вращения глобуса ──
+        this._globeOrbitVelX = 0;
+        this._globeOrbitVelY = 0;
         if (e.button === 2) {
             if (this.globe) {
                 // На глобусе поворот/наклон включаются только с зума ≈6
@@ -273,6 +292,9 @@ export const CoreInputMixin = {
             this._globeRadPerPx = 0;
             this._panVelX = 0;
             this._panVelZ = 0;
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
+            this._globeOrbitLastMoveTime = performance.now();
             return;
         }
         if (this._raycastToGround(e.clientX, e.clientY, this.intersection)) {
@@ -360,6 +382,16 @@ export const CoreInputMixin = {
         if (!this.panInertia || performance.now() - this._panLastMoveTime > 100) {
             this._panVelX = 0;
             this._panVelZ = 0;
+        }
+        // ── инерция вращения глобуса: тот же критерий остановки ──
+        if (!this.panInertia || performance.now() - this._globeOrbitLastMoveTime > 100) {
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
+        }
+        // Вне диска скорости нет вообще (см. _globeOrbit): гарантированно гасим.
+        if (!this._globeLastPickedHit) {
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
         }
         this.syncControlsTarget();
     },
@@ -587,6 +619,9 @@ export const CoreInputMixin = {
                 this._globeLastX = t.clientX;
                 this._globeLastY = t.clientY;
                 this._globeRadPerPx = 0;
+                this._globeOrbitVelX = 0;
+                this._globeOrbitVelY = 0;
+                this._globeOrbitLastMoveTime = performance.now();
                 return;
             }
             // ── сброс pan-скорости ──
@@ -614,6 +649,8 @@ export const CoreInputMixin = {
             // ── останавливаем pan-инерцию ──
             this._panVelX = 0;
             this._panVelZ = 0;
+            this._globeOrbitVelX = 0;
+            this._globeOrbitVelY = 0;
             const t0 = e.touches[0], t1 = e.touches[1];
             const ts = this.touchState;
             ts.isPinching = true;
@@ -810,6 +847,9 @@ export const CoreInputMixin = {
                     this._globeLastX = midX - mdx;
                     this._globeLastY = midY - mdy;
                     this._globeOrbit(mdx, mdy);
+                    // Жест двумя пальцами — без инерции вращения (как flat-путь).
+                    this._globeOrbitVelX = 0;
+                    this._globeOrbitVelY = 0;
                 }
                 ts.prevDist = curDist;
                 ts.prevAngle = curAngle;
@@ -994,6 +1034,11 @@ export const CoreInputMixin = {
             if (!this.panInertia || performance.now() - this._panLastMoveTime > 100) {
                 this._panVelX = 0;
                 this._panVelZ = 0;
+            }
+            // ── инерция вращения глобуса ──
+            if (!this.panInertia || performance.now() - this._globeOrbitLastMoveTime > 100) {
+                this._globeOrbitVelX = 0;
+                this._globeOrbitVelY = 0;
             }
         }
     },

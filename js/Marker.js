@@ -317,6 +317,23 @@ export class Marker extends SpatialObject {
     getLabelPosition() {
         return 'bottom';
     }
+    /**
+     * Точка привязки тултипа — ВЕРХНИЙ край видимой иконки маркера.
+     *
+     * `getScreenPosition()` отдаёт точку геопривязки (она совпадает с
+     * anchor-точкой иконки, т.е. с её низом при anchor [0.5, 1]). Хвостик
+     * тултипа должен указывать на верх иконки, поэтому смещаем точку на
+     * высоту иконки относительно anchor.
+     */
+    getPopupAnchor() {
+        const base = this.getScreenPosition();
+        if (!base)
+            return null;
+        const [, h] = this._iconSize;
+        // Верхний край иконки лежит на ay*h выше anchor-точки (ay — доля от верха).
+        const ay = this._anchor[1];
+        return { x: base.x, y: base.y - ay * h };
+    }
     getPriority() {
         return this.getIconPriority() + 1000;
     }

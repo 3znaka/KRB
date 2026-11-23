@@ -58,6 +58,10 @@ R?: number;
     baseZoom?: number;
     baseDistance?: number;
     objectRenderDistanceFactor?: number;
+    /** Глобус: зум, ниже которого (включительно) отдаление идёт из центра, а не из курсора. По умолчанию 5. */
+    globeCenterZoomOutMax?: number;
+    /** Глобус: зум, ниже которого (включительно) приближение идёт из центра. По умолчанию 4. */
+    globeCenterZoomInMax?: number;
     staticBgZoom?: number;
     antialias?: boolean;
     tileLighting?: boolean;
@@ -155,6 +159,10 @@ export class KrbMap {
     MIN_ZOOM: number;
     MAX_ZOOM: number;
     ZOOM_SENSITIVITY: number;
+    /** Глобус: при отдалении с зума ≤ этого значения zoom-out идёт из центра, а не из курсора. */
+    GLOBE_CENTER_ZOOM_OUT_MAX: number;
+    /** Глобус: при приближении с зума ≤ этого значения zoom-in идёт из центра, а не из курсора. */
+    GLOBE_CENTER_ZOOM_IN_MAX: number;
     TILE_MARGIN: number;
     TILE_MARGIN_BG: number;
     VISIBLE_UPDATE_THROTTLE: number;
@@ -458,6 +466,8 @@ this._refreshExtents();
         if (this.globe) this.MIN_ZOOM = Math.min(this.MIN_ZOOM, -3);
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
+        this.GLOBE_CENTER_ZOOM_OUT_MAX = options.globeCenterZoomOutMax ?? 5;
+        this.GLOBE_CENTER_ZOOM_IN_MAX = options.globeCenterZoomInMax ?? 4;
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
         this.TILE_MARGIN_BG = options.tileMarginBg ?? DEFAULTS.TILE_MARGIN_BG;
         this.VISIBLE_UPDATE_THROTTLE = options.visibleUpdateThrottle ?? DEFAULTS.VISIBLE_UPDATE_THROTTLE;

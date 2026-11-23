@@ -363,6 +363,22 @@ export const CoreInputMixin = {
         }
         this.syncControlsTarget();
     },
+    /**
+     * Глобус: на низких зумах zoom идёт из центра, а не из курсора/пальцев.
+     *  - отдаление: из центра при зуме ≤ GLOBE_CENTER_ZOOM_OUT_MAX (по умолчанию 5);
+     *  - приближение: из центра при зуме ≤ GLOBE_CENTER_ZOOM_IN_MAX (по умолчанию 4),
+     *    т.е. курсорный zoom-in начинается с 5 зума.
+     * Иначе точка под курсором далеко от центра Земли, и доворот цели
+     * «раскручивает» глобус по инерции.
+     * Возвращает true, если pivot по курсору нужно взвести.
+     */
+    _shouldUseCursorPivot(zoomDelta) {
+        if (!this.globe)
+            return true;
+        const zoomingIn = zoomDelta > 0;
+        const limit = zoomingIn ? this.GLOBE_CENTER_ZOOM_IN_MAX : this.GLOBE_CENTER_ZOOM_OUT_MAX;
+        return this.continuousZoom > limit;
+    },
     onWheel(e) {
         if (this._cameraAnimation)
             return;
@@ -371,10 +387,16 @@ export const CoreInputMixin = {
             return;
         const delta = -Math.sign(e.deltaY) * this.ZOOM_SENSITIVITY;
         // запоминаем точку-пивот для zoom-to-cursor: работает и на плоской
-        // карте, и на глобусе (там камера доворачивается, а не сдвигается мир)
-        this._zoomPivotActive = true;
-        this._zoomPivotX = e.clientX;
-        this._zoomPivotY = e.clientY;
+        // карте, и на глобусе (там камера доворачивается, а не сдвигается мир).
+        // На глобусе при отдалении с низких зумов — из центра (см. _shouldUseCursorPivot).
+        if (this._shouldUseCursorPivot(delta)) {
+            this._zoomPivotActive = true;
+            this._zoomPivotX = e.clientX;
+            this._zoomPivotY = e.clientY;
+        }
+        else {
+            this._zoomPivotActive = false;
+        }
         // Позиция мыши изменится после зума, но rect останется прежним,
         // так что не инвалидируем — просто используем накопленное.
         this.applyZoomDelta(delta);
@@ -768,10 +790,11 @@ export const CoreInputMixin = {
                     return;
                 }
                 // ── zoom + rotate + панорама ──
-                this._zoomPivotActive = true;
+                const zd = Math.log2(curDist / ts.prevDist);
+                // Пинч-отдаление на низких зумах — из центра (как колесо), без пивота по пальцам.
+                this._zoomPivotActive = this._shouldUseCursorPivot(zd);
                 this._zoomPivotX = midX;
                 this._zoomPivotY = midY;
-                const zd = Math.log2(curDist / ts.prevDist);
                 if (isFinite(zd) && zd !== 0)
                     this.applyZoomDelta(zd);
                 // Поворот карты по углу между пальцами (знак как в плоской ветке).

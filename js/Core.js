@@ -60,6 +60,10 @@ export class KrbMap {
     MIN_ZOOM;
     MAX_ZOOM;
     ZOOM_SENSITIVITY;
+    /** Глобус: при отдалении с зума ≤ этого значения zoom-out идёт из центра, а не из курсора. */
+    GLOBE_CENTER_ZOOM_OUT_MAX;
+    /** Глобус: при приближении с зума ≤ этого значения zoom-in идёт из центра, а не из курсора. */
+    GLOBE_CENTER_ZOOM_IN_MAX;
     TILE_MARGIN;
     TILE_MARGIN_BG;
     VISIBLE_UPDATE_THROTTLE;
@@ -310,6 +314,8 @@ export class KrbMap {
             this.MIN_ZOOM = Math.min(this.MIN_ZOOM, -3);
         this.MAX_ZOOM = this.view.maxZoom;
         this.ZOOM_SENSITIVITY = this.view.zoomSensitivity;
+        this.GLOBE_CENTER_ZOOM_OUT_MAX = options.globeCenterZoomOutMax ?? 5;
+        this.GLOBE_CENTER_ZOOM_IN_MAX = options.globeCenterZoomInMax ?? 4;
         this.TILE_MARGIN = options.tileMargin ?? DEFAULTS.TILE_MARGIN;
         this.TILE_MARGIN_BG = options.tileMarginBg ?? DEFAULTS.TILE_MARGIN_BG;
         this.VISIBLE_UPDATE_THROTTLE = options.visibleUpdateThrottle ?? DEFAULTS.VISIBLE_UPDATE_THROTTLE;

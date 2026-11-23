@@ -77,6 +77,8 @@ interface BoundingCache {
 interface SimplifiedLineData {
     abs: [number, number][];
     nodeH: number[];
+    /** lon/lat вершин (для глобуса); синхронно с abs/nodeH, может отсутствовать. */
+    lonLat?: Array<[number, number] | null>;
 }
 
 export class Polyline extends SpatialObject implements GeoJSONExportable {
@@ -92,6 +94,7 @@ export class Polyline extends SpatialObject implements GeoJSONExportable {
     private _altitudeMode: PolylineAltitudeMode;
     private _depthTest: boolean;
     private _depthWrite: boolean;
+    private _depthFlagsExplicit: boolean = false;
     private _lineDasharray: LineDasharray | null = null;
     private _lineDashOffset: number = 0;
 
@@ -101,6 +104,10 @@ export class Polyline extends SpatialObject implements GeoJSONExportable {
     private _heightsFinalized = false;
     private _absPositions: Array<[number, number]> = [];
     private _nodeHeights: number[] = [];
+    /** lon/lat текущих (после упрощения) вершин — для размещения на глобусе. */
+    private _vertexLonLat: Array<[number, number] | null> = [];
+    /** Мировые точки вершин на глобусе (для подписей); null — плоский режим. */
+    private _globeWorldPoints: Array<{ x: number; y: number; z: number }> | null = null;
     private _cachedHeights: number[] | null = null;
 
     // ── LOD ──
@@ -190,6 +197,8 @@ export class Polyline extends SpatialObject implements GeoJSONExportable {
         this._maxZoom = options.maxZoom ?? Infinity;
         this._depthTest = options.depthTest ?? false;
         this._depthWrite = options.depthWrite ?? false;
+        // true, если depthTest/depthWrite заданы пользователем явно (тогда не трогаем).
+        this._depthFlagsExplicit = options.depthTest !== undefined || options.depthWrite !== undefined;
 
         this._heightUpdateInterval = options.heightUpdateInterval ?? 500;
 
@@ -218,6 +227,14 @@ export class Polyline extends SpatialObject implements GeoJSONExportable {
 
     protected _onAttached(map: any): void {
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+
+        // Глобус: включаем проверку глубины, чтобы эллипсоидный окклюдер
+        // (WorldSurface.createOccluder, depth-only) закрывал обратную сторону.
+        // Без этого линия рисуется поверх окклюдера. Явные флаги пользователя не трогаем.
+        if (map.globe === true && !this._depthFlagsExplicit) {
+            this._depthTest = true;
+            this._depthWrite = true;
+        }
 
         this._projectedCache = null;
         this._normalizedCache = null;
@@ -348,6 +365,16 @@ private _getNormalized(): NormalizedPosition[] {
     return this._normalizedCache;
 }
 
+/** lon/lat вершины (WGS-84 градусы) для глобуса; null, если не переводится. */
+private _lonLatOfNormalized(nn: NormalizedPosition): [number, number] | null {
+    if (nn.lonLat) return [nn.lonLat[0], nn.lonLat[1]];
+    const src = this._crs ?? this._map?.inputCRS;
+    if (!src || typeof src.toLonLat !== 'function') return null;
+    const ll = src.toLonLat(nn.coord);
+    if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) return null;
+    return [ll[0], ll[1]];
+}
+
 private _projectNormalized(nn: NormalizedPosition): [number, number] {
     // ВАЖНО: для ECEF проецируем точные lon/lat напрямую, а не nn.coord:
     // round-trip через 2D-проекцию ECEF ограничен видимой полусферой,
@@ -403,11 +430,14 @@ private _getFullLineData(): SimplifiedLineData {
     const n = this._positions.length;
     const abs: [number, number][] = new Array(n);
     const nodeH: number[] = new Array(n);
+    // lon/lat вершин — нужны глобусу (projectSurfaceVertex), как у полигона.
+    const lonLat: Array<[number, number] | null> = new Array(n);
     for (let i = 0; i < n; i++) {
         abs[i] = projected[i];
         nodeH[i] = norm[i].nodeHeight;   // для ECEF — h над эллипсоидом, не Z_ecef
+        lonLat[i] = this._lonLatOfNormalized(norm[i]);
     }
-    this._fullLineData = { abs, nodeH };
+    this._fullLineData = { abs, nodeH, lonLat };
     return this._fullLineData;
 }
 
@@ -445,13 +475,17 @@ private _getFullLineData(): SimplifiedLineData {
 
         const abs: [number, number][] = new Array(keptIdx.length);
         const nodeH: number[] = new Array(keptIdx.length);
+        const lonLat: Array<[number, number] | null> | undefined = full.lonLat
+            ? new Array(keptIdx.length)
+            : undefined;
         for (let k = 0; k < keptIdx.length; k++) {
             const idx = keptIdx[k];
             abs[k] = pts[idx];
             nodeH[k] = full.nodeH[idx];
+            if (lonLat) lonLat[k] = full.lonLat![idx];
         }
 
-        const result: SimplifiedLineData = { abs, nodeH };
+        const result: SimplifiedLineData = { abs, nodeH, lonLat };
         this._simplifyCache.set(bucket, result);
         return result;
     }
@@ -467,6 +501,8 @@ private _getFullLineData(): SimplifiedLineData {
         const resolved = data ?? this._getSimplifiedData(bucket);
         this._absPositions = resolved.abs;
         this._nodeHeights = resolved.nodeH;
+        this._vertexLonLat = resolved.lonLat ?? [];
+        this._globeWorldPoints = null; // пересчитается в _buildGlobeArray
 
         this._cachedHeights = null;
         this._heightsFinalized = false;
@@ -935,6 +971,12 @@ private _getFullLineData(): SimplifiedLineData {
             return (this._geometry?.attributes?.instanceStart?.count ?? 0) >= 1;
         }
 
+        // Глобус: вершины на эллипсоиде через projectSurfaceVertex (как у полигона).
+        const globeArr = this._buildGlobeArray();
+        if (globeArr) {
+            return this._setLineGeometry(globeArr);
+        }
+
         this._ensureLocalOrigin();
         const ox = this._localOrigin.x;
         const oz = this._localOrigin.z;
@@ -965,14 +1007,57 @@ private _getFullLineData(): SimplifiedLineData {
             lastFx = fx; lastFy = fy; lastFz = fz;
         }
 
-        if (k < 6) {
+        const finalArr = k === arr.length ? arr : arr.slice(0, k);
+        return this._setLineGeometry(finalArr);
+    }
+
+    /**
+     * Глобус: мировые позиции вершин через projectSurfaceVertex (как у полигона).
+     * Origin — центр мировых позиций, чтобы локальные координаты были малыми.
+     * Возвращает null, если глобус не активен или вершины не переводятся.
+     */
+    private _buildGlobeArray(): Float32Array | null {
+        const map = this._map as any;
+        if (!map?.globe || !map.surface || typeof map.projectSurfaceVertex !== 'function') return null;
+        const n = this._absPositions.length;
+        if (n < 2 || this._vertexLonLat.length !== n) return null;
+
+        const pts = new Array<{ x: number; y: number; z: number }>(n);
+        const v = new THREE.Vector3();
+        for (let i = 0; i < n; i++) {
+            const ll = this._vertexLonLat[i];
+            const h = (this._cachedHeights?.[i] ?? this._altitude);
+            const p = ll ? map.projectSurfaceVertex(ll, 'EPSG:4326', Number.isFinite(h) ? h : 0, null, v) : null;
+            if (!p) return null;
+            pts[i] = { x: p.x, y: p.y, z: p.z };
+        }
+
+        // Мировые точки — для подписей (та же дуга, что у линии).
+        this._globeWorldPoints = pts;
+
+        // origin — среднее мировых позиций (для стабильной точности float32)
+        let cx = 0, cy = 0, cz = 0;
+        for (const p of pts) { cx += p.x; cy += p.y; cz += p.z; }
+        cx /= n; cy /= n; cz /= n;
+        this._localOrigin.set(cx, cy, cz);
+        this._localOriginValid = true;
+        if (this._line) this._line.position.copy(this._localOrigin);
+
+        const arr = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            arr[i * 3]     = pts[i].x - cx;
+            arr[i * 3 + 1] = pts[i].y - cy;
+            arr[i * 3 + 2] = pts[i].z - cz;
+        }
+        return arr;
+    }
+
+    private _setLineGeometry(finalArr: Float32Array): boolean {
+        if (finalArr.length < 6) {
             this._line.visible = false;
             this._positionsDirty = false;
             return false;
         }
-
-        const finalArr = k === arr.length ? arr : arr.slice(0, k);
-
         // КРИТИЧНО: пересоздаём LineGeometry при обновлении буфера.
         // Иначе Three.js сохраняет старый geometry._maxInstanceCount через Math.min(...),
         // и при приближении рисует только то число сегментов, которое было на дальнем зуме.
@@ -1016,7 +1101,16 @@ private _getFullLineData(): SimplifiedLineData {
         if (n < 2) { this._screenData.valid = false; this._labelPrefixSums = null; return; }
 
         const points3D: any[] = new Array(n);
+        // Глобус: подписи должны идти по той же дуге, что и линия — берём мировые
+        // точки глобуса (кэш из _applyPositions), а не плоские координаты.
+        const globe = this._globeWorldPoints;
+        const useGlobe = !!globe && globe.length === n;
         for (let i = 0; i < n; i++) {
+            if (useGlobe) {
+                const g = globe![i];
+                points3D[i] = new THREE.Vector3(g.x, g.y, g.z);
+                continue;
+            }
             const [ax, az] = pts[i];
             let y = this._altitude + (this._nodeHeights[i] ?? 0);
             if (this._cachedHeights) y = this._cachedHeights[i];

@@ -19,6 +19,7 @@ await KRB.crs.add(['EPSG:7682', 'EPSG:4284', 'EPSG:4200']);
 
 const map = new KRB.Map({
     target: 'map',
+    globe: true,
     layers: [
         new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
@@ -35,6 +36,12 @@ const map = new KRB.Map({
 });
 
 
+new KRB.Marker({
+    position: [37.6178, 55.7558],
+    tooltip: '<b>Москва</b><br><small>столица России</small>',
+    title: 'Москва',
+    titleStyle: { color: '#fff', textShadow: '0 1px 3px #000', fontSize: '13px', fontWeight: 'bold' }
+}).addTo(map);
 
 
 new KRB.Marker({

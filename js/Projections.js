@@ -433,8 +433,12 @@ export class Projection {
         const inCoord = this.isGeographic
             ? (typeof other.clampLonLat === 'function' ? other.clampLonLat(coord) : this.clampLonLat(coord))
             : coord;
-        if (other.def == null)
+        // Если хотя бы один датум не WGS-84 — прямой proj4 между определениями
+        // датум не учитывает, поэтому переход идёт через WGS-84 (lon/lat).
+        const datumInvolved = !!this._datumShift || !!other._datumShift;
+        if (other.def == null || datumInvolved) {
             return other.fromLonLat(this.toLonLat(inCoord));
+        }
         let c = this._convTo.get(other.code);
         if (!c) {
             c = proj4(this.def, other.def);

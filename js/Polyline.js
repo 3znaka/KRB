@@ -25,6 +25,7 @@ export class Polyline extends SpatialObject {
     _altitudeMode;
     _depthTest;
     _depthWrite;
+    _depthFlagsExplicit = false;
     _lineDasharray = null;
     _lineDashOffset = 0;
     // ── Высоты ──
@@ -33,6 +34,10 @@ export class Polyline extends SpatialObject {
     _heightsFinalized = false;
     _absPositions = [];
     _nodeHeights = [];
+    /** lon/lat текущих (после упрощения) вершин — для размещения на глобусе. */
+    _vertexLonLat = [];
+    /** Мировые точки вершин на глобусе (для подписей); null — плоский режим. */
+    _globeWorldPoints = null;
     _cachedHeights = null;
     // ── LOD ──
     _simplify = true;
@@ -103,6 +108,8 @@ export class Polyline extends SpatialObject {
         this._maxZoom = options.maxZoom ?? Infinity;
         this._depthTest = options.depthTest ?? false;
         this._depthWrite = options.depthWrite ?? false;
+        // true, если depthTest/depthWrite заданы пользователем явно (тогда не трогаем).
+        this._depthFlagsExplicit = options.depthTest !== undefined || options.depthWrite !== undefined;
         this._heightUpdateInterval = options.heightUpdateInterval ?? 500;
         this._title = options.title ?? '';
         this._titleAlign = options.titleAlign ?? 'center';
@@ -126,6 +133,13 @@ export class Polyline extends SpatialObject {
     // =================================================================
     _onAttached(map) {
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        // Глобус: включаем проверку глубины, чтобы эллипсоидный окклюдер
+        // (WorldSurface.createOccluder, depth-only) закрывал обратную сторону.
+        // Без этого линия рисуется поверх окклюдера. Явные флаги пользователя не трогаем.
+        if (map.globe === true && !this._depthFlagsExplicit) {
+            this._depthTest = true;
+            this._depthWrite = true;
+        }
         this._projectedCache = null;
         this._normalizedCache = null;
         this._fullLineData = null;
@@ -240,6 +254,18 @@ export class Polyline extends SpatialObject {
         this._normalizedCache = this._positions.map(p => this._normalizePosition(p, this._crs));
         return this._normalizedCache;
     }
+    /** lon/lat вершины (WGS-84 градусы) для глобуса; null, если не переводится. */
+    _lonLatOfNormalized(nn) {
+        if (nn.lonLat)
+            return [nn.lonLat[0], nn.lonLat[1]];
+        const src = this._crs ?? this._map?.inputCRS;
+        if (!src || typeof src.toLonLat !== 'function')
+            return null;
+        const ll = src.toLonLat(nn.coord);
+        if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+            return null;
+        return [ll[0], ll[1]];
+    }
     _projectNormalized(nn) {
         // ВАЖНО: для ECEF проецируем точные lon/lat напрямую, а не nn.coord:
         // round-trip через 2D-проекцию ECEF ограничен видимой полусферой,
@@ -297,11 +323,14 @@ export class Polyline extends SpatialObject {
         const n = this._positions.length;
         const abs = new Array(n);
         const nodeH = new Array(n);
+        // lon/lat вершин — нужны глобусу (projectSurfaceVertex), как у полигона.
+        const lonLat = new Array(n);
         for (let i = 0; i < n; i++) {
             abs[i] = projected[i];
             nodeH[i] = norm[i].nodeHeight; // для ECEF — h над эллипсоидом, не Z_ecef
+            lonLat[i] = this._lonLatOfNormalized(norm[i]);
         }
-        this._fullLineData = { abs, nodeH };
+        this._fullLineData = { abs, nodeH, lonLat };
         return this._fullLineData;
     }
     _getSimplifiedData(bucket) {
@@ -332,12 +361,17 @@ export class Polyline extends SpatialObject {
         }
         const abs = new Array(keptIdx.length);
         const nodeH = new Array(keptIdx.length);
+        const lonLat = full.lonLat
+            ? new Array(keptIdx.length)
+            : undefined;
         for (let k = 0; k < keptIdx.length; k++) {
             const idx = keptIdx[k];
             abs[k] = pts[idx];
             nodeH[k] = full.nodeH[idx];
+            if (lonLat)
+                lonLat[k] = full.lonLat[idx];
         }
-        const result = { abs, nodeH };
+        const result = { abs, nodeH, lonLat };
         this._simplifyCache.set(bucket, result);
         return result;
     }
@@ -352,6 +386,8 @@ export class Polyline extends SpatialObject {
         const resolved = data ?? this._getSimplifiedData(bucket);
         this._absPositions = resolved.abs;
         this._nodeHeights = resolved.nodeH;
+        this._vertexLonLat = resolved.lonLat ?? [];
+        this._globeWorldPoints = null; // пересчитается в _buildGlobeArray
         this._cachedHeights = null;
         this._heightsFinalized = false;
         this._lastHeightUpdateTime = 0;
@@ -801,6 +837,11 @@ export class Polyline extends SpatialObject {
         if (!this._positionsDirty) {
             return (this._geometry?.attributes?.instanceStart?.count ?? 0) >= 1;
         }
+        // Глобус: вершины на эллипсоиде через projectSurfaceVertex (как у полигона).
+        const globeArr = this._buildGlobeArray();
+        if (globeArr) {
+            return this._setLineGeometry(globeArr);
+        }
         this._ensureLocalOrigin();
         const ox = this._localOrigin.x;
         const oz = this._localOrigin.z;
@@ -832,12 +873,61 @@ export class Polyline extends SpatialObject {
             lastFy = fy;
             lastFz = fz;
         }
-        if (k < 6) {
+        const finalArr = k === arr.length ? arr : arr.slice(0, k);
+        return this._setLineGeometry(finalArr);
+    }
+    /**
+     * Глобус: мировые позиции вершин через projectSurfaceVertex (как у полигона).
+     * Origin — центр мировых позиций, чтобы локальные координаты были малыми.
+     * Возвращает null, если глобус не активен или вершины не переводятся.
+     */
+    _buildGlobeArray() {
+        const map = this._map;
+        if (!map?.globe || !map.surface || typeof map.projectSurfaceVertex !== 'function')
+            return null;
+        const n = this._absPositions.length;
+        if (n < 2 || this._vertexLonLat.length !== n)
+            return null;
+        const pts = new Array(n);
+        const v = new THREE.Vector3();
+        for (let i = 0; i < n; i++) {
+            const ll = this._vertexLonLat[i];
+            const h = (this._cachedHeights?.[i] ?? this._altitude);
+            const p = ll ? map.projectSurfaceVertex(ll, 'EPSG:4326', Number.isFinite(h) ? h : 0, null, v) : null;
+            if (!p)
+                return null;
+            pts[i] = { x: p.x, y: p.y, z: p.z };
+        }
+        // Мировые точки — для подписей (та же дуга, что у линии).
+        this._globeWorldPoints = pts;
+        // origin — среднее мировых позиций (для стабильной точности float32)
+        let cx = 0, cy = 0, cz = 0;
+        for (const p of pts) {
+            cx += p.x;
+            cy += p.y;
+            cz += p.z;
+        }
+        cx /= n;
+        cy /= n;
+        cz /= n;
+        this._localOrigin.set(cx, cy, cz);
+        this._localOriginValid = true;
+        if (this._line)
+            this._line.position.copy(this._localOrigin);
+        const arr = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+            arr[i * 3] = pts[i].x - cx;
+            arr[i * 3 + 1] = pts[i].y - cy;
+            arr[i * 3 + 2] = pts[i].z - cz;
+        }
+        return arr;
+    }
+    _setLineGeometry(finalArr) {
+        if (finalArr.length < 6) {
             this._line.visible = false;
             this._positionsDirty = false;
             return false;
         }
-        const finalArr = k === arr.length ? arr : arr.slice(0, k);
         // КРИТИЧНО: пересоздаём LineGeometry при обновлении буфера.
         // Иначе Three.js сохраняет старый geometry._maxInstanceCount через Math.min(...),
         // и при приближении рисует только то число сегментов, которое было на дальнем зуме.
@@ -880,7 +970,16 @@ export class Polyline extends SpatialObject {
             return;
         }
         const points3D = new Array(n);
+        // Глобус: подписи должны идти по той же дуге, что и линия — берём мировые
+        // точки глобуса (кэш из _applyPositions), а не плоские координаты.
+        const globe = this._globeWorldPoints;
+        const useGlobe = !!globe && globe.length === n;
         for (let i = 0; i < n; i++) {
+            if (useGlobe) {
+                const g = globe[i];
+                points3D[i] = new THREE.Vector3(g.x, g.y, g.z);
+                continue;
+            }
             const [ax, az] = pts[i];
             let y = this._altitude + (this._nodeHeights[i] ?? 0);
             if (this._cachedHeights)

@@ -25,16 +25,10 @@ await KRB.addCrs(['ADPKP:0072', 'EPSG:32637', 'EPSG:32601']);
  const map = new KRB.Map({
         target: 'map',
 debug: true,
-       crs: 'ADPKP:0072',
+globe: true,
+
         layers: [],
-        graticule: {
-            crs: 'EPSG:4326',
-            step: { lat: 15, lon: 5 },
-            color: '#888',
-            width: 1,
-            opacity: 0.6,
-            showLabels: true,
-        },
+        
         view: new KRB.View({
             centerLonLat: [10, 20],
             zoom: 1,

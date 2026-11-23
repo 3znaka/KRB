@@ -36,6 +36,10 @@ export class Polyline extends SpatialObject {
     _nodeHeights = [];
     /** lon/lat текущих (после упрощения) вершин — для размещения на глобусе. */
     _vertexLonLat = [];
+    /** Время последнего пересчёта подписи (для ограничения частоты). */
+    _labelLastCompute = 0;
+    /** Сигнатура входов подписи: при неизменной — пересчёт пропускается. */
+    _labelSig = null;
     /** Мировые точки вершин на глобусе (для подписей); null — плоский режим. */
     _globeWorldPoints = null;
     _cachedHeights = null;
@@ -763,10 +767,46 @@ export class Polyline extends SpatialObject {
             this._labelPrefixSums = null;
             return;
         }
-        if (this._title)
-            this._computeScreenData();
+        if (this._title && this._labelNeedsRecompute()) {
+            // Ограничиваем частоту пересчёта подписи: при движении камеры не чаще ~10 Гц.
+            // Подпись чуть отстаёт, зато не тормозит 282 линии каждый кадр.
+            const now = performance.now();
+            if (!this._screenData.valid || now - this._labelLastCompute >= 100) {
+                this._labelLastCompute = now;
+                this._computeScreenData();
+            }
+        }
         this._line.visible = true;
         this._isVisible = true;
+    }
+    /**
+     * Подпись пересчитываем только если изменилось то, от чего зависит видимый
+     * интервал: камера, сдвиг мира, геометрия линии. На статичной камере
+     * пересчёт (200 сэмплов × project/isWorldPointOccluded) не нужен.
+     */
+    _labelNeedsRecompute() {
+        const map = this._map;
+        if (!map)
+            return false;
+        const cam = map.camera;
+        const wg = map.worldGroup.position;
+        const sig = this._labelSig;
+        const camX = cam.position.x, camY = cam.position.y, camZ = cam.position.z;
+        const qx = cam.quaternion.x, qy = cam.quaternion.y, qz = cam.quaternion.z, qw = cam.quaternion.w;
+        const changed = !sig ||
+            sig.camX !== camX || sig.camY !== camY || sig.camZ !== camZ ||
+            sig.qx !== qx || sig.qy !== qy || sig.qz !== qz || sig.qw !== qw ||
+            sig.wgX !== wg.x || sig.wgY !== wg.y || sig.wgZ !== wg.z ||
+            sig.geom !== this._geometry ||
+            !this._screenData.valid;
+        if (!changed)
+            return false;
+        this._labelSig = {
+            camX, camY, camZ, qx, qy, qz, qw,
+            wgX: wg.x, wgY: wg.y, wgZ: wg.z,
+            geom: this._geometry,
+        };
+        return true;
     }
     _updateHeights() {
         if (!this._map)
@@ -1013,7 +1053,14 @@ export class Polyline extends SpatialObject {
             }
             return lo;
         };
-        const samples = 200;
+        // Глобус: та же проверка горизонта, что у Marker/Polygon (isWorldPointOccluded).
+        const horizonCheck = map.globe && typeof map.isWorldPointOccluded === 'function'
+            ? (p) => map.isWorldPointOccluded(p)
+            : null;
+        // 32 сэмпла достаточно для видимого интервала подписи; точную позицию
+        // подписи даёт getScreenPositionAt. 200 сэмплов × 282 линии при движении
+        // камеры давали просадку до 30–40 fps.
+        const samples = 32;
         const visibleTs = [];
         for (let i = 0; i < samples; i++) {
             const t = i / (samples - 1);
@@ -1022,6 +1069,10 @@ export class Polyline extends SpatialObject {
             const segLen = segLengths[segIdx];
             const local = segLen > 0 ? (target - prefix[segIdx]) / segLen : 0;
             world.lerpVectors(points3D[segIdx], points3D[segIdx + 1], local);
+            // Глобус: точка за горизонтом (обратная сторона) — не кандидат на подпись,
+            // даже если попадает в экранный прямоугольник (как у Marker).
+            if (horizonCheck && horizonCheck(world))
+                continue;
             scr.copy(world).project(camera);
             if (scr.z > 0 && scr.z < 1 &&
                 scr.x >= -1 && scr.x <= 1 &&

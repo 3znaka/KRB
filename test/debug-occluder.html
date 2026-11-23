@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Polynomial CRS — debug occluder</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map {
+        position: absolute;
+        left: 0; right: 0; top: 0; bottom: 0;
+        width: 100%; height: 100dvh; overflow: hidden;
+    }
+    #debug {
+        position: absolute; top: 8px; left: 8px; z-index: 9999;
+        background: rgba(255,255,255,0.95); color: #111;
+        font: 12px/1.4 monospace; padding: 8px 10px; border: 1px solid #999;
+        border-radius: 4px; max-width: 520px; max-height: 60vh; overflow: auto;
+        white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="debug">загрузка…</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+const out = document.getElementById('debug');
+const log = [];
+const print = (s) => { log.push(s); out.textContent = log.join('\n'); };
+
+await KRB.addCrs(['ADPKP:0072', 'EPSG:32637', 'EPSG:32601']);
+
+const map = new KRB.Map({
+    target: 'map',
+    debug: true,
+    globe: true,
+    layers: [],
+    view: new KRB.View({
+        centerLonLat: [10, 20],
+        zoom: 1,
+        minZoom: 0,
+        maxZoom: 8,
+    }),
+});
+
+const world = new KRB.GeoJSONLayer({
+    url: 'lines.geojson',
+    defaultFillColor:   '#aa0101',
+    defaultStrokeColor: '#000000',
+    defaultStrokeWidth: 0.3,
+}).addTo(map);
+
+window.map = map;
+window.world = world;
+
+</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Perf — глобус с полилиниями</title>
+<link href="../KRB.css" rel="stylesheet">
+<style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: 100%; height: 100dvh; overflow: hidden; }
+    #perf {
+        position: absolute; top: 8px; left: 8px; z-index: 9999;
+        background: rgba(255,255,255,0.95); color: #111;
+        font: 12px/1.4 monospace; padding: 8px 10px; border: 1px solid #999;
+        border-radius: 4px; white-space: pre;
+    }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="perf">загрузка…</div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+const out = document.getElementById('perf');
+const print = (lines) => { out.textContent = lines.join('\n'); };
+
+await KRB.addCrs(['ADPKP:0072', 'EPSG:32637', 'EPSG:32601']);
+
+const map = new KRB.Map({
+    target: 'map',
+    globe: true,
+    layers: [],
+    view: new KRB.View({ centerLonLat: [10, 20], zoom: 1, minZoom: 0, maxZoom: 8 }),
+});
+
+const world = new KRB.GeoJSONLayer({
+    url: 'lines.geojson',
+    defaultFillColor:   '#aa0101',
+    defaultStrokeColor: '#000000',
+    defaultStrokeWidth: 0.3,
+}).addTo(map);
+
+window.map = map;
+window.world = world;
+
+// ---- профилирование: оборачиваем методы полилиний, сам код не меняем ----
+const prof = {
+    frames: 0,
+    update: 0, updateMs: 0,
+    geom: 0, geomMs: 0,
+    globe: 0, globeMs: 0,
+    labels: 0, labelsMs: 0,
+};
+
+function collectObjects(node, acc = [], depth = 0) {
+    if (!node || depth > 6) return acc;
+    const list = node._objects || node.objects || node.children;
+    if (!Array.isArray(list)) return acc;
+    for (const o of list) {
+        if (o && o._material && o._line !== undefined) acc.push(o);
+        collectObjects(o, acc, depth + 1);
+    }
+    return acc;
+}
+
+function wrap(obj, name, key, msKey) {
+    const orig = obj[name];
+    if (typeof orig !== 'function') return;
+    obj[name] = function (...args) {
+        const t = performance.now();
+        const r = orig.apply(this, args);
+        prof[key]++;
+        prof[msKey] += performance.now() - t;
+        return r;
+    };
+}
+
+function instrument() {
+    for (const pl of collectObjects(world)) {
+        if (pl.__perfWrapped) continue;
+        pl.__perfWrapped = true;
+        wrap(pl, '_update',              'update', 'updateMs');
+        wrap(pl, '_setLineGeometry',     'geom',   'geomMs');
+        wrap(pl, '_buildGlobeArray',     'globe',  'globeMs');
+        wrap(pl, '_computeScreenData',   'labels', 'labelsMs');
+    }
+}
+
+const avg = (ms, n) => (n ? (ms / n).toFixed(3) : '0.000');
+
+let lastFrames = 0;
+let lastT = performance.now();
+setInterval(() => {
+    instrument();
+    const now = performance.now();
+    const fps = (prof.frames - lastFrames) / ((now - lastT) / 1000);
+    lastFrames = prof.frames;
+    lastT = now;
+
+    const count = collectObjects(world).length;
+    print([
+        `== PERF (последняя секунда) ==`,
+        `FPS                : ${fps.toFixed(1)}`,
+        `polylines          : ${count}`,
+        `_update            : ${prof.update} вызовов, сред. ${avg(prof.updateMs, prof.update)} мс, сумма ${prof.updateMs.toFixed(1)} мс`,
+        `_setLineGeometry   : ${prof.geom} пересозд., сред. ${avg(prof.geomMs, prof.geom)} мс, сумма ${prof.geomMs.toFixed(1)} мс`,
+        `_buildGlobeArray   : ${prof.globe} вызовов, сред. ${avg(prof.globeMs, prof.globe)} мс, сумма ${prof.globeMs.toFixed(1)} мс`,
+        `_computeScreenData : ${prof.labels} вызовов, сред. ${avg(prof.labelsMs, prof.labels)} мс, сумма ${prof.labelsMs.toFixed(1)} мс`,
+    ]);
+
+    for (const k of ['update', 'updateMs', 'geom', 'geomMs', 'globe', 'globeMs', 'labels', 'labelsMs']) prof[k] = 0;
+}, 1000);
+
+const countFrame = () => { prof.frames++; requestAnimationFrame(countFrame); };
+requestAnimationFrame(countFrame);
+</script>
+</body>
+</html>

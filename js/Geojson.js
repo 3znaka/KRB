@@ -66,8 +66,9 @@ export class GeoJSONLayer extends Layer {
     defaultLineOpacity = 1;
     defaultLineAltitudeMode = 'absolute';
     defaultLineAltitude = 10;
-    defaultLineDepthTest = false;
-    defaultLineDepthWrite = false;
+    // undefined = «не задано»: тогда полилиния сама включит depth на глобусе.
+    defaultLineDepthTest = undefined;
+    defaultLineDepthWrite = undefined;
     defaultLineMinZoom = -Infinity;
     defaultLineMaxZoom = Infinity;
     defaultVectorColor = '#3388ff';
@@ -150,8 +151,8 @@ export class GeoJSONLayer extends Layer {
         this.defaultLineOpacity = o.defaultLineOpacity ?? 1;
         this.defaultLineAltitudeMode = o.defaultLineAltitudeMode ?? 'absolute';
         this.defaultLineAltitude = o.defaultLineAltitude ?? o.defaultLineAltitudeOffset ?? 10;
-        this.defaultLineDepthTest = o.defaultLineDepthTest ?? false;
-        this.defaultLineDepthWrite = o.defaultLineDepthWrite ?? false;
+        this.defaultLineDepthTest = o.defaultLineDepthTest;
+        this.defaultLineDepthWrite = o.defaultLineDepthWrite;
         this.defaultLineMinZoom = o.defaultLineMinZoom ?? -Infinity;
         this.defaultLineMaxZoom = o.defaultLineMaxZoom ?? Infinity;
         this.defaultVectorColor = o.defaultVectorColor ?? '#3388ff';

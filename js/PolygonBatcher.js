@@ -280,11 +280,14 @@ class BatchedGroup {
         if (d0.strokeWidth > 0 && d0.strokeOpacity > 0 && d0.strokeColor != null) {
             const strokePos = [];
             for (const { data } of datas) {
-                const wc = data.worldCoords;
-                const h = data.heights;
-                const wpS = data.worldPositions;
+                // Обводка — по контурным вершинам (см. Polygon._getBatchGeometryData).
+                const wc = data.strokeWorldCoords ?? data.worldCoords;
+                const h = data.strokeHeights ?? data.heights;
+                const wpS = data.strokeWorldPositions ?? data.worldPositions;
                 const n = wc.length;
-                const rs = (data.ringStarts && data.ringStarts.length > 0) ? data.ringStarts : [0];
+                const rs = (data.strokeRingStarts && data.strokeRingStarts.length > 0)
+                    ? data.strokeRingStarts
+                    : ((data.ringStarts && data.ringStarts.length > 0) ? data.ringStarts : [0]);
                 for (let r = 0; r < rs.length; r++) {
                     const start = rs[r];
                     const end = (r + 1 < rs.length) ? rs[r + 1] : n;

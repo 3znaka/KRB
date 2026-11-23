@@ -1,4 +1,5 @@
 // CoreLifecycle.ts
+import { THREE } from './js_TP/tpb.js';
 import type { KrbMap } from './Core.js';
 
 export interface CoreLifecycleMethods {

@@ -1,3 +1,5 @@
+// CoreLifecycle.ts
+import { THREE } from './js_TP/tpb.js';
 export const CoreLifecycleMixin = {
     _setupAutoPause() {
         if (this._autoPauseDisabled)

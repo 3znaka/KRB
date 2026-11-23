@@ -16,5 +16,8 @@
   "devDependencies": {
     "esbuild": "^0.25.12",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "cdt2d": "^1.0.0"
   }
 }

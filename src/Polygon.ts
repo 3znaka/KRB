@@ -117,6 +117,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _avgNodeHeightValid = false;
 
     _worldCoords: Array<[number, number]> = [];
+    /** Сколько первых вершин _worldCoords — контуры; дальше идут Steiner-точки. */
+    _contourVertexCount = 0;
     _strokeWorldCoords: Array<[number, number]> = [];
     /** lon/lat вершин обводки (глобус: обводка ложится на эллипсоид). */
     _strokeVertexLonLat: Array<[number, number] | null> = [];
@@ -285,6 +287,7 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         }
 
         this._worldCoords.length = 0;
+        this._contourVertexCount = 0;
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._vertexLonLat.length = 0;
@@ -412,7 +415,20 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
             if (!ok) worldPositions = null;
         }
 
+        // Обводка — отдельно, по КОНТУРНЫМ вершинам (без Steiner): последовательно
+        // соединяем точки каждого кольца. Заливка с Steiner на обводку не влияет.
+        const contourN = Math.min(this._contourVertexCount || this._worldCoords.length, this._worldCoords.length);
+        const strokeCoords = this._worldCoords.slice(0, contourN);
+        const strokeRingStarts = this._ringStartIndices.filter(s => s < contourN);
+        const strokeWorldPositions = worldPositions
+            ? worldPositions.slice(0, contourN * 3)
+            : null;
+
         return {
+            strokeWorldCoords: strokeCoords,
+            strokeRingStarts,
+            strokeWorldPositions,
+            strokeHeights: heights.slice(0, contourN),
             worldCoords: this._worldCoords,
             worldPositions,
             heights,
@@ -547,6 +563,7 @@ _normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
             return this;
         }
         this._rings = rings;
+        (this as any)._steinerCache = null;
         this._boundsCache.clear();
         this._visualCenterCache = null;
         this._centroidFromOriginal = null;
@@ -690,6 +707,7 @@ override getGeoJSONProperties(): Record<string, any> {
         this._disposeMeshes();
 
         this._worldCoords.length = 0;
+        this._contourVertexCount = 0;
         this._strokeWorldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._vertexLonLat.length = 0;

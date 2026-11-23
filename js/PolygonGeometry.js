@@ -3,8 +3,7 @@
  * fill-pattern, поверхностные материалы.
  */
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
-import earcut from './js_TP/earcut.js';
-import { POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE, crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial } from './PolygonUtils.js';
+import { POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE, crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial, triangulatePolygonCDT, } from './PolygonUtils.js';
 export const PolygonGeometryMixin = {
     _disposeMeshes() {
         if (this._group) {
@@ -295,6 +294,9 @@ export const PolygonGeometryMixin = {
         const rs = this._ringStartIndices;
         if (!wc.length || !rs.length)
             return [];
+        // Триангуляция — в lon/lat (как в _buildFillGeometry): мировые (x,z)
+        // сферы склеивают переднюю и заднюю стороны. Откат — мировые (x,z).
+        const vll = this._vertexLonLat;
         const coords = [];
         const holeIndices = [];
         for (let r = 0; r < rs.length; r++) {
@@ -302,12 +304,18 @@ export const PolygonGeometryMixin = {
             const end = (r + 1 < rs.length) ? rs[r + 1] : wc.length;
             if (r > 0)
                 holeIndices.push(coords.length / 2);
-            for (let i = start; i < end; i++)
-                coords.push(wc[i][0], wc[i][1]);
+            for (let i = start; i < end; i++) {
+                const ll = vll?.[i];
+                if (ll)
+                    coords.push(ll[0], ll[1]);
+                else
+                    coords.push(wc[i][0], wc[i][1]);
+            }
         }
         if (coords.length < 6)
             return [];
-        const indices = earcut(coords, holeIndices, 2);
+        const contourCount = Math.min(this._contourVertexCount || wc.length, wc.length);
+        const indices = triangulatePolygonCDT(coords, holeIndices, contourCount);
         if (!indices.length)
             return [];
         const p2d = new Array(coords.length / 2);
@@ -334,6 +342,7 @@ export const PolygonGeometryMixin = {
         this._avgNodeHeightValid = false;
         this._boundsCache.clear();
         const coords = [];
+        const triCoords = [];
         const points2D = [];
         const holeIndices = [];
         const ringStartIndices = [];
@@ -356,6 +365,10 @@ export const PolygonGeometryMixin = {
                     continue;
                 coords.push(absX, absZ);
                 points2D.push(new THREE.Vector2(absX, absZ));
+                // Триангуляция — в lon/lat (развёртка), а не в мировых (x,z):
+                // мировые координаты сферы склеивают переднюю и заднюю стороны.
+                const ll = lonLats ? lonLats[i] : null;
+                triCoords.push(ll ? ll[0] : absX, ll ? ll[1] : absZ);
                 this._worldCoords.push([absX, absZ]);
                 this._nodeHeights.push(heights[i] ?? 0);
                 // Геодезические координаты вершины — на глобусе по ним
@@ -382,9 +395,26 @@ export const PolygonGeometryMixin = {
         this._invalidGeometry = false;
         this._vertices2D = points2D;
         this._cachedHeights = new Array(points2D.length).fill(0);
-        const indices = earcut(coords, holeIndices, 2);
+        // Constrained Delaunay (cdt2d): контуры — constraints, поэтому полигон
+        // на глобусе не срезается хордами; дыры вырезаются корректно.
+        // Число вершин контуров — зафиксировано ДО добавления Steiner.
+        const contourCount = points2D.length;
+        this._contourVertexCount = contourCount;
+        // Глобус: Steiner-точки внутри полигона (те же, что в _refreshWorldCoordsForBatch).
+        const steiner = this._globeSteinerPoints();
+        for (let k = 0; k < steiner.world.length; k++) {
+            const [sx, sz] = steiner.world[k];
+            const ll = steiner.lonLat[k];
+            coords.push(sx, sz);
+            triCoords.push(ll[0], ll[1]);
+            points2D.push(new THREE.Vector2(sx, sz));
+            this._worldCoords.push([sx, sz]);
+            this._nodeHeights.push(0);
+            this._vertexLonLat.push(ll);
+        }
+        const indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
         if (indices.length === 0) {
-            console.warn('Polygon: Earcut returned no triangles');
+            console.warn('Polygon: triangulation returned no triangles');
             return;
         }
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);

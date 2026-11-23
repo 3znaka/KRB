@@ -1,18 +1,18 @@
 /**
  * PolygonLOD.ts — миксин LOD-упрощения (Douglas–Peucker по бакетам зума).
  */
-import earcut from './js_TP/earcut.js';
 import { THREE } from './js_TP/tpb.js';
 import { simplifyRingIndices } from './Simplify.js';
 import {
     type RenderRing, type PolygonRing,
-    crossY, flipIndices, REBUILD_DEBOUNCE_MS,
+    crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, globeSteinerLonLat,
     interpolateSurface, centralAngle,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
 
 export interface PolygonLOD {
     _worldPerPixel(z: number): number;
+    _globeSteinerPoints(): { world: Array<[number, number]>; lonLat: Array<[number, number]> };
     _getFullRenderRings(): RenderRing[];
     _getRenderRings(bucket: number): RenderRing[];
     _sameRingCounts(a: RenderRing[], b: RenderRing[]): boolean;
@@ -31,6 +31,53 @@ export const PolygonLODMixin = {
         return map.WORLD_SIZE / (Math.pow(2, z) * map.TILE_PIXELS);
     },
 
+    /**
+     * Глобус: Steiner-точки для constrained-триангуляции.
+     * Возвращает { world: [x,z][], lonLat: [lon,lat][] } — позиции в мировых
+     * координатах (как _worldCoords) и их lon/lat. Пусто для плоской карты.
+     * Один источник для всех путей триангуляции, чтобы батч и LOD совпадали.
+     */
+    _globeSteinerPoints(this: Polygon): { world: Array<[number, number]>; lonLat: Array<[number, number]> } {
+        const empty = { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> };
+        const map = (this as any)._map;
+        if (!map || map.globe !== true || typeof map.projectSurfaceVertex !== 'function') return empty;
+
+        // Кеш: точки зависят только от исходных колец и карты, не от зума.
+        const cached = (this as any)._steinerCache;
+        if (cached) return cached;
+
+        // Кольца в lon/lat — из исходных _rings (тот же набор, что и для контура).
+        const rings: Array<Array<[number, number]>> = [];
+        for (const ring of this._rings) {
+            const pts: Array<[number, number]> = [];
+            for (const pt of ring) {
+                const nn = this._normalizeCoord(pt, this._crs);
+                const ll = nn.lonLat ?? nn.coord;
+                if (Number.isFinite(ll[0]) && Number.isFinite(ll[1])) pts.push([ll[0], ll[1]]);
+            }
+            if (pts.length >= 3) rings.push(pts);
+        }
+        if (!rings.length) return empty;
+
+        // Шаг по широте ~1°; ограничение количества точек, чтобы крупные полигоны
+        // (Россия) не раздувались.
+        const lonLat = globeSteinerLonLat(rings, 4, 300);
+        const world: Array<[number, number]> = [];
+        const out: Array<[number, number]> = [];
+        const tmp = new THREE.Vector3();
+        for (const ll of lonLat) {
+            const p = map.projectSurfaceVertex(ll, 'EPSG:4326', 0, null, tmp);
+            if (!p) continue;
+            world.push([tmp.x, tmp.z]);
+            out.push(ll);
+        }
+        const result = { world, lonLat: out };
+        (this as any)._steinerCache = result;
+        return result;
+    },
+
+
+
 _getFullRenderRings(this: Polygon): RenderRing[] {
     if (this._fullRenderRings) return this._fullRenderRings;
 
@@ -47,13 +94,16 @@ _getFullRenderRings(this: Polygon): RenderRing[] {
         // треугольник между двумя соседними точками прошьёт шар по хорде.
         const isGlobe = map.globe === true && !!map.surface;
         const R = isGlobe ? (map.surface.b || map.R || 0) : 0;
-        // Шаг по дуге ~0.5°: на высоких зумах это доли пикселя, на низких
-        // (весь глобус в кадре) — несколько пикселей.
-        const MAX_STEP = (0.5 * Math.PI) / 180;
+        // Шаг по дуге ~0.25°: вершины контура плотно ложатся на сферу, и
+        // хорда между соседними узлами не «срезает» край (тот самый срез
+        // у края диска на скриншоте).
+        const MAX_STEP = (0.25 * Math.PI) / 180;
         // Защита от раздувания: не больше стольких доп. точек на ребро.
-        const MAX_SUB = 64;
+        // Длинная граница (Россия) при шаге 0.25° требует до ~400 точек,
+        // поэтому лимит поднят.
+        const MAX_SUB = 512;
         // Соседние точки ближе этого (в world-единицах) — дугу не дробим.
-        const MIN_CHORD = isGlobe ? ((MAX_STEP * R) / 2) : 0;
+        const MIN_CHORD = isGlobe ? ((MAX_STEP * R) / 4) : 0;
 
         let prevWP: any = null;
         let prevLonLat: [number, number] | null = null;
@@ -243,6 +293,7 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         this._vertexLonLat.length = 0;
 
         const coords: number[] = [];
+        const triCoords: number[] = [];
         const holeIndices: number[] = [];
 
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
@@ -261,11 +312,30 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
                 // ВАЖНО: держим lon/lat заново — иначе после смены LOD-бакета
                 // (а это происходит у больших полигонов при зуме) вершины
                 // теряют привязку к эллипсоиду и полигон ложится в плоскость.
-                this._vertexLonLat.push(lonLats ? (lonLats[i] ?? null) : null);
+                const ll = lonLats ? (lonLats[i] ?? null) : null;
+                this._vertexLonLat.push(ll);
+                // Триангуляция — в lon/lat (см. _buildFillGeometry).
+                triCoords.push(ll ? ll[0] : absX, ll ? ll[1] : absZ);
             }
         }
 
-        const indices = earcut(coords, holeIndices.length ? holeIndices : undefined, 2);
+        // Число вершин контуров — зафиксировано ДО добавления Steiner.
+        const contourCount = coords.length / 2;
+        this._contourVertexCount = contourCount;
+
+        // Глобус: Steiner-точки внутри полигона (сетка вдоль меридианов).
+        const steiner = this._globeSteinerPoints();
+        for (let k = 0; k < steiner.world.length; k++) {
+            const [wx, wz] = steiner.world[k];
+            const ll = steiner.lonLat[k];
+            coords.push(wx - this._centroidWorld.x, wz - this._centroidWorld.z);
+            triCoords.push(ll[0], ll[1]);
+            this._worldCoords.push([wx, wz]);
+            this._nodeHeights.push(0);
+            this._vertexLonLat.push(ll);
+        }
+
+        const indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
         if (indices.length === 0) { this._cachedTopIndices = null; return; }
         const p2d = new Array(this._worldCoords.length);
         for (let i = 0; i < this._worldCoords.length; i++) {

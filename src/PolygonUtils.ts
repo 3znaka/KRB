@@ -329,3 +329,161 @@ export function applyGapMaskToMaterial(material: any, map: any): void {
 
 /** Не используется в показанном коде; сохранён для совместимости. */
 export let _rebuildSlotCounter = 0;
+
+// ---------------------------------------------------------------------
+// Constrained Delaunay triangulation (cdt2d)
+// ---------------------------------------------------------------------
+import cdt2d from './js_TP/cdt2d.js';
+
+/**
+ * @param coords — все вершины: сначала контуры (внешнее кольцо, затем дыры),
+ *   затем Steiner-точки без ограничений.
+ * @param holeIndices — начало каждой дыры (в вершинах).
+ * @param contourCount — сколько первых вершин принадлежат контурам (внешнее
+ *   кольцо + дыры). Всё после них — Steiner, рёбер-ограничений не получает.
+ */
+export function triangulatePolygonCDT(coords: number[], holeIndices: number[], contourCount: number): number[] {
+    const n = coords.length / 2;
+    if (n < 3) return [];
+    const points: Array<[number, number]> = new Array(n);
+    for (let i = 0; i < n; i++) points[i] = [coords[i * 2], coords[i * 2 + 1]];
+
+    // Рёбра-ограничения — только по кольцам контура. Конец каждого кольца —
+    // начало следующего (или contourCount для последнего), поэтому Steiner-точки
+    // в замыкание колец не попадают.
+    const starts = [0, ...holeIndices];
+    const ends = [...holeIndices, contourCount];
+    const edges: Array<[number, number]> = [];
+    for (let r = 0; r < starts.length; r++) {
+        const s = starts[r], e = ends[r];
+        const len = e - s;
+        if (len < 2) continue;
+        for (let i = 0; i < len; i++) edges.push([s + i, s + ((i + 1) % len)]);
+    }
+
+    // DEBUG (временно): диагностика constraint-рёбер
+    {
+        const seen = new Set<string>();
+        let dupPts = 0, selfEdge = 0, dupEdge = 0;
+        for (const [a, b] of edges) {
+            if (a === b) selfEdge++;
+            const k = a < b ? `${a},${b}` : `${b},${a}`;
+            if (seen.has(k)) dupEdge++; else seen.add(k);
+        }
+        const pk = new Set<string>();
+        for (let i = 0; i < n; i++) {
+            const k = `${points[i][0]},${points[i][1]}`;
+            if (pk.has(k)) dupPts++; else pk.add(k);
+        }
+        console.log('[CDT-DEBUG]', JSON.stringify({ n, contourCount, edges: edges.length, selfEdge, dupEdge, dupPts, holes: holeIndices.length }));
+    }
+
+    const tris: number[][] = cdt2d(points, edges, { delaunay: true, interior: true, exterior: false });
+
+    // DEBUG (временно): есть ли в выходе длинные рёбра (признак зигзага).
+    {
+        let longCount = 0, maxLen = 0;
+        for (const t of tris) {
+            for (let k = 0; k < 3; k++) {
+                const a = points[t[k]], b = points[t[(k + 1) % 3]];
+                const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+                if (L > maxLen) maxLen = L;
+                if (L > 15) longCount++;
+            }
+        }
+        console.log('[CDT-OUT]', JSON.stringify({ n, contourCount, tris: tris.length, longEdges15deg: longCount, maxEdgeDeg: +maxLen.toFixed(2) }));
+    }
+
+    const out: number[] = new Array(tris.length * 3);
+    for (let t = 0; t < tris.length; t++) {
+        out[t * 3] = tris[t][0];
+        out[t * 3 + 1] = tris[t][1];
+        out[t * 3 + 2] = tris[t][2];
+    }
+    return out;
+}
+
+/**
+ * Steiner-точки внутри полигона для глобуса, в lon/lat [lon, lat].
+ *
+ * Сетка идёт вдоль меридианов (шаг по широте stepLat) и по параллелям с
+ * шагом, пропорциональным 1/cos(lat), чтобы ячейки на сфере были примерно
+ * квадратными. Точка берётся только внутри контура (even-odd по всем
+ * кольцам, дыры учитываются) и не ближе 0.5·шага к любому ребру — поэтому
+ * constrained-рёбра не нарушаются, а треугольники остаются невырожденными.
+ *
+ * rings — кольца в lon/lat (первое — внешнее, остальные — дыры).
+ * stepDeg — шаг по широте в градусах; ограничивается maxPoints.
+ */
+export function globeSteinerLonLat(
+    rings: Array<Array<[number, number]>>,
+    stepDeg: number,
+    maxPoints: number,
+): Array<[number, number]> {
+    if (!rings.length || !(stepDeg > 0)) return [];
+    const outer = rings[0];
+    if (outer.length < 3) return [];
+
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const [lo, la] of outer) {
+        if (lo < minLon) minLon = lo; if (lo > maxLon) maxLon = lo;
+        if (la < minLat) minLat = la; if (la > maxLat) maxLat = la;
+    }
+    if (!(maxLon > minLon) || !(maxLat > minLat)) return [];
+
+    // Шаг по широте, при котором число точек не превышает maxPoints.
+    let stepLat = stepDeg;
+    const estimate = (s: number) => {
+        const midCos = Math.max(0.2, Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+        return ((maxLon - minLon) * midCos / s) * ((maxLat - minLat) / s);
+    };
+    while (estimate(stepLat) > maxPoints && stepLat < 90) stepLat *= 1.25;
+
+    // Минимальный отступ от рёбер: половина шага — точки не вплотную к контуру.
+    const minEdgeDist = stepLat * 0.5;
+    const minEdgeDistSq = minEdgeDist * minEdgeDist;
+
+    const inside = (x: number, y: number): boolean => {
+        let c = false;
+        for (const ring of rings) {
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const xi = ring[i][0], yi = ring[i][1];
+                const xj = ring[j][0], yj = ring[j][1];
+                if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+            }
+        }
+        return c;
+    };
+
+    const distSqToEdges = (x: number, y: number): number => {
+        let best = Infinity;
+        for (const ring of rings) {
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const ax = ring[j][0], ay = ring[j][1];
+                const bx = ring[i][0], by = ring[i][1];
+                const dx = bx - ax, dy = by - ay;
+                const len2 = dx * dx + dy * dy;
+                let t = len2 > 0 ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                const px = ax + t * dx - x, py = ay + t * dy - y;
+                const d2 = px * px + py * py;
+                if (d2 < best) best = d2;
+            }
+        }
+        return best;
+    };
+
+    const out: Array<[number, number]> = [];
+    for (let lat = minLat + stepLat / 2; lat < maxLat; lat += stepLat) {
+        // Шаг по долготе, согласованный с широтой: ячейка ~квадратная на сфере.
+        const cosLat = Math.max(0.2, Math.cos(lat * Math.PI / 180));
+        const stepLon = stepLat / cosLat;
+        for (let lon = minLon + stepLon / 2; lon < maxLon; lon += stepLon) {
+            if (!inside(lon, lat)) continue;
+            if (distSqToEdges(lon, lat) < minEdgeDistSq) continue;
+            out.push([lon, lat]);
+            if (out.length >= maxPoints) return out;
+        }
+    }
+    return out;
+}

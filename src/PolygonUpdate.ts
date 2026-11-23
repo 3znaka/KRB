@@ -14,6 +14,8 @@ export interface PolygonUpdate {
     _update(_mapArg?: any): void;
     _updateHeights(): boolean;
     _vertexLonLatOf(i: number): [number, number] | null;
+    _centroidLonLat(): [number, number] | null;
+    _averageLonLat(arr: Array<[number, number] | null> | null, nPts: number): [number, number] | null;
     _orientIndicesOutward(posArr: Float32Array, origin: any): void;
     _updateStroke(): void;
     _updateCentroidScreenPos(): void;
@@ -352,7 +354,82 @@ _updateHeights(this: Polygon): boolean {
         }
     },
 
-    _updateCentroidScreenPos(this: Polygon): void {
+    /**
+ * Геодезические координаты центроида полигона — для подписи.
+ *
+ * ВАЖНО: на глобусе `_centroidWorld`/`_centroidFromOriginal` — это ECEF
+ * (x, z точки на сфере), а не плоская проекция, поэтому переводить их
+ * через unproject нельзя. Считаем центр по lon/lat вершин кольца.
+ */
+_centroidLonLat(this: Polygon): [number, number] | null {
+    const map = (this as any)._map;
+    if (!map) return null;
+
+    // 1) Быстрый путь: геодезические координаты вершин уже есть
+    //    (`_vertexLonLat` заполняется при сборке геометрии).
+    //    ВАЖНО: после батчинга `_vertices2D` обнуляется, поэтому
+    //    ориентируемся только на сам массив.
+    const arr = this._vertexLonLat;
+    let ll = this._averageLonLat(arr, arr ? arr.length : 0);
+    if (ll) return ll;
+
+    // 2) Own-геометрия ещё не строилась (полигон сразу ушёл в батчер).
+    //    Считаем центр прямо из ИСХОДНЫХ колец `_rings` — они всегда есть.
+    const rings = this._rings as any;
+    if (rings && rings.length) {
+        const tmp: Array<[number, number] | null> = [];
+        for (let r = 0; r < rings.length; r++) {
+            const ring = rings[r];
+            if (!ring) continue;
+            for (let i = 0; i < ring.length; i++) {
+                const nn = this._normalizeCoord(ring[i], this._crs);
+                const lonLat = nn.lonLat ?? nn.coord;
+                tmp.push(Array.isArray(lonLat)
+                    && Number.isFinite(lonLat[0]) && Number.isFinite(lonLat[1])
+                    ? [lonLat[0], lonLat[1]] : null);
+            }
+        }
+        ll = this._averageLonLat(tmp, tmp.length);
+        if (ll) return ll;
+    }
+
+    // 3) Плоская карта (или нет данных): прежний путь через unproject.
+    if (!map.globe && this._centroidFromOriginal) {
+        const src = this._centroidFromOriginal;
+        const conv = typeof map.unprojectToLonLatSafe === 'function'
+            ? map.unprojectToLonLatSafe(src.x, src.z)
+            : null;
+        if (conv && Number.isFinite(conv[0]) && Number.isFinite(conv[1])) ll = [conv[0], conv[1]];
+    }
+    return ll;
+},
+
+/**
+ * Среднее lon/lat по массиву вершин с учётом перехода через антимеридиан.
+ */
+_averageLonLat(arr: Array<[number, number] | null> | null, nPts: number): [number, number] | null {
+    if (!arr || nPts <= 0) return null;
+    let sx = 0, sy = 0, n = 0;
+    let lonRef: number | null = null;
+    for (let i = 0; i < nPts; i++) {
+        const p = arr[i];
+        if (!p) continue;
+        if (lonRef === null) lonRef = p[0];
+        let dLon = p[0] - lonRef;
+        while (dLon > 180) dLon -= 360;
+        while (dLon < -180) dLon += 360;
+        sx += dLon;
+        sy += p[1];
+        n++;
+    }
+    if (n === 0) return null;
+    let lon = (lonRef as number) + sx / n;
+    while (lon > 180) lon -= 360;
+    while (lon < -180) lon += 360;
+    return [lon, sy / n];
+},
+
+_updateCentroidScreenPos(this: Polygon): void {
         if (this._invalidGeometry) { this._centroidScreenPos = null; return; }
         const map = (this as any)._map;
         if (!map || !this._centroidWorld) { this._centroidScreenPos = null; return; }
@@ -382,7 +459,20 @@ _updateHeights(this: Polygon): boolean {
         worldY += this._avgNodeHeight;
         worldY += this._minHeight + (this._extruded ? this._height : 0);
 
-        const screenPos = map.getVec3().set(worldX, worldY + wgPos.y, worldZ);
+        // ГЛОБУС: центр полигона лежит на ЭЛЛИПСОИДЕ, а `_centroidWorld`
+        // хранит плоскую пару (x, z). Берём настоящую мировую точку центра
+        // через его lon/lat — иначе подпись висит в плоскости экватора.
+        let px = worldX, py = worldY + wgPos.y, pz = worldZ;
+        if (map.globe && typeof map.projectSurfacePoint === 'function') {
+            const ll = this._centroidLonLat();
+            if (ll) {
+                const v = map.getVec3();
+                const surf = map.projectSurfacePoint(ll, 'EPSG:4326', worldY, v);
+                if (surf) { px = surf.x; py = surf.y; pz = surf.z; }
+            }
+        }
+
+        const screenPos = map.getVec3().set(px, py, pz);
         screenPos.project(map.camera);
         if (screenPos.z > 1 || Math.abs(screenPos.x) > 1 || Math.abs(screenPos.y) > 1) {
             this._centroidScreenPos = null;

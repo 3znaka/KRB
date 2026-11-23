@@ -36,7 +36,13 @@ export const CoreLayersMixin = {
     },
     _rebuildLayerStack() {
         this._getLayersInOrder().forEach((layer, index) => {
-            this._applyLayerRenderOrder(layer, index * 1000);
+            // Глобус: все тайловые слои должны лежать ВЫШЕ окклюдера и НИЖЕ
+            // полигонов (POLYGON_RENDER_ORDER ≥ 900). Порядок между самими
+            // тайлами сохраняем мелким шагом, а не 1000 на слой.
+            const base = this.globe
+                ? Math.min(index, 8) * 100 // 0, 100, … 800 — все < 900
+                : index * 1000;
+            this._applyLayerRenderOrder(layer, base);
         });
     },
     setLayerOrder(layer, index) {

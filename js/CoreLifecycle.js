@@ -272,6 +272,20 @@ export const CoreLifecycleMixin = {
         if (typeof root.clear === 'function')
             root.clear();
     },
+    /**
+     * Billboard-окклюдер глобуса: держим его повёрнутым к камере.
+     * Камеру переводим в local-СК worldGroup (там живёт геометрия).
+     */
+    _updateGlobeOccluder() {
+        const occ = this._globeOccluder;
+        if (!occ || !this.surface || typeof this.surface.updateOccluder !== 'function')
+            return;
+        const camLocal = this._tempVec3c ?? (this._tempVec3c = new THREE.Vector3());
+        camLocal.copy(this.camera.position);
+        if (this.worldGroup)
+            this.worldGroup.worldToLocal(camLocal);
+        this.surface.updateOccluder(occ, camLocal);
+    },
     /* ================================================================
        Инерция
        ================================================================ */
@@ -332,6 +346,7 @@ export const CoreLifecycleMixin = {
         this._enforceMaxBounds();
         this.camera.updateMatrixWorld(true);
         this.worldGroup.updateMatrixWorld(true);
+        this._updateGlobeOccluder();
         for (const mgr of this._tileManagers)
             mgr._syncMaskOffset?.();
         this.maybeUpdateVisibleTiles();

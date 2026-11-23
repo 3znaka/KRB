@@ -9,6 +9,8 @@ import type { Polygon } from './Polygon.js';
 
 /** Temp-РІРµРєС‚РѕСЂ РґР»СЏ РїРµСЂРµСЃС‡С‘С‚Р° РІРµСЂС€РёРЅ (Р±РµР· Р°Р»Р»РѕРєР°С†РёР№ РЅР° РєР°РґСЂ). */
 const _v3 = new THREE.Vector3();
+/** Temp-вектор для вершин обводки на глобусе. */
+const _strokeV = new THREE.Vector3();
 
 export interface PolygonUpdate {
     _update(_mapArg?: any): void;
@@ -323,17 +325,34 @@ _updateHeights(this: Polygon): boolean {
         const groupPos = this._group.position;
         const strokeLen = this._strokeWorldCoords.length;
         const altitude = (this as any)._altitude;
+        const map = (this as any)._map;
+
+        // Глобус: вершина обводки = точка эллипсоида (как у заливки),
+        // а не (x, y, z) плоскости — иначе обводка «лежит» в экваторе.
+        const globe = map?.globe === true && typeof map.projectSurfaceVertex === 'function';
+        const v = _strokeV;
 
         for (let i = 0; i < strokeLen; i++) {
             const wc = this._strokeWorldCoords[i];
             if (!wc) continue;
             const y = this._cachedStrokeHeights[i] ?? altitude;
+            const ll = globe ? (this._strokeVertexLonLat?.[i] ?? null) : null;
+            if (ll) {
+                const p = map.projectSurfaceVertex(ll, 'EPSG:4326', y, this._centroidWorld, v);
+                if (p) { positions.push(v.x, v.y, v.z); continue; }
+            }
             positions.push(wc[0] - groupPos.x, y, wc[1] - groupPos.z);
         }
         if (strokeLen > 0) {
             const first = this._strokeWorldCoords[0];
             const fy = this._cachedStrokeHeights[0] ?? altitude;
-            positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);
+            const ll = globe ? (this._strokeVertexLonLat?.[0] ?? null) : null;
+            let pushed = false;
+            if (ll) {
+                const p = map.projectSurfaceVertex(ll, 'EPSG:4326', fy, this._centroidWorld, v);
+                if (p) { positions.push(v.x, v.y, v.z); pushed = true; }
+            }
+            if (!pushed) positions.push(first[0] - groupPos.x, fy, first[1] - groupPos.z);
         }
 
         if (this._useSimpleStroke) {

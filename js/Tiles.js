@@ -326,8 +326,18 @@ export class TileManager {
     key(z, virtX, y) { return getVirtKey(z, virtX, y); }
     _createTileMaterial(texture, opts = {}) {
         const layerHasElevation = this.hasElevation;
-        const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite : layerHasElevation;
-        const depthTest = opts.depthTest !== undefined ? opts.depthTest : layerHasElevation;
+        // Глобус: тайлы обязаны писать и проверять глубину — иначе окклюдер
+        // (billboard-диск) не закрывает обратную сторону, а полигоны на ней
+        // «просвечивают» сквозь тайлы. Плоская карта — прежнее поведение.
+        const globe = this.engine.globe === true;
+        // Глобус: тайлы ПРОВЕРЯЮТ глубину (их отсекает окклюдер), но глубину
+        // НЕ пишут — иначе тайл и полигон на одной сфере конкурируют в
+        // depth-буфере (z-fighting; polygonOffset при logarithmicDepthBuffer
+        // не спасает). Порядок «полигоны поверх тайлов» держит renderOrder.
+        const depthWrite = opts.depthWrite !== undefined ? opts.depthWrite
+            : (globe ? false : layerHasElevation);
+        const depthTest = opts.depthTest !== undefined ? opts.depthTest
+            : (globe || layerHasElevation);
         const opacity = Number.isFinite(this.layer?.opacity) ? this.layer.opacity : 1;
         const transparent = opacity < 1;
         const common = { map: texture, depthWrite, depthTest, opacity, transparent };

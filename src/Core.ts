@@ -311,6 +311,8 @@ _globeGrabDir: any;
     _globeRotateAnchor: any;
     _globeRotateAnchorX: number;
     _globeRotateAnchorY: number;
+    /** Billboard-окклюдер глобуса (depth-only), см. GlobeSurface.createOccluder. */
+    _globeOccluder: any = null;
 
     _rotatePivotActive: boolean;
     _rotatePivot: any;
@@ -594,6 +596,14 @@ this.controls.update();
         this.worldGroup = new THREE.Group();
         this.worldGroup.position.set(0, 0, 0);
         this.scene.add(this.worldGroup);
+
+        // Глобус: невидимый billboard-окклюдер (depth-only) в центре эллипсоида.
+        // Скрывает обратное полушарие для полигонов и тайлов без батч-хаков.
+        this._globeOccluder = null;
+        if (this.globe && this.surface && typeof this.surface.createOccluder === 'function') {
+            this._globeOccluder = this.surface.createOccluder();
+            if (this._globeOccluder) this.worldGroup.add(this._globeOccluder);
+        }
 
         this._cameraAnimation = null;
         this._cameraAnimations = { pitch: null, bearing: null };

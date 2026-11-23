@@ -31,6 +31,7 @@ const _rayO = new THREE.Vector3();
 const _rayD = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
 const _flatPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const _occN = new THREE.Vector3(); // нормаль окклюдера (к камере)
 // ============================================================
 // FlatSurface — тонкая обёртка над текущим поведением.
 // Сейчас используется только как заглушка контракта: плоский
@@ -63,6 +64,9 @@ export class FlatSurface {
     }
     /** Плоский движок использует наследованный AABB-путь TileManager. */
     visibleTileRanges() { return null; }
+    /** Окклюдера на плоскости нет. */
+    createOccluder() { return null; }
+    updateOccluder() { }
     buildTileGeometry() { return null; }
     applyHeights() { }
     isOccluded() { return false; }
@@ -471,6 +475,76 @@ export class GlobeSurface {
         geometry.userData.heights = heights;
         geometry.attributes.position.needsUpdate = true;
         geometry.computeBoundingSphere();
+    }
+    // ── Окклюдер (billboard-диск) ────────────────────────────────
+    //
+    // Невидимый (colorWrite=false) плоский круг, лежащий на касательной
+    // плоскости к горизонту и повёрнутый к камере (billboard). Он пишет
+    // ТОЛЬКО глубину:
+    // всё, что лежит за ним (обратная сторона Земли), depth-тест
+    // отбрасывает, а полигоны/тайлы видимого полушария проходят.
+    // Рисуется раньше полигонов и тайлов (renderOrder ниже), поэтому
+    // его глубина уже на месте, когда они проверяют z-test.
+    //
+    // Радиус — минимальный b (консервативно): диск не закрывает
+    // элементы, поднятые над поверхностью (там r > b).
+    /**
+     * @returns THREE.Mesh — окклюдер; добавляется в worldGroup.
+     */
+    createOccluder() {
+        // Радиус задаётся в updateOccluder по текущей дистанции до камеры.
+        const geom = new THREE.CircleGeometry(1, 192);
+        const mat = new THREE.MeshBasicMaterial({
+            colorWrite: false, // только глубина, цвет не трогаем
+            depthWrite: true,
+            depthTest: true,
+            side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.name = 'globeOccluder';
+        mesh.frustumCulled = false;
+        mesh.renderOrder = -500000; // до тайлов и полигонов (см. CoreLifecycle)
+        return mesh;
+    }
+    /**
+     * Ставит диск на касательную плоскость к горизонту и растягивает его так,
+     * чтобы он перекрывал весь видимый сегмент эллипсоида с запасом.
+     *
+     * Геометрия (сфера радиуса R, камера на расстоянии C от центра):
+     *   - горизонт — окружность в плоскости, ⟂ направлению на камеру,
+     *     на расстоянии d = R²/C от центра, радиуса r = R·√(1 − R²/C²);
+     *   - диск ставим в эту плоскость (d < C — между камерой и центром)
+     *     и растягиваем до r·(1 + HORIZON_MARGIN), так что его край уходит
+     *     за видимый горизонт при ЛЮБОМ наклоне камеры.
+     *
+     * Для эллипсоида берём минимальный радиус b — это консервативно
+     * (горизонт только шире, нахлёст его покрывает).
+     *
+     * @param mesh      — окклюдер из createOccluder()
+     * @param camLocal  — позиция камеры в local-СК worldGroup
+     */
+    updateOccluder(mesh, camLocal) {
+        if (!mesh || !camLocal)
+            return;
+        const R = this.b;
+        const C = camLocal.length();
+        // Камера внутри/у поверхности: горизонта нет, диск не нужен.
+        if (!(C > R * 1.0001)) {
+            mesh.visible = false;
+            return;
+        }
+        mesh.visible = true;
+        const HORIZON_MARGIN = 0.15; // нахлёст за горизонт, 15%
+        const d = (R * R) / C; // расстояние до плоскости горизонта
+        const r = R * Math.sqrt(1 - (R * R) / (C * C)); // радиус горизонта
+        const radius = Math.max(r, R * 0.5) * (1 + HORIZON_MARGIN);
+        // Нормаль к плоскости горизонта — направление на камеру.
+        const n = _occN.copy(camLocal).divideScalar(C);
+        // Центр диска — на плоскости горизонта.
+        mesh.position.copy(n).multiplyScalar(d);
+        mesh.scale.set(radius, radius, 1);
+        // Диск (CircleGeometry, нормаль +Z) смотрит на камеру.
+        mesh.lookAt(camLocal);
     }
 }
 // ============================================================

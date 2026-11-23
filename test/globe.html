@@ -21,18 +21,21 @@ import * as KRB from '../js/KRB.js';
 
 await KRB.crs.add('EPSG:32637');
 
-
-const map = new KRB.Map({
-    target: 'map',
- globe: true,
-    layers: [
-        new KRB.Tile({
+const tiles =  new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
             attributionTitle: '2GIS',
             attributionUrl: 'https://2gis.ru/',
           //  elevation: 'demo',
             maxZoom: 18
-        })
+        });
+
+
+
+const map = new KRB.Map({
+    target: 'map',
+ globe: true,
+    layers: [
+       tiles,
     ],
     view: new KRB.View({
        centerLonLat: [37.6178, 55.7558],
@@ -41,6 +44,8 @@ const map = new KRB.Map({
     }),
     debug:true,
 });
+
+     //   tiles.addTo(map);
 
 new KRB.Marker({
     position: [37.6178, 55.7558],
@@ -55,8 +60,6 @@ new KRB.Marker({
   const world = new KRB.GeoJSONLayer({
         url: 'world.geojson',
         extendAntarctica: true,
-        defaultFillColor:   '#aa0101',
-      
         defaultStrokeColor: '#000000',
         defaultStrokeWidth: 0.3,
     }).addTo(map);

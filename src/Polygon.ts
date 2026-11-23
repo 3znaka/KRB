@@ -66,6 +66,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _minHeight: number;
     _depthTest: boolean;
     _depthWrite: boolean;
+    /** true, если depthTest/depthWrite заданы пользователем явно. */
+    _depthFlagsExplicit = false;
     _castShadow: boolean;
     _receiveShadow: boolean;
     _roughness: number;
@@ -116,6 +118,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
 
     _worldCoords: Array<[number, number]> = [];
     _strokeWorldCoords: Array<[number, number]> = [];
+    /** lon/lat вершин обводки (глобус: обводка ложится на эллипсоид). */
+    _strokeVertexLonLat: Array<[number, number] | null> = [];
 
     _batch: any = null;
 
@@ -176,6 +180,9 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
         this._depthTest = options.depthTest ?? this._extruded;
         this._depthWrite = options.depthWrite ?? this._extruded;
+        // Явно заданные пользователем флаги не трогаем; для глобуса
+        // дефолт выставляется в _onAttached (там известна карта).
+        this._depthFlagsExplicit = options.depthTest !== undefined || options.depthWrite !== undefined;
 
         this._minZoom = options.minZoom ?? -Infinity;
         this._maxZoom = options.maxZoom ?? Infinity;
@@ -218,6 +225,12 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
 
     protected _onAttached(map: any): void {
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
+        // Глобус: полигоны должны проверять глубину, чтобы окклюдер
+        // закрывал обратное полушарие. Явные флаги пользователя не трогаем.
+        if (map.globe === true && !this._depthFlagsExplicit) {
+            this._depthTest = true;
+            this._depthWrite = true;
+        }
         this._loadFillPattern();
 
         this._currentSimplifyBucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
@@ -276,6 +289,7 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._nodeHeights.length = 0;
         this._vertexLonLat.length = 0;
         this._strokeNodeHeights.length = 0;
+        this._strokeVertexLonLat.length = 0;
         this._ringStartIndices.length = 0;
         this._cachedTopIndices = null;
         this._sideEdgeIJ.length = 0;

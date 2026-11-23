@@ -612,10 +612,11 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         const rings = this._getRenderRings(this._currentSimplifyBucket);
         const outer = rings[0];
         if (!outer) return;
-        const { worldCoords: outerWC, heights: outerH } = outer;
+        const { worldCoords: outerWC, heights: outerH, lonLats: outerLL } = outer as any;
 
         this._strokeWorldCoords.length = 0;
         this._strokeNodeHeights.length = 0;
+        this._strokeVertexLonLat.length = 0;
         let firstStrokePoint: [number, number] | null = null;
         for (let i = 0; i < outerWC.length; i++) {
             const [absX, absZ] = outerWC[i];
@@ -623,6 +624,8 @@ _hasAntimeridianWrap(this: Polygon): boolean {
             else if (firstStrokePoint && absX === firstStrokePoint[0] && absZ === firstStrokePoint[1]) continue;
             this._strokeWorldCoords.push([absX, absZ]);
             this._strokeNodeHeights.push(outerH[i] ?? 0);
+            // Геодезические координаты — чтобы обводка легла на эллипсоид (глобус).
+            this._strokeVertexLonLat.push(outerLL ? (outerLL[i] ?? null) : null);
         }
 
         this._cachedStrokeHeights = new Array(this._strokeWorldCoords.length).fill(0);

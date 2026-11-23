@@ -134,8 +134,8 @@ export class GeoJSONLayer extends Layer {
     public defaultStrokeOpacity = 1;
     public defaultPolygonAltitudeMode: 'clampToGround' | 'absolute' = 'absolute';
     public defaultPolygonAltitude = 10;
-    public defaultPolygonDepthTest = false;
-    public defaultPolygonDepthWrite = false;
+    public defaultPolygonDepthTest: boolean | undefined = undefined;
+    public defaultPolygonDepthWrite: boolean | undefined = undefined;
     public defaultPolygonMinZoom = -Infinity;
     public defaultPolygonMaxZoom = Infinity;
     public defaultPolygonExtruded = false;
@@ -233,8 +233,9 @@ export class GeoJSONLayer extends Layer {
         this.defaultStrokeOpacity = o.defaultStrokeOpacity ?? 1;
         this.defaultPolygonAltitudeMode = o.defaultPolygonAltitudeMode ?? 'absolute';
         this.defaultPolygonAltitude = o.defaultPolygonAltitude ?? o.defaultPolygonAltitudeOffset ?? 10;
-        this.defaultPolygonDepthTest = o.defaultPolygonDepthTest ?? false;
-        this.defaultPolygonDepthWrite = o.defaultPolygonDepthWrite ?? false;
+        // undefined = «не задано явно»: Polygon сам выберет дефолт (для глобуса — true).
+        this.defaultPolygonDepthTest = o.defaultPolygonDepthTest;
+        this.defaultPolygonDepthWrite = o.defaultPolygonDepthWrite;
         this.defaultPolygonMinZoom = o.defaultPolygonMinZoom ?? -Infinity;
         this.defaultPolygonMaxZoom = o.defaultPolygonMaxZoom ?? Infinity;
         this.defaultPolygonExtruded = o.defaultPolygonExtruded ?? false;

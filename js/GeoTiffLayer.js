@@ -781,6 +781,14 @@ export class GeoTiffLayer extends SpatialObject {
             this._group.visible = false;
     }
     _onAltitudeChanged() {
+        if (this._isGlobe()) {
+            // Глобус: высота меняет точки на эллипсоиде — пересобираем меш.
+            if (this._loaded && this._mesh) {
+                this._computeWorldCorners(this._image);
+                this._buildMesh();
+            }
+            return;
+        }
         if (this._group)
             this._group.position.y = this._altitude;
         this._centroidWorld.y = this._altitude;
@@ -830,8 +838,52 @@ export class GeoTiffLayer extends SpatialObject {
         if (this._maskEnabled && map.worldGroup) {
             this._maskOffsetUniform.value.copy(map.worldGroup.position);
         }
+        // Глобус: группа стоит на эллипсоиде центром растра; «вверх» группы —
+        // местная нормаль. Меш уже в мировых осях относительно центроида, поэтому
+        // группу ориентировать не нужно: кривизна уже заложена в вершинах.
+        if (this._isGlobe() && !this._mesh) {
+            this._applyHidden();
+            this._isVisible = false;
+            return;
+        }
+        // Глобус: растр скрываем, только если за горизонтом ВСЁ изображение.
+        // Проверка одного центра давала пропадание большого растра на крупных
+        // зумах, когда центр уходит за край, а его часть остаётся видимой.
+        if (this._isGlobe() && typeof map.isWorldPointOccluded === 'function') {
+            if (!this._anyPointVisibleOnGlobe(map)) {
+                this._applyHidden();
+                this._isVisible = false;
+                return;
+            }
+        }
         this._group.visible = true;
         this._isVisible = true;
+    }
+    /**
+     * Глобус: видна ли хотя бы одна точка растра (углы, середины сторон, центр).
+     * Сэмплы — в мировых координатах (worldGroup + локальные вершины группы).
+     */
+    _anyPointVisibleOnGlobe(map) {
+        const wg = map.worldGroup.position;
+        // _worldPositions — точки эллипсоида в координатах worldGroup
+        // (до вычитания центроида), поэтому сдвиг группы НЕ добавляем.
+        const samples = [];
+        const w = this._worldPositions;
+        if (w && w.length >= 4) {
+            const cornerIdx = [0, 1, 3, 2];
+            for (const k of cornerIdx)
+                samples.push(w[k]);
+            // Середины сторон — ловят видимый край между углами.
+            samples.push(w[0].clone().lerp(w[1], 0.5), w[1].clone().lerp(w[3], 0.5), w[3].clone().lerp(w[2], 0.5), w[2].clone().lerp(w[0], 0.5));
+        }
+        samples.push(this._centroidWorld.clone()); // центр растра
+        const tmp = this._tempVec3;
+        for (const s of samples) {
+            tmp.copy(s).add(wg);
+            if (!map.isWorldPointOccluded(tmp))
+                return true;
+        }
+        return false;
     }
     getLabelType() { return 'geotiff'; }
     /* ==== Merge-mode helpers ==== */
@@ -1680,6 +1732,26 @@ export class GeoTiffLayer extends SpatialObject {
         }
         return cnt > 0 ? sum / cnt : null;
     }
+    /** Глобус: активен ли режим эллипсоида. */
+    _isGlobe() {
+        return this._map?.globe === true && !!this._map?.surface;
+    }
+    /**
+     * Глобус: точка эллипсоида над координатой CRS растра на высоте `h`
+     * (мировые оси). Возвращает локальную точку worldGroup (как у Image).
+     */
+    _projectCrsToSurface(x, yCrs, h, out) {
+        const map = this._map;
+        const crs = this._crs ?? map.inputCRS;
+        const ll = crs && crs.toLonLat ? crs.toLonLat([x, yCrs]) : [x, yCrs];
+        if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+            return null;
+        const p = map.projectSurfacePoint(ll, 'EPSG:4326', h, out);
+        if (!p)
+            return null;
+        const wg = map.worldGroup ? map.worldGroup.position : { x: 0, y: 0, z: 0 };
+        return out.clone().sub(new THREE.Vector3(wg.x, wg.y, wg.z));
+    }
     /** Безопасное проецирование точки из CRS растра в world-координаты карты. */
     _projectCrsToWorld(x, yCrs) {
         let sx = x, sy = yCrs;
@@ -1713,6 +1785,15 @@ export class GeoTiffLayer extends SpatialObject {
         ];
         this._cornersCrs = cornersCrs;
         const y = this._altitude;
+        if (this._isGlobe()) {
+            // Глобус: углы на эллипсоиде (высота = altitude над поверхностью).
+            const tmp = new THREE.Vector3();
+            this._worldPositions = cornersCrs.map(([x, yCrs]) => {
+                const p = this._projectCrsToSurface(x, yCrs, y, tmp);
+                return p ? p.clone() : new THREE.Vector3();
+            });
+            return;
+        }
         this._worldPositions = cornersCrs.map(([x, yCrs]) => {
             const pt = this._projectCrsToWorld(x, yCrs);
             return pt ? new THREE.Vector3(pt[0], y, pt[1]) : new THREE.Vector3(0, y, 0);
@@ -1723,6 +1804,19 @@ export class GeoTiffLayer extends SpatialObject {
         this._centroidWorld.set(0, this._altitude, 0);
         if (positions.length < 4)
             return;
+        if (this._isGlobe()) {
+            // Глобус: центр растра — точка на эллипсоиде над центром bbox в CRS.
+            const cs = this._cornersCrs;
+            if (cs && cs.length >= 4) {
+                const cx = (cs[0][0] + cs[3][0]) / 2;
+                const cy = (cs[0][1] + cs[3][1]) / 2;
+                const p = this._projectCrsToSurface(cx, cy, this._altitude, new THREE.Vector3());
+                if (p) {
+                    this._centroidWorld.copy(p);
+                    return;
+                }
+            }
+        }
         let count = 0;
         let sumX = 0, sumZ = 0;
         for (const p of positions) {
@@ -1824,6 +1918,10 @@ export class GeoTiffLayer extends SpatialObject {
                 const count = grid * grid;
                 const valid = new Uint8Array(count);
                 let sumX = 0, sumZ = 0, nValid = 0;
+                const globe = this._isGlobe();
+                // Глобус: вершины в мировых осях (эллипсоид), центр — отдельно.
+                const gVerts = globe ? new Array(count) : null;
+                const gTmp = globe ? new THREE.Vector3() : null;
                 for (let j = 0; j < grid; j++) {
                     const v = j / seg;
                     const srcY = c0y + v * spanY;
@@ -1832,14 +1930,26 @@ export class GeoTiffLayer extends SpatialObject {
                         const idx = j * grid + i;
                         const u = i / seg;
                         const srcX = c0x + u * spanX;
-                        let yWorld = 0;
+                        let hgt = 0;
                         if (canDrape) {
                             const px = Math.min(maxPx, u * W);
-                            let hgt = this._bilinearSample(px, py);
+                            hgt = this._bilinearSample(px, py);
                             if (hgt === null || !Number.isFinite(hgt))
                                 hgt = 0;
-                            yWorld = hgt * hs;
                         }
+                        if (globe) {
+                            // Рельеф откладываем вдоль нормали эллипсоида (как altitude).
+                            const p = this._projectCrsToSurface(srcX, srcY, this._altitude + hgt * hs, gTmp);
+                            if (p) {
+                                gVerts[idx] = p.clone();
+                                valid[idx] = 1;
+                            }
+                            else {
+                                gVerts[idx] = null;
+                            }
+                            continue;
+                        }
+                        const yWorld = hgt * hs;
                         const pt = this._projectCrsToWorld(srcX, srcY);
                         if (pt) {
                             posAttr.setXYZ(idx, pt[0], yWorld, pt[1]);
@@ -1853,14 +1963,41 @@ export class GeoTiffLayer extends SpatialObject {
                         }
                     }
                 }
-                if (nValid > 0) {
+                if (globe) {
+                    // Центр — средняя точка вершин; локальные координаты меша = вершина − центр.
+                    let cx = 0, cy = 0, cz = 0, nv = 0;
+                    for (let idx = 0; idx < count; idx++) {
+                        const g = gVerts[idx];
+                        if (!g)
+                            continue;
+                        cx += g.x;
+                        cy += g.y;
+                        cz += g.z;
+                        nv++;
+                    }
+                    if (nv > 0) {
+                        const cen = new THREE.Vector3(cx / nv, cy / nv, cz / nv);
+                        centroid.copy(cen);
+                        this._centroidWorld.copy(cen);
+                    }
+                    for (let idx = 0; idx < count; idx++) {
+                        const g = gVerts[idx];
+                        if (g)
+                            posAttr.setXYZ(idx, g.x - centroid.x, g.y - centroid.y, g.z - centroid.z);
+                        else
+                            posAttr.setXYZ(idx, 0, 0, 0);
+                    }
+                }
+                if (nValid > 0 && !globe) {
                     centroid.set(sumX / nValid, this._altitude, sumZ / nValid);
                     this._centroidWorld.copy(centroid);
                 }
-                for (let idx = 0; idx < count; idx++) {
-                    if (valid[idx]) {
-                        posAttr.setX(idx, posAttr.getX(idx) - centroid.x);
-                        posAttr.setZ(idx, posAttr.getZ(idx) - centroid.z);
+                if (!globe) {
+                    for (let idx = 0; idx < count; idx++) {
+                        if (valid[idx]) {
+                            posAttr.setX(idx, posAttr.getX(idx) - centroid.x);
+                            posAttr.setZ(idx, posAttr.getZ(idx) - centroid.z);
+                        }
                     }
                 }
                 // Отсекаем треугольники, перепрыгивающие через разрывы лепестков
@@ -1876,7 +2013,9 @@ export class GeoTiffLayer extends SpatialObject {
                 const tryTri = (a, b, c) => {
                     if (!valid[a] || !valid[b] || !valid[c])
                         return;
-                    if (d2(a, b) > maxEdge2 || d2(b, c) > maxEdge2 || d2(c, a) > maxEdge2)
+                    // На глобусе отсечку по XZ-длине не применяем: её метрика плоская
+                    // и ложно режет грани на сфере (разрывов лепестков там нет).
+                    if (!globe && (d2(a, b) > maxEdge2 || d2(b, c) > maxEdge2 || d2(c, a) > maxEdge2))
                         return;
                     outIndices.push(a, b, c);
                 };

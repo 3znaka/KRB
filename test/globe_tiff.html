@@ -31,7 +31,7 @@ const tiles =  new KRB.Tile({
 
 const map = new KRB.Map({
     target: 'map',
- //globe: true,
+ globe: true,
     layers: [
      tiles,
     ],
@@ -52,6 +52,14 @@ const img2 = new KRB.Image({
     size: [40000, 40000],
 });
 //img2.addTo(map);
+
+ new KRB.GeoTiffLayer({
+    source: 'bratkov.tif',
+asElevation: false,
+    colorRamp: 'terrain',
+    opacity: 0.75,
+}).addTo(map);
+
 
 
 </script>

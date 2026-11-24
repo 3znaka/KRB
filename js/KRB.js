@@ -18,7 +18,7 @@ export { exportToGLB } from './Exporter.js';
 export { InteractionManager } from './Interaction.js';
 export { GeoTiffLayer } from './GeoTiffLayer.js';
 export { Vector3D } from './Vector3D.js';
-export { Ellipsoid, ELLIPSOIDS, parseEllipsoid, geodeticToEcef, ecefToGeodetic, enuToEcefDelta, } from './Ellipsoid.js';
+export { Ellipsoid, ELLIPSOIDS, parseEllipsoid, geodeticToEcef, ecefToGeodetic, } from './Ellipsoid.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
 export * from './styles/index.js';
 export { Diagram } from './Diagram.js';

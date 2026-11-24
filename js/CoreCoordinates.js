@@ -1,6 +1,7 @@
 // CoreCoordinates.ts
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
+import { assetUrl } from './assets.js';
 // ── Temp-объекты для проверки перекрытия глобусом (без аллокаций на кадр) ──
 const _occPoint = new THREE.Vector3();
 const _occCam = new THREE.Vector3();
@@ -286,7 +287,7 @@ export const CoreCoordinatesMixin = {
             return null;
         if (layer.texture === 'demo') {
             const n = 1 + Math.floor(Math.random() * 24);
-            return new URL(`./demotiles/${n}.webp`, import.meta.url).href;
+            return assetUrl(`demotiles/${n}.webp`);
         }
         return layer.texture.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
     },

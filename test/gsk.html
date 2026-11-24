@@ -19,7 +19,7 @@ await KRB.crs.add(['EPSG:7682', 'EPSG:4284', 'EPSG:4200']);
 
 const map = new KRB.Map({
     target: 'map',
-    globe: true,
+    //globe: true,
     layers: [
         new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
@@ -72,7 +72,17 @@ new KRB.Marker({
 
 
 
+const p = KRB.Projections.get('EPSG:4200');
+console.log(p.def, p._datumShift && p._datumShift.key);
+console.log(p.toLonLat([37.6178, 55.7558]));
+console.log(KRB.Projections.get('EPSG:4200').constructor.name);
+console.log(Object.keys(KRB.Projections));
 
+const d = '+proj=longlat +ellps=krass +towgs84=24.47,-130.89,-81.56,0,0,-0.13,-0.22 +no_defs +type=crs';
+console.log('isGeographic:', /\+proj=longlat/.test(d));
+console.log('needsDatumShift:', KRB.Datums?.needsDatumShift ?? 'not exported');
+
+console.log('isGeographic:', p.isGeographic, '| _ellipsoid:', p._ellipsoid && p._ellipsoid.a, '| keys:', Object.keys(p));
 </script>
 </body>
 </html>

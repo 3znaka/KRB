@@ -4,6 +4,7 @@ import proj4 from './js_TP/proj4.js';
 import { Ellipsoid, ELLIPSOIDS, parseEllipsoid } from './Ellipsoid.js';
 import { createEcefProjection, isGeocentricDef } from './EcefProjection.js';
 import { DATUMS, convertDatum, datumFromProj, needsDatumShift } from './Datums.js';
+import { assetUrl, getBundledCustomCrs, getBundledEpsgDefs } from './assets.js';
 
 export { Ellipsoid, ELLIPSOIDS, parseEllipsoid };
 
@@ -706,24 +707,33 @@ class ProjectionRegistry {
     private async _loadCustom(code: string): Promise<void> {
         const fileName = code.replace(':', '_') + '.js';
 
+        // Бандл: модуль CRS вшит заранее. Обычный режим: динамический import файла.
+        const embedded = getBundledCustomCrs(code);
         let url: string;
-        try {
-            url = new URL(`./customCRS/${fileName}`, import.meta.url).href;
-        } catch {
-            this._customMisses.add(code);
-            return;
+        if (!embedded) {
+            try {
+                url = assetUrl(`customCRS/${fileName}`);
+            } catch {
+                this._customMisses.add(code);
+                return;
+            }
         }
 
         let mod: any;
         try {
-            mod = await import(/* @vite-ignore */ url);
+            mod = embedded ? embedded : await import(/* @vite-ignore */ url);
         } catch (err: any) {
             const msg = String(err?.message || err);
+            // Файла customCRS нет — это штатный случай (код берём из epsg_defs).
+            // Покрываем формулировки браузеров и Node: "Failed to fetch dynamically imported
+            // module", "Cannot find module", "ERR_MODULE_NOT_FOUND", "Error loading ...".
             const isNotFound =
                 /failed to fetch dynamically imported module/i.test(msg) ||
                 /error loading dynamically imported module/i.test(msg) ||
                 /importing a module script failed/i.test(msg) ||
-                err?.name === 'TypeError';
+                /cannot find module/i.test(msg) ||
+                /module_not_found/i.test(msg) ||
+                /ERR_MODULE_NOT_FOUND/.test(String(err?.code || ''));
 
             if (isNotFound) {
                 this._customMisses.add(code);
@@ -769,7 +779,13 @@ if (spec.formula) {
 
     _loadDefs() {
         if (!this._defsPromise) {
-            this._defsPromise = fetch(new URL('./epsg_defs.json', import.meta.url))
+            // Бандл: распаковка вшитого (ленивая, один раз). Иначе — файл по URL.
+            const embeddedDefs = getBundledEpsgDefs();
+            if (embeddedDefs) {
+                this._defsPromise = embeddedDefs.catch(() => ({} as Record<string, string>));
+                return this._defsPromise;
+            }
+            this._defsPromise = fetch(assetUrl('epsg_defs.json'))
                 .then(r => r.ok ? r.json() : ({} as Record<string, string>))
                 .catch(() => ({} as Record<string, string>));
         }
@@ -788,7 +804,7 @@ if (spec.formula) {
 getCustomCrsUrl(code: string): string | null {
     const fileName = code.replace(':', '_') + '.js';
     try {
-        return new URL(`./customCRS/${fileName}`, import.meta.url).href;
+        return assetUrl(`customCRS/${fileName}`);
     } catch {
         return null;
     }
@@ -902,12 +918,17 @@ getCustomCrsUrl(code: string): string | null {
 
     /** Каталог customCRS как база для относительных импортов. */
     private _customCrsDir(): string {
-        return new URL('./customCRS/', import.meta.url).href;
+        return assetUrl('customCRS/');
     }
 
     /** '../Ellipsoid.js' → абсолютный URL библиотеки. Эвристика, не AST. */
     private _rewriteImports(src: string): string {
-        const base = this._customCrsDir();
+        const rel = this._customCrsDir();
+        // Относительная база (бандл) не годится для new URL — переписывать нечего:
+        // вшитые CRS уже разрешены при сборке.
+        let base: string;
+        try { base = new URL(rel, document.baseURI).href; }
+        catch { return src; }
         return src.replace(
             /(\bfrom\s*|\bimport\s*\(?\s*)(['"])(\.\.?\/[^'"]+)\2/g,
             (_m, head, q, spec) => `${head}${q}${new URL(spec, base).href}${q}`,

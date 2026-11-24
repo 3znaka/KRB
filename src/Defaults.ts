@@ -8,7 +8,8 @@
  * @module Defaults
  */
 
-const _MODULE_DIR = new URL('.', import.meta.url).href;
+import { assetUrl, getBundledDraco } from './assets.js';
+import { DRACOLoader } from './js_TP/tpb.js';
 
 export const DEFAULTS = {
     /**
@@ -50,17 +51,45 @@ export const DEFAULTS = {
     /** Размер тайла в пикселях (информативное значение). */
     TILE_PIXELS: 256,
 
-   DRACO_DECODER_PATH: new URL('./js_TP/draco/', _MODULE_DIR).href,
 } as const;
 
 export type Defaults = typeof DEFAULTS;
 
-let _dracoDecoderPath: string = DEFAULTS.DRACO_DECODER_PATH;
+// Путь к декодеру Draco вычисляется лениво (при первом обращении), а не на загрузке:
+// в бандле ресурсы регистрируются позже, чем выполняется этот модуль.
+let _dracoDecoderPath: string | null = null;
 
 export function setDracoDecoderPath(path: string): void {
     _dracoDecoderPath = path;
 }
 
 export function getDracoDecoderPath(): string {
+    if (_dracoDecoderPath === null) _dracoDecoderPath = assetUrl('js_TP/draco/');
     return _dracoDecoderPath;
+}
+
+/**
+ * Создаёт DRACOLoader с декодером wasm.
+ * В обычном режиме — грузит файлы по getDracoDecoderPath().
+ * В бандле — подставляет вшитые wrapper.js и wasm через decoderConfig,
+ * без сетевых запросов к папке draco/.
+ */
+export function createDracoLoader(): DRACOLoader {
+    const loader = new DRACOLoader();
+    const embedded = getBundledDraco();
+    if (embedded) {
+        // DRACOLoader._loadLibrary грузит файлы по имени через FileLoader.
+        // В бандле подменяем этот метод: отдаём вшитый текст wrapper'а и wasm.
+        const anyLoader = loader as any;
+        anyLoader._loadLibrary = (name: string, responseType: string) => {
+            if (name === 'draco_wasm_wrapper.js') return Promise.resolve(embedded.wrapperJs);
+            if (name === 'draco_decoder.wasm') return Promise.resolve(embedded.wasm.slice(0));
+            return Promise.reject(new Error(`KRB bundle: неизвестный draco-ресурс ${name}`));
+        };
+        loader.setDecoderConfig({ type: 'wasm' });
+    } else {
+        loader.setDecoderPath(getDracoDecoderPath());
+        loader.setDecoderConfig({ type: 'wasm' });
+    }
+    return loader;
 }

@@ -3,16 +3,17 @@
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
-import { fromUrl, fromArrayBuffer, Pool } from './js_TP/geotiff.bundle.js';
+import { loadGeoTiffModule, type GeoTiffModule } from './geotiff-loader.js';
 import {
     resolveColorRamp,
     sampleColorRamp,
     parseColorToRGBA
 } from './ColorRamps.js';
 import { applyGapMaskToMaterial } from './PolygonUtils.js';
+import { assetUrl } from './assets.js';
 
 /** @private */ const GEOTIFF_RENDER_ORDER = 995;
-/** @private */ const DEFAULT_WORKER_URL = new URL('./js_TP/geotiff.worker.js', import.meta.url).href;
+/** @private */ const defaultWorkerUrl = (): string => assetUrl('js_TP/geotiff.worker.js');
 /** @private */ const DEFAULT_HEIGHT_SCALE = 1.0;
 /** @private */ const DEFAULT_POLYGON_OFFSET = -4;
 /** @private */ const TILE_TEXTURE_CACHE_MAX = 200;
@@ -50,8 +51,9 @@ export class GeoTiffLayer extends SpatialObject {
 
         this._useWorker = options.useWorker === true;
         this._poolSize = options.poolSize ?? 2;
-        this._workerUrl = options.workerUrl ?? DEFAULT_WORKER_URL;
+        this._workerUrl = options.workerUrl ?? defaultWorkerUrl();
         this._pool = options.pool || null;
+        this._gt = null as GeoTiffModule | null;
         this._ownsPool = false;
         this._blobWorkerUrl = null;
 
@@ -950,6 +952,9 @@ if (this._maskEnabled && map.worldGroup) {
 
     async _performLoad() {
         try {
+            // Ленивая загрузка KRB.geotiff.min.js при первом использовании.
+            const gt = await loadGeoTiffModule();
+            this._gt = gt;
             await this._ensurePool();
             const tiff = await this._openTiff();
             this._tiff = tiff;
@@ -1009,16 +1014,24 @@ if (this._maskEnabled && map.worldGroup) {
         if (this._pool) return;
         if (!this._useWorker) return;
         try {
-            const resp = await fetch(this._workerUrl, { mode: 'cors' });
-            if (!resp.ok) throw new Error(`worker fetch failed: ${resp.status}`);
-            const code = await resp.text();
-            const trimmed = code.trimStart();
-            if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-                throw new Error('worker URL returned HTML');
+            // Бандл: исходник воркера уже вшит; иначе — загрузка по URL.
+            // Исходник воркера приходит из KRB.geotiff.min.js (модуль уже загружен).
+            const embeddedCode = this._gt?.geotiffWorkerSource ?? null;
+            let code: string;
+            if (embeddedCode) {
+                code = embeddedCode;
+            } else {
+                const resp = await fetch(this._workerUrl, { mode: 'cors' });
+                if (!resp.ok) throw new Error(`worker fetch failed: ${resp.status}`);
+                code = await resp.text();
+                const trimmed = code.trimStart();
+                if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+                    throw new Error('worker URL returned HTML');
+                }
             }
             const blob = new Blob([code], { type: 'application/javascript' });
             const blobUrl = URL.createObjectURL(blob);
-            this._pool = new Pool(this._poolSize, () => new Worker(blobUrl));
+            this._pool = new this._gt.Pool(this._poolSize, () => new Worker(blobUrl));
             this._ownsPool = true;
             this._blobWorkerUrl = blobUrl;
         } catch (e) {
@@ -1069,16 +1082,16 @@ async _openTiff() {
             );
         }
 
-        return await fromArrayBuffer(buf, { pool: this._pool || undefined });
+        return await this._gt.fromArrayBuffer(buf, { pool: this._pool || undefined });
     }
 
-    if (src instanceof ArrayBuffer) return await fromArrayBuffer(src);
+    if (src instanceof ArrayBuffer) return await this._gt.fromArrayBuffer(src);
     if (ArrayBuffer.isView(src)) {
         const buf = src.buffer.slice(src.byteOffset, src.byteOffset + src.byteLength);
-        return await fromArrayBuffer(buf);
+        return await this._gt.fromArrayBuffer(buf);
     }
     if (typeof Blob !== 'undefined' && src instanceof Blob) {
-        return await fromArrayBuffer(await src.arrayBuffer());
+        return await this._gt.fromArrayBuffer(await src.arrayBuffer());
     }
     throw new Error('GeoTiffLayer: unsupported source type');
 }

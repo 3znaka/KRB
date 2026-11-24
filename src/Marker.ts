@@ -17,6 +17,7 @@ import type {
     GeoJSONGeometry,
     CrsLike,
 } from './GeoJSONExportable.js';
+import { assetUrl } from './assets.js';
 
 
 
@@ -72,7 +73,9 @@ interface MapPanes {
 
 const _mapPanes = new WeakMap<object, MapPanes>();
 
-const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
+// Ленивое вычисление: в бандле ресурс регистрируется после загрузки этого модуля,
+// поэтому URL нельзя брать на верхнем уровне — только при первом использовании.
+const defaultIconUrl = (): string => assetUrl('img/marker.png');
 
 /** @deprecated Иконки рендерятся через TextManager. */
 export function _getPanes(map: { targetElement: HTMLElement }): MapPanes {
@@ -172,7 +175,7 @@ export class Marker extends SpatialObject implements GeoJSONExportable {
         this._maxZoom = options.maxZoom ?? Infinity;
         this._altitudeMode = options.altitudeMode ?? 'ground';
         this._altitude = options.altitude ?? 0;
-        this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : DEFAULT_ICON_URL;
+        this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : defaultIconUrl();
         this._onHover = options.onHover ?? null;
         this._onClick = options.onClick ?? null;
         this._clusterable = options.clusterable !== undefined ? options.clusterable : true;

@@ -147,4 +147,12 @@ if (!tscOk) {
 }
 
 console.log('STEP 5: done' + (tscOk ? '' : ' (with tsc errors!)'));
+
+// STEP 6: самодостаточные бандлы KRB.bundle.min.js, KRB.bundle.iife.min.js, KRB.geotiff.min.js
+if (tscOk) {
+  const { buildBundles } = await import('./build.bundle.mjs');
+  await buildBundles();
+} else {
+  console.log('STEP 6: skipped bundles (tsc failed)');
+}
 process.exit(tscOk ? 0 : 1);

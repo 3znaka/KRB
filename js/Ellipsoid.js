@@ -313,27 +313,3 @@ export function ecefToGeodetic(X, Y, Z, ellipsoid) {
         h
     };
 }
-/**
- * Является ли CRS геоцентрической (ECEF). Определяется по типу загруженной
- * проекции (+proj=geocent в def), а не по списку кодов.
- * Принимает код ('EPSG:4978') или инстанс проекции.
- * Для строкового кода вернёт false, если CRS ещё не загружена —
- * сначала await Projections.ensure(code).
- */
-export function isEcefCrs(crsOrCode) {
-    if (!crsOrCode)
-        return false;
-    const p = typeof crsOrCode === 'string'
-        ? (Projections.has(crsOrCode) ? Projections.get(crsOrCode) : null)
-        : crsOrCode;
-    return !!(p && (p.isGeocentric === true || p._raw?.isGeocentric === true));
-}
-export function enuToEcefDelta(e, n, u, lonRad, latRad) {
-    const sLo = Math.sin(lonRad), cLo = Math.cos(lonRad);
-    const sLa = Math.sin(latRad), cLa = Math.cos(latRad);
-    return [
-        -sLo * e - sLa * cLo * n + cLa * cLo * u,
-        cLo * e - sLa * sLo * n + cLa * sLo * u,
-        cLa * n + sLa * u,
-    ];
-}

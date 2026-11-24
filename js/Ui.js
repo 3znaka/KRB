@@ -6,6 +6,7 @@
  * @module ui
  */
 import { THREE } from './js_TP/tpb.js';
+import { assetUrl } from './assets.js';
 /**
  * Собирает атрибуцию со всех слоёв карты — как растровых, переданных
  * в `layers`, так и векторных/динамических, добавленных через
@@ -69,7 +70,7 @@ function collectAttributions(map) {
  */
 export function initUI(map) {
     const container = map.targetElement;
-    const getImgUrl = (filename) => new URL(`./img/${filename}`, import.meta.url).href;
+    const getImgUrl = (filename) => assetUrl(`img/${filename}`);
     const existing = container.querySelector('#krb-ui-pane');
     if (existing && existing.parentNode)
         existing.parentNode.removeChild(existing);

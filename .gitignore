@@ -1,7 +1,14 @@
-@"
+# зависимости
 node_modules/
+src_for_tpb/node_modules/
+
+# js/ публикуем: его раздаёт jsDelivr для ESM-подключения
+
+# dist/ публикуем, но промежуточные файлы сборки — нет
+dist/meta.json
+dist/tpb-worker-slice.min.js
+
+# логи и временные файлы
 build.log
 build-output.txt
 *.pyc
-"@ | Out-File -Encoding ascii .gitignore
-Get-Content .gitignore

@@ -10,8 +10,11 @@
 import { THREE } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
+import { assetUrl } from './assets.js';
 const _mapPanes = new WeakMap();
-const DEFAULT_ICON_URL = new URL('./img/marker.png', import.meta.url).href;
+// Ленивое вычисление: в бандле ресурс регистрируется после загрузки этого модуля,
+// поэтому URL нельзя брать на верхнем уровне — только при первом использовании.
+const defaultIconUrl = () => assetUrl('img/marker.png');
 /** @deprecated Иконки рендерятся через TextManager. */
 export function _getPanes(map) {
     let panes = _mapPanes.get(map);
@@ -100,7 +103,7 @@ export class Marker extends SpatialObject {
         this._maxZoom = options.maxZoom ?? Infinity;
         this._altitudeMode = options.altitudeMode ?? 'ground';
         this._altitude = options.altitude ?? 0;
-        this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : DEFAULT_ICON_URL;
+        this._iconUrl = options.iconUrl !== undefined ? options.iconUrl : defaultIconUrl();
         this._onHover = options.onHover ?? null;
         this._onClick = options.onClick ?? null;
         this._clusterable = options.clusterable !== undefined ? options.clusterable : true;

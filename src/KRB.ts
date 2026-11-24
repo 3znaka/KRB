@@ -26,7 +26,6 @@ export {
     parseEllipsoid,
     geodeticToEcef,
     ecefToGeodetic,
-    enuToEcefDelta,
 } from './Ellipsoid.js';
 export { VectorLineLayer } from './VectorLineLayer.js';
 

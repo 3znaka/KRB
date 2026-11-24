@@ -23,13 +23,15 @@ export type {
 
 import { VectorTileMaterialsMixin } from './VectorTileMaterials.js';
 import { VectorTileLabelsMixin } from './VectorTileLabels.js';
-import { VectorTileWorkerMixin, _DEFAULT_WORKER_SCRIPTS } from './VectorTileWorker.js';
+import { VectorTileWorkerMixin, getDefaultWorkerScripts } from './VectorTileWorker.js';
 import { VectorTileCoverageMixin } from './VectorTileCoverage.js';
 import { VectorTileLoadingMixin } from './VectorTileLoading.js';
 import { VectorTileLifecycleMixin } from './VectorTileLifecycle.js';
+import { assetUrl } from './assets.js';
+import { IS_BUNDLE_BUILD } from './build-flag.js';
 
 let _nextVectorLabelLayerId = 1;
-const _MODULE_DIR = new URL('.', import.meta.url).href;
+const _MODULE_DIR = IS_BUNDLE_BUILD ? '' : new URL('.', import.meta.url).href; // только для пользовательских workerScripts
 
 export class VectorTile {
     // Config
@@ -159,7 +161,7 @@ private _exclusionCrs: any = null;
   constructor(options: VectorTileOptions = {}) {
 
         this.url = options.url;
-        const rawScripts = options.workerScripts ?? _DEFAULT_WORKER_SCRIPTS;
+        const rawScripts = options.workerScripts ?? getDefaultWorkerScripts();
 
 this._crsCode = options.crs ?? null;
 this._tileCrs = null;
@@ -255,6 +257,7 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
 
         this._workerScriptUrls = rawScripts.map((s) => {
             if (/^https?:\/\//i.test(s) || s.startsWith('/')) return s;
+            if (!_MODULE_DIR) return assetUrl(s);
             try { return new URL(s, _MODULE_DIR).href; }
             catch (e) { console.error('Invalid worker script URL:', s, e); return s; }
         });
@@ -273,8 +276,8 @@ this._styles = this._mergeStyles(baseStyles, options.styles || {});
     async _initDefaultSprite() {
         try {
             // Резолвим пути относительно папки, где лежит сам VectorTile.js (то есть js/)
-            const jsonUrl = new URL('./sprite/sprite.json', _MODULE_DIR).href;
-            const pngUrl = new URL('./sprite/sprite.png', _MODULE_DIR).href;
+            const jsonUrl = assetUrl('sprite/sprite.json');
+            const pngUrl = assetUrl('sprite/sprite.png');
 
             const s = new Sprite(jsonUrl, pngUrl);
             await s.load();

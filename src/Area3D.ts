@@ -16,7 +16,7 @@ import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject, TitleAlignH, TitleAlignV, ZoomInterpolation, SpatialPosition, NormalizedPosition } from './SpatialObject.js';
 
-import { getDracoDecoderPath } from './Defaults.js';
+import { createDracoLoader } from './Defaults.js';
 
 // =====================================================================
 // Типы
@@ -545,10 +545,7 @@ private _calculatePolygonParams(): void {
         this._modelPromise = (async () => {
             try {
                const loader = new GLTFLoader();
-const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath(getDracoDecoderPath());
-dracoLoader.setDecoderConfig({ type: 'wasm' });
-loader.setDRACOLoader(dracoLoader);
+loader.setDRACOLoader(createDracoLoader());
 
                 const gltf = await (loader as any).loadAsync(this._modelUrl!);
                 const model = gltf.scene;

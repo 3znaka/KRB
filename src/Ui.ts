@@ -7,6 +7,7 @@
  */
 
 import { THREE } from './js_TP/tpb.js';
+import { assetUrl } from './assets.js';
 
 export interface UIMap {
     targetElement: HTMLElement;
@@ -113,8 +114,7 @@ function collectAttributions(map: any): Attribution[] {
 export function initUI(map: UIMap): { destroy: () => void } {
     const container = map.targetElement;
 
-    const getImgUrl = (filename: string): string =>
-        new URL(`./img/${filename}`, import.meta.url).href;
+    const getImgUrl = (filename: string): string => assetUrl(`img/${filename}`);
 
     const existing = container.querySelector<HTMLDivElement>('#krb-ui-pane');
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing);

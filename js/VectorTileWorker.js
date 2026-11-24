@@ -2,10 +2,11 @@
 import { THREE, Line2, LineSegmentsGeometry } from './js_TP/tpb.js';
 import { stringToBase64, createWorkerCode } from './vectorTileWorkerCode.js';
 import { VECTOR_TILE_RENDER_ORDER } from './VectorTileTypes.js';
-const _MODULE_DIR = new URL('.', import.meta.url).href;
-export const _DEFAULT_WORKER_SCRIPTS = [
-    new URL('./js_TP/tpb.js', _MODULE_DIR).href,
-    new URL('./js_TP/earcut.js', _MODULE_DIR).href,
+import { assetUrl, getBundledWorkerSources } from './assets.js';
+// Функция, а не константа: ресурсы бандла регистрируются после загрузки модуля.
+export const getDefaultWorkerScripts = () => [
+    assetUrl('js_TP/tpb.js'),
+    assetUrl('js_TP/earcut.js'),
 ];
 const _workerBlobUrlCache = new Map();
 // Временные объекты для ориентации точек на глобусе (без аллокаций на тайл).
@@ -16,7 +17,14 @@ function _getSharedWorkerBlobUrl(tpbUrl, earcutUrl) {
     const cached = _workerBlobUrlCache.get(key);
     if (cached)
         return cached;
-    const promise = (async () => {
+    const embedded = getBundledWorkerSources();
+    const promise = embedded ? (async () => {
+        // Бандл: исходники уже в памяти, fetch не нужен.
+        const tpbDataURL = 'data:text/javascript;base64,' + stringToBase64(embedded.tpb);
+        const earcutDataURL = 'data:text/javascript;base64,' + stringToBase64(embedded.earcut);
+        const workerCode = createWorkerCode(tpbDataURL, earcutDataURL);
+        return URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' }));
+    })() : (async () => {
         const [tpbRes, earcutRes] = await Promise.all([fetch(tpbUrl), fetch(earcutUrl)]);
         if (!tpbRes.ok)
             throw new Error(`HTTP ${tpbRes.status} for ${tpbUrl}`);

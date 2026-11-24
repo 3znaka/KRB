@@ -10,10 +10,10 @@
  *
  * @module Marker3D
  */
-import { THREE, GLTFLoader, DRACOLoader } from './js_TP/tpb.js';
+import { THREE, GLTFLoader } from './js_TP/tpb.js';
 import { Projections } from './Projections.js';
 import { SpatialObject } from './SpatialObject.js';
-import { getDracoDecoderPath } from './Defaults.js';
+import { createDracoLoader } from './Defaults.js';
 const MARKER_RENDER_ORDER = 1000;
 // =====================================================================
 // Marker3D
@@ -370,10 +370,7 @@ export class Marker3D extends SpatialObject {
         this._modelPromise = (async () => {
             try {
                 const loader = new GLTFLoader();
-                const dracoLoader = new DRACOLoader();
-                dracoLoader.setDecoderPath(getDracoDecoderPath());
-                dracoLoader.setDecoderConfig({ type: 'wasm' });
-                loader.setDRACOLoader(dracoLoader);
+                loader.setDRACOLoader(createDracoLoader());
                 const gltf = await loader.loadAsync(this._modelUrl);
                 const model = gltf.scene;
                 if (this._playAnimation && gltf.animations && gltf.animations.length > 0) {

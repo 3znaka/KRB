@@ -850,37 +850,37 @@ setNodeHeight(height: number): this {
             this._mixer.update(delta);
         }
 
-        // ВАЖНО: объект лежит в worldGroup, который сам смещается при панораме.
-        // Поэтому берём ЛОКАЛЬНЫЕ координаты группы (origin = worldGroup),
-        // иначе сдвиг мира применился бы дважды.
-        const wg = map.worldGroup ? map.worldGroup.position : { x: 0, y: 0, z: 0 };
-        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, this._worldPosition,
-            wg);
+        // ВАЖНО: projectSurfacePoint возвращает МИРОВЫЕ координаты сцены
+        // (на плоскости — уже с учётом сдвига worldGroup при панораме).
+        // Именно мировой контракт ждут: getBoundingSphere у Interaction
+        // (луч рейкаста живёт в мировом пространстве), getSurfaceHeightAt /
+        // ensureTileForPoint (внутри сами вычитают сдвиг группы),
+        // isWorldPointOccluded и сравнение с camera.position.
+        // Локальную позицию меша вычитаем ниже, при установке position.
+        const surfacePoint = map.projectSurfacePoint(this._coord, this._crs, 0, this._worldPosition);
         if (!surfacePoint) {
             this._applyHidden();
             this._isVisible = false;
             return;
         }
-        const worldX = surfacePoint.x;
-        const worldZ = surfacePoint.z;
         let worldY = surfacePoint.y;
 
 if (this._altitudeMode === 'clampToGround') {
     const now = performance.now();
     if (now - this._lastHeightUpdateTime > 500) {
-        map.ensureTileForPoint(worldX, worldZ);
-        this._cachedWorldY = map.getSurfaceHeightAt(worldX, worldZ);
+        map.ensureTileForPoint(this._worldPosition.x, this._worldPosition.z);
+        this._cachedWorldY = map.getSurfaceHeightAt(this._worldPosition.x, this._worldPosition.z);
         this._lastHeightUpdateTime = now;
     }
     if (map.globe) {
-        map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition, wg);
+        map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition);
         worldY = this._worldPosition.y;
     } else {
         worldY = this._cachedWorldY + this._altitude;
     }
 } else if (map.globe) {
     map.projectSurfacePoint(this._coord, this._crs,
-        this._altitude + this._nodeHeight, this._worldPosition, wg);
+        this._altitude + this._nodeHeight, this._worldPosition);
     worldY = this._worldPosition.y;
 } else {
     worldY = this._altitude + this._nodeHeight;
@@ -891,8 +891,15 @@ if (!map.globe) {
     worldY += this._nodeHeight;
 }
 
-this._object3D.position.set(worldX, worldY, worldZ);
-this._worldPosition.set(worldX, worldY, worldZ);
+// Позиция МЕША — локальная (объект лежит в worldGroup, который сам
+// смещается при панораме), а _worldPosition остаётся МИРОВОЙ.
+const wgPos = map.worldGroup ? map.worldGroup.position : null;
+this._object3D.position.set(
+    surfacePoint.x - (wgPos ? wgPos.x : 0),
+    worldY   - (wgPos ? wgPos.y : 0),
+    surfacePoint.z - (wgPos ? wgPos.z : 0),
+);
+this._worldPosition.set(surfacePoint.x, worldY, surfacePoint.z);
 
 // На глобусе модель должна «стоять» вдоль МЕСТНОЙ нормали, а не мировой Y.
 if (map.globe && map.surface) {

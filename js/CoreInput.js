@@ -1084,9 +1084,13 @@ export const CoreInputMixin = {
                 this._panVelX = 0;
                 this._panVelZ = 0;
             }
-            // ── инерция вращения глобуса ──
-            if (!this.panInertia)
+            // ── инерция вращения глобуса: та же логика, что у мыши (см. onMouseUp) ──
+            if (this.globe && this.panInertia) {
+                this._globeInertia.start(performance.now());
+            }
+            else {
                 this._globeInertia.clear();
+            }
         }
     },
     resize() {

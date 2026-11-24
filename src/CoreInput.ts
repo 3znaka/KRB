@@ -24,14 +24,16 @@ const _crtVec = new THREE.Vector3();
 const _qhInner = new THREE.Quaternion();
 
 // ── Globe drag: дифференциальная орбита камеры ──
-const _gUp   = new THREE.Vector3(0, 1, 0);
 const _gCam  = new THREE.Vector3();
-const _gN    = new THREE.Vector3();
-const _gAxis = new THREE.Vector3();
-const _gA    = new THREE.Vector3();   // hit под ПРОШЛЫМ курсором
-const _gB    = new THREE.Vector3();   // hit под ТЕКУЩИМ курсором
+const _gA    = new THREE.Vector3();   // hit под ПРОШЛЫМ курсором (мировые)
+const _gB    = new THREE.Vector3();   // hit под ТЕКУЩИМ курсором (мировые)
+const _globLocalA = new THREE.Vector3();
+const _globLocalB = new THREE.Vector3();
+const _globGeoA: { lon: number; lat: number; h: number } = { lon: 0, lat: 0, h: 0 };
+const _globGeoB: { lon: number; lat: number; h: number } = { lon: 0, lat: 0, h: 0 };
+const _globGeoT: { lon: number; lat: number; h: number } = { lon: 0, lat: 0, h: 0 };
+/** Предел широты — геодезический, в радианах (полюс запрещён). */
 const GLOBE_MAX_LAT = 89.99 * Math.PI / 180;
-const _clamp1 = (v: number) => Math.max(-1, Math.min(1, v));
 const _wrapPi = (a: number) => {
     while (a >  Math.PI) a -= 2 * Math.PI;
     while (a < -Math.PI) a += 2 * Math.PI;
@@ -177,12 +179,6 @@ _globeOrbit(dx: number, dy: number): void {
     const wg  = this.worldGroup;
     const H   = this.renderer.domElement.clientHeight || 1;
 
-    _gCam.copy(this.controls.target);
-    wg.worldToLocal(_gCam);
-    const dT = _gCam.length();
-    if (!(dT > 1e-6)) return;
-    _gN.copy(_gCam).divideScalar(dT);
-
     const x0 = this._globeLastX, y0 = this._globeLastY;
     const x1 = x0 + dx,          y1 = y0 + dy;
 
@@ -190,16 +186,23 @@ _globeOrbit(dx: number, dy: number): void {
     const A = this._raycastToGround(x0, y0, _gA);
     const B = this._raycastToGround(x1, y1, _gB);
 
+    // Геодезические lon/lat (как в WorldSurface.geodeticFromWorld): широта —
+    // геодезическая эллипсоида, а не сферическая asin(n.y). Иначе у полюсов
+    // сферическая и эллипсоидная широты расходятся, и вращение дрейфует к полюсу.
     let dLon = 0, dLat = 0, picked = false;
     if (A && B) {
-        wg.worldToLocal(A);
-        wg.worldToLocal(B);
-        const la = A.length(), lb = B.length();
-        if (la > 1e-6 && lb > 1e-6) {
-            A.divideScalar(la);
-            B.divideScalar(lb);
-            dLon = _wrapPi(Math.atan2(-A.z, A.x) - Math.atan2(-B.z, B.x));
-            dLat = Math.asin(_clamp1(A.y)) - Math.asin(_clamp1(B.y));
+        _globLocalA.copy(A);
+        _globLocalB.copy(B);
+        wg.worldToLocal(_globLocalA);
+        wg.worldToLocal(_globLocalB);
+        const gA = this.surface.geodeticFromWorld(_globLocalA, _globGeoA);
+        const gB = this.surface.geodeticFromWorld(_globLocalB, _globGeoB);
+        if (Number.isFinite(gA.lon) && Number.isFinite(gA.lat) &&
+            Number.isFinite(gB.lon) && Number.isFinite(gB.lat)) {
+            // Точка под курсором сместилась A→B; цель должна сместиться
+            // на ту же величину В ОБРАТНУЮ сторону, чтобы точка осталась под курсором.
+            dLon = -_wrapPi((gB.lon - gA.lon) * Math.PI / 180);
+            dLat = -(gB.lat - gA.lat) * Math.PI / 180;
             picked = true;
         }
     }
@@ -228,23 +231,20 @@ _globeOrbit(dx: number, dy: number): void {
             s = (2 * h * Math.tan(cam.fov * Math.PI / 360)) / H / this.R;
         }
         s = Math.min(s, Math.PI / H);
+        // Те же знаки, что в лучевой ветке: цель уходит против смещения курсора.
         dLon = -dx * s;
         dLat =  dy * s;
     }
 
-    // 1) долгота — вокруг мировой Y (полюс не наклоняется)
-    if (dLon !== 0) _gN.applyAxisAngle(_gUp, dLon);
-
-    // 2) широта — вокруг горизонтальной оси «запад» = n × Y
-    _gAxis.crossVectors(_gN, _gUp);
-    if (_gAxis.lengthSq() < 1e-14) _gAxis.set(1, 0, 0); else _gAxis.normalize();
-    const lat = Math.asin(_clamp1(_gN.y));
-    const newLat = Math.max(-GLOBE_MAX_LAT, Math.min(GLOBE_MAX_LAT, lat + dLat));
-    const eff = newLat - lat;
-    if (eff !== 0) _gN.applyAxisAngle(_gAxis, eff);
-
-    // Новая точка обзора на поверхности + поза с прежним наклоном/азимутом.
-    this._globeSetTargetDir(_gN);
+    // Сдвиг непосредственно в геодезических координатах цели. Широта
+    // ограничивается GLOBE_MAX_LAT, долгота нормализуется в (−180, 180].
+    const g = this._globeTargetGeo(_globGeoT);
+    const lon0 = g.lon, lat0 = g.lat;
+    const newLon = lon0 + dLon * 180 / Math.PI;
+    const newLat = Math.max(-GLOBE_MAX_LAT * 180 / Math.PI,
+                   Math.min( GLOBE_MAX_LAT * 180 / Math.PI, lat0 + dLat * 180 / Math.PI));
+    if (!Number.isFinite(newLon) || !Number.isFinite(newLat)) return;
+    this._globeSetTargetLonLat(newLon, newLat);
     const dist = this.getTargetDistanceForZoom(this.continuousZoom);
     this._globeApplyPose(dist, this._globePitchNow(), this._globeBearingNow());
     this.controls.update();

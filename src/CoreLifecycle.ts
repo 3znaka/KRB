@@ -2,6 +2,16 @@
 import { THREE } from './js_TP/tpb.js';
 import type { KrbMap } from './Core.js';
 
+// ── Инерция вращения глобуса ──
+/** Ниже этой скорости (px/с) инерция останавливается. */
+const GLOBE_INERTIA_STOP_PX_S = 2;
+/** Время, за которое достигается предельная скорость (с) — задаёт кривую ограничения. */
+const GLOBE_INERTIA_CAP_TIME_S = 0.25;
+/** Коэффициент затухания скорости за секунду (≈ доля, оставшаяся через 1 с). */
+const GLOBE_INERTIA_DECAY = 0.05;
+/** Множитель вертикальной (к полюсам) скорости на низких зумах. */
+const GLOBE_INERTIA_LAT_DAMP = 0.5;
+
 export interface CoreLifecycleMethods {
     _setupAutoPause(): void;
     pause(): void;
@@ -248,53 +258,47 @@ export const CoreLifecycleMixin: CoreLifecycleMethods & ThisType<KrbMap> = {
             if (vx === 0 && vy === 0) return;
 
             // Порог остановки — в пикселях/с, не зависит от дистанции камеры.
-            const speed = Math.hypot(vx, vy);
-            if (speed < 2) {
+            if (Math.hypot(vx, vy) < GLOBE_INERTIA_STOP_PX_S) {
                 this._globeOrbitVelX = 0;
                 this._globeOrbitVelY = 0;
                 return;
             }
 
-            // Масштаб: на дальнем зуме один пиксель соответствует большему углу
-            // (_globeOrbit это учитывает), поэтому броску даём усиление,
-            // пропорциональное дистанции камеры относительно её крупного вида.
-            // Так инерция ощущается одинаково на любом зуме.
+            // Масштаб: на дальнем зуме один пиксель соответствует большему углу,
+            // поэтому усиливаем бросок пропорционально дистанции камеры.
             const camDist = this.camera.position.distanceTo(this.controls.target);
             const ref = Math.max(1e-6, this.R * 4);
             const k = Math.max(1, Math.min(camDist / ref, 3));
 
-            // На дальних зумах (≤ 5) вертикальная инерция (вдоль меридиана,
-            // к полюсам) ослаблена в 8 раз относительно горизонтальной
-            // (вдоль параллелей), чтобы не «выкидывало» к полюсам.
             const zoomNow = this.continuousZoom;
-            const vyScale = zoomNow <= 5 ? 1 / 8 : 1;
-
-            // Ограничиваем шаг за кадр в пикселях по исходной скорости (без k):
-            // иначе на отдалении усиленный бросок даёт неограниченный угловой шаг.
             const H = this.renderer?.domElement?.clientHeight || 1;
-            // Предел шага за кадр: на зуме ≤ 1 инерция вообще не крутит глобус
-            // (там он «мяч»), выше — ограничена долей высоты экрана.
+            // Предел угловой скорости: на низком зуме глобус «мяч» — инерции нет,
+            // выше предел — доля высоты экрана в секунду (а не за кадр),
+            // поэтому частота кадров не влияет на поведение.
             const zoomCap = zoomNow <= 1 ? 0 : (zoomNow <= 2 ? 0.02 : 0.25);
-            const maxStepPx = zoomCap * H;
-            if (maxStepPx <= 0) {
+            if (zoomCap <= 0) {
                 this._globeOrbitVelX = 0;
                 this._globeOrbitVelY = 0;
                 return;
             }
-            let sx = vx * dt;
-            let sy = vy * dt * vyScale;
-            // Потолок итогового шага (с учётом k), чтобы глобус не крутился
-            // «как мяч» даже при сильном отдалении.
-            let fx = sx * k, fy = sy * k;
-            const finalLen = Math.hypot(fx, fy);
-            if (finalLen > maxStepPx) {
-                const f = maxStepPx / finalLen;
-                fx *= f; fy *= f;
-            }
-            this._globeOrbit(fx, fy);
+            const maxSpeedPxS = zoomCap * H / GLOBE_INERTIA_CAP_TIME_S;
 
-            // Та же константа плавности, что и в плоском панорамировании.
-            const decay = Math.pow(this.panFriction, dt);
+            // Мягкое (гладкое) ограничение скорости вместо жёсткого среза шага:
+            // v' = vmax·tanh(|v|·k / vmax) / k — монотонно, без рывка на пороге.
+            let vxE = vx * k, vyE = vy * k;
+            const vLen = Math.hypot(vxE, vyE);
+            if (vLen > 0 && maxSpeedPxS > 0) {
+                const soft = maxSpeedPxS * Math.tanh(vLen / maxSpeedPxS);
+                const f = soft / vLen;
+                vxE *= f; vyE *= f;
+            }
+            // Вертикаль (к полюсам) — тот же закон, без ручного ослабления:
+            // кривая одна, а анизотропия задаётся GLOBE_INERTIA_LAT_DAMP.
+            const latDamp = zoomNow <= 5 ? GLOBE_INERTIA_LAT_DAMP : 1;
+            this._globeOrbit((vxE * dt) / k, (vyE * dt * latDamp) / k);
+
+            // Экспоненциальное затухание, не зависящее от частоты кадров.
+            const decay = Math.pow(GLOBE_INERTIA_DECAY, dt);
             this._globeOrbitVelX *= decay;
             this._globeOrbitVelY *= decay;
             return;

@@ -710,6 +710,9 @@ export class Graticule {
         }
         else if (cameraMoved) {
             this._addMissingLines(viewport, steps, mode);
+            // Глобус: горизонт зависит от камеры — видимые куски линий пересобираем.
+            if (this._isGlobe())
+                this._rebuildVisibleRuns();
         }
         this._updateResolution();
         this._updateLabelPositions(viewport);
@@ -1380,28 +1383,81 @@ export class Graticule {
         if (this._debug) {
             console.log(`[Graticule] _buildLine2 segments=${segments.length}`);
         }
+        // Глобус: геометрия режется по горизонту, а не полагается на depthTest.
+        // Иначе дальние дуги, выходящие за силуэт диска при наклоне, рисуются
+        // фантомно (окклюдер эллипсоида не закрывает их на краю).
+        const globe = this._isGlobe();
         for (const seg of segments) {
-            const flat = [];
-            for (const [x, y, z] of seg.pts) {
-                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z))
+            const runs = [];
+            let run = [];
+            for (const p of seg.pts) {
+                const [x, y, z] = p;
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)
+                    || (globe && this._isPointOccluded(p))) {
+                    if (run.length) {
+                        runs.push(run);
+                        run = [];
+                    }
                     continue;
-                flat.push(x, y, z);
+                }
+                run.push(p);
             }
-            if (flat.length < 6)
-                continue;
-            const geom = new LineGeometry();
-            geom.setPositions(flat);
-            geom.computeBoundingSphere();
-            const line = new Line2(geom, this._material);
-            line.computeLineDistances();
-            line.renderOrder = this._renderOrder;
-            line.frustumCulled = true;
-            group.add(line);
+            if (run.length)
+                runs.push(run);
+            for (const r of runs) {
+                if (r.length < 2)
+                    continue;
+                const flat = [];
+                for (const [x, y, z] of r)
+                    flat.push(x, y, z);
+                const geom = new LineGeometry();
+                geom.setPositions(flat);
+                geom.computeBoundingSphere();
+                const line = new Line2(geom, this._material);
+                line.computeLineDistances();
+                line.renderOrder = this._renderOrder;
+                line.frustumCulled = true;
+                group.add(line);
+            }
         }
         if (this._debug) {
             console.log(`[Graticule] _buildLine2 created ${group.children.length} lines`);
         }
         return group;
+    }
+    /**
+     * Глобус: пересобрать геометрию линий, если изменилась маска горизонта.
+     * Маска — битовая строка видимости сэмплов; пересборка только при её смене,
+     * поэтому плавное вращение без смены видимости почти ничего не стоит.
+     */
+    _rebuildVisibleRuns() {
+        for (const info of this._lineInfos) {
+            if (!info.segments.length)
+                continue;
+            let mask = '';
+            for (const seg of info.segments) {
+                for (const p of seg.pts)
+                    mask += this._isPointOccluded(p) ? '0' : '1';
+                mask += '|';
+            }
+            if (mask === info.visMask)
+                continue;
+            info.visMask = mask;
+            if (info.line2) {
+                if (info.line2.parent)
+                    info.line2.parent.remove(info.line2);
+                if (typeof info.line2.traverse === 'function') {
+                    info.line2.traverse((obj) => { try {
+                        obj.geometry?.dispose();
+                    }
+                    catch { } });
+                }
+            }
+            info.line2 = this._buildLine2(info.segments);
+            info.line2.traverse?.((obj) => { obj.renderOrder = this._renderOrder; });
+            if (this._linesGroup)
+                this._linesGroup.add(info.line2);
+        }
     }
     _destroyLine(info) {
         if (!info.line2)

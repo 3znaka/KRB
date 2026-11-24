@@ -45,6 +45,7 @@ setAllowRotate(v: boolean): void;
     _globeFrame(up: any, north: any, east: any): void;
     _globeApplyPose(dist: number, pitch: number, bearing: number): void;
     _globeSetTargetDir(dirLocal: any): void;
+    _globeSetTargetLonLat(lonDeg: number, latDeg: number): void;
     _globeSnapTarget(): void;
     _globeRetarget(): void;
     _globeProjectTarget(): void;
@@ -600,6 +601,13 @@ _globeApplyPose(dist: number, pitch: number, bearing: number): void {
     this.camera.up.copy(up);
     this.camera.lookAt(tgt);
     this.camera.updateMatrixWorld(true);
+},
+
+/** Поставить цель по геодезическим lon/lat (градусы) на поверхности эллипсоида. */
+_globeSetTargetLonLat(lonDeg: number, latDeg: number): void {
+    const p = this.surface.position(lonDeg, latDeg, 0, _globTmp);
+    if (this.worldGroup) this.worldGroup.localToWorld(p);
+    this.controls.target.copy(p);
 },
 
 /** Поставить цель в точку эллипсоида по направлению (локальный единичный вектор). */

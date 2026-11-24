@@ -488,6 +488,13 @@ export const CoreCameraMixin = {
         this.camera.lookAt(tgt);
         this.camera.updateMatrixWorld(true);
     },
+    /** Поставить цель по геодезическим lon/lat (градусы) на поверхности эллипсоида. */
+    _globeSetTargetLonLat(lonDeg, latDeg) {
+        const p = this.surface.position(lonDeg, latDeg, 0, _globTmp);
+        if (this.worldGroup)
+            this.worldGroup.localToWorld(p);
+        this.controls.target.copy(p);
+    },
     /** Поставить цель в точку эллипсоида по направлению (локальный единичный вектор). */
     _globeSetTargetDir(dirLocal) {
         const g = this.surface.geodeticFromWorld(_globTmp2.copy(dirLocal).multiplyScalar(this.R), _globGeo);

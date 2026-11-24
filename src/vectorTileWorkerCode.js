@@ -1180,11 +1180,17 @@ function makeGlobeContext(g, z, x, y, tileSizeX, tileSizeY) {
     // В tile-CRS world-Z = -projY, поэтому projY = -worldZ (см. processTile).
     const lonScale = 180 / g.halfX;
     const yScale = Math.PI / g.halfY;
+    // Граница полярного ряда в world-Z (верхний ряд y=0 → projY = +halfY).
+    // Точки ровно на этой границе (и дальше за ней) получают широту ±90.
+    const edgeN = (g.extendN ? (-g.halfY) : null);   // wz при projY = halfY
+    const edgeS = (g.extendS ? (g.halfY) : null);    // wz при projY = -halfY
     return {
         a: g.a, e2: g.e2,
         halfX: g.halfX, halfY: g.halfY,
         maxLatDeg: g.maxLatDeg ?? 85.05112878,
         lonScale, yScale,
+        extendN: !!g.extendN, extendS: !!g.extendS,
+        edgeN, edgeS,
         n, tileSizeX, tileSizeY,
     };
 }
@@ -1194,8 +1200,13 @@ function globeLonLat(ctx, wx, wz, out) {
     const lon = wx * ctx.lonScale;
     const projY = -wz;
     let lat = Math.atan(Math.sinh(projY * ctx.yScale)) / GLOBE_DEG;
+    // Широту клампим на maxLatDeg. Полюсная вершина (extendFillToPoles)
+    // ставится отдельно и попадает в lat=±90 через свою плоскую точку.
     const m = ctx.maxLatDeg;
     if (lat > m) lat = m; else if (lat < -m) lat = -m;
+    const tol = ctx.tileSizeY ? ctx.tileSizeY * 1e-3 : 1e-6;
+    if (ctx.extendN && Math.abs(wz - ctx.edgeN) < tol) lat = 90;
+    else if (ctx.extendS && Math.abs(wz - ctx.edgeS) < tol) lat = -90;
     if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
     out[0] = lon; out[1] = lat;
     return true;
@@ -1765,6 +1776,64 @@ renderOrder: semanticOrder - 0.5,
 }
 
 /**
+ * Полярное продление заливки. Граничные рёбра треугольников на верхней
+ * (y=0 → север) или нижней (y=n-1 → юг) границе тайла соединяются веером
+ * с полюсной вершиной. Полюсная вершина ставится в плоскость границы на
+ * краю тайла: globeLonLat при extendN/extendS переводит её в широту ±90.
+ * Геометрия остаётся плоской до сферизации (как и всё остальное).
+ */
+function extendFillToPoles(fill, ctx, centerWX, centerWZ, tileSizeY, globeParams, geoPolarRings) {
+    const pos = fill.positions;
+    const idx = fill.indices;
+    if (!pos || !idx || !pos.length || !idx.length) return;
+    const halfY = tileSizeY / 2;
+
+    const extra = [];
+    const extraIdx = [];
+    const nVerts = pos.length / 3;
+
+    for (const side of [globeParams.extendN ? 1 : 0, globeParams.extendS ? -1 : 0]) {
+        if (!side) continue;
+        // Полный диск не зависит от того, касается ли заливка края тайла:
+        // кольцо и полюс строятся всегда для полюсного тайла.
+
+        // Полный диск по ДОЛГОТАМ: кольцо lon = -180..180 на краевой широте,
+        // веер к полюсу. tile-local x тайла покрывает лишь сектор долгот —
+        // отсюда узкий клин вместо окружности. Кольцо задаём прямо в
+        // ГЕОГРАФИЧЕСКИХ координатах, минуя tile-x.
+        // Кольцо и полюс задаются ГЕОГРАФИЧЕСКИ (lon, lat). Их позиции в
+        // плоских координатах здесь не нужны: sphereizeTileResult пересчитает
+        // их напрямую через globePoint (см. geoPolarRings).
+        const RING = 256;
+        const latEdgeDeg = side > 0 ? ctx.maxLatDeg : -ctx.maxLatDeg;
+        const base = nVerts + extra.length / 3;
+        for (let s = 0; s < RING; s++) {
+            extra.push(0, 0, 0);                     // заглушка, перезапишется
+        }
+        const poleIdx = base + RING;
+        extra.push(0, 0, 0);                          // заглушка полюса
+        for (let s = 0; s < RING; s++) {
+            const s1 = (s + 1) % RING;
+            extraIdx.push(base + s, base + s1, poleIdx);
+        }
+        geoPolarRings.push({
+            base, RING, poleIdx,
+            latEdgeDeg, pole: side > 0 ? 90 : -90,
+        });
+    }
+
+    if (!extra.length) return;
+    const merged = new Float32Array(pos.length + extra.length);
+    merged.set(pos);
+    merged.set(extra, pos.length);
+    const allIdx = new Uint32Array(idx.length + extraIdx.length);
+    allIdx.set(idx);
+    allIdx.set(extraIdx, idx.length);
+    fill.positions = merged;
+    fill.indices = allIdx;
+}
+
+/**
  * Переводит все позиции результата тайла на эллипсоид.
  * Вызывается один раз в конце processTile; центр тайла возвращается в
  * result.centerX/Y/Z (world-оси глобуса), позиции — относительно него.
@@ -1785,7 +1854,62 @@ function sphereizeTileResult(result, globeParams, z, centerWX, centerWZ, tileSiz
         return recenterPositions(out, c.x, c.y, c.z);
     };
 
-    for (const f of result.fills) f.positions = sph(f.positions);
+    // Полярное продление заливки: граничные рёбра верхнего/нижнего ряда
+    // тайла соединяем веером с полюсом (вершина полюса — на эллипсоиде).
+    for (const f of result.fills) {
+        const geoPolarRings = [];
+        // DEBUG: globeParams.debugNoPolarStrip = true — отключить полюсные полосы.
+        if ((globeParams.extendN || globeParams.extendS) && !globeParams.debugNoPolarStrip) {
+            extendFillToPoles(f, ctx, centerWX, centerWZ, tileSizeY, globeParams, geoPolarRings);
+        }
+        f.polar = !!(globeParams.extendN || globeParams.extendS);
+        f.positions = sph(f.positions);
+        // Полный диск: кольцо и полюс — точные географические точки эллипсоида,
+        // минуя tile-x (он покрывает лишь сектор долгот).
+        for (const r of geoPolarRings) {
+            const q = [0, 0, 0];
+            for (let s = 0; s < r.RING; s++) {
+                const lon = -180 + (360 * s) / r.RING;
+                globePoint(ctx, lon, r.latEdgeDeg, 0, q, 0);
+                const k = (r.base + s) * 3;
+                f.positions[k] = q[0] - c.x;
+                f.positions[k + 1] = q[1] - c.y;
+                f.positions[k + 2] = q[2] - c.z;
+            }
+            globePoint(ctx, 0, r.pole, 0, q, 0);
+            const kp = r.poleIdx * 3;
+            f.positions[kp] = q[0] - c.x;
+            f.positions[kp + 1] = q[1] - c.y;
+            f.positions[kp + 2] = q[2] - c.z;
+        }
+    }
+
+    // ── DEBUG (временно): полюсная полоса после сферизации ──
+    if (globeParams.extendN || globeParams.extendS) {
+        for (const f of result.fills) {
+            const p = f.positions;
+            const nv = p.length / 3;
+            const nt = f.indices ? f.indices.length / 3 : 0;
+            // Полоса добавлена последней: SEG+1 вершин края и 1 полюс.
+            const from = Math.max(0, nv - 17);
+            const rows = [];
+            for (let i = from; i < nv; i++) {
+                // Обратно в ECEF: world (X, Y=Z_ecef, Z=-Y_ecef) → (X, -Z, Y).
+                const X = p[i * 3] + c.x;
+                const Zw = p[i * 3 + 1] + c.y;
+                const Yw = -(p[i * 3 + 2] + c.z);
+                // Сферическая широта: для отладки точности хватает, на полюсе
+                // она показывает, есть ли вершины в -90 или только на краю.
+                const lat = Math.atan2(Zw, Math.hypot(X, Yw)) / GLOBE_DEG;
+                const lon = Math.atan2(Yw, X) / GLOBE_DEG;
+                rows.push(i + ' lat=' + lat.toFixed(3) + ' lon=' + lon.toFixed(3));
+            }
+            console.log('[polar-debug] z=' + z + ' ' + (globeParams.extendS ? 'SOUTH' : 'NORTH') +
+                ' layer=' + f.layerName + ' verts=' + nv + ' tris=' + nt, rows);
+        }
+    }
+    // ── /DEBUG ──
+
     for (const b of result.buildings) {
         // Нормали — по ПЛОСКИМ позициям (нужна tile-координата вершины).
         const flatN = sphereizeBuildingNormals(b.normals, b.positions, ctx, centerWX, centerWZ);

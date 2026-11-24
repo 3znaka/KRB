@@ -344,6 +344,7 @@ if ((this._labelsDirty || settleUpdateDue || periodicUpdateDue)
         this._requiredKeys = visibleTiles;
         this._coverageDirty = true;
 
+
         for (const key of Array.from(this._tileCache.keys()) as string[]) {
             if (!visibleTiles.has(key)) {
                 const group = this._tileCache.get(key)!;

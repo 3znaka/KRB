@@ -36,6 +36,8 @@ export class Tile {
         this.attributionUrl = options.attributionUrl || '';
         this.heightScale = options.heightScale;
         this.zoomOffset = options.zoomOffset ?? 0;
+        // extend: дотягивать крайний ряд тайлов до полюса (глобус). По умолчанию true.
+        this.extend = options.extend ?? true;
         this.visible = options.visible ?? true;
         this.opacity = options.opacity ?? 1;
         this.minZoom = options.minZoom ?? 0;
@@ -1594,7 +1596,13 @@ export class TileManager {
         const seg = this.hasElevation
             ? this.engine.SEGMENTS
             : SEG_TABLE[Math.min(z, SEG_TABLE.length - 1)];
-        const built = this.engine.surface.buildTileGeometry(z, virtX, y, seg, this._layerCrs, null);
+        // extend (по умолчанию true): крайний ряд тайла тянем до полюса.
+        const extend = this.layer?.extend !== false;
+        const n = 1 << z;
+        const opts = extend
+            ? { extendN: y === 0, extendS: y === n - 1 }
+            : null;
+        const built = this.engine.surface.buildTileGeometry(z, virtX, y, seg, this._layerCrs, null, opts);
         if (!built)
             return null;
         const mesh = new THREE.Mesh(built.geometry, this._createTileMaterial(texture));

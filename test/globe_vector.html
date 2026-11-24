@@ -21,6 +21,13 @@ import * as KRB from '../js/KRB.js';
 
 await KRB.crs.add('EPSG:32637');
 
+// DEBUG: ?onlypolar=1 — рисовать только полюсные заливки (тест источника белого круга).
+globalThis.DEBUG_ONLY_POLAR = new URLSearchParams(location.search).get('onlypolar') === '1';
+// DEBUG: ?nopolar=1 — без полюсных полос (проверка, даёт ли круг сама заливка тайла).
+globalThis.DEBUG_NO_POLAR_STRIP = new URLSearchParams(location.search).get('nopolar') === '1';
+console.log('[debug] DEBUG_NO_POLAR_STRIP =', globalThis.DEBUG_NO_POLAR_STRIP);
+console.log('[debug] DEBUG_ONLY_POLAR =', globalThis.DEBUG_ONLY_POLAR);
+
 const tiles =  new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
             attributionTitle: '2GIS',

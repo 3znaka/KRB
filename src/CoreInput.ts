@@ -1180,10 +1180,16 @@ onClick(e) {
     this._tempMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this._tempRaycaster.setFromCamera(this._tempMouse, this.camera);
     const groundPoint = new THREE.Vector3();
-    // groundPlane к этому моменту уже стоит на высоте террейна под точкой
-    // клика (его только что установил onMouseDown). Для shift-click это
-    // даёт lon/lat на реальной поверхности, а не на y = 0.
-    if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, groundPoint)) {
+    // Глобус: точка на ЭЛЛИПСОИДЕ через surface.raycast (как _raycastToGround).
+    // Плоскость groundPlane на глобусе даёт неверные lon/lat и identify.
+    if (this.globe && this.surface) {
+        if (!this.surface.raycast(this._tempRaycaster, groundPoint, this.worldGroup)) {
+            console.log('[shift-click] Ray did not hit globe (looking at horizon?)');
+            return;
+        }
+    } else if (!this._tempRaycaster.ray.intersectPlane(this.groundPlane, groundPoint)) {
+        // groundPlane к этому моменту уже стоит на высоте террейна под точкой
+        // клика (его только что установил onMouseDown).
         console.log('[shift-click] Ray did not hit ground plane (looking at horizon?)');
         return;
     }

@@ -450,7 +450,20 @@ if (found.size === 0) {
 
         const ranges = surface.visibleTileRanges(camLocal, z, tileCrs, view);
         const found = new Map<string, number>();
-        if (!ranges || !ranges.length) return new Set();
+        // Полюсный ряд всегда в наборе — даже если visibleTileRanges его не захватил
+        // (на 5–6 уровнях конус взгляда часто не доходит до y=0/y=n-1).
+        // Полюсные тайлы: по долготам видимого сегмента (cxTile ± 2 тайла),
+        // а не весь ряд — иначе набор раздувается и лимит срезает остальное.
+        const nRow = 1 << z;
+        const polarRows = [0, nRow - 1];
+        const cxCenter = ranges && ranges.length ? ranges[0].cxTile : nRow / 2;
+        for (const y of polarRows) {
+            for (let d = -2; d <= 2; d++) {
+                const wx = ((Math.round(cxCenter + d) % nRow) + nRow) % nRow;
+                found.set(`${z},${wx},${y}`, -1);
+            }
+        }
+        if (!ranges || !ranges.length) return new Set(found.keys());
 
         // Frustum-отсечение по сфере тайла (как у растра).
         const frustum = this._tmpFrustum || (this._tmpFrustum = new THREE.Frustum());
@@ -470,15 +483,21 @@ if (found.size === 0) {
                     const cy = tileCrs.halfExtentY - ((y + 0.5) / n) * 2 * tileCrs.halfExtentY;
                     const ll = tileCrs.toLonLat([cx, cy]);
                     if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
-                    surface.position(ll[0], ll[1], 0, tmp);
-                    if (worldGroup) worldGroup.localToWorld(tmp);
-                    sphere.center.copy(tmp);
-                    sphere.radius = radius;
-                    if (!frustum.intersectsSphere(sphere)) continue;
+                    // Полюсный ряд (y=0 север, y=n-1 юг) всегда в наборе: его заливка
+                    // и полоса до полюса нужны даже когда центр тайла вне кадра.
+                    const polarRow = y === 0 || y === maxTile;
+                    if (!polarRow) {
+                        surface.position(ll[0], ll[1], 0, tmp);
+                        if (worldGroup) worldGroup.localToWorld(tmp);
+                        sphere.center.copy(tmp);
+                        sphere.radius = radius;
+                        if (!frustum.intersectsSphere(sphere)) continue;
+                    }
                     const wx = ((vx % n) + n) % n;
                     const key = `${z},${wx},${y}`;
                     const dx = vx + 0.5 - rg.cxTile, dy = y + 0.5 - rg.cyTile;
-                    found.set(key, dx * dx + dy * dy);
+                    // Полюсные тайлы получают приоритет в лимите.
+                    found.set(key, polarRow ? -1 : dx * dx + dy * dy);
                 }
             }
         }

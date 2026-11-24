@@ -84,6 +84,8 @@ export type WidthSpec = number | { stops: Stops } | null;
 export interface WorkerFill {
     layerName: string; color: number; opacity: number;
     positions: Float32Array; indices?: Uint32Array; renderOrder?: number;
+    /** DEBUG: заливка полюсного тайла (см. sphereizeTileResult в воркере). */
+    polar?: boolean;
 }
 export interface WorkerBuilding {
     color: number; stroke?: number;

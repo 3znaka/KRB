@@ -30,6 +30,7 @@ export class VectorTile {
     visibleLayers;
     invisibleLayers;
     zoomOffset;
+    extend;
     buildings3d;
     buildings3dMinZoom;
     buildingEdges;
@@ -159,6 +160,8 @@ export class VectorTile {
         this.visibleLayers = options.visibleLayers || null;
         this.invisibleLayers = options.invisibleLayers || null;
         this.zoomOffset = options.zoomOffset ?? -1;
+        // extend: полярные тайлы тянем до полюса на глобусе (по умолчанию true).
+        this.extend = options.extend ?? true;
         this.buildings3d = options.buildings3d ?? true;
         this.buildings3dMinZoom = options.buildings3dMinZoom ?? 17;
         this.buildingEdges = options.buildingEdges ?? true;

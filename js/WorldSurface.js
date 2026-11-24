@@ -315,11 +315,15 @@ export class GlobeSurface {
      *
      * @returns { geometry, center } | null
      */
-    buildTileGeometry(z, x, y, seg, tileCrs, heights = null) {
+    buildTileGeometry(z, x, y, seg, tileCrs, heights = null, opts = null) {
         const n = 1 << z;
         const hx = tileCrs.halfExtentX, hy = tileCrs.halfExtentY;
         const grid = seg + 1, count = grid * grid;
         const maxLat = tileCrs.maxLatDeg ?? null;
+        // extend: полярный ряд тянется до ±90° (клампа широты нет). Работает
+        // только для сепарабельных CRS: там широта задаётся строкой сетки.
+        const extendN = opts?.extendN ?? false;
+        const extendS = opts?.extendS ?? false;
         // Сепарабельные CRS (меркатор/географическая): lon/lat — 1D-сетки.
         let lons = null, lats = null;
         if (tileCrs.isMercator || tileCrs.isGeographic) {
@@ -333,6 +337,12 @@ export class GlobeSurface {
                 const wy = hy - ((y + j / seg) / n) * 2 * hy;
                 lats[j] = tileCrs.toLonLat([0, wy])[1];
             }
+            // Полярная полоса: верхний/нижний ряд тайла продлеваем до полюса.
+            // lats[0] — север (world y наибольший), lats[grid-1] — юг.
+            if (extendN)
+                lats[0] = 90;
+            if (extendS)
+                lats[grid - 1] = -90;
         }
         const pos = new Float32Array(count * 3);
         const nrm = new Float32Array(count * 3);
@@ -357,7 +367,9 @@ export class GlobeSurface {
                 }
                 if (!Number.isFinite(lon) || !Number.isFinite(lat))
                     continue;
-                if (maxLat != null)
+                // Клампим широту, КРОМЕ продлённого полярного ряда (он уже ±90).
+                const polarRow = (extendN && j === 0) || (extendS && j === grid - 1);
+                if (maxLat != null && !polarRow)
                     lat = Math.max(-maxLat, Math.min(maxLat, lat));
                 lon = Math.max(-180, Math.min(180, lon));
                 const h = heights ? (heights[idx] || 0) : 0;

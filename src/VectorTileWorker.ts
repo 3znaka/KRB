@@ -134,15 +134,23 @@ _isGlobeMode(this: any): boolean {
  * Параметры эллипсоида и tile-сетки для воркера (сериализуемые числа).
  * Эллипсоид берём у поверхности карты, чтобы растр и вектор совпадали.
  */
-_globeWorkerParams(this: any) {
+_globeWorkerParams(this: any, z?: number, y?: number) {
     const ell = this._map.surface.ellipsoid;
     const tileCrs = this._tileCrs;
+    // extend: полярные тайлы продлеваем до ±90° (клампа широты на 85.05 нет).
+    const extend = this.extend !== false;
+    const n = z !== undefined ? (1 << z) : 0;
     return {
         a: ell.a,
         e2: ell.e2,
         halfX: tileCrs.halfExtentX,
         halfY: tileCrs.halfExtentY,
         maxLatDeg: tileCrs.maxLatDeg ?? null,
+        // Верхний/нижний ряд сетки — граница домена: там широта = ±90.
+        extendN: extend && z !== undefined && y === 0,
+        extendS: extend && z !== undefined && y === n - 1,
+        // DEBUG: отключить полюсные полосы (?nopolar=1 в примере).
+        debugNoPolarStrip: (globalThis as any).DEBUG_NO_POLAR_STRIP === true,
     };
 },
 
@@ -336,6 +344,8 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
 
                // ── Fills ─────────────────────────────────────────────────────
         for (const fill of result.fills || []) {
+            // DEBUG (временно): window.DEBUG_ONLY_POLAR = true — оставить только полюсные заливки.
+            if ((globalThis as any).DEBUG_ONLY_POLAR && !fill.polar) continue;
             const mat = this._getFillMaterialFromData(fill.layerName, fill.color, fill.opacity);
             
             const geom = new THREE.BufferGeometry();
@@ -352,6 +362,21 @@ _deformXZ(this: any, x: number, z: number, df: TileDeform) {
             const isTransportationFill = fill.layerName === 'transportation';
             mesh.renderOrder = isTransportationFill ? 200_000 + rawFillOrder : rawFillOrder;
             mesh.position.y = isTransportationFill ? 0.04 : 0;
+            // DEBUG (временно): меши заливок полюсных тайлов.
+            if (this._map?.globe === true && fill.layerName !== 'transportation') {
+                mesh.userData.debugFill = true;
+                const cnt = fill.positions ? fill.positions.length / 3 : 0;
+                const tcount = fill.indices ? fill.indices.length / 3 : 0;
+                let ymin = Infinity, ymax = -Infinity;
+                if (fill.positions) for (let i = 1; i < fill.positions.length; i += 3) {
+                    const v = fill.positions[i];
+                    if (v < ymin) ymin = v;
+                    if (v > ymax) ymax = v;
+                }
+                console.log('[polar-mesh] layer=' + fill.layerName + ' color=' + fill.color.toString(16) +
+                    ' opacity=' + fill.opacity + ' verts=' + cnt + ' tris=' + tcount +
+                    ' renderOrder=' + mesh.renderOrder + ' yRange=[' + ymin + ',' + ymax + ']');
+            }
             group.add(mesh);
         }
 
@@ -673,7 +698,7 @@ const tileSizeY = (2 * tileHalfY) / (1 << z);
     tileSizeX, tileSizeY,
     maxMercX: tileHalfX, maxMercY: tileHalfY,
             // Глобус: воркер сферизует геометрию сам (см. processTile/globeParams).
-            globe: globeOn ? this._globeWorkerParams() : null,
+            globe: globeOn ? this._globeWorkerParams(z, y) : null,
             is3d,
             continuousZoom: map.continuousZoom + this.zoomOffset,
             styleZoom: effectiveStyleZoom,
@@ -717,7 +742,27 @@ const numTiles = 1 << sourceZoom;
 
         let localX = sceneX - map.worldGroup.position.x;
         let localZ = sceneZ - map.worldGroup.position.z;
-        if (this._isDeformed) {
+        if (map.globe === true && map.surface) {
+            // Глобус: sceneX/sceneZ — точка на ЭЛЛИПСОИДЕ (world-оси), не плоская.
+            // Переводим в lon/lat через геодезику поверхности, затем в tile-CRS.
+            // Плоский _mapToTile здесь давал неверную точку (см. CoreInput.onClick).
+            const g = map.surface.geodeticFromWorld(
+                { x: localX, y: 0, z: localZ }, {}
+            );
+            // Полярная шапка (|lat| > maxLatDeg): MVT-данных там нет, это колпак.
+            // Раньше fromLonLat клампил широту на 85.05 и клик на Антарктиде
+            // попадал в океанский тайл на краю → ложный «ocean».
+            const mLat = this._tileCrs.maxLatDeg;
+            if (mLat != null && Math.abs(g.lat) > mLat) {
+                return { polar: true, hemisphere: g.lat > 0 ? 'north' : 'south', lat: g.lat, lon: g.lon };
+            }
+            const p = this._tileCrs.fromLonLat([g.lon, g.lat]);
+            if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) {
+                return { error: 'click outside projection domain' };
+            }
+            localX = p[0];
+            localZ = -p[1];
+        } else if (this._isDeformed) {
             const t = this._mapToTile(localX, localZ);
             if (!t) return { error: 'click outside projection domain' };
             localX = t.x;

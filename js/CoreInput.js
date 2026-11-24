@@ -155,9 +155,18 @@ export const CoreInputMixin = {
         // Широта цели — нужна только для 1/cos φ.
         const g = this._globeTargetGeo(_globGeoT);
         const cosLat = Math.max(0.05, Math.cos(g.lat * Math.PI / 180));
-        // Курсор вправо (dx>0) → цель на запад (dLon<0); курсор вниз (dy>0) → на юг.
-        const eastWorld = -dx * worldPerPx;
-        const northWorld = dy * worldPerPx;
+        // Экранный сдвиг пальца в метрах (вправо = +x, вверх = +y). Экран повёрнут
+        // на bearing камеры относительно севера, поэтому переводим в north/east
+        // поворотом, а не считаем, что экран всегда смотрит на север.
+        const beta = this._globeBearingNow();
+        const cb = Math.cos(beta), sb = Math.sin(beta);
+        const rightM = dx * worldPerPx;
+        const upM = -dy * worldPerPx;
+        const eastFinger = rightM * cb + upM * sb;
+        const northFinger = -rightM * sb + upM * cb;
+        // Драг тянет поверхность за пальцем: цель смещается противоположно сдвигу.
+        const eastWorld = -eastFinger;
+        const northWorld = -northFinger;
         const dLonRad = (eastWorld * radPerWorld) / cosLat;
         const dLatRad = northWorld * radPerWorld;
         const newLon = g.lon + dLonRad * 180 / Math.PI;

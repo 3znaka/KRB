@@ -13,6 +13,7 @@ import { Graticule, GraticuleOptions } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';  
 import { Downloader } from './Downloader.js';
 import { createWorldSurface } from './WorldSurface.js';
+import { GlobeInertia } from './GlobeInertia.js';
 import type { FlatSurface, GlobeSurface } from './WorldSurface.js';
 
 
@@ -214,9 +215,8 @@ dragRuler: boolean;
     _panLastWorldX: number;
     _panLastWorldZ: number;
 
-    // ── Инерция вращения глобуса (px/с) ──
-    _globeOrbitVelX: number;
-    _globeOrbitVelY: number;
+    // ── Инерция вращения глобуса (MapLibre-подобная, см. GlobeInertia.ts) ──
+    _globeInertia: GlobeInertia;
     _globeOrbitLastMoveTime: number;
     /** Последний шаг орбиты попал в диск глобуса (оба луча). */
     _globeLastPickedHit: boolean;
@@ -517,8 +517,7 @@ this._refreshExtents();
         this._panLastMoveTime = 0;
         this._panLastWorldX = 0;
         this._panLastWorldZ = 0;
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
+        this._globeInertia = new GlobeInertia();
         this._globeOrbitLastMoveTime = 0;
         this._globeLastPickedHit = false;
 

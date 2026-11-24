@@ -12,6 +12,7 @@ import { Graticule } from './Graticule.js';
 import { GeoJSONExporter } from './GeoJSONExporter.js';
 import { Downloader } from './Downloader.js';
 import { createWorldSurface } from './WorldSurface.js';
+import { GlobeInertia } from './GlobeInertia.js';
 // Примеси
 import { CoreElevationMixin } from './CoreElevation.js';
 import { CoreCameraMixin } from './CoreCamera.js';
@@ -106,9 +107,8 @@ export class KrbMap {
     _panLastMoveTime;
     _panLastWorldX;
     _panLastWorldZ;
-    // ── Инерция вращения глобуса (px/с) ──
-    _globeOrbitVelX;
-    _globeOrbitVelY;
+    // ── Инерция вращения глобуса (MapLibre-подобная, см. GlobeInertia.ts) ──
+    _globeInertia;
     _globeOrbitLastMoveTime;
     /** Последний шаг орбиты попал в диск глобуса (оба луча). */
     _globeLastPickedHit;
@@ -357,8 +357,7 @@ export class KrbMap {
         this._panLastMoveTime = 0;
         this._panLastWorldX = 0;
         this._panLastWorldZ = 0;
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
+        this._globeInertia = new GlobeInertia();
         this._globeOrbitLastMoveTime = 0;
         this._globeLastPickedHit = false;
         this._disposed = false;

@@ -34,6 +34,9 @@ const _globGeoB: { lon: number; lat: number; h: number } = { lon: 0, lat: 0, h: 
 const _globGeoT: { lon: number; lat: number; h: number } = { lon: 0, lat: 0, h: 0 };
 /** Предел широты — геодезический, в радианах (полюс запрещён). */
 const GLOBE_MAX_LAT = 89.99 * Math.PI / 180;
+const _globUpI    = new THREE.Vector3();
+const _globNorthI = new THREE.Vector3();
+const _globEastI  = new THREE.Vector3();
 const _wrapPi = (a: number) => {
     while (a >  Math.PI) a -= 2 * Math.PI;
     while (a < -Math.PI) a += 2 * Math.PI;
@@ -65,7 +68,8 @@ export interface CoreInputMethods {
     onResize(): void;
     onClick(e: MouseEvent): void;
     bindEvents(): void;
-        _globeOrbit(dx: number, dy: number): void;
+        _globeOrbit(dx: number, dy: number, inertial?: boolean): void;
+        _globeInertialShift(dx: number, dy: number): void;
     _globeGrabAt(screenX: number, screenY: number): boolean;   // ← добавить
     shiftWorld(dx: number, dz: number): void;
     shiftWorld(dx: number, dz: number): void;
@@ -171,7 +175,63 @@ _globeGrabAt(screenX: number, screenY: number): boolean {
  * же pitch/bearing, поэтому вся картинка поворачивается как единое целое
  * вокруг центра Земли — при наклоне/повороте это тоже корректно.
  */
-_globeOrbit(dx: number, dy: number): void {
+/**
+ * Инерционный сдвиг глобуса в касательной плоскости точки обзора.
+ *
+ * Экранный сдвиг (dx, dy) переводится в угловой сдвиг на поверхности так,
+ * что одинаковый пиксельный бросок даёт одинаковое смещение по поверхности
+ * на любой широте: dLon = east / (R·cos φ), dLat = north / R. Множитель
+ * 1/cos φ как раз компенсирует сжатие меридианов у полюса, которое в
+ * лучевой ветке превращалось в растущий сдвиг по широте.
+ */
+_globeInertialShift(dx: number, dy: number): void {
+    const cam = this.camera;
+    const H = this.renderer.domElement.clientHeight || 1;
+
+    // Метров (world-ед.) на пиксель в центре экрана на дистанции до цели.
+    const dist = Math.max(cam.position.distanceTo(this.controls.target), 1e-6);
+    const worldPerPx = (2 * dist * Math.tan(cam.fov * Math.PI / 360)) / H;
+
+    // Угловой масштаб на поверхности: длина дуги / радиус.
+    const radPerWorld = 1 / this.R;
+
+    // Касательный базис в точке обзора (north/east), world-координаты.
+    const up = _globUpI, north = _globNorthI, east = _globEastI;
+    this._globeFrame(up, north, east);
+
+    // Широта цели — нужна только для 1/cos φ.
+    const g = this._globeTargetGeo(_globGeoT);
+    const cosLat = Math.max(0.05, Math.cos(g.lat * Math.PI / 180));
+
+    // Курсор вправо (dx>0) → цель на запад (dLon<0); курсор вниз (dy>0) → на юг.
+    const eastWorld  = -dx * worldPerPx;
+    const northWorld =  dy * worldPerPx;
+
+    const dLonRad = (eastWorld * radPerWorld) / cosLat;
+    const dLatRad = northWorld * radPerWorld;
+
+    const newLon = g.lon + dLonRad * 180 / Math.PI;
+    const newLat = Math.max(-GLOBE_MAX_LAT * 180 / Math.PI,
+                   Math.min( GLOBE_MAX_LAT * 180 / Math.PI, g.lat + dLatRad * 180 / Math.PI));
+    if (!Number.isFinite(newLon) || !Number.isFinite(newLat)) return;
+
+    if ((window as any).__krbInertiaDebug) {
+        console.log('[orbit-tangent]',
+            'in=(' + dx.toFixed(2) + ',' + dy.toFixed(2) + ')',
+            'dLon=' + (dLonRad * 180 / Math.PI).toFixed(3),
+            'dLat=' + (dLatRad * 180 / Math.PI).toFixed(3),
+            'lat0=' + g.lat.toFixed(3),
+            'newLat=' + newLat.toFixed(3));
+    }
+
+    this._globeSetTargetLonLat(newLon, newLat);
+    const d = this.getTargetDistanceForZoom(this.continuousZoom);
+    this._globeApplyPose(d, this._globePitchNow(), this._globeBearingNow());
+    this.controls.update();
+    this.maybeUpdateVisibleTiles();
+},
+
+_globeOrbit(dx: number, dy: number, inertial = false): void {
     if (!this.globe || !this.worldGroup) return;
     if (dx === 0 && dy === 0) return;
 
@@ -181,6 +241,13 @@ _globeOrbit(dx: number, dy: number): void {
 
     const x0 = this._globeLastX, y0 = this._globeLastY;
     const x1 = x0 + dx,          y1 = y0 + dy;
+
+    // Инерция: сдвиг в касательной плоскости вокруг точки обзора (см. ниже).
+    // Лучи не используем: их геометрия на высоких широтах даёт растущий dLat.
+    if (inertial) {
+        this._globeInertialShift(dx, dy);
+        return;
+    }
 
     // ОБА луча — до перемещения камеры. Это и есть весь фикс.
     const A = this._raycastToGround(x0, y0, _gA);
@@ -207,8 +274,12 @@ _globeOrbit(dx: number, dy: number): void {
         }
     }
 
+    // Срез «не больше пол-оборота на высоту экрана за кадр» нужен живому драгу
+    // (защита от рывков мыши). Для инерции он пропорционален скорости и давит
+    // быстрый бросок на каждом кадре — поэтому там его не применяем: скорость
+    // уже ограничена в GlobeInertia.
     const pix = Math.hypot(dx, dy);
-    const cap = (pix / H) * Math.PI;   // ≤ пол-оборота на высоту экрана
+    const cap = inertial ? Infinity : (pix / H) * Math.PI;
 
     if (picked) {
         const mag = Math.hypot(dLon, dLat);
@@ -243,6 +314,18 @@ _globeOrbit(dx: number, dy: number): void {
     const newLon = lon0 + dLon * 180 / Math.PI;
     const newLat = Math.max(-GLOBE_MAX_LAT * 180 / Math.PI,
                    Math.min( GLOBE_MAX_LAT * 180 / Math.PI, lat0 + dLat * 180 / Math.PI));
+    if (inertial && (window as any).__krbInertiaDebug) {
+        // picked=false → шаг посчитан по fallback (луч ушёл с диска).
+        console.log('[orbit]',
+            'picked=' + picked,
+            'in=(' + dx.toFixed(2) + ',' + dy.toFixed(2) + ')',
+            'dLon=' + (dLon * 180 / Math.PI).toFixed(3),
+            'dLat=' + (dLat * 180 / Math.PI).toFixed(3),
+            'capped=' + (cap !== Infinity),
+            'lat0=' + lat0.toFixed(3),
+            'newLat=' + newLat.toFixed(3),
+            'rpp=' + this._globeRadPerPx.toExponential(2));
+    }
     if (!Number.isFinite(newLon) || !Number.isFinite(newLat)) return;
     this._globeSetTargetLonLat(newLon, newLat);
     const dist = this.getTargetDistanceForZoom(this.continuousZoom);
@@ -258,14 +341,12 @@ _globeOrbit(dx: number, dy: number): void {
     // масштабированного фолбэка и при отпускании глобус раскручивается сам.
     const nowT = performance.now();
     this._globeLastPickedHit = picked;
-    if (picked) {
-        const dtMv = Math.max((nowT - this._globeOrbitLastMoveTime) / 1000, 0.001);
-        this._globeOrbitVelX = 0.6 * this._globeOrbitVelX + 0.4 * (dx / dtMv);
-        this._globeOrbitVelY = 0.6 * this._globeOrbitVelY + 0.4 * (dy / dtMv);
-    } else {
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
-    }
+    // Инерция (MapLibre-подобная): буфер смещений жеста. Вне диска сбрасываем,
+    // иначе масштабированный фолбэк раскрутит глобус при отпускании.
+    // Вне диска шаг не записываем, но историю внутри диска НЕ сбрасываем:
+    // длинный свайп, закончившийся за пределами глобуса, всё равно должен
+    // давать инерцию по последним честным шагам (см. onMouseUp).
+    if (picked) this._globeInertia.record(dx, dy, nowT);
     this._globeOrbitLastMoveTime = nowT;
 
     this.maybeUpdateVisibleTiles();
@@ -288,8 +369,7 @@ onMouseDown(e) {
     this._panVelX = 0;
     this._panVelZ = 0;
     // ── и инерцию вращения глобуса ──
-    this._globeOrbitVelX = 0;
-    this._globeOrbitVelY = 0;
+    this._globeInertia.clear();
 
     if (e.button === 2) {
         if (this.globe) {
@@ -338,8 +418,7 @@ if (this.globe) {
     this._globeRadPerPx = 0;     
     this._panVelX = 0;
     this._panVelZ = 0;
-    this._globeOrbitVelX = 0;
-    this._globeOrbitVelY = 0;
+    this._globeInertia.clear();
     this._globeOrbitLastMoveTime = performance.now();
     return;
 }
@@ -436,14 +515,14 @@ onMouseUp(e?: MouseEvent) {
         this._panVelZ = 0;
     }
     // ── инерция вращения глобуса: тот же критерий остановки ──
-    if (!this.panInertia || performance.now() - this._globeOrbitLastMoveTime > 100) {
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
-    }
-    // Вне диска скорости нет вообще (см. _globeOrbit): гарантированно гасим.
-    if (!this._globeLastPickedHit) {
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
+    // Скорость измеряется по окну перед отпусканием по буферу честных шагов
+    // (MapLibre-подобно, см. GlobeInertia). Положение курсора на момент
+    // отпускания не важно: длинный свайп, закончившийся вне диска, даёт инерцию
+    // по своей внутридисковой части.
+    if (this.globe && this.panInertia) {
+        this._globeInertia.start(performance.now());
+    } else {
+        this._globeInertia.clear();
     }
 
     this.syncControlsTarget();
@@ -692,8 +771,7 @@ if (this.globe) {
     this._globeLastX = t.clientX;
     this._globeLastY = t.clientY;
     this._globeRadPerPx = 0;
-    this._globeOrbitVelX = 0;
-    this._globeOrbitVelY = 0;
+    this._globeInertia.clear();
     this._globeOrbitLastMoveTime = performance.now();
     return;
 }
@@ -722,8 +800,7 @@ if (this.globe) {
         // ── останавливаем pan-инерцию ──
         this._panVelX = 0;
         this._panVelZ = 0;
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
+        this._globeInertia.clear();
 
         const t0 = e.touches[0], t1 = e.touches[1];
         const ts = this.touchState;
@@ -924,8 +1001,7 @@ if (this.globe) {
         this._globeLastY = midY - mdy;
         this._globeOrbit(mdx, mdy);
         // Жест двумя пальцами — без инерции вращения (как flat-путь).
-        this._globeOrbitVelX = 0;
-        this._globeOrbitVelY = 0;
+        this._globeInertia.clear();
     }
 
     ts.prevDist = curDist; ts.prevAngle = curAngle;
@@ -1146,10 +1222,7 @@ onTouchEnd(e: TouchEvent) {
             this._panVelZ = 0;
         }
         // ── инерция вращения глобуса ──
-        if (!this.panInertia || performance.now() - this._globeOrbitLastMoveTime > 100) {
-            this._globeOrbitVelX = 0;
-            this._globeOrbitVelY = 0;
-        }
+        if (!this.panInertia) this._globeInertia.clear();
     }
 },
 

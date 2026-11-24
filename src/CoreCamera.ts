@@ -26,6 +26,9 @@ const _globUp = new THREE.Vector3();
 const _globNorth = new THREE.Vector3();
 const _globEast = new THREE.Vector3();
 const _globGeo = { lon: 0, lat: 0, h: 0 };
+// easeTo на глобусе: temps для геодезической интерполяции цели.
+const _easeTmp = new THREE.Vector3();
+const _easeGeo = { lon: 0, lat: 0, h: 0 };
 
 export interface CoreCameraMethods {
     setAllowPitch(v: boolean): void;
@@ -50,6 +53,8 @@ setAllowRotate(v: boolean): void;
     _globeRetarget(): void;
     _globeProjectTarget(): void;
     _globeSyncStateFromCamera(): void;
+    /** easeTo на глобусе: геодезический перелёт через _globeApplyPose. */
+    _globeEaseRun(anim: any): void;
     _globeRotateAroundPivot(dxPixels: number, dyPixels: number, pivot: any): void;
     _applyGlobeZoomDistance(): void;
     setPitch(pitchDeg: number, duration?: number): void;
@@ -192,6 +197,79 @@ easeTo(options) {
 
     // 5. End state
 
+    // ── Глобус: цель живёт на эллипсоиде (ECEF-мир), поза ставится через ──
+    // ── _globeApplyPose (вертикаль — местная нормаль), а не плоским      ──
+    // ── _resolveCameraPlacement. Плоский projectLonLat здесь даёт точку   ──
+    // ── меркатор-мира (cz = −y), которая в ECEF-осях — совсем другое      ──
+    // ── место на шаре (Москва уезжала в Индийский океан).                 ──
+    if (this.globe && this.surface && this.controls) {
+        // Доживающая инерция драга не должна толкать камеру после перелёта.
+        this._globeInertia?.clear?.();
+        let tx = center ? center[0] : null;
+        let ty = center ? center[1] : null;
+        if (center && tx !== null) {
+            if (this._maxBounds) {
+                const b = this._maxBounds;
+                tx = Math.max(b.minLon, Math.min(b.maxLon, tx!));
+                ty = Math.max(b.minLat, Math.min(b.maxLat, ty!));
+            }
+            // На полюсах геодезический базис вырождается — как в _globeOrbit.
+            ty = Math.max(-89.99, Math.min(89.99, ty!));
+        }
+        // Приоритет: явный options.altitude > 3-й элемент center > 0
+        const alt = altitude !== undefined
+            ? altitude
+            : (center && center.length >= 3 && Number.isFinite(center[2]) ? center[2] : 0);
+
+        let endLon: number, endLat: number, endAlt: number;
+        if (center && tx !== null && ty !== null) {
+            // Конечная цель — точка поверхности (высота alt вдоль нормали).
+            this._globeSetTargetLonLat(tx, ty);   // ставит controls.target
+            if (alt) {
+                const p = this.surface.position(tx, ty, alt, _easeTmp);
+                if (this.worldGroup) this.worldGroup.localToWorld(p);
+                this.controls.target.copy(p);
+            }
+            endLon = tx;
+            endLat = ty;
+            endAlt = alt;
+        } else {
+            // center не задан (только zoom/pitch/bearing) — держим текущую
+            // точку обзора целиком, с её высотой.
+            const g = this._globeTargetGeo(_easeGeo);
+            endLon = Number.isFinite(g.lon) ? g.lon : 0;
+            endLat = Number.isFinite(g.lat) ? g.lat : 0;
+            endAlt = Number.isFinite(g.h) ? g.h : 0;
+        }
+
+        const endZoom = zoom ?? startZoom;
+        // Старт и финиш pitch/bearing — в пространстве состояния глобуса
+        // (с учётом гейта), а не из плоской геометрии «камера − цель».
+        const startPitchG = this._globePitchNow();
+        const startBearingG = this._globeBearingNow();
+        const endPitch = pitch !== undefined
+            ? Math.max(GLOBE_MIN_PITCH, Math.min(GLOBE_MAX_PITCH, (pitch * Math.PI) / 180))
+            : startPitchG;
+        let endBearing = (bearing !== undefined && this.allowRotate)
+            ? (bearing * Math.PI) / 180
+            : startBearingG;
+        let dB = endBearing - startBearingG;
+        while (dB >  Math.PI) dB -= 2 * Math.PI;
+        while (dB < -Math.PI) dB += 2 * Math.PI;
+        endBearing = startBearingG + dB;
+
+        const anim = {
+            globe: true,
+            startTarget,
+            endLon, endLat, endAlt,
+            startZoom, endZoom, startPitch: startPitchG, endPitch,
+            startBearing: startBearingG, endBearing,
+            startTime: performance.now(),
+            duration,
+        };
+        this._globeEaseRun(anim);
+        return;
+    }
 
 let endTarget = startTarget.clone();
 if (center) {
@@ -684,6 +762,91 @@ _globeSyncStateFromCamera(): void {
     this._globeBearing = bearing / gate;
     this._globePitchTarget = this._globePitch;
     this._globeBearingTarget = this._globeBearing;
+},
+
+/**
+ * Раннер easeTo на глобусе: цель едет геодезически (по эллипсоиду,
+ * lon/lat интерполируются), поза ставится через _globeApplyPose
+ * (вертикаль — местная нормаль). Плоский _resolveCameraPlacement здесь
+ * неприменим: он орбитит вокруг мировой Y и меркатор-координат.
+ *
+ * @param anim — { startTarget, endLon, endLat, endAlt, startZoom,
+ *     endZoom, startPitch, endPitch, startBearing, endBearing, ... }
+ */
+_globeEaseRun(anim: any): void {
+    const apply = (lon: number, lat: number, alt: number,
+                   zoom: number, pitch: number, bearing: number) => {
+        this._globeSetTargetLonLat(lon, lat);
+        if (alt) {
+            const p = this.surface.position(lon, lat, alt, _easeTmp);
+            if (this.worldGroup) this.worldGroup.localToWorld(p);
+            this.controls.target.copy(p);
+        }
+        this._globePitch = pitch;
+        this._globeBearing = bearing;
+        this._globePitchTarget = pitch;
+        this._globeBearingTarget = bearing;
+        this._globeApplyPose(this.getTargetDistanceForZoom(zoom, lat), pitch, bearing);
+        this.controls.update();
+        this.continuousZoom = zoom;
+        this.targetContinuousZoom = zoom;
+    };
+
+    // Стартовые геодезические — из ЗАПИСАННОЙ (до easeTo) цели: к этому
+    // моменту controls.target уже мог быть перезаписан конечной точкой.
+    _globTmp.copy(anim.startTarget);
+    if (this.worldGroup) this.worldGroup.worldToLocal(_globTmp);
+    const sg = this.surface.geodeticFromWorld(_globTmp, _easeGeo);
+    const startLon = Number.isFinite(sg.lon) ? sg.lon : 0;
+    const startLat = Number.isFinite(sg.lat) ? sg.lat : 0;
+    // Кратчайший путь по долготе (через антимеридиан — без полного оборота).
+    let dLon = anim.endLon - startLon;
+    while (dLon > 180) dLon -= 360;
+    while (dLon < -180) dLon += 360;
+
+    if (!(anim.duration > 0)) {
+        apply(anim.endLon, anim.endLat, anim.endAlt,
+              anim.endZoom, anim.endPitch, anim.endBearing);
+        this.maybeUpdateVisibleTiles(true);
+        return;
+    }
+
+    this._cameraAnimation = anim;
+    this._controlsDampingWasEnabled = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+    // До первого кадра RAF камера/цель должны оставаться в стартовом
+    // состоянии: цель easeTo уже перезаписал конечной точкой.
+    apply(startLon, startLat, Number.isFinite(sg.h) ? sg.h : 0,
+          anim.startZoom, anim.startPitch, anim.startBearing);
+
+    const animateStep = (now: number) => {
+        if (this._disposed || this._cameraAnimation !== anim) return;
+        let t = (now - anim.startTime) / (anim.duration * 1000);
+        t = Math.min(t, 1);
+        const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+        apply(
+            startLon + dLon * eased,
+            startLat + (anim.endLat - startLat) * eased,
+            anim.endAlt,
+            anim.startZoom + (anim.endZoom - anim.startZoom) * eased,
+            anim.startPitch + (anim.endPitch - anim.startPitch) * eased,
+            anim.startBearing + (anim.endBearing - anim.startBearing) * eased,
+        );
+        this.maybeUpdateVisibleTiles();
+
+        if (t >= 1) {
+            if (this._cameraAnimation === anim) this._cameraAnimation = null;
+            this.controls.enableDamping = this._controlsDampingWasEnabled;
+            // финальная точная установка
+            apply(anim.endLon, anim.endLat, anim.endAlt,
+                  anim.endZoom, anim.endPitch, anim.endBearing);
+            this.maybeUpdateVisibleTiles(true);
+            return;
+        }
+        this._cameraAnimFrame = requestAnimationFrame(animateStep);
+    };
+    this._cameraAnimFrame = requestAnimationFrame(animateStep);
 },
 
 /**

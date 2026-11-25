@@ -8,6 +8,7 @@ import {
     POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE,
     crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial,
     triangulatePolygonCDT, triangulatePolygonEarcut,
+    azimuthalEquidistant, inverseAzimuthalEquidistant, sphericalCentroidLonLat,
     centralAngle, interpolateSurface,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
@@ -51,7 +52,7 @@ export interface PolygonGeometry {
     _hasAntimeridianWrap(): boolean;
     _isGeometryInvalid(ringStartIndices: number[], worldSize: number): boolean;
     _triangulateFromRings(): number[];
-    _subdivideGlobeTriangles(indices: number[], lonLats: Array<[number, number] | null>, contourCount: number, holeIndices: number[], maxStepRad: number): number[];
+    _subdivideGlobeTriangles(indices: number[], lonLats: Array<[number, number] | null>, contourCount: number, holeIndices: number[], maxStepRad: number, planeCenter?: [number, number] | null): number[];
     _buildFillGeometry(map: any): void;
     _buildBottomAndSides(points2D: any[], topUVs: Float32Array, bottomIndices: number[], patternScale: number): void;
     _buildStrokeGeometry(map: any): void;
@@ -73,6 +74,7 @@ export const PolygonGeometryMixin = {
         contourCount: number,
         holeIndices: number[],
         maxStepRad: number,
+        planeCenter: [number, number] | null = null,
     ): number[] {
         if (!indices.length || !(maxStepRad > 0)) return indices;
 
@@ -99,18 +101,34 @@ export const PolygonGeometryMixin = {
             if (cached != null) return cached;
             const la = outLonLat[lo], lb = outLonLat[hi];
             if (!la || !lb) return lo;
-            // Earcut's parent triangle lives in the source lon/lat plane.
-            // Take the exact arithmetic midpoint there (shortest wrapped lon
-            // only for dateline-adjacent endpoints), then project that point
-            // onto the ellipsoid. This keeps every child inside its source
-            // triangle instead of letting a great-circle midpoint bow outside.
-            let deltaLon = lb[0] - la[0];
-            if (deltaLon > 180) deltaLon -= 360;
-            else if (deltaLon < -180) deltaLon += 360;
-            let lon = la[0] + deltaLon * 0.5;
+            let lon: number, lat: number;
+            if (planeCenter) {
+                // Polar/wrapping ring: earcut's parent triangle lives in the
+                // azimuthal plane. Take the midpoint there and invert back to
+                // lon/lat, so the child stays inside its parent triangle and
+                // never crosses the antimeridian seam.
+                const pa = azimuthalEquidistant(la[0], la[1], planeCenter[0], planeCenter[1]);
+                const pb = azimuthalEquidistant(lb[0], lb[1], planeCenter[0], planeCenter[1]);
+                const ll = inverseAzimuthalEquidistant(
+                    (pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5,
+                    planeCenter[0], planeCenter[1],
+                );
+                lon = ll[0];
+                lat = ll[1];
+            } else {
+                // Earcut's parent triangle lives in the source lon/lat plane.
+                // Take the exact arithmetic midpoint there (shortest wrapped lon
+                // only for dateline-adjacent endpoints), then project that point
+                // onto the ellipsoid. This keeps every child inside its source
+                // triangle instead of letting a great-circle midpoint bow outside.
+                let deltaLon = lb[0] - la[0];
+                if (deltaLon > 180) deltaLon -= 360;
+                else if (deltaLon < -180) deltaLon += 360;
+                lon = la[0] + deltaLon * 0.5;
+                lat = (la[1] + lb[1]) * 0.5;
+            }
             while (lon > 180) lon -= 360;
             while (lon < -180) lon += 360;
-            const lat = (la[1] + lb[1]) * 0.5;
             const idx = outLonLat.length;
             outLonLat.push([lon, lat]);
             const height = ((outCachedHeights[lo] ?? 0) + (outCachedHeights[hi] ?? 0)) * 0.5;
@@ -497,16 +515,34 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         if (coords.length < 6) return [];
 
         const contourCount = Math.min(this._contourVertexCount || wc.length, wc.length);
-        const useEarcut = (this as any)._map?.globe === true || this._isPolarOrWrapping();
+        const isGlobeMap = (this as any)._map?.globe === true;
+        const useEarcut = isGlobeMap || this._isPolarOrWrapping();
+
+        // Полярные/разорванные кольца — азимутальная проекция (см. _buildFillGeometry).
+        let planeCenter: [number, number] | null = null;
+        let planeCoords = coords;
+        if (isGlobeMap && this._isPolarOrWrapping()) {
+            planeCenter = sphericalCentroidLonLat(
+                this._vertexLonLat.slice(0, contourCount).filter((p): p is [number, number] => !!p),
+            );
+            planeCoords = [];
+            for (let i = 0; i < coords.length; i += 2) {
+                const [px, py] = azimuthalEquidistant(
+                    coords[i], coords[i + 1], planeCenter[0], planeCenter[1],
+                );
+                planeCoords.push(px, py);
+            }
+        }
+
         let indices = useEarcut
-            ? triangulatePolygonEarcut(coords, holeIndices)
+            ? triangulatePolygonEarcut(planeCoords, holeIndices)
             : triangulatePolygonCDT(coords, holeIndices, contourCount);
-        if ((this as any)._map?.globe === true) indices = filterNearDegenerateTriangles(coords, indices);
+        if (isGlobeMap) indices = filterNearDegenerateTriangles(planeCoords, indices);
         if (!indices.length) return [];
 
-        if ((this as any)._map?.globe === true) {
+        if (isGlobeMap) {
             indices = this._subdivideGlobeTriangles(
-                indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180,
+                indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180, planeCenter,
             );
         }
 
@@ -627,9 +663,28 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         // Антарктида): CDT там может вернуть пусто. Тогда пробуем мировые (x,z).
         let indices: number[];
         if (useEarcut) {
-            indices = triangulatePolygonEarcut(triCoords, holeIndices);
+            // Полярные/разорванные кольца: lon/lat-развёртка разрывна (скачок ±180°,
+            // полюс внутри контура). Триангулируем в азимутальной равнодистантной
+            // проекции с центром в сферическом центроиде кольца — она непрерывна
+            // через антимеридиан и полюс.
+            const usePolarPlane = isGlobe && this._isPolarOrWrapping();
+            let planeCoords = triCoords;
+            let planeCenter: [number, number] | null = null;
+            if (usePolarPlane) {
+                planeCenter = sphericalCentroidLonLat(
+                    this._vertexLonLat.slice(0, contourCount).filter((p): p is [number, number] => !!p),
+                );
+                planeCoords = [];
+                for (let i = 0; i < triCoords.length; i += 2) {
+                    const [px, py] = azimuthalEquidistant(
+                        triCoords[i], triCoords[i + 1], planeCenter[0], planeCenter[1],
+                    );
+                    planeCoords.push(px, py);
+                }
+            }
+            indices = triangulatePolygonEarcut(planeCoords, holeIndices);
             if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
-            if (isGlobe) indices = filterNearDegenerateTriangles(triCoords, indices);
+            if (isGlobe) indices = filterNearDegenerateTriangles(planeCoords, indices);
             // После earcut разбиваем крупные globe-треугольники по поверхности;
             // 2° — компромисс между кривизной и количеством вершин.
             if (indices.length && isGlobe) {
@@ -639,6 +694,7 @@ _hasAntimeridianWrap(this: Polygon): boolean {
                     contourCount,
                     holeIndices,
                     2 * Math.PI / 180,
+                    planeCenter,
                 );
                 // arrays may have grown; regenerate points2D from updated world coords
                 points2D.length = 0;

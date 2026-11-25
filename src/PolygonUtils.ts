@@ -359,6 +359,64 @@ export function triangulatePolygonEarcut(coords: number[], holeIndices: number[]
     return earcut(coords, holeIndices, 2);
 }
 
+/**
+ * Азимутальная равнодистантная проекция (lon/lat → локальная плоскость)
+ * с центром в (centerLon, centerLat). Непрерывна через антимеридиан и
+ * полюс — в отличие от развёртки lon/lat, где кольцо, охватывающее полюс
+ * (Антарктида), разрывается скачком ±180° и earcut соединяет далёкие вершины.
+ * Возвращает [x, y] в радианах относительно центра.
+ */
+export function azimuthalEquidistant(
+    lon: number, lat: number, centerLon: number, centerLat: number,
+): [number, number] {
+    const toRad = Math.PI / 180;
+    const φ = lat * toRad, φ0 = centerLat * toRad;
+    const Δλ = (lon - centerLon) * toRad;
+    const cosC = Math.sin(φ0) * Math.sin(φ) + Math.cos(φ0) * Math.cos(φ) * Math.cos(Δλ);
+    const c = Math.acos(Math.max(-1, Math.min(1, cosC)));
+    if (c < 1e-12) return [0, 0];
+    const k = c / Math.sin(c);
+    const x = k * Math.cos(φ) * Math.sin(Δλ);
+    const y = k * (Math.cos(φ0) * Math.sin(φ) - Math.sin(φ0) * Math.cos(φ) * Math.cos(Δλ));
+    return [x, y];
+}
+
+/** Обратная к azimuthalEquidistant: плоские (x, y) → [lon, lat] в градусах. */
+export function inverseAzimuthalEquidistant(
+    x: number, y: number, centerLon: number, centerLat: number,
+): [number, number] {
+    const toRad = Math.PI / 180;
+    const φ0 = centerLat * toRad, λ0 = centerLon * toRad;
+    const c = Math.hypot(x, y);
+    if (c < 1e-12) return [centerLon, centerLat];
+    const sinC = Math.sin(c), cosC = Math.cos(c);
+    const φ = Math.asin(Math.max(-1, Math.min(1, cosC * Math.sin(φ0) + (y * sinC * Math.cos(φ0)) / c)));
+    const λ = λ0 + Math.atan2(x * sinC, c * Math.cos(φ0) * cosC - y * Math.sin(φ0) * sinC);
+    let lon = λ / toRad;
+    while (lon > 180) lon -= 360;
+    while (lon < -180) lon += 360;
+    return [lon, φ / toRad];
+}
+
+/**
+ * Центр локальной проекции для кольца: средняя точка единичных векторов
+ * вершин (сферический центроид). Для полярного кольца это почти полюс,
+ * для Антарктиды — ожидаемая точка «внутри» шапки.
+ */
+export function sphericalCentroidLonLat(lonLats: Array<[number, number]>): [number, number] {
+    const toRad = Math.PI / 180;
+    let x = 0, y = 0, z = 0;
+    for (const [lo, la] of lonLats) {
+        const φ = la * toRad, λ = lo * toRad;
+        x += Math.cos(φ) * Math.cos(λ);
+        y += Math.cos(φ) * Math.sin(λ);
+        z += Math.sin(φ);
+    }
+    const lat = Math.atan2(z, Math.sqrt(x * x + y * y)) / toRad;
+    const lon = Math.atan2(y, x) / toRad;
+    return [lon, lat];
+}
+
 export function triangulatePolygonCDT(
     coords: number[], holeIndices: number[], contourCount: number,
 ): number[] {

@@ -3,7 +3,7 @@
  */
 import { THREE } from './js_TP/tpb.js';
 import { simplifyRingIndices } from './Simplify.js';
-import { crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat, interpolateSurface, centralAngle, } from './PolygonUtils.js';
+import { crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat, interpolateSurface, centralAngle, azimuthalEquidistant, sphericalCentroidLonLat, } from './PolygonUtils.js';
 /**
  * Допуск упрощения контура в пикселях экрана. Один на всю карту: уровень
  * детализации зависит только от зума, поэтому соседние полигоны стыкуются.
@@ -315,11 +315,25 @@ export const PolygonLODMixin = {
         }
         let indices;
         if (useEarcut) {
-            indices = triangulatePolygonEarcut(triCoords, holeIndices);
+            // Полярные/разорванные кольца — та же азимутальная проекция, что и в
+            // _buildFillGeometry (lon/lat-развёртка разрывна у антимеридиана/полюса).
+            const isGlobeMap = this._map?.globe === true;
+            const usePolarPlane = isGlobeMap && this._isPolarOrWrapping();
+            let planeCoords = triCoords;
+            let planeCenter = null;
+            if (usePolarPlane) {
+                planeCenter = sphericalCentroidLonLat(this._vertexLonLat.slice(0, contourCount).filter((p) => !!p));
+                planeCoords = [];
+                for (let i = 0; i < triCoords.length; i += 2) {
+                    const [px, py] = azimuthalEquidistant(triCoords[i], triCoords[i + 1], planeCenter[0], planeCenter[1]);
+                    planeCoords.push(px, py);
+                }
+            }
+            indices = triangulatePolygonEarcut(planeCoords, holeIndices);
             if (indices.length === 0)
                 indices = triangulatePolygonEarcut(coords, holeIndices);
-            if (indices.length && this._map?.globe === true) {
-                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180);
+            if (indices.length && isGlobeMap) {
+                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180, planeCenter);
                 coords.length = 0;
                 for (const [x, z] of this._worldCoords)
                     coords.push(x - this._centroidWorld.x, z - this._centroidWorld.z);

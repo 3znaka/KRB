@@ -7,6 +7,7 @@ import {
     type RenderRing, type PolygonRing,
     crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat,
     interpolateSurface, centralAngle,
+    azimuthalEquidistant, sphericalCentroidLonLat,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
 
@@ -349,15 +350,34 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
 
         let indices: number[];
         if (useEarcut) {
-            indices = triangulatePolygonEarcut(triCoords, holeIndices);
+            // Полярные/разорванные кольца — та же азимутальная проекция, что и в
+            // _buildFillGeometry (lon/lat-развёртка разрывна у антимеридиана/полюса).
+            const isGlobeMap = (this as any)._map?.globe === true;
+            const usePolarPlane = isGlobeMap && this._isPolarOrWrapping();
+            let planeCoords = triCoords;
+            let planeCenter: [number, number] | null = null;
+            if (usePolarPlane) {
+                planeCenter = sphericalCentroidLonLat(
+                    this._vertexLonLat.slice(0, contourCount).filter((p): p is [number, number] => !!p),
+                );
+                planeCoords = [];
+                for (let i = 0; i < triCoords.length; i += 2) {
+                    const [px, py] = azimuthalEquidistant(
+                        triCoords[i], triCoords[i + 1], planeCenter[0], planeCenter[1],
+                    );
+                    planeCoords.push(px, py);
+                }
+            }
+            indices = triangulatePolygonEarcut(planeCoords, holeIndices);
             if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
-            if (indices.length && (this as any)._map?.globe === true) {
+            if (indices.length && isGlobeMap) {
                 indices = this._subdivideGlobeTriangles(
                     indices,
                     this._vertexLonLat,
                     contourCount,
                     holeIndices,
                     2 * Math.PI / 180,
+                    planeCenter,
                 );
                 coords.length = 0;
                 for (const [x, z] of this._worldCoords) coords.push(x - this._centroidWorld.x, z - this._centroidWorld.z);

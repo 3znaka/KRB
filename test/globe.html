@@ -21,23 +21,19 @@ import * as KRB from '../js/KRB.js';
 
 await KRB.crs.add('EPSG:32637');
 
-const tiles =  new KRB.Tile({
+
+const map = new KRB.Map({
+    target: 'map',
+globe: true,
+    layers: [
+        new KRB.Tile({
             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
             attributionTitle: '2GIS',
             attributionUrl: 'https://2gis.ru/',
           //  elevation: 'demo',
             maxZoom: 18
-        });
-
-
-
-const map = new KRB.Map({
-    target: 'map',
- globe: true,
-    layers: [
-     tiles,
+        })
     ],
-graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 } ,
     view: new KRB.View({
        centerLonLat: [37.6178, 55.7558],
         zoom: 8,
@@ -45,8 +41,6 @@ graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 } ,
     }),
     debug:true,
 });
-
-     //   tiles.addTo(map);
 
 new KRB.Marker({
     position: [37.6178, 55.7558],
@@ -60,134 +54,15 @@ new KRB.Marker({
 
   const world = new KRB.GeoJSONLayer({
         url: 'world.geojson',
-     //  extendAntarctica: true,
+        //extendAntarctica: true,
+        defaultFillColor:   '#aa0101',
+      
         defaultStrokeColor: '#000000',
         defaultStrokeWidth: 0.3,
     }).addTo(map);
 
 
 window.map = map; 
-
-// ───────── отладка подписей сетки ─────────
-// Вызов из консоли: graticuleDebug()   (или нажмите клавишу D на странице)
-function getGraticule() {
-    return map._dynamicLayers?.find(l => l.constructor?.name === 'Graticule') ?? null;
-}
-
-function fmt(p) {
-    return p ? `(${p[0].toFixed(0)}, ${p[1].toFixed(0)}, ${p[2].toFixed(0)})` : 'null';
-}
-
-window.graticuleDebug = function () {
-    const gr = getGraticule();
-    if (!gr) { console.warn('[grat] Graticule не найдена в map._dynamicLayers'); return; }
-
-    const cam = map.camera;
-    const wg = map.worldGroup;
-    console.groupCollapsed('[grat] состояние сетки');
-
-    // 1) камера и глобус
-    console.log('camera pos      :', cam.position.x.toFixed(0), cam.position.y.toFixed(0), cam.position.z.toFixed(0));
-    console.log('camera near/far :', cam.near, cam.far);
-    console.log('globe           :', map.globe, '| surface:', map.surface?.constructor?.name);
-    console.log('worldGroup pos  :', wg.position.x.toFixed(0), wg.position.y.toFixed(0), wg.position.z.toFixed(0));
-    console.log('isGlobe (grat)  :', gr._isGlobe?.());
-
-    // 2) меридианы и параллели: концы и видимость
-    const infos = gr._lineInfos || [];
-    const meridians = infos.filter(i => i.kind === 'meridian');
-    const parallels = infos.filter(i => i.kind === 'parallel');
-    console.log(`линий: всего ${infos.length}, меридианов ${meridians.length}, параллелей ${parallels.length}`);
-
-    const sample = (list, label) => {
-        console.group(`[grat] ${label} (первые 5 из ${list.length})`);
-        for (const info of list.slice(0, 5)) {
-            const pts = info.points3D || [];
-            const first = pts[0];
-            const last = pts[pts.length - 1];
-            const occFirst = gr._isPointOccluded ? gr._isPointOccluded(first) : 'n/a';
-            const occLast = gr._isPointOccluded ? gr._isPointOccluded(last) : 'n/a';
-            console.log(
-                `${info.stableId} n=${pts.length}`,
-                '| first', fmt(first), 'occluded=', occFirst,
-                '| last', fmt(last), 'occluded=', occLast,
-                '| labels:', (info.labels || []).map(l =>
-                    `${l.side}:${l.visibleOnScreen ? 'on' : 'off'}` +
-                    (l.screenPos ? `@(${l.screenPos.x.toFixed(0)},${l.screenPos.y.toFixed(0)})` : '')
-                ).join(' ')
-            );
-        }
-        console.groupEnd();
-    };
-    sample(meridians, 'меридианы');
-    sample(parallels, 'параллели');
-
-    // 2b) плоская ветка меридианов: есть ли у меридиана видимый сегмент на экране
-    const W = map.renderer.domElement.clientWidth;
-    const H = map.renderer.domElement.clientHeight;
-    const mv = gr._mvMatrix.multiplyMatrices(cam.matrixWorldInverse, wg.matrixWorld);
-    const pm = cam.projectionMatrix;
-    const nearZ = -Math.max(1e-4, cam.near || 0.1);
-    console.groupCollapsed('[grat] меридианы: видимые сегменты на экране (плоская ветка)');
-    for (const info of meridians.slice(0, 5)) {
-        const pts = info.points3D || [];
-        let visibleSegs = 0;
-        const vs = pts.map(p => gr._tmpVec.set(p[0], p[1], p[2]).applyMatrix4(mv).clone());
-        for (let i = 0; i < vs.length - 1; i++) {
-            const hit = gr._getClippedSegmentScreenIntersection(
-                vs[i].x, vs[i].y, vs[i].z, vs[i + 1].x, vs[i + 1].y, vs[i + 1].z,
-                W, H, nearZ, pm);
-            if (hit) visibleSegs++;
-        }
-        const inScreen = vs.filter(v => {
-            const p = gr._projectPointToScreen(v.x, v.y, v.z, pm, W, H, nearZ);
-            return !!p;
-        }).length;
-        console.log(`${info.stableId}: сегментов с пересечением экрана=${visibleSegs}, точек на экране=${inScreen}/${vs.length}`);
-    }
-    console.groupEnd();
-
-    // 2c) согласованность двух проверок видимости на одной точке (середина меридиана -180)
-    const mid = infos.find(i => i.stableId === 'grid:m:-180');
-    if (mid) {
-        const p = mid.points3D[16];
-        const occ = gr._isPointOccluded(p);
-        const wgPt = gr._tmpVec.set(p[0], p[1], p[2]).clone().applyMatrix4(wg.matrixWorld);
-        const isOccFromMap = map.isWorldPointOccluded(wgPt);
-        const vs = gr._tmpVec.set(p[0], p[1], p[2]).applyMatrix4(mv);
-        const scr = gr._projectPointToScreen(vs.x, vs.y, vs.z, pm, W, H, nearZ);
-        console.log(`[grat] точка 16 меридиана -180: _isPointOccluded=${occ}, map.isWorldPointOccluded=${isOccFromMap}, на экране=${scr ? `(${scr.x.toFixed(0)},${scr.y.toFixed(0)})` : 'нет'}`);
-    }
-
-    // 3) сводка: сколько подписей видно и сколько скрыто горизонтом
-    let shown = 0, hidden = 0, occludedCount = 0;
-    for (const info of infos) {
-        for (const l of info.labels || []) {
-            if (l.visibleOnScreen) shown++; else hidden++;
-        }
-    }
-    console.log(`подписи: видимых ${shown}, скрытых ${hidden}`);
-
-    // 4) сколько точек сетки за горизонтом (по всем линиям)
-    let ptsTotal = 0, ptsOcc = 0;
-    for (const info of infos) {
-        for (const p of info.points3D || []) {
-            ptsTotal++;
-            if (gr._isPointOccluded && gr._isPointOccluded(p)) ptsOcc++;
-        }
-    }
-    console.log(`точек сетки: всего ${ptsTotal}, за горизонтом ${ptsOcc}`);
-
-    console.groupEnd();
-    return { meridians: meridians.length, parallels: parallels.length, shown, hidden };
-};
-
-// горячая клавиша D — снять состояние при текущей камере
-window.addEventListener('keydown', (e) => {
-    if (e.key === 'd' || e.key === 'D') window.graticuleDebug();
-});
-
-console.log('[grat] готово: вызови graticuleDebug() или нажми D');
 
 </script>
 </body>

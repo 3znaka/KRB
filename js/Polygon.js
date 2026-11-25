@@ -759,7 +759,13 @@ export class Polygon extends SpatialObject {
     // =================================================================
     // Style setters
     // =================================================================
-    setFillColor(color) {
+    /**
+     * @param skipBatchRebuild — не помечать батч «грязным». Нужно, когда цвет
+     *   меняется на множестве полигонов сразу (картограмма): батч перекрасит
+     *   вершинные цвета сам через `PolygonBatcher.recolorAll()`, и пересборка
+     *   геометрии (триангуляция) не требуется.
+     */
+    setFillColor(color, skipBatchRebuild = false) {
         this._fillColor = color;
         if (this._fillMaterial?.color)
             this._fillMaterial.color.set(color);
@@ -767,7 +773,8 @@ export class Polygon extends SpatialObject {
             this._bottomMaterial.color.set(color);
         if (this._sideMaterial?.color)
             this._sideMaterial.color.set(color);
-        this._invalidateBatch();
+        if (!skipBatchRebuild)
+            this._invalidateBatch();
         return this;
     }
     getFillColor() { return this._fillColor; }

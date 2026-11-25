@@ -608,6 +608,98 @@ export const PolygonUpdateMixin = {
         this._visualCenterCache = vc;
         return this._visualCenterCache;
     },
+    /**
+     * Контур полигона в экранных координатах (CSS-пиксели), по одному массиву
+     * на кольцо. Нужен TextManager, чтобы не показывать подпись, которая не
+     * помещается внутрь полигона.
+     *
+     * На глобусе полигон может уходить за горизонт: вершины, которые не
+     * проецируются на экран, пропускаются, поэтому контур описывает именно
+     * видимую часть.
+     *
+     * @returns `null`, если полигон не привязан к карте или камера недоступна.
+     */
+    getScreenPolygonRings(maxPointsPerRing = 32) {
+        const map = this._map;
+        if (!map || !this._worldCoords.length)
+            return null;
+        const wgPos = map.worldGroup.position;
+        const canvas = map.renderer?.domElement;
+        if (!canvas)
+            return null;
+        const W = canvas.clientWidth, H = canvas.clientHeight;
+        if (!(W > 0) || !(H > 0))
+            return null;
+        const v = map.getVec3?.() ?? new THREE.Vector3();
+        const altitude = this._altitude;
+        // `_worldCoords` может после контурных вершин содержать Steiner-точки
+        // для триангуляции. Для теста вписанности нужна только граница.
+        const contourCount = Math.min(this._contourVertexCount || this._worldCoords.length, this._worldCoords.length);
+        const ringStarts = (this._ringStartIndices ?? []).filter((s) => s < contourCount);
+        if (!ringStarts.length)
+            return null;
+        const out = [];
+        for (let r = 0; r < ringStarts.length; r++) {
+            const start = ringStarts[r];
+            const end = (r + 1 < ringStarts.length) ? ringStarts[r + 1] : contourCount;
+            const ring = [];
+            let allVisible = true;
+            const vertexCount = end - start;
+            if (vertexCount < 3)
+                continue;
+            // Равномерно семплируем контур: проверка подписи не нуждается в
+            // каждом из тысяч денсифицированных узлов. Сетка сохраняет общую
+            // форму и остаётся достаточно точной для размещения текста.
+            const sampleCount = Math.min(vertexCount, Math.max(8, maxPointsPerRing | 0));
+            for (let sample = 0; sample < sampleCount; sample++) {
+                const i = start + Math.floor(sample * vertexCount / sampleCount);
+                const wc = this._worldCoords[i];
+                const y = (this._cachedHeights[i] ?? 0) + altitude;
+                // На глобусе `_worldCoords` — только плоские координаты для
+                // LOD/UV. Видимая геометрия строится по `_vertexLonLat` на
+                // эллипсоиде; проектируем эти же lon/lat, иначе проверка
+                // вписанности сравнивает подпись с другим (плоским) контуром.
+                let worldPoint = null;
+                if (map.globe && map.surface && this._vertexLonLat?.[i]
+                    && typeof map.projectSurfaceVertex === 'function') {
+                    worldPoint = map.projectSurfaceVertex(this._vertexLonLat[i], 'EPSG:4326', y, null, v);
+                    if (worldPoint && worldPoint !== v)
+                        v.copy(worldPoint);
+                    // projectSurfaceVertex возвращает мировую координату,
+                    // уже включающую worldGroup transform. Не прибавляем wgPos.
+                }
+                else {
+                    v.set(wc[0] + wgPos.x, y + wgPos.y, wc[1] + wgPos.z);
+                    worldPoint = v;
+                }
+                if (!worldPoint) {
+                    allVisible = false;
+                    continue;
+                }
+                // Проверяем и горизонт глобуса: не соединяем видимые точки
+                // через невидимый участок контура на обратной стороне Земли.
+                if (map.globe && typeof map.isWorldPointOccluded === 'function'
+                    && map.isWorldPointOccluded(v)) {
+                    allVisible = false;
+                    continue;
+                }
+                v.project(map.camera);
+                if (!(v.z > -1 && v.z < 1)) {
+                    allVisible = false;
+                    continue;
+                }
+                ring.push({
+                    x: (v.x * 0.5 + 0.5) * W,
+                    y: (-v.y * 0.5 + 0.5) * H,
+                });
+            }
+            if (!allVisible)
+                return null;
+            if (ring.length >= 3)
+                out.push(ring);
+        }
+        return out.length ? out : null;
+    },
     getScreenBBox() {
         const map = this._map;
         if (!map || !this._worldCoords.length)

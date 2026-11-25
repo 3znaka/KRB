@@ -323,10 +323,17 @@ export function evaluateValueExpression(props, exprOrFn) {
 export function getTitle(titleField, props) {
     if (titleField) {
         const v = props[titleField];
-        if (v != null && v !== '')
-            return String(v);
+        if (v != null && v !== '') {
+            // В `titleField` можно передать шаблон ('{name}, {year}') — тогда
+            // подставляем значения из props. Без шаблона поведение прежнее.
+            const s = String(v);
+            return s.includes('{') ? interpolate(s, props) : s;
+        }
     }
-    return props.title || props.name || '';
+    const fallback = props.title || props.name || '';
+    return typeof fallback === 'string' && fallback.includes('{')
+        ? interpolate(fallback, props)
+        : fallback;
 }
 export function getTooltip(tooltip, tooltipField, props) {
     if (typeof tooltip === 'function') {

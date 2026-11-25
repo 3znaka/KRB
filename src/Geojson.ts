@@ -12,8 +12,8 @@ import type { Diagram } from './Diagram.js';
 import type { Diagram3D, Diagram3DSpawnOptions } from './Diagram3D.js';
 import { getAutoCoins, resolveDiagramUnitPx, MIN_COIN_DIAMETER_PX } from './DiagramTypes.js';
 import type { Diagram3DData } from './Diagram3DTypes.js';
-import { calculateBreaks, makeBreaksPretty } from './Classification.js';
-import { resolveColorRamp, invertColorRamp } from './ColorRamps.js';
+import { calculateBreaks, makeBreaksPretty, getClassIndex } from './Classification.js';
+import { resolveColorRamp, invertColorRamp, sampleColorRamp } from './ColorRamps.js';
 import {
     buildDiagramLegend, buildChoroplethLegend, buildDiagram3DLegend,
     type MapLegend, type LegendOptions, type LegendContext,
@@ -285,6 +285,115 @@ reload(): void {
         if (this._map) this.reload(); else this._loaded = false;
         return this;
     }
+
+    /**
+     * Обновляет данные **без пересоздания геометрии**.
+     *
+     * Полезно, когда набор объектов не меняется, а меняются только значения
+     * (например, картограмма по нескольким показателям на одной геометрии).
+     * В отличие от {@link setData}, не пересоздаёт полигоны/линии и не гоняет
+     * триангуляцию заново — на больших наборах это разница в секунды.
+     *
+     * Фича сопоставляется с объектом по значению `matchField` (по умолчанию
+     * `name`). Если хотя бы одну фичу не удалось сопоставить или количество
+     * объектов не совпало — выполняется обычная перезагрузка (`reload()`),
+     * чтобы результат всегда был корректным.
+     *
+     * @param data      новый GeoJSON
+     * @param options.matchField поле, по которому сопоставляются фичи и объекты
+     * @returns `true`, если удалось обновить «на месте»; `false` — если была
+     *          выполнена полная перезагрузка
+     */
+    updateData(
+        data: GeoJSONInput,
+        options: { matchField?: string } = {},
+    ): boolean {
+        const matchField = options.matchField ?? 'name';
+        this.data = data;
+        if (!this._map || !this._loaded) {
+            if (this._map) this.reload(); else this._loaded = false;
+            return false;
+        }
+
+        const features = data.type === 'FeatureCollection'
+            ? data.features
+            : (data.type === 'Feature' ? [data as GeoJSONFeature] : []);
+
+        // Только объекты, созданные из фич с этим полем (полигоны/линии/точки).
+        const objects = (this as any)._objects as any[];
+        if (!objects || objects.length !== features.length) {
+            this.reload();
+            return false;
+        }
+
+        const byKey = new Map<string, any>();
+        for (const obj of objects) {
+            const props = typeof obj.getProperties === 'function' ? obj.getProperties() : null;
+            const key = props?.[matchField];
+            if (key == null) { this.reload(); return false; }
+            byKey.set(String(key), obj);
+        }
+
+        // Сначала сверяем сопоставимость, чтобы не оставить слой полуобновлённым.
+        for (const feature of features) {
+            const key = feature.properties?.[matchField];
+            if (key == null || !byKey.has(String(key))) {
+                this.reload();
+                return false;
+            }
+        }
+
+        // Пересчёт классов картограммы делаем до обновления цветов.
+        if (this.choropleth) {
+            const baseRamp = resolveColorRamp(this.choropleth.colorRamp);
+            this._choroplethRamp = this.choropleth.colorRampReverse
+                ? invertColorRamp(baseRamp)
+                : baseRamp;
+            this._calculateChoroplethBreaks(data);
+        }
+
+        for (const feature of features) {
+            const obj = byKey.get(String(feature.properties![matchField]));
+            const props = feature.properties ?? {};
+
+            if (typeof obj.setProperties === 'function') obj.setProperties(props);
+
+            // Перекраска: заливка картограммы / обновлённые title из props.
+            if (this.choropleth && this._choroplethRamp
+                && typeof obj.setFillColor === 'function') {
+                // Второй аргумент: не пересобирать батч — цвета обновит
+                // recolorAll() ниже, без триангуляции.
+                obj.setFillColor(this._choroplethColorOf(props), true);
+            }
+            if (typeof obj.setTitle === 'function') {
+                obj.setTitle(this._getTitle(props));
+            }
+        }
+
+        this._buildLegend(data);
+
+        // Перекраска батча — только цвета (без пересборки геометрии).
+        // Если батчер ещё не строил батчи, recolor() вернёт false — тогда
+        // это первый проход, и ничего делать не нужно.
+        const batcher = (this as any)._polygonBatcher;
+        if (batcher && typeof batcher.recolorAll === 'function') {
+            batcher.recolorAll();
+        }
+        return true;
+    }
+
+    /** Цвет класса картограммы для набора свойств (или «нет данных»). */
+    _choroplethColorOf(props: Props): string {
+        const cfg = this.choropleth;
+        if (!cfg) return this.defaultFillColor as string;
+        const val = this._evaluateValueExpression(props, cfg.value);
+        if (!isFinite(val)) return cfg.noDataColor ?? '#cccccc';
+        const idx = getClassIndex(val, this._choroplethBreaks);
+        const denom = Math.max(1, this._choroplethBreaks.length - 2);
+        const rgba = sampleColorRamp(this._choroplethRamp, idx / denom);
+        return `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
+    }
+
     setUrl(url: string | null): this {
         this.url = url;
         if (this._map) this.reload(); else this._loaded = false;

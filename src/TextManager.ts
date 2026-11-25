@@ -140,6 +140,9 @@ _iconAnchorY: number | null;
      * (например, при переборе variableAnchor-ов).
      */
     screenPos?: LabelScreenPoint | null;
+    /** Кэш грубого экранного контура полигона на время одного layout-прохода. */
+    _fitRings?: LabelScreenPoint[][] | null;
+    _fitRingsFrame?: number;
 }
 
 export interface PruneStaleOptions {
@@ -227,6 +230,8 @@ export class TextManager {
     _measureQueue: Label[] = [];
     _measureScheduled = false;
     _dirty = true;
+    /** Уникальный id прохода размещения подписей. */
+    _layoutPassId = 0;
 
     _stableFrameCount = 0;
     _wasStable = false;
@@ -1052,6 +1057,75 @@ if (!anchorOverride
         return corners;
     }
 
+    /**
+     * Помещается ли подпись полигона целиком в его видимую часть.
+     *
+     * Проверяются центр плашки и середины её сторон: подпись видна, если они
+     * все лежат внутри экранного контура полигона. Углы не проверяются
+     * намеренно — из-за скруглений и трекинга реальная плашка чуть шире
+     * расчётной рамки, и требование «все 4 угла» прятало почти все подписи.
+     * Если и центр, и середины сторон внутри — подпись визуально «лежит»
+     * на своём регионе.
+     *
+     * Отключается флагом `titleAllowOverflow: true` у полигона.
+     * Для не-полигональных подписей (точки, линии) всегда `true`.
+     */
+    _fitsInsidePolygon(label: Label, corners: LabelScreenPoint[]): boolean {
+        const src = label.source as any;
+        if (typeof src.getLabelType !== 'function' || src.getLabelType() !== 'polygon') return true;
+        // Явный обход: пользователь разрешил подписям выходить за пределы.
+        if (label.allowOverflow) return true;
+        if (typeof src.getScreenPolygonRings !== 'function') return true;
+
+        let rings: LabelScreenPoint[][] | null = null;
+        // Контур грубо семплируется (24 точки на кольцо), но обновляется
+        // в каждом layout-проходе: видимость должна следовать за камерой
+        // и при панорамировании, а не только после её остановки.
+        if (label._fitRingsFrame === this._layoutPassId) {
+            rings = label._fitRings ?? null;
+        } else {
+            try { rings = src.getScreenPolygonRings(24); } catch { rings = null; }
+            label._fitRings = rings;
+            label._fitRingsFrame = this._layoutPassId;
+        }
+        // Контур недоступен (полигон ещё не построен) — не мешаем размещению.
+        if (!rings || !rings.length) return true;
+
+        // Если размеры ещё не измерены, `_getLabelCorners()` вернёт
+        // совпадающие точки; в этом случае проверяем только anchor, а не
+        // искусственные «середины стороны» длиной 0.
+        const measured = label.width > 0 && label.height > 0;
+        const [tl, tr, br, bl] = corners;
+        const mid = (a: LabelScreenPoint, b: LabelScreenPoint) =>
+            ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+        const probes: LabelScreenPoint[] = measured
+            ? [mid(tl, br), mid(tl, tr), mid(tr, br), mid(br, bl), mid(bl, tl)]
+            : [tl];
+        for (const p of probes) {
+            if (!this._pointInRings(p, rings)) return false;
+        }
+        return true;
+    }
+
+    /** Точка внутри набора колец (even-odd: дыры учитываются). */
+    _pointInRings(pt: LabelScreenPoint, rings: LabelScreenPoint[][]): boolean {
+        let inside = false;
+        for (const ring of rings) {
+            const n = ring.length;
+            if (n < 3) continue;
+            for (let i = 0, j = n - 1; i < n; j = i++) {
+                const xi = ring[i].x, yi = ring[i].y;
+                const xj = ring[j].x, yj = ring[j].y;
+                if ((yi > pt.y) !== (yj > pt.y)
+                    && pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi) {
+                    inside = !inside;
+                }
+            }
+        }
+        return inside;
+    }
+
     _getBBox(corners: LabelScreenPoint[]): LabelBBox {
         let minX = Infinity, minY = Infinity;
         let maxX = -Infinity, maxY = -Infinity;
@@ -1305,6 +1379,7 @@ if (!this._dirty && this.labels.length > 0) {
     }
 
 _updateVisibility(zoom: number, placeLines: boolean): void {
+    this._layoutPassId++;
     const visibleLabels: Label[] = [];
     for (let i = 0; i < this.labels.length; i++) {
         const label = this.labels[i];
@@ -1390,6 +1465,10 @@ _updateVisibility(zoom: number, placeLines: boolean): void {
                     if (this._rectsIntersect(corners, other.rect!)) { overlaps = true; break; }
                 }
                 if (overlaps) continue;
+
+                // Подпись полигона должна целиком помещаться в его видимую
+                // часть; иначе она читается как подпись соседнего региона.
+                if (!this._fitsInsidePolygon(lbl, corners)) continue;
 
                 lbl.rect = corners;
                 lbl._bbox = bbox;

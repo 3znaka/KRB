@@ -1,0 +1,477 @@
+
+<!DOCTYPE html>
+<html>
+ <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Атлас единства</title>
+  
+  <script src='dist/maplibre-gl.js'></script>
+  <link href='dist/maplibre-gl.css' rel='stylesheet' />  
+  
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <style>
+   #map {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    right: 0px;
+    bottom: 0px;
+    background: #f8f8f8;
+   }
+  
+    .legend {
+        position: absolute; top: 20px; left: 20px;
+        background: rgba(255,255,255,0.92);
+        padding: 10px 12px; border-radius: 6px;
+        font: 12px/1.5 sans-serif;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+        z-index: 1000; min-width: 200px; pointer-events: auto;
+    }
+    .legend-selector { display:flex; gap:6px; margin-bottom:8px; flex-direction: column; }
+    .legend-selector button {
+        flex:1; padding:5px 8px; border:1px solid #999;
+        background:#f5f5f5; border-radius:4px; cursor:pointer;
+        font:12px sans-serif; transition: background .15s, color .15s;
+    }
+    .legend-selector button.active {
+        background:#4CAF50; color:#fff; border-color:#4CAF50;
+    }
+    #legend-title { font-weight:bold; margin-bottom:4px; }
+    .legend-gradient {
+        width:100%; height:10px; border:1px solid #999;
+        border-radius:3px; margin:4px 0;
+        background:linear-gradient(to right, #ceedc0, #a4d68e, #93c47d, #6aa84f,#38761d,#38761d,#38761d,#38761d,#38761d);
+    }
+    .legend-labels {
+        display:flex; justify-content:space-between;
+        font-size:10px; color:#333;
+    }
+    .legend-right {
+        position: absolute; top: 20px; right: 20px;
+        background: rgba(255,255,255,0.92);
+        padding: 10px 12px; border-radius: 6px;
+        font: 12px/1.5 sans-serif;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+        z-index: 1000; min-width: 200px; pointer-events: auto;
+    }
+
+    @media screen and (max-width: 768px) {
+      /* Стили для мобильных устройств и планшетов */
+        .legend {
+            top: 50%; left: 0px; right: 0px; bottom: 42%;
+            overflow: auto;
+        }
+        .legend-right {
+            top: 58%; left: 0px; right: 0px; bottom: 0px;
+            overflow: auto;
+        }        
+        #map {
+            bottom: 50%;
+        }
+        .legend-selector { flex-direction: row;}
+        #myChart2Div {display: none;}
+    }
+
+  </style>
+ </head>
+ <body>
+<div id="map"></div>
+
+<div class="legend">
+    <div id="nationselector" class="legend-selector"></div>
+    
+    <div id="myChart2Div" style="width: 300px; height: 300px;">
+      <canvas id="myChart2"></canvas>
+    </div>
+</div>
+
+<div class="legend-right">
+    <div style="width: 300px; margin: 0 auto;">
+        <img id="pict_nation" src="img/pict/Русские.png"  width="300">
+    </div>
+    <div>
+        <h1 id="name_nation">Русские</h1>
+        <p></p>
+    </div>  
+    
+    <div id="legend-title">Доля народа от общей численности региона</div>
+    <div class="legend-gradient" id="legend-gradient"></div>
+    <div class="legend-labels" id="legend-labels"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+    
+    <div style="width: 300px; height: 300px;">
+      <canvas id="myChart"></canvas>
+    </div>
+</div>
+
+<script>
+	var map = new maplibregl.Map({
+	  container: 'map',
+      style: {
+        "version": 8,
+        "sources": {
+            "satellite": {
+                "type": "raster",
+                "tiles": [
+                  //  "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg"
+                  "https://api.mapbox.com/styles/v1/gleban/cmvo75e7g00th01s8acgfdbtv/tiles/256/{z}/{x}/{y}@2x?access_token=pk.eyJ1IjoiZ2xlYmFuIiwiYSI6ImNpdnhlMmJmcjAwMTUyeXBrcDFtMzR2MjIifQ.GKDNdlpl_RBDz5V9CLdmEA"
+                ],
+                "tileSize": 256
+            }
+        },
+        "layers": [{
+            "id": "satellite",
+            "type": "raster",
+            "source": "satellite"
+        }],
+      },
+	  center: [100, 60],
+	  zoom: 2
+	});
+	
+    map.on('style.load', () => {
+        map.setProjection({
+            type: 'globe', // Set projection to globe
+        });
+        
+        map.fitBounds([
+            [20, 40],
+            [180, 80]
+        ]);
+    });
+    
+    map.on('load', () => {
+        
+        map.addSource('adm_polygon_source', {
+            'type': 'geojson',
+            'data': 'php/adm_list_nation.php?q=Русские',
+            'generateId': true
+        });
+
+        map.addLayer({
+            'id': 'adm_polygon',
+            'type': 'fill',
+            'source': 'adm_polygon_source',
+            'layout': {},
+            'paint': {
+                'fill-color': [
+                    'step', 
+                    ['get', 'p'], // Имя вашего поля из GeoJSON
+                    '#bbbbbb',             // Цвет по умолчанию (если значение < первого порога)
+                    0.0000000001,'#ceedc0',
+                    1, '#a4d68e',   
+                    5, '#93c47d',   
+                    25, '#6aa84f',    
+                    50, '#38761d'   
+                ],
+                'fill-opacity': [
+                    'case',
+                    ['boolean', ['feature-state', 'hover'], false],
+                    0.9, // Прозрачность при наведении
+                    0.5  // Обычная прозрачность
+                ]
+            }
+        });
+
+        let hoveredPolygonId = null;
+
+        map.addLayer({
+            'id': 'adm_polygon_line',
+            'type': 'line',
+            'source': 'adm_polygon_source',
+            'layout': {
+                'line-join': 'round',
+                'line-cap': 'round'
+            },
+            'paint': {
+                'line-color': '#eee',
+                'line-width': [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    1, 0.1,
+                    5, 2
+                  ]
+            }
+        });
+
+        map.on('click', 'adm_polygon', (e) => {
+            const feature = e.features[0];
+//            console.log('Данные объекта:', feature.properties);
+            getData2(feature.properties.name);
+            
+            
+            new maplibregl.Popup()
+                .setLngLat(e.lngLat)
+                .setHTML(
+                    (feature.properties.popAll>0) ? 
+                        `<h3>${feature.properties.name}</h3><p>Население субъекта ${feature.properties.popAll.toLocaleString('ru-RU')} чел.</p>`+
+                            ((feature.properties.text) ? 
+                                `<p>${feature.properties.text} ${feature.properties.popQ.toLocaleString('ru-RU')} чел.</p><p>Доля народа от общей численности региона: ${feature.properties.p.toFixed(2)}%</p>` :
+                                `<p>Не зарегистрированы</p>`) : 
+                        `<h3>${feature.properties.name}</h3><p>Нет информации</p>`
+                )
+                .addTo(map);
+        });
+        
+        // Меняем курсор на pointer при наведении, чтобы пользователь понял, что объект кликабелен
+        map.on('mouseenter', 'adm_polygon', () => {
+            map.getCanvas().style.cursor = 'pointer';
+        });
+        
+        // Возвращаем стандартный курсор, когда он покидает слой
+        map.on('mouseleave', 'adm_polygon', () => {
+            map.getCanvas().style.cursor = '';
+        });
+
+        map.on('mousemove', 'adm_polygon', (e) => {
+            if (e.features.length > 0) {
+                // Если уже был подсвечен другой полигон, сбрасываем его состояние
+                if (hoveredPolygonId !== null) {
+                    map.setFeatureState(
+                        { source: 'adm_polygon_source', id: hoveredPolygonId },
+                        { hover: false }
+                    );
+                }
+                
+                hoveredPolygonId = e.features[0].id;
+                
+                // Устанавливаем новое состояние наведения
+                map.setFeatureState(
+                    { source: 'adm_polygon_source', id: hoveredPolygonId },
+                    { hover: true }
+                );
+            }
+        });
+        
+        map.on('mouseleave', 'adm_polygon', () => {
+            if (hoveredPolygonId !== null) {
+                map.setFeatureState(
+                    { source: 'adm_polygon_source', id: hoveredPolygonId },
+                    { hover: false }
+                );
+            }
+            hoveredPolygonId = null;
+        });
+
+    });
+    
+
+        
+    
+    /*    const select = document.querySelector('.custom-select');
+        const selected = select.querySelector('.select-selected');
+        const items = select.querySelector('.select-items');
+        
+        selected.addEventListener('click', () => {
+          items.classList.toggle('select-hide');
+        });
+       
+        items.querySelectorAll('div').forEach(item => {
+          item.addEventListener('click', () => {
+            selected.innerHTML = item.innerHTML;
+            items.classList.add('select-hide');
+        //    console.log(item.querySelector('span').innerHTML);
+            map.setFilter('points', ['>=', ['index-of', item.querySelector('span').innerHTML, ['get', 'crops']], 0]);
+            map.setLayoutProperty('points', 'icon-image', item.querySelector('span').innerHTML);
+          });
+        });            
+    */
+    
+    async function getData(str) {
+      try {
+        const response = await fetch('php/graph_nation.php?q='+str);
+        
+        // Проверяем статус ответа
+        if (!response.ok) {
+          throw new Error(`Ошибка HTTP: ${response.status}`);
+        }
+        
+        const geojson = await response.json();
+        
+        console.log(geojson);
+        
+        let labels = [];
+        let data = [];
+        
+        geojson.forEach(feature => {
+            labels.push(feature.name);
+            data.push(feature.p);
+        });       
+        
+        Chart1.data.labels = labels;
+        Chart1.data.datasets[0].data = data;
+        
+        Chart1.update();
+        
+      } catch (error) {
+        console.error('Не удалось выполнить запрос:', error);
+      }
+    }
+    
+    let arrnat = ['Русские','Татары','Чеченцы','Башкиры','Чуваши','Аварцы','Украинцы','Армяне','Даргинцы','Казахи','Кумыки','Кабардинцы','Чукчи','Эскимосы'];
+    
+    function renderVariable(variable) {
+        const source = map.getSource('adm_polygon_source');
+        source.setData('php/adm_list_nation.php?q='+variable);
+        
+        pict_nation.src="img/pict/"+variable+".png";
+        name_nation.innerHTML=variable;
+        getData(variable);
+    }
+
+    let currentVariable = arrnat[0];
+    
+    function switchVariable(variable) {
+        if (variable === currentVariable) return;
+        currentVariable = variable;
+        arrnat.forEach((item, index) => {
+            document.getElementById('btn-'+item).classList.toggle('active', variable === item);
+        });
+        renderVariable(variable);
+    }
+    
+//___________Создание кнопок народов    
+    let nationsel = document.getElementById('nationselector');
+
+    arrnat.forEach((item, index) => {
+        const button = document.createElement('button');
+        
+        button.setAttribute('id', 'btn-'+item);
+        button.textContent = item;
+        if (index==0) {button.classList.add('active');}       
+        
+        button.addEventListener('click', () => {
+          switchVariable(item);
+        });
+        
+        nationsel.append(button);
+    });
+
+
+//_____________График____________________
+
+    const ctx = document.getElementById('myChart');
+
+    var Chart1 = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: [],
+          datasets: [{
+            label: 'Доля ',
+            data: [],
+            backgroundColor: '#a4d68e', // Цвет заливки столбцов
+            borderColor: '#38761d',       // Цвет рамки столбцов
+            borderWidth: 1
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, // Включить/выключить адаптивность под экран
+          maintainAspectRatio: false, // Отключить сохранение пропорций (позволяет задать свою высоту через CSS)
+          scales: {
+            y: {
+              beginAtZero: true
+            }
+          },
+          plugins: {
+              legend: {
+                display: false
+              },
+              title: {
+                display: true,
+                text: 'Распределение по субъектам (10 первых по доле)'
+              }
+          }
+        }
+    });
+
+    getData('Русские');
+
+//_____________График2____________________
+
+    async function getData2(str) {
+      try {
+        const response = await fetch('php/graph_subject_nation.php?q='+str);
+        
+        // Проверяем статус ответа
+        if (!response.ok) {
+          throw new Error(`Ошибка HTTP: ${response.status}`);
+        }
+        
+        const geojson = await response.json();
+        
+        console.log(geojson);
+        
+        let labels = [];
+        let data = [];
+        let sum = 0;
+        
+        geojson.forEach(feature => {
+            labels.push(feature.text);
+            data.push(feature.p);
+            sum = sum+feature.p;
+        });       
+        
+        labels.push('Остальные');
+        data.push(100-sum);
+        
+        Chart2.data.labels = labels;
+        Chart2.data.datasets[0].data = data;
+        Chart2.options.plugins.title.text = str + '. Национальный состав'
+        
+        Chart2.update();
+        
+      } catch (error) {
+        console.error('Не удалось выполнить запрос:', error);
+      }
+    }
+
+    const ctx2 = document.getElementById('myChart2');
+
+    const colors10 = [
+      'rgb(54, 162, 235)',    // 1. Голубой (Базовый Chart.js)
+      'rgb(255, 99, 132)',    // 2. Розово-красный (Базовый Chart.js)
+      'rgb(255, 159, 64)',    // 3. Оранжевый (Базовый Chart.js)
+      'rgb(255, 205, 86)',    // 4. Желтый (Базовый Chart.js)
+      'rgb(75, 192, 192)',    // 5. Бирюзовый (Базовый Chart.js)
+      'rgb(153, 102, 255)',   // 6. Фиолетовый (Базовый Chart.js)
+      'rgb(201, 203, 207)',   // 7. Серый (Базовый Chart.js)
+      'rgb(231, 76, 60)',     // 8. Насыщенный красный (дополнительный)
+      'rgb(46, 204, 113)',    // 9. Ярко-зеленый (дополнительный)
+      'rgb(52, 73, 94)'       // 10. Темно-синий/Асфальт (дополнительный)
+    ];
+
+    var Chart2 = new Chart(ctx2, {
+        type: 'pie',
+        data: {
+          labels: [],
+          datasets: [
+            {
+              label: 'Доля',
+              data: [],
+              backgroundColor: colors10,
+            }
+          ]            
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: 'Национальный состав субъекта'
+                }
+            }
+        },        
+    });
+    
+    getData2('г. Москва');
+    
+</script>
+
+ </body>
+</html>

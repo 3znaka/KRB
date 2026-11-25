@@ -805,12 +805,18 @@ override getGeoJSONProperties(): Record<string, any> {
     // Style setters
     // =================================================================
 
-    setFillColor(color: string | number): this {
+    /**
+     * @param skipBatchRebuild — не помечать батч «грязным». Нужно, когда цвет
+     *   меняется на множестве полигонов сразу (картограмма): батч перекрасит
+     *   вершинные цвета сам через `PolygonBatcher.recolorAll()`, и пересборка
+     *   геометрии (триангуляция) не требуется.
+     */
+    setFillColor(color: string | number, skipBatchRebuild = false): this {
         this._fillColor = color;
         if (this._fillMaterial?.color) this._fillMaterial.color.set(color as any);
         if (this._bottomMaterial?.color) this._bottomMaterial.color.set(color as any);
         if (this._sideMaterial?.color) this._sideMaterial.color.set(color as any);
-        this._invalidateBatch();
+        if (!skipBatchRebuild) this._invalidateBatch();
         return this;
     }
     getFillColor(): string | number { return this._fillColor; }

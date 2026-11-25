@@ -9,7 +9,7 @@ import { Diagram3D } from './Diagram3D.js';
 import { getClassIndex } from './Classification.js';
 import { sampleColorRamp } from './ColorRamps.js';
 import {
-    LINE_ALIASES, POLYGON_ALIASES, AREA3D_ALIASES,
+    LINE_ALIASES, POLYGON_ALIASES, AREA3D_ALIASES, interpolate,
     type LineStyleAliases, type PolygonStyleAliases, type Area3DStyleAliases,
     type GeoJSONFeature, type GeoJSONPolygon, type Props,
 } from './Geojson.js';
@@ -18,6 +18,7 @@ import type { GeoJSONLayer } from './Geojson.js';
 export interface GeoJSONLayerShapes {
     _addLineFeature(feature: GeoJSONFeature): void;
     _addPolygonFeature(feature: GeoJSONFeature): void;
+    _choroplethColorOf(props: Props): string;
     _createPolygon(feature: GeoJSONFeature, props: Props, rings: GeoJSONPolygon,
                    cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null): Polygon | null;
     _addCartodiagram(feature: GeoJSONFeature, props: Props, polygon: Polygon): void;
@@ -93,19 +94,11 @@ export const ShapesMixin = {
 
     _createPolygon(this: GeoJSONLayer, feature: GeoJSONFeature, props: Props, rings: GeoJSONPolygon,
                    cb: (Partial<PolygonOptions> & PolygonStyleAliases) | null): Polygon | null {
-        let choroplethColor: string | undefined;
-        if (this.choropleth && this._choroplethRamp) {
-            const val = this._evaluateValueExpression(props, this.choropleth.value);
-            if (isFinite(val)) {
-                const idx = getClassIndex(val, this._choroplethBreaks);
-                const denom = Math.max(1, this._choroplethBreaks.length - 2);
-                const t = idx / denom;
-                const rgba = sampleColorRamp(this._choroplethRamp, t);
-                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
-            } else {
-                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
-            }
-        }
+        // Цвет класса картограммы — общий хелпер, чтобы updateData() красил
+        // точно так же, как первичное построение.
+        const choroplethColor: string | undefined = this.choropleth && this._choroplethRamp
+            ? this._choroplethColorOf(props)
+            : undefined;
         const defaults: PolygonOptions = {
             rings,
             crs: this.crs ?? undefined,
@@ -142,6 +135,10 @@ export const ShapesMixin = {
             fillColor: choroplethColor || cbNorm?.fillColor || style?.fillColor || defaults.fillColor,
         };
         if (merged.titleStyle) merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+        // `title` из style-правила может быть шаблоном ('{name}') — подставляем.
+        if (typeof merged.title === 'string' && merged.title.includes('{')) {
+            merged.title = interpolate(merged.title, props);
+        }
 
         const polygon = new Polygon(merged);
         this.add(polygon);

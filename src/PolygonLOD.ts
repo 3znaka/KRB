@@ -328,10 +328,12 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         const contourCount = coords.length / 2;
         this._contourVertexCount = contourCount;
 
-        // Полярные и разорванные по антимеридиану — earcut без Steiner (как в основной сборке).
-        const useEarcut = this._isPolarOrWrapping();
+        // На глобусе контур уже денсифицирован с шагом 0.25°. Используем
+        // быстрый earcut вместо CDT+Steiner: CDT блокирует главный поток на
+        // секунды при первой загрузке/перестроении больших наборов.
+        const useEarcut = (this as any)._map?.globe === true || this._isPolarOrWrapping();
 
-        // Глобус: Steiner-точки внутри полигона (сетка вдоль меридианов).
+        // Steiner нужен только для плоской/особой CDT-ветки.
         const steiner = useEarcut
             ? { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> }
             : this._globeSteinerPoints();
@@ -349,6 +351,17 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         if (useEarcut) {
             indices = triangulatePolygonEarcut(triCoords, holeIndices);
             if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
+            if (indices.length && (this as any)._map?.globe === true) {
+                indices = this._subdivideGlobeTriangles(
+                    indices,
+                    this._vertexLonLat,
+                    contourCount,
+                    holeIndices,
+                    2 * Math.PI / 180,
+                );
+                coords.length = 0;
+                for (const [x, z] of this._worldCoords) coords.push(x - this._centroidWorld.x, z - this._centroidWorld.z);
+            }
         } else {
             indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
         }

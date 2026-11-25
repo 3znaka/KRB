@@ -279,9 +279,32 @@ export function triangulatePolygonCDT(coords, holeIndices, contourCount) {
     // (interior) отбрасывает всё, когда контур разорван антимеридианом или
     // полюсом. Критерий — центроид треугольника внутри полигона (even-odd).
     const tris = cdt2d(points, edges, { delaunay: true, interior: true, exterior: true });
+    // Bounding box каждого кольца: точка вне bbox заведомо не даёт пересечений
+    // с его рёбрами, и кольцо можно пропустить. Без этого проверка
+    // «треугольник × все вершины» квадратична и на крупных полигонах
+    // (Саха, Красноярский край) съедает секунды.
+    const ringBox = starts.map((a, s) => {
+        const b = ends[s];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = a; i < b; i++) {
+            const px = points[i][0], py = points[i][1];
+            if (px < minX)
+                minX = px;
+            if (px > maxX)
+                maxX = px;
+            if (py < minY)
+                minY = py;
+            if (py > maxY)
+                maxY = py;
+        }
+        return { minX, minY, maxX, maxY };
+    });
     const inside = (x, y) => {
         let c = false;
         for (let s = 0; s < starts.length; s++) {
+            const box = ringBox[s];
+            if (x < box.minX || x > box.maxX || y < box.minY || y > box.maxY)
+                continue;
             const a = starts[s], b = ends[s];
             for (let i = a, j = b - 1; i < b; j = i++) {
                 const xi = points[i][0], yi = points[i][1];

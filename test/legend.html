@@ -110,13 +110,13 @@
 <script type="module">
 import * as KRB from '../js/KRB.js';
 
-await KRB.addCrs(['ADPKP:0072']);
+
 
 const map = new KRB.Map({
     target: 'map',
-   /// globe: true,
-    crs: 'ADPKP:0072',
-    graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
+globe: true,
+
+   
     view: new KRB.View({
         centerLonLat: [10, 20],
         zoom: 2, minZoom: 0, maxZoom: 8,

@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Атлас единства — KRB</title>
+
+<link href="../KRB.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+
+    #map {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100dvh;
+        background: #eef2f5;
+    }
+
+    /* ── Общая «карточка» для панелей ─────────────────────────────── */
+    .panel {
+        position: absolute;
+        z-index: 900;                 /* ниже панели управления KRB (1000) */
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+        font: 12px/1.5 system-ui, sans-serif;
+        color: #222;
+    }
+
+    /* ── Левая панель: выбор народа + круговая диаграмма ─────────── */
+    #panel-left {
+        top: 12px;
+        left: 12px;
+        width: 320px;
+        max-height: calc(100dvh - 24px);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    #nation-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 10px 10px 8px;
+        overflow: auto;
+        flex: 0 1 auto;
+    }
+    #nation-selector button {
+        padding: 6px 10px;
+        border: 1px solid #c6d2c6;
+        border-radius: 4px;
+        background: #f5f8f4;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        transition: background .15s, color .15s, border-color .15s;
+    }
+    #nation-selector button:hover { background: #eaf2e8; }
+    #nation-selector button.active {
+        background: #38761d;
+        border-color: #2b5c16;
+        color: #fff;
+        font-weight: 600;
+    }
+
+    #chart-nation-wrap {
+        border-top: 1px solid #eee;
+        padding: 8px 10px 10px;
+        flex: 0 0 auto;
+        height: 250px;
+    }
+    #chart-nation-wrap canvas { display: block; }
+
+    /* ── Правая панель: портрет, легенда, столбцы ────────────────── */
+    #panel-right {
+        top: 12px;
+        right: 12px;
+        width: 320px;
+        max-height: calc(100dvh - 24px);
+        padding: 10px 12px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow: auto;
+    }
+
+    #pict-box {
+        width: 100%;
+        height: 170px;
+        flex: 0 0 auto;
+        border-radius: 4px;
+        background-color: #eef1ef;
+        background-repeat: no-repeat;
+        background-size: 1px 1px;      /* картинка лежит «на фоне» — см. JS */
+        background-position: center;
+        overflow: hidden;
+        transition: background-color .25s;
+    }
+    #pict-nation {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+    }
+
+    #name-nation {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.25;
+        font-weight: 600;
+    }
+
+    .legend-title { font-weight: 600; font-size: 12px; }
+
+    /* Легенда картограммы рендерится KRB в #legend-choropleth */
+    #legend-choropleth { min-height: 16px; }
+    #legend-choropleth:empty::after { content: 'Классы доли народа…'; color: #999; }
+
+    .legend-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+    .legend-row:last-child { margin-bottom: 0; }
+    .legend-swatch {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        border: 1px solid rgba(0, 0, 0, 0.18);
+        box-sizing: border-box;
+    }
+
+    #chart-subject-wrap {
+        border-top: 1px solid #eee;
+        padding-top: 8px;
+        flex: 0 0 auto;
+        height: 240px;
+    }
+    #chart-subject-wrap canvas { display: block; }
+
+    #status {
+        position: absolute;
+        left: 50%;
+        bottom: 16px;
+        transform: translateX(-50%);
+        z-index: 1100;
+        padding: 6px 14px;
+        border-radius: 16px;
+        background: rgba(30, 30, 30, 0.84);
+        color: #fff;
+        font: 12px/1.4 system-ui, sans-serif;
+        pointer-events: none;
+        transition: opacity .25s;
+    }
+    #status[hidden] { display: none; }
+
+    /* ── Тултип-попап KRB ────────────────────────────────────────── */
+    .krb-popup-tooltip { max-width: 320px; font: 12px/18px system-ui, sans-serif; color: #333; }
+    .krb-popup-tooltip h3 { margin: 4px 0 6px; font-size: 15px; }
+    .krb-popup-tooltip p { margin: 4px 0; }
+    .krb-popup-tooltip .muted { color: #777; }
+
+    /* ── Мобильная раскладка ─────────────────────────────────────── */
+    @media screen and (max-width: 860px) {
+        #panel-left, #panel-right {
+            width: auto;
+            left: 8px;
+            right: 8px;
+            max-height: none;
+        }
+        #panel-left {
+            top: auto;
+            bottom: 8px;
+            height: 38dvh;
+        }
+        #nation-selector {
+            flex-direction: row;
+            flex-wrap: wrap;
+            max-height: 40%;
+        }
+        #nation-selector button { flex: 1 1 30%; text-align: center; }
+        #chart-nation-wrap { display: none; }
+
+        #panel-right {
+            top: 8px;
+            bottom: calc(38dvh + 16px);
+            height: auto;
+        }
+        #pict-box { height: 110px; }
+        #chart-subject-wrap { height: 190px; }
+        #status { bottom: calc(38dvh + 24px); }
+    }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- ══ Левая панель: выбор народа и распределение по субъектам ══ -->
+<div class="panel" id="panel-left">
+    <div id="nation-selector"></div>
+    <div id="chart-nation-wrap">
+        <canvas id="chart-nation"></canvas>
+    </div>
+</div>
+
+<!-- ══ Правая панель: портрет, легенда, национальный состав ══ -->
+<div class="panel" id="panel-right">
+    <div id="pict-box">
+        <img id="pict-nation" alt="">
+    </div>
+    <h1 id="name-nation">Русские</h1>
+
+    <div class="legend-title">Доля народа от общей численности региона</div>
+    <div id="legend-choropleth"></div>
+
+    <div id="chart-subject-wrap">
+        <canvas id="chart-subject"></canvas>
+    </div>
+</div>
+
+<div id="status" hidden></div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// 0. Источники данных и константы
+// ═══════════════════════════════════════════════════════════════════
+
+// Все данные — локальная копия https://dev.kartfak.ru/nation (см. manifest.json).
+// Скачивать в браузере напрямую нельзя: у dev.kartfak.ru нет CORS-заголовков.
+// Копия обновляется скриптом test/download_nations.py.
+const DATA_BASE = '../static_nations';
+
+const geoUrl = (nation) =>
+    `${DATA_BASE}/geo/${encodeURIComponent(nation)}.json`;
+const portraitUrl = (nation) =>
+    `${DATA_BASE}/img/pict/${encodeURIComponent(nation)}.png`;
+const nationGraphUrl = (nation) =>
+    `${DATA_BASE}/graph/nation/${encodeURIComponent(nation)}.json`;
+const subjectGraphUrl = (subject) =>
+    `${DATA_BASE}/graph/subject/${encodeURIComponent(subject)}.json`;
+
+// Тайловая подложка: EliteGIS «ru_basemap» (OSM DE), EPSG:3857, 256×256,
+// схема {z}/{y}/{x} (ArcGIS MapServer, источник y сверху).
+const BASEMAP_URL =
+    'https://cogisdemo.dataeast.com/elitegis/rest/services/common_osmde/ru_basemap/MapServer/tile/{z}/{y}/{x}';
+const BASEMAP_MAX_NATIVE_ZOOM = 17;
+
+const NATIONS = [
+    'Русские', 'Татары', 'Чеченцы', 'Башкиры', 'Чуваши', 'Аварцы', 'Украинцы',
+    'Армяне', 'Даргинцы', 'Казахи', 'Кумыки', 'Кабардинцы', 'Чукчи', 'Эскимосы',
+];
+
+const INITIAL_NATION = NATIONS[0];
+
+// ═══════════════════════════════════════════════════════════════════
+// 1. Форматирование и разбор данных
+// ═══════════════════════════════════════════════════════════════════
+const percentFmt = new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+});
+const intFmt = new Intl.NumberFormat('ru-RU');
+
+const formatPercent = (v) => `${percentFmt.format(v)} %`;
+const formatPopulation = (v) => `${intFmt.format(v)} чел.`;
+
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+}
+
+/**
+ * requestIdleCallback есть не везде (Safari) — мягкий фолбэк, и он же
+ * позволяет писать `requestIdleCallbackCompat(fn)` без «typeof-трюков».
+ */
+const requestIdleCallbackCompat = (fn) => {
+    if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(fn, { timeout: 4000 });
+    } else {
+        setTimeout(fn, 1600);
+    }
+};
+
+/**
+ * Доля `p` приводится к числу сразу, а не лениво: KRB обращается к фиче и при
+ * раскраске, и в попапе. NaN/null → null → субъект красится как «нет данных».
+ */
+function normalizeGeoJSON(raw, nation) {
+    const features = (raw?.features ?? []).map((feature) => {
+        const props = feature.properties ?? {};
+        const p = Number(props.p);
+        return {
+            type: 'Feature',
+            geometry: feature.geometry,
+            properties: {
+                ...props,
+                nation,
+                p: Number.isFinite(p) ? p : null,
+                popAll: Number(props.popAll) || 0,
+                popQ: Number(props.popQ) || 0,
+            },
+        };
+    });
+    return { type: 'FeatureCollection', features };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 2. Карта (глобус) + подложка
+// ═══════════════════════════════════════════════════════════════════
+const tiles = new KRB.Tile({
+    texture: BASEMAP_URL,
+    attributionTitle: 'OpenStreetMap · EliteGIS',
+    attributionUrl: 'https://cogisdemo.dataeast.com/elitegis/rest/services',
+    minZoom: 1,
+    maxZoom: 10,
+    minNativeZoom: 1,
+    maxNativeZoom: BASEMAP_MAX_NATIVE_ZOOM,
+    crs: 'EPSG:3857',
+});
+
+const map = new KRB.Map({
+    target: 'map',
+    globe: true,
+    layers: [tiles],
+    view: new KRB.View({
+        centerLonLat: [100, 60],
+        zoom: 2.2,
+        minZoom: 1,
+        maxZoom: 10,
+    }),
+});
+
+// как map.fitBounds([[20, 40], [180, 80]]) в maplibre-версии
+map.fitToBounds([[20, 40], [180, 80]], { duration: 0, maxZoom: 3.5 });
+
+// Отладочный доступ из консоли
+window.map = map;
+
+// ═══════════════════════════════════════════════════════════════════
+// 3. Картограмма
+// ═══════════════════════════════════════════════════════════════════
+
+// Границы классов — как в maplibre `step`-выражении. Замыкающий «якорь»
+// страхует от значений > 100 % (в данных такие встречаются редко, но бывает).
+const CHOROPLETH_BREAKS = [0, 1, 5, 25, 50, 100, Infinity];
+const CHOROPLETH_NO_DATA = '#d9d9d9';
+
+// Палитра-«лесенка» из исходных цветов. KRB красит класс `i` цветом
+// sampleColorRamp(ramp, i / (breaks.length − 2)), т.е. при 7 границах —
+// точками 0; 0.2; 0.4; 0.6; 0.8; 1. Стопы выставлены ровно в эти позиции,
+// поэтому каждый класс получает точный цвет исходного maplibre-выражения.
+const CHOROPLETH_RAMP = [
+    [0.0, '#ceedc0'],   // (0, 1)
+    [0.2, '#a4d68e'],   // [1, 5)
+    [0.4, '#93c47d'],   // [5, 25)
+    [0.6, '#6aa84f'],   // [25, 50)
+    [0.8, '#38761d'],   // [50, 100)
+    [1.0, '#38761d'],   // резервный класс (значения > 100 %)
+];
+
+function formatChoroplethRange(lo, hi, ctx) {
+    if (ctx.isFirst && hi === 1) return 'менее 1 %';
+    if (hi == null) return 'без ограничения';
+    return `от ${percentFmt.format(lo)} до ${percentFmt.format(hi)} %`;
+}
+
+const STROKE_IDLE = { color: '#8a8a8a', width: 0.7, opacity: 0.9 };
+const FILL_OPACITY = 0.58;
+
+// Попап по клику: позиция считается через сам полигон (лучи по его мешам),
+// поэтому на глобусе точка попадания корректная.
+function showSubjectPopup(event, polygon) {
+    const props = polygon.getProperties?.() ?? {};
+    // Клик по объекту приходит и без предшествующего pointermove
+    // (например, тап на тач-экране) — подсветку выставляем и здесь.
+    setHovered(polygon);
+    try {
+        map.popupManager.showAtEvent(event, buildPopupHtml(props), polygon);
+    } catch (err) {
+        console.warn('[nations] popup failed:', err);
+    }
+    loadSubjectComposition(props.name);
+}
+
+function buildPopupHtml(props) {
+    const head = `<h3>${escapeHtml(props.name ?? '—')}</h3>`;
+
+    if (!(props.popAll > 0)) {
+        return `${head}<p class="muted">Нет информации</p>`;
+    }
+
+    const rows = [
+        `<p>Население субъекта: <b>${formatPopulation(props.popAll)}</b></p>`,
+    ];
+
+    if (props.p != null) {
+        rows.push(
+            `<p>${escapeHtml(props.text ?? 'Представители народа')}: <b>${formatPopulation(props.popQ)}</b></p>`,
+            `<p>Доля народа от общей численности региона: <b>${formatPercent(props.p)}</b></p>`,
+        );
+    } else {
+        rows.push('<p class="muted">Не зарегистрированы</p>');
+    }
+
+    return head + rows.join('');
+}
+
+const choroplethLayer = new KRB.GeoJSONLayer({
+    data: { type: 'FeatureCollection', features: [] },
+    crs: 'EPSG:4326',
+    titleField: 'name',
+
+    // Подписи субъектов. Текст подписи берётся из `titleField: 'name'`;
+    // в style задаём только оформление — если положить сюда `title: '{name}'`,
+    // style-правило перекрывает titleField и подпись остаётся сырым шаблоном.
+    style: {
+        polygon: {
+            default: {
+                titleStyle: {
+                    fontFamily: 'system-ui, sans-serif',
+                    fontSize: '11px',
+                    color: '#14280c',
+                    haloColor: '#ffffff',
+                    haloWidth: 2,
+                },
+            },
+        },
+    },
+
+    choropleth: {
+        value: 'p',
+        colorRamp: CHOROPLETH_RAMP,
+        classification: CHOROPLETH_BREAKS,
+        noDataColor: CHOROPLETH_NO_DATA,
+        pretty: false,
+        legend: {
+            target: 'legend-choropleth',
+            title: 'Доля народа',
+            format: { range: formatChoroplethRange },
+            template: `
+                {{#each-reverse classes}}
+                    <div class="legend-row">
+                        <span class="legend-swatch" style="background:{{color}}"></span>
+                        <span>{{label}}</span>
+                    </div>
+                {{/each-reverse}}
+            `,
+        },
+    },
+
+    // Попап по клику навешиваем на каждый созданный полигон.
+    polygonToOptions: () => ({ onClick: showSubjectPopup }),
+
+    defaultFillOpacity: FILL_OPACITY,
+    defaultStrokeColor: STROKE_IDLE.color,
+    defaultStrokeWidth: STROKE_IDLE.width,
+    defaultStrokeOpacity: STROKE_IDLE.opacity,
+}).addTo(map);
+
+// ── Подсветка субъекта под курсором ──────────────────────────────────
+// Работаем через `map.interaction.queryRenderedFeatures`, а не через
+// per-polygon `onHover`: у Polygon при наличии `onHover` его полигоны
+// выпадают из батчера, и 89 больших мультиполигонов рисуются отдельными
+// мешами. Здесь полигоны остаются батченными, а «что под точкой» KRB
+// отдаёт одним raycast'ом.
+const canvasEl = map.renderer?.domElement ?? map.targetElement;
+
+// Положение курсора — в CSS-пикселях относительно canvas
+// (именно это ожидает `queryRenderedFeatures({ x, y })`).
+function pickPolygonAt(clientX, clientY) {
+    if (!canvasEl || !map.interaction?.queryRenderedFeatures) return null;
+    const rect = canvasEl.getBoundingClientRect();
+    let hits;
+    try {
+        hits = map.interaction.queryRenderedFeatures({
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        });
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(hits)) return null;
+    for (const hit of hits) {
+        if (hit?.layer === choroplethLayer && hit.object) return hit.object;
+    }
+    return null;
+}
+
+let pickScheduled = false;
+let pickClient = null;
+
+// Слой-«контур» для подсветки. Отдельный слой нужен потому, что смена стиля
+// (толщины/цвета обводки) у самого полигона ставит батчер `GeoJSONLayer` на
+// пересборку — на каждом переходе мыши это слишком дорого. Здесь же над
+// картограммой живёт слой из одного полигона.
+const hoverLayer = new KRB.GeoJSONLayer({
+    data: { type: 'FeatureCollection', features: [] },
+    crs: 'EPSG:4326',
+    defaultFillColor: '#ffffff',
+    defaultFillOpacity: 0.15,
+    defaultStrokeColor: '#ffffff',
+    defaultStrokeWidth: 2,
+    defaultStrokeOpacity: 1,
+    // на глобусе — «абсолютная» высота, значит над эллипсоидом
+    defaultPolygonAltitudeMode: 'absolute',
+    defaultPolygonAltitude: 40,
+    defaultPolygonDepthTest: false,
+}).addTo(map);
+
+let hoveredSubject = null;
+
+function setHovered(polygon) {
+    const name = polygon?.getProperties?.()?.name ?? null;
+    if (hoveredSubject === name) return;
+    hoveredSubject = name;
+
+    if (!polygon) {
+        hoverLayer.setData({ type: 'FeatureCollection', features: [] });
+        canvasEl.style.cursor = '';
+        return;
+    }
+
+    // Контур берём из колец того же полигона (WGS84), чтобы подсветка
+    // лежала пиксель-в-пиксель поверх картограммы.
+    const rings = typeof polygon.getRings === 'function' ? polygon.getRings() : [];
+    hoverLayer.setData({
+        type: 'FeatureCollection',
+        features: rings.length ? [{
+            type: 'Feature',
+            properties: { name },
+            geometry: { type: 'Polygon', coordinates: rings },
+        }] : [],
+    });
+    canvasEl.style.cursor = 'pointer';
+}
+
+canvasEl?.addEventListener('pointermove', (event) => {
+    pickClient = [event.clientX, event.clientY];
+    if (pickScheduled) return;
+    pickScheduled = true;
+    // Raycast не бесплатный — считаем не чаще раза в кадр.
+    requestAnimationFrame(() => {
+        pickScheduled = false;
+        if (!pickClient) return;
+        setHovered(pickPolygonAt(pickClient[0], pickClient[1]));
+    });
+});
+
+canvasEl?.addEventListener('pointerleave', () => {
+    pickClient = null;
+    setHovered(null);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 4. Статус и загрузка GeoJSON
+// ═══════════════════════════════════════════════════════════════════
+const statusEl = document.getElementById('status');
+let statusTimer = 0;
+
+function showStatus(text, autoHideMs = 0) {
+    clearTimeout(statusTimer);
+    if (!text) { statusEl.hidden = true; return; }
+    statusEl.textContent = text;
+    statusEl.hidden = false;
+    if (autoHideMs) statusTimer = setTimeout(() => { statusEl.hidden = true; }, autoHideMs);
+}
+
+// Данные лежат локально и кэшируются HTTP-сервером, но держим и свой кэш:
+// возврат «Татары → Русские → Татары» не должен повторно парсить 4,6 МБ JSON.
+const geoCache = new Map();
+const geoInflight = new Map();
+
+function fetchSubjects(nation) {
+    if (geoCache.has(nation)) return Promise.resolve(geoCache.get(nation));
+    if (geoInflight.has(nation)) return geoInflight.get(nation);
+
+    const request = fetch(geoUrl(nation))
+        .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status} — ${geoUrl(nation)}`);
+            return response.json();
+        })
+        .then((raw) => {
+            const fc = normalizeGeoJSON(raw, nation);
+            geoCache.set(nation, fc);
+            return fc;
+        })
+        .finally(() => geoInflight.delete(nation));
+
+    geoInflight.set(nation, request);
+    return request;
+}
+
+// Текущий выбранный народ. `null` до первого renderNation — так стартовый
+// вызов проходит через «смену» и не упирается в ранний выход.
+let currentNation = null;
+let geoToken = 0;
+// Первая отрисовка создаёт полигоны (setData), дальше только перекрашиваем.
+let choroplethBuilt = false;
+
+/**
+ * Показывает народ: портрет и заголовок — сразу, картограмма — после
+ * загрузки данных. Дублирует состояние кнопок, поэтому пригодна и для
+ * прямых вызовов (старт, консоль), а не только из switchNation().
+ */
+async function renderNation(nation) {
+    currentNation = nation;
+    markActiveNation(nation);
+    const token = ++geoToken;
+
+    setPortrait(nation);           // портрет и заголовок — сразу
+    showStatus(`Загрузка данных: ${nation}…`);
+
+    try {
+        const fc = await fetchSubjects(nation);
+        if (token !== geoToken) return;      // уже выбрали другую кнопку
+
+        // Геометрия субъектов у всех народов одна и та же, меняются только
+        // значения. Первый раз создаём полигоны (setData), дальше только
+        // перекрашиваем через updateData — без повторной триангуляции
+        // (это разница в секунды) и без сброса камеры.
+        const inPlace = choroplethBuilt
+            && choroplethLayer.updateData(fc, { matchField: 'name' });
+
+        if (!inPlace) {
+            choroplethLayer.setData(fc);
+        }
+        choroplethBuilt = true;
+        showStatus(`Готово: ${nation}`, 1200);
+    } catch (err) {
+        if (token !== geoToken) return;
+        console.error('[nations] geo data failed:', err);
+        showStatus(`Не удалось загрузить данные «${nation}»`, 4000);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 5. Кнопки народов
+// ═══════════════════════════════════════════════════════════════════
+const selectorEl = document.getElementById('nation-selector');
+
+for (const nation of NATIONS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = nation;
+    button.dataset.nation = nation;
+    button.addEventListener('click', () => switchNation(nation));
+    selectorEl.appendChild(button);
+}
+
+function markActiveNation(nation) {
+    for (const button of selectorEl.children) {
+        button.classList.toggle('active', button.dataset.nation === nation);
+    }
+}
+
+function switchNation(nation) {
+    if (nation === currentNation) return;
+    renderNation(nation);
+    loadNationGraph(nation);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. Портрет народа
+// ═══════════════════════════════════════════════════════════════════
+const pictEl = document.getElementById('pict-nation');
+const pictBox = document.getElementById('pict-box');
+const nameEl = document.getElementById('name-nation');
+
+// Портреты (~1 МБ PNG) лежат локально; поле вокруг картинки заливаем
+// усреднённым цветом самого изображения — у PNG прозрачные поля.
+const avgColorCache = new Map();      // URL → [r, g, b]
+
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('image load failed'));
+        img.src = src;
+    });
+}
+
+async function averageColorOf(imageUrl) {
+    if (avgColorCache.has(imageUrl)) return avgColorCache.get(imageUrl);
+    const img = await loadImage(imageUrl);
+    const size = 48;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, size, size);
+    const { data } = ctx.getImageData(0, 0, size, size);
+
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 200) continue;   // прозрачный угол — не учитываем
+        r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
+    }
+    if (!n) return null;
+    // Немного выбеливаем, чтобы фон не конкурировал с портретом.
+    const rgb = [r / n, g / n, b / n].map((v) => Math.round(v * 0.9 + 255 * 0.1));
+    avgColorCache.set(imageUrl, rgb);
+    return rgb;
+}
+
+function setPortrait(nation) {
+    nameEl.textContent = nation;
+
+    // Картинки локальные, поэтому достаточно обычного src — без blob-URL
+    // и без CORS-обходов. Кэш браузера при повторном клике сработает сам.
+    const url = portraitUrl(nation);
+    pictEl.src = url;
+    pictEl.alt = nation;
+    pictBox.style.backgroundColor = '#eef1ef';
+
+    averageColorOf(url)
+        .then((rgb) => {
+            // пока грузили цвет, могли переключить народ
+            if (nameEl.textContent !== nation || !rgb) return;
+            pictBox.style.backgroundColor = `rgb(${rgb.join(',')})`;
+        })
+        .catch(() => { /* фон — необязательное украшение */ });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. Диаграммы Chart.js (с деградацией, если CDN недоступен)
+// ═══════════════════════════════════════════════════════════════════
+const hasChartJs = typeof window.Chart === 'function';
+if (!hasChartJs) {
+    console.warn('[nations] Chart.js с CDN не загрузился — диаграммы выключены.');
+}
+
+/** Заглушка вместо диаграммы: показываем текст прямо в canvas. */
+function drawFallback(canvas, text) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 300;
+    const h = canvas.clientHeight || 200;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#999';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, w / 2, h / 2 - 8);
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillText('проверьте доступ к cdn.jsdelivr.net', w / 2, h / 2 + 12);
+}
+
+// Если Chart.js не поднялся — сразу рисуем заглушки в обеих панелях,
+// чтобы пустые белые блоки не выглядели как «сломанная» страница.
+if (!hasChartJs) {
+    for (const id of ['chart-nation', 'chart-subject']) {
+        const canvas = document.getElementById(id);
+        if (canvas) drawFallback(canvas, 'Диаграммы недоступны');
+    }
+}
+
+const CHART_PALETTE = [
+    'rgb(54, 162, 235)', 'rgb(255, 99, 132)', 'rgb(255, 159, 64)',
+    'rgb(255, 205, 86)', 'rgb(75, 192, 192)', 'rgb(153, 102, 255)',
+    'rgb(201, 203, 207)', 'rgb(231, 76, 60)', 'rgb(46, 204, 113)',
+    'rgb(52, 73, 94)',
+];
+
+// ── 7.1 Столбцы: 10 субъектов с максимальной долей народа ────────────
+const barCanvas = document.getElementById('chart-nation');
+
+const chartNation = hasChartJs ? new window.Chart(barCanvas, {
+    type: 'bar',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'Доля, %',
+            data: [],
+            backgroundColor: '#a4d68e',
+            borderColor: '#38761d',
+            borderWidth: 1,
+        }],
+    },
+    options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        scales: {
+            x: { beginAtZero: true, ticks: { callback: (v) => `${v} %` } },
+            y: { ticks: { autoSkip: false, font: { size: 10 } } },
+        },
+        plugins: {
+            legend: { display: false },
+            title: {
+                display: true,
+                font: { size: 11 },
+                text: 'Распределение по субъектам (10 первых по доле)',
+            },
+            tooltip: { callbacks: { label: (item) => formatPercent(item.parsed.x) } },
+        },
+    },
+}) : null;
+
+let nationGraphToken = 0;
+
+async function loadNationGraph(nation) {
+    // Без Chart.js заглушка уже нарисована один раз при старте — дальше
+    // перерисовывать её на каждую смену народа незачем.
+    if (!chartNation) return;
+    const request = ++nationGraphToken;
+    try {
+        const response = await fetch(nationGraphUrl(nation));
+        if (!response.ok) throw new Error(`HTTP ${response.status} — ${nationGraphUrl(nation)}`);
+        const rows = await response.json();
+        if (request !== nationGraphToken) return;
+
+        chartNation.data.labels = rows.map((r) => r.name);
+        chartNation.data.datasets[0].data = rows.map((r) => r.p);
+        chartNation.options.plugins.title.text =
+            `${nation}. Распределение по субъектам (10 первых по доле)`;
+        chartNation.update();
+    } catch (err) {
+        console.error('[nations] graph nation failed:', err);
+        chartNation.data.labels = [];
+        chartNation.data.datasets[0].data = [];
+        chartNation.options.plugins.title.text = `${nation}. Нет данных`;
+        chartNation.update();
+    }
+}
+
+// ── 7.2 Круговая: национальный состав выбранного субъекта ────────────
+const pieCanvas = document.getElementById('chart-subject');
+
+const chartSubject = hasChartJs ? new window.Chart(pieCanvas, {
+    type: 'pie',
+    data: {
+        labels: [],
+        datasets: [{ label: 'Доля', data: [], backgroundColor: CHART_PALETTE }],
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        plugins: {
+            legend: { position: 'top', labels: { boxWidth: 10, font: { size: 9 } } },
+            title: { display: true, font: { size: 11 }, text: 'Национальный состав субъекта' },
+            tooltip: { callbacks: { label: (item) => formatPercent(item.parsed) } },
+        },
+    },
+}) : null;
+
+let subjectGraphToken = 0;
+
+async function loadSubjectComposition(subjectName) {
+    if (!subjectName) return;
+    // Заглушка уже нарисована при старте (см. блок 7).
+    if (!chartSubject) return;
+    const request = ++subjectGraphToken;
+    try {
+        const response = await fetch(subjectGraphUrl(subjectName));
+        if (!response.ok) throw new Error(`HTTP ${response.status} — ${subjectGraphUrl(subjectName)}`);
+        const rows = await response.json();
+        if (request !== subjectGraphToken) return;
+
+        const labels = rows.map((r) => r.text);
+        const data = rows.map((r) => r.p);
+        const sum = data.reduce((acc, value) => acc + value, 0);
+
+        if (labels.length) {
+            labels.push('Остальные');
+            data.push(Math.max(0, 100 - sum));
+        } else {
+            labels.push('Нет данных');
+            data.push(100);
+        }
+
+        chartSubject.data.labels = labels;
+        chartSubject.data.datasets[0].data = data;
+        chartSubject.options.plugins.title.text = `${subjectName}. Национальный состав`;
+        chartSubject.update();
+    } catch (err) {
+        console.error('[nations] graph subject failed:', err);
+        chartSubject.data.labels = ['Нет данных'];
+        chartSubject.data.datasets[0].data = [100];
+        chartSubject.options.plugins.title.text = `${subjectName}. Нет данных`;
+        chartSubject.update();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. Старт
+// ═══════════════════════════════════════════════════════════════════
+// renderNation сама выставляет «активную» кнопку — для старта достаточно её.
+renderNation(INITIAL_NATION);
+loadNationGraph(INITIAL_NATION);
+loadSubjectComposition('г. Москва');   // демо для круговой, как в maplibre-версии
+
+// Остальные народы подгружаем в фоне по одному — чтобы переключение кнопок
+// было мгновенным, но старт не упирался в 60 МБ JSON сразу.
+// Ошибки здесь намеренно глушим: предзагрузка не должна сыпать в консоль
+// (при отсутствии static_nations/ достаточно ошибки первого реального запроса).
+function prefetchNext(index = 1) {
+    if (index >= NATIONS.length) return;
+    requestIdleCallbackCompat(() => {
+        fetchSubjects(NATIONS[index])
+            .catch(() => null)
+            .finally(() => prefetchNext(index + 1));
+    });
+}
+prefetchNext();
+
+console.log('[nations] KRB-версия готова. Карта — window.map');
+</script>
+</body>
+</html>

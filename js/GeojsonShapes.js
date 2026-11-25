@@ -6,9 +6,7 @@ import { Polygon } from './Polygon.js';
 import { Area3D } from './Area3D.js';
 import { Diagram } from './Diagram.js';
 import { Diagram3D } from './Diagram3D.js';
-import { getClassIndex } from './Classification.js';
-import { sampleColorRamp } from './ColorRamps.js';
-import { LINE_ALIASES, POLYGON_ALIASES, AREA3D_ALIASES, } from './Geojson.js';
+import { LINE_ALIASES, POLYGON_ALIASES, AREA3D_ALIASES, interpolate, } from './Geojson.js';
 export const ShapesMixin = {
     _addLineFeature(feature) {
         const geom = feature.geometry;
@@ -79,20 +77,11 @@ export const ShapesMixin = {
         }
     },
     _createPolygon(feature, props, rings, cb) {
-        let choroplethColor;
-        if (this.choropleth && this._choroplethRamp) {
-            const val = this._evaluateValueExpression(props, this.choropleth.value);
-            if (isFinite(val)) {
-                const idx = getClassIndex(val, this._choroplethBreaks);
-                const denom = Math.max(1, this._choroplethBreaks.length - 2);
-                const t = idx / denom;
-                const rgba = sampleColorRamp(this._choroplethRamp, t);
-                choroplethColor = `#${((1 << 24) + (rgba[0] << 16) + (rgba[1] << 8) + rgba[2]).toString(16).slice(1)}`;
-            }
-            else {
-                choroplethColor = this.choropleth.noDataColor ?? '#cccccc';
-            }
-        }
+        // Цвет класса картограммы — общий хелпер, чтобы updateData() красил
+        // точно так же, как первичное построение.
+        const choroplethColor = this.choropleth && this._choroplethRamp
+            ? this._choroplethColorOf(props)
+            : undefined;
         const defaults = {
             rings,
             crs: this.crs ?? undefined,
@@ -130,6 +119,10 @@ export const ShapesMixin = {
         };
         if (merged.titleStyle)
             merged.titleStyle = this._interpolateStyle(merged.titleStyle, props);
+        // `title` из style-правила может быть шаблоном ('{name}') — подставляем.
+        if (typeof merged.title === 'string' && merged.title.includes('{')) {
+            merged.title = interpolate(merged.title, props);
+        }
         const polygon = new Polygon(merged);
         this.add(polygon);
         this.onEachFeature?.(feature, polygon);

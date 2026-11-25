@@ -8,6 +8,9 @@ src_for_tpb/node_modules/
 dist/meta.json
 dist/tpb-worker-slice.min.js
 
+# локальная копия данных для test/nations_krb.html (не коммитить)
+static_nations/
+
 # логи и временные файлы
 build.log
 build-output.txt

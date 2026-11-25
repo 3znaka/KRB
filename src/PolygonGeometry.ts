@@ -8,8 +8,34 @@ import {
     POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE,
     crossY, flipIndices, approxVisualCenter, getSharedPatternTexture, applyGapMaskToMaterial,
     triangulatePolygonCDT, triangulatePolygonEarcut,
+    centralAngle, interpolateSurface,
 } from './PolygonUtils.js';
 import type { Polygon } from './Polygon.js';
+
+/**
+ * Earcut may emit tiny-area triangles around long runs of nearly collinear
+ * boundary vertices. On a globe those degenerate faces can show up as long,
+ * dark hairline slivers. Filter only triangles whose altitude/edge ratio is
+ * below 1e-6; their removed area is negligible compared with the source ring.
+ */
+function filterNearDegenerateTriangles(coords: number[], indices: number[], relativeAreaEpsilon = 1e-6): number[] {
+    if (indices.length < 3) return indices;
+    const out: number[] = [];
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+        const ia = indices[i] * 2, ib = indices[i + 1] * 2, ic = indices[i + 2] * 2;
+        const ax = coords[ia], ay = coords[ia + 1];
+        const bx = coords[ib], by = coords[ib + 1];
+        const cx = coords[ic], cy = coords[ic + 1];
+        const abx = bx - ax, aby = by - ay;
+        const bcx = cx - bx, bcy =cy - by;
+        const cax = ax - cx, cay = ay - cy;
+        const maxEdgeSq = Math.max(abx * abx + aby * aby, bcx * bcx + bcy * bcy, cax * cax + cay * cay);
+        const twiceArea = Math.abs(abx * (cy - ay) - aby * (cx - ax));
+        if (!(maxEdgeSq > 0) || twiceArea <= maxEdgeSq * relativeAreaEpsilon) continue;
+        out.push(indices[i], indices[i + 1], indices[i + 2]);
+    }
+    return out;
+}
 
 
 export interface PolygonGeometry {
@@ -25,12 +51,150 @@ export interface PolygonGeometry {
     _hasAntimeridianWrap(): boolean;
     _isGeometryInvalid(ringStartIndices: number[], worldSize: number): boolean;
     _triangulateFromRings(): number[];
+    _subdivideGlobeTriangles(indices: number[], lonLats: Array<[number, number] | null>, contourCount: number, holeIndices: number[], maxStepRad: number): number[];
     _buildFillGeometry(map: any): void;
     _buildBottomAndSides(points2D: any[], topUVs: Float32Array, bottomIndices: number[], patternScale: number): void;
     _buildStrokeGeometry(map: any): void;
 }
 
 export const PolygonGeometryMixin = {
+    /**
+     * Subdivide earcut triangles on the globe surface.
+     *
+     * MapLibre follows the same high-level strategy: fast earcut topology,
+     * then split triangles before the globe projection. Here overlong edges
+     * are bisected on the sphere; shared edge midpoints are cached by the
+     * unordered endpoint pair so adjacent triangles stitch exactly.
+     */
+    _subdivideGlobeTriangles(
+        this: Polygon,
+        indices: number[],
+        lonLats: Array<[number, number] | null>,
+        contourCount: number,
+        holeIndices: number[],
+        maxStepRad: number,
+    ): number[] {
+        if (!indices.length || !(maxStepRad > 0)) return indices;
+
+        const outLonLat: Array<[number, number] | null> = lonLats.slice(0, contourCount);
+        const outWorld: Array<[number, number]> = this._worldCoords.slice(0, contourCount);
+        const outCachedHeights = (this._cachedHeights ?? []).slice(0, contourCount);
+        const surface = this._map.surface;
+        const worldOffset = this._map.worldGroup.position;
+        const midpointCache = new Map<string, number>();
+
+        const edgeAngle = (a: number, b: number): number => {
+            const la = outLonLat[a], lb = outLonLat[b];
+            if (!la || !lb) return 0;
+            const va = surface.position(la[0], la[1], 0, new THREE.Vector3());
+            const vb = surface.position(lb[0], lb[1], 0, new THREE.Vector3());
+            const angle = centralAngle(va, vb);
+            return Number.isFinite(angle) ? angle : 0;
+        };
+
+        const getMidpoint = (a: number, b: number): number => {
+            const lo = Math.min(a, b), hi = Math.max(a, b);
+            const key = `${lo}:${hi}`;
+            const cached = midpointCache.get(key);
+            if (cached != null) return cached;
+            const la = outLonLat[lo], lb = outLonLat[hi];
+            if (!la || !lb) return lo;
+            // Earcut's parent triangle lives in the source lon/lat plane.
+            // Take the exact arithmetic midpoint there (shortest wrapped lon
+            // only for dateline-adjacent endpoints), then project that point
+            // onto the ellipsoid. This keeps every child inside its source
+            // triangle instead of letting a great-circle midpoint bow outside.
+            let deltaLon = lb[0] - la[0];
+            if (deltaLon > 180) deltaLon -= 360;
+            else if (deltaLon < -180) deltaLon += 360;
+            let lon = la[0] + deltaLon * 0.5;
+            while (lon > 180) lon -= 360;
+            while (lon < -180) lon += 360;
+            const lat = (la[1] + lb[1]) * 0.5;
+            const idx = outLonLat.length;
+            outLonLat.push([lon, lat]);
+            const height = ((outCachedHeights[lo] ?? 0) + (outCachedHeights[hi] ?? 0)) * 0.5;
+            const p = this._map.projectSurfaceVertex([lon, lat], 'EPSG:4326', height, null, new THREE.Vector3());
+            if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) {
+                outLonLat.pop();
+                return lo;
+            }
+            outWorld.push([p.x - worldOffset.x, p.z - worldOffset.z]);
+            outCachedHeights.push(height);
+            midpointCache.set(key, idx);
+            return idx;
+        };
+
+        // Conforming midpoint refinement. Each round marks every over-limit
+        // edge globally, so both triangles sharing an edge split it together
+        // (no T-junctions). A 1/2/3-edge split produces 2/3/4 child triangles;
+        // all children are subsets of the original earcut triangle.
+        let triangles: number[][] = [];
+        for (let i = 0; i + 2 < indices.length; i += 3) {
+            triangles.push([indices[i], indices[i + 1], indices[i + 2]]);
+        }
+        const maxRounds = 12;
+        for (let round = 0; round < maxRounds; round++) {
+            const splitEdges = new Set<string>();
+            for (const [a, b, c] of triangles) {
+                for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+                    if (edgeAngle(u, v) > maxStepRad) {
+                        splitEdges.add(`${Math.min(u, v)}:${Math.max(u, v)}`);
+                    }
+                }
+            }
+            if (!splitEdges.size) break;
+            for (const key of splitEdges) {
+                const [a, b] = key.split(':').map(Number);
+                getMidpoint(a, b);
+            }
+
+            const midpoint = (a: number, b: number): number | null =>
+                midpointCache.get(`${Math.min(a, b)}:${Math.max(a, b)}`) ?? null;
+            const next: number[][] = [];
+            for (const [a, b, c] of triangles) {
+                const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+                const count = Number(ab != null) + Number(bc != null) + Number(ca != null);
+                if (count === 0) { next.push([a, b, c]); continue; }
+
+                if (ab != null && bc == null && ca == null) {
+                    next.push([a, ab, c], [ab, b, c]);
+                } else if (ab == null && bc != null && ca == null) {
+                    next.push([b, bc, a], [bc, c, a]);
+                } else if (ab == null && bc == null && ca != null) {
+                    next.push([c, ca, b], [ca, a, b]);
+                } else if (ab != null && bc != null && ca == null) {
+                    next.push([b, bc, ab], [a, ab, c], [ab, bc, c]);
+                } else if (ab == null && bc != null && ca != null) {
+                    next.push([c, ca, bc], [b, bc, a], [bc, ca, a]);
+                } else if (ab != null && bc == null && ca != null) {
+                    next.push([a, ab, ca], [c, ca, b], [ca, ab, b]);
+                } else {
+                    next.push(
+                        [a, ab!, ca!], [ab!, b, bc!], [ca!, bc!, c],
+                        [ab!, bc!, ca!],
+                    );
+                }
+            }
+            triangles = next;
+        }
+
+        const result: number[] = [];
+        for (const tri of triangles) result.push(tri[0], tri[1], tri[2]);
+
+        // Preserve ring boundaries and contour-vertex metadata; append the
+        // generated surface samples after all original contour vertices.
+        this._worldCoords.length = 0;
+        this._worldCoords.push(...outWorld);
+        this._vertexLonLat.length = 0;
+        this._vertexLonLat.push(...outLonLat);
+        this._nodeHeights.length = outWorld.length;
+        for (let i = contourCount; i < outWorld.length; i++) this._nodeHeights[i] = 0;
+        this._cachedHeights = outCachedHeights;
+        while (this._cachedHeights.length < outWorld.length) this._cachedHeights.push(0);
+        return result;
+    },
+
     /**
      * Полигон разорван антимеридианом (скачок долготы больше 180° между соседними
      * вершинами) или касается полюса (|широта| ≥ 80°). Для таких полигонов lon/lat
@@ -333,14 +497,22 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         if (coords.length < 6) return [];
 
         const contourCount = Math.min(this._contourVertexCount || wc.length, wc.length);
-        const indices = this._isPolarOrWrapping()
+        const useEarcut = (this as any)._map?.globe === true || this._isPolarOrWrapping();
+        let indices = useEarcut
             ? triangulatePolygonEarcut(coords, holeIndices)
             : triangulatePolygonCDT(coords, holeIndices, contourCount);
+        if ((this as any)._map?.globe === true) indices = filterNearDegenerateTriangles(coords, indices);
         if (!indices.length) return [];
 
-        const p2d: Array<{ x: number; y: number }> = new Array(coords.length / 2);
-        for (let i = 0, j = 0; i < coords.length; i += 2, j++) {
-            p2d[j] = { x: coords[i], y: coords[i + 1] };
+        if ((this as any)._map?.globe === true) {
+            indices = this._subdivideGlobeTriangles(
+                indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180,
+            );
+        }
+
+        const p2d: Array<{ x: number; y: number }> = new Array(this._worldCoords.length);
+        for (let i = 0; i < this._worldCoords.length; i++) {
+            p2d[i] = { x: this._worldCoords[i][0], y: this._worldCoords[i][1] };
         }
         const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
         return firstCrossY >= 0 ? indices : flipIndices(indices);
@@ -429,10 +601,14 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         const contourCount = points2D.length;
         this._contourVertexCount = contourCount;
 
-        // Полярные и разорванные по антимеридиану полигоны — earcut без Steiner.
-        const useEarcut = this._isPolarOrWrapping();
+        // Контуры уже денсифицированы с шагом 0.25° на глобусе. Earcut
+        // триангулирует их за миллисекунды, тогда как CDT+Steiner блокирует
+        // главный поток на 5–10 секунд для 89 субъектов. На коротких рёбрах
+        // денсифицированного контура хорда не даёт заметного среза.
+        // Steiner/CDT оставляем только для плоского режима и особых разрывов.
+        const isGlobe = map.globe === true && !!map.surface;
+        const useEarcut = isGlobe || this._isPolarOrWrapping();
 
-        // Глобус: Steiner-точки внутри полигона (те же, что в _refreshWorldCoordsForBatch).
         const steiner = useEarcut
             ? { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> }
             : this._globeSteinerPoints();
@@ -453,6 +629,21 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         if (useEarcut) {
             indices = triangulatePolygonEarcut(triCoords, holeIndices);
             if (indices.length === 0) indices = triangulatePolygonEarcut(coords, holeIndices);
+            if (isGlobe) indices = filterNearDegenerateTriangles(triCoords, indices);
+            // После earcut разбиваем крупные globe-треугольники по поверхности;
+            // 2° — компромисс между кривизной и количеством вершин.
+            if (indices.length && isGlobe) {
+                indices = this._subdivideGlobeTriangles(
+                    indices,
+                    this._vertexLonLat,
+                    contourCount,
+                    holeIndices,
+                    2 * Math.PI / 180,
+                );
+                // arrays may have grown; regenerate points2D from updated world coords
+                points2D.length = 0;
+                for (const [x, z] of this._worldCoords) points2D.push(new THREE.Vector2(x, z));
+            }
         } else {
             indices = triangulatePolygonCDT(triCoords, holeIndices, contourCount);
         }

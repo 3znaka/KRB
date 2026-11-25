@@ -84,6 +84,8 @@ class BatchedGroup {
     readonly polygons: Batchable[];
     readonly polygonSet: Set<Batchable>;
     private _trianglesToPolygon: Batchable[] = [];
+    /** Диапазоны вершин TOP/BOTTOM для быстрой recolor без пересчёта геометрии. */
+    private _colorRanges: Array<{ poly: Batchable; start: number; count: number }> = [];
     private _unregister: (() => void) | null = null;
     private _map: any = null;
     private _anchorX = 0;
@@ -170,10 +172,12 @@ class BatchedGroup {
         const uvs: number[] = [];
         const indices: number[] = [];
         const triPoly: Batchable[] = [];
+        const colorRanges: Array<{ poly: Batchable; start: number; count: number }> = [];
 
         for (const { poly, data } of datas) {
             const baseVertex = positions.length / 3;
             const wc = data.worldCoords;
+            const colorStart = baseVertex;
             const heights = data.heights;
             const n = wc.length;
             const height = data.height;
@@ -227,7 +231,10 @@ class BatchedGroup {
                 triPoly.push(poly);
             }
 
-            if (!isExtruded) continue;
+            if (!isExtruded) {
+                colorRanges.push({ poly, start: colorStart, count: positions.length / 3 - colorStart });
+                continue;
+            }
 
             // в”Ђв”Ђ BOTTOM в”Ђв”Ђ
             const bottomBase = positions.length / 3;
@@ -298,13 +305,38 @@ for (let r = 0; r < ringStarts.length; r++) {
         triPoly.push(poly, poly);
     }
 }
+            colorRanges.push({
+                poly,
+                start: colorStart,
+                count: positions.length / 3 - colorStart,
+            });
         }
 
         this._trianglesToPolygon = triPoly;
 
+        // Кэшируем полный диапазон вершин полигона (TOP + BOTTOM + sides),
+        // чтобы recolor() не запрашивал его геометрию заново.
+        this._colorRanges = colorRanges;
+
+        // Вершинные цвета: заливка каждого полигона в батче задаётся своими
+        // цветами, поэтому перекраска не требует пересборки геометрии.
+        // Цвета сторон extruded-полигонов оставляем белыми/neutral как раньше.
+        const colors = new Float32Array(positions.length).fill(1);
+        const cc = new THREE.Color();
+        for (const range of colorRanges) {
+            cc.set((range.poly as any)._fillColor ?? 0xffffff);
+            for (let i = 0; i < range.count; i++) {
+                const k = (range.start + i) * 3;
+                colors[k] = cc.r;
+                colors[k + 1] = cc.g;
+                colors[k + 2] = cc.b;
+            }
+        }
+
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
         geom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+        geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         geom.setIndex(indices);
         // РќРѕСЂРјР°Р»Рё РЅСѓР¶РЅС‹ MeshStandardMaterial (extruded). Р”Р»СЏ MeshBasic
         // РѕРЅРё РЅРµ РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ вЂ” РїСЂРѕРїСѓСЃРєР°РµРј, СЌРєРѕРЅРѕРјРёРј С†РёРєР» РЅР° rebuild.
@@ -320,7 +352,8 @@ for (let r = 0; r < ringStarts.length; r++) {
         let mat: any;
         if (d0.extruded) {
             mat = new THREE.MeshStandardMaterial({
-                color: d0.fillColor as any,
+                color: 0xffffff,
+                vertexColors: true,
                 opacity: d0.fillOpacity,
                 transparent: isTransparent,
                 side: THREE.DoubleSide,
@@ -335,7 +368,8 @@ for (let r = 0; r < ringStarts.length; r++) {
             });
         } else {
             mat = new THREE.MeshBasicMaterial({
-                color: d0.fillColor as any,
+                color: 0xffffff,
+                vertexColors: true,
                 opacity: d0.fillOpacity,
                 transparent: isTransparent,
                 side: THREE.DoubleSide,
@@ -502,6 +536,41 @@ for (let r = 0; r < ringStarts.length; r++) {
         return this._trianglesToPolygon[faceIdx] ?? null;
     }
 
+    /**
+     * Перекраска без пересборки геометрии: обновляет только вершинные цвета.
+     * Полигоны, у которых сменился цвет заливки, передаются через
+     * `poly.fillColor` (поле читается из `_getBatchGeometryData()`).
+     *
+     * @returns `true`, если цвета удалось обновить; `false` — если геометрия
+     *          ещё не построена (тогда нужна пересборка).
+     */
+    recolor(): boolean {
+        const geom = this.mesh?.geometry;
+        const attr = geom?.getAttribute?.('color');
+        if (!attr) return false;
+
+        const cc = new THREE.Color();
+        let changed = false;
+        for (const range of this._colorRanges) {
+            // Fill color stored on the Polygon; do not rebuild batch geometry.
+            // Используем только цвет объекта: вызов _getBatchGeometryData здесь
+            // запрещён, потому что на глобусе он повторно проецирует все вершины.
+            cc.set((range.poly as any)._fillColor ?? 0xffffff);
+            for (let i = 0; i < range.count; i++) {
+                const k = (range.start + i) * 3;
+                if (attr.array[k] !== cc.r || attr.array[k + 1] !== cc.g
+                    || attr.array[k + 2] !== cc.b) {
+                    attr.array[k] = cc.r;
+                    attr.array[k + 1] = cc.g;
+                    attr.array[k + 2] = cc.b;
+                    changed = true;
+                }
+            }
+        }
+        if (changed) attr.needsUpdate = true;
+        return true;
+    }
+
     update(map: any, layerVisible: boolean): void {
         if (!this.mesh) return;
         const z = map.continuousZoom;
@@ -575,6 +644,20 @@ export class PolygonBatcher {
     constructor(layer: any) {
         this._layer = layer;
         this._group = new THREE.Group();
+    }
+
+    /**
+     * Перекрашивает все батчи без пересборки геометрии.
+     *
+     * Полигоны в батче рисуются одним мешем с вершинными цветами, поэтому
+     * смена цвета заливки (например, при переходе к другому показателю
+     * картограммы) обновляет только атрибут `color` и не трогает
+     * триангуляцию — в отличие от {@link markDirty}, который пересобирает
+     * батчи целиком.
+     */
+    recolorAll(): void {
+        if (this._disposed) return;
+        for (const batch of this._batches.values()) batch.recolor();
     }
 
     addTo(map: any): void {

@@ -32,8 +32,7 @@ function filterNearDegenerateTriangles(coords, indices, relativeAreaEpsilon = 1e
 }
 /**
  * Максимальная длина ребра на сфере, после которой ребро делится (градусы).
- * Меньше = мельче треугольники и больше вершин. Настраивается через
- * setGlobeTriangulationOptions() из KRB.
+ * Крупный шаг (для больших полигонов), по умолчанию 0.75.
  */
 let globeSubdivideDeg = 0.75;
 /** Шаг для самых мелких полигонов (размер ≤ SMALL_SIZE_DEG), градусы. */

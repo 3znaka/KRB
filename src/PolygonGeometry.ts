@@ -41,8 +41,7 @@ function filterNearDegenerateTriangles(coords: number[], indices: number[], rela
 
 /**
  * Максимальная длина ребра на сфере, после которой ребро делится (градусы).
- * Меньше = мельче треугольники и больше вершин. Настраивается через
- * setGlobeTriangulationOptions() из KRB.
+ * Крупный шаг (для больших полигонов), по умолчанию 0.75.
  */
 let globeSubdivideDeg = 0.75;
 /** Шаг для самых мелких полигонов (размер ≤ SMALL_SIZE_DEG), градусы. */
@@ -61,7 +60,6 @@ export function getGlobeSubdivideDeg(): number {
 export function setGlobeSubdivideSmallDeg(deg: number): void {
     if (Number.isFinite(deg) && deg > 0) globeSubdivideSmallDeg = deg;
 }
-
 /**
  * Шаг субдивизии (радианы) для полигона.
  * Крупные и вытянутые полигоны (размер ≥ LARGE_SIZE_DEG) получают
@@ -731,6 +729,7 @@ _hasAntimeridianWrap(this: Polygon): boolean {
     },
 
     _buildFillGeometry(this: Polygon, map: any): void {
+
         this._cachedTopIndices = null;
         const rings = this._getRenderRings(this._currentSimplifyBucket);
         if (!rings || !rings.length || rings[0].worldCoords.length < 3) {

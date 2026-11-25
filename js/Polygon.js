@@ -197,9 +197,7 @@ export class Polygon extends SpatialObject {
         }
         // Глобус: упрощение выключено, чтобы общие границы соседних полигонов
         // стыковались (каждый полигон иначе режется по своему контуру).
-        if (map.globe === true && !this._simplifyExplicit) {
-            this._simplify = false;
-        }
+        // LOD на глобусе включён (см. историю: отключался в старой версии).
         this._loadFillPattern();
         this._currentSimplifyBucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
         this._simplifyCache.clear();

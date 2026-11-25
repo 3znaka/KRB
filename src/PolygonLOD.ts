@@ -17,7 +17,7 @@ import type { Polygon } from './Polygon.js';
  * детализации зависит только от зума, поэтому соседние полигоны стыкуются.
  * 0.1 px давал заметное падение производительности, 0.5 px — грубые страны.
  */
-const GLOBE_LOD_PIXELS = 0.25;
+const GLOBE_LOD_PIXELS = 0.4;
 
 export interface PolygonLOD {
     _worldPerPixel(z: number): number;
@@ -33,6 +33,11 @@ export interface PolygonLOD {
         lonLats: Array<[number, number] | null>, map: any,
         curLonLat: [number, number], prevLonLat: [number, number] | null): void;
 }
+
+/** Угол (градусы), ниже которого вершина на LOD-бакете считается остриём клина. */
+const SHARP_ANGLE_DEG = 10;
+
+
 
 export const PolygonLODMixin = {
     _worldPerPixel(this: Polygon, z: number): number {
@@ -242,7 +247,57 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
             // Проверку «мелкий полигон не упрощаем» убрали: она делала стыки
             // соседних полигонов несовпадающими (один упрощён, другой нет).
 
-            const sWC: [number, number][] = new Array(keptIdx.length);
+            // Убираем последовательные совпадающие точки, включая замыкающую
+            // (кольцо: last == first). Нулевые рёбра на узких участках
+            // превращаются в иглы при субдивизии.
+            {
+                const dedup: number[] = [];
+                for (const idx of keptIdx) {
+                    const p = worldCoords[idx];
+                    if (dedup.length) {
+                        const q = worldCoords[dedup[dedup.length - 1]];
+                        if (p[0] === q[0] && p[1] === q[1]) continue;
+                    }
+                    dedup.push(idx);
+                }
+                while (dedup.length > 3) {
+                    const f = worldCoords[dedup[0]], l = worldCoords[dedup[dedup.length - 1]];
+                    if (f[0] === l[0] && f[1] === l[1]) dedup.pop(); else break;
+                }
+                if (dedup.length >= 3 && dedup.length < keptIdx.length) {
+                    keptIdx.length = 0;
+                    for (const idx of dedup) keptIdx.push(idx);
+                }
+            }
+            // Длинные дуги упрощённого кольца: DP оставляет вершины на расстоянии
+            // 2–3° по дуге (на высоких широтах), субдивизия режет такое ребро по
+            // lon/lat и даёт ряды. Возвращаем исходные вершины между концами ребра,
+            // если его дуга больше порога субдивизии.
+            if (ring.lonLats && (this as any)._map?.surface) {
+                const surf = (this as any)._map.surface;
+                const thrRad = subdivideStepRadFor(this._vertexLonLat);
+                const n = worldCoords.length;
+                const restored: number[] = [];
+                for (let k = 0; k < keptIdx.length; k++) {
+                    const a = keptIdx[k];
+                    const b = keptIdx[(k + 1) % keptIdx.length];
+                    restored.push(a);
+                    const la = ring.lonLats[a], lb = ring.lonLats[b];
+                    if (!la || !lb) continue;
+                    const va = surf.position(la[0], la[1], 0, new THREE.Vector3());
+                    const vb = surf.position(lb[0], lb[1], 0, new THREE.Vector3());
+                    const arc = centralAngle(va, vb);
+                    if (!Number.isFinite(arc) || arc <= thrRad) continue;
+                    const span = (b - a + n) % n;
+                    const parts = Math.ceil(arc / thrRad);
+                    const step = Math.max(1, Math.ceil(span / parts));
+                    for (let j = step; j < span; j += step) restored.push((a + j) % n);
+                }
+                if (restored.length > keptIdx.length) {
+                    keptIdx.length = 0;
+                    for (const idx of restored) keptIdx.push(idx);
+                }
+            }            const sWC: [number, number][] = new Array(keptIdx.length);
             const sH: number[] = new Array(keptIdx.length);
             const sLL: Array<[number, number] | null> = new Array(keptIdx.length);
             for (let k = 0; k < keptIdx.length; k++) {

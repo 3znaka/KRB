@@ -18,6 +18,8 @@ export * from './GeojsonUtils.js';
 // =====================================================================
 // GeoJSONLayer
 // =====================================================================
+/** Сколько фич строится за один кадр при порционной постройке. */
+const PARSE_CHUNK_SIZE = 12;
 export class GeoJSONLayer extends Layer {
     url = null;
     data = null;
@@ -110,6 +112,7 @@ export class GeoJSONLayer extends Layer {
     defaultPolygon3DModelUrl = null;
     defaultPolygon3DDepthTest = true;
     defaultPolygon3DDepthWrite = true;
+    _buildToken = 0;
     _loaded = false;
     static fromMapboxFilter(arr) { return mapboxToJsExpr(arr); }
     constructor(o = {}) {
@@ -206,6 +209,8 @@ export class GeoJSONLayer extends Layer {
     }
     reload() {
         const self = this;
+        // Отменяем незавершённую порционную постройку.
+        this._buildToken = (this._buildToken ?? 0) + 1;
         for (const obj of [...(self._objects ?? [])])
             obj.remove();
         self._objects = [];
@@ -467,7 +472,10 @@ export class GeoJSONLayer extends Layer {
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
             this._computeCoinDenoms(geojson);
-            this._parse(geojson);
+            const token = this._buildToken ?? 0;
+            await this._parseAsync(geojson, token);
+            if (token !== (this._buildToken ?? 0))
+                return;
             this._buildLegend(geojson);
             this._loaded = true;
         }
@@ -712,6 +720,32 @@ export class GeoJSONLayer extends Layer {
         return interpolateStyle(style, props);
     }
     // ── dispatch ────────────────────────────────────────────────────
+    /** Порционный разбор больших FeatureCollection: по кадру на порцию. */
+    async _parseAsync(geojson, token) {
+        const type = geojson.type;
+        const features = type === 'FeatureCollection'
+            ? geojson.features
+            : null;
+        if (!features || features.length <= PARSE_CHUNK_SIZE) {
+            this._parse(geojson);
+            return;
+        }
+        const frame = () => new Promise((resolve) => {
+            if (typeof requestAnimationFrame === 'function')
+                requestAnimationFrame(() => resolve());
+            else
+                setTimeout(resolve, 0);
+        });
+        for (let i = 0; i < features.length; i += PARSE_CHUNK_SIZE) {
+            if (token !== (this._buildToken ?? 0))
+                return;
+            const end = Math.min(features.length, i + PARSE_CHUNK_SIZE);
+            for (let k = i; k < end; k++)
+                this._addFeature(features[k]);
+            if (end < features.length)
+                await frame();
+        }
+    }
     _parse(geojson) {
         const type = geojson.type;
         if (type === 'FeatureCollection') {

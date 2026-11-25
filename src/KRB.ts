@@ -37,3 +37,4 @@ export { setDracoDecoderPath, getDracoDecoderPath } from './Defaults.js';
 export { PathFollower, createPrimitiveVisual } from './PathFollower.js';
 
 export { setGlobeSubdivideDeg, getGlobeSubdivideDeg, setGlobeSubdivideSmallDeg } from './PolygonGeometry.js';
+

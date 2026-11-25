@@ -24,6 +24,7 @@ await KRB.crs.add('EPSG:32637');
 
 const map = new KRB.Map({
     target: 'map',
+    debug: true,
 globe: true,
     layers: [
         new KRB.Tile({

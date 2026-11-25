@@ -45,6 +45,9 @@ export * from './GeojsonUtils.js';
 // GeoJSONLayer
 // =====================================================================
 
+/** Сколько фич строится за один кадр при порционной постройке. */
+const PARSE_CHUNK_SIZE = 12;
+
 export class GeoJSONLayer extends Layer {
     public url: string | null = null;
     public data: GeoJSONInput | null = null;
@@ -154,6 +157,7 @@ export class GeoJSONLayer extends Layer {
     public defaultPolygon3DDepthTest = true;
     public defaultPolygon3DDepthWrite = true;
 
+    private _buildToken = 0;
     private _loaded = false;
 
     static fromMapboxFilter(arr: readonly unknown[]): string { return mapboxToJsExpr(arr); }
@@ -267,6 +271,8 @@ override addTo(map: any): this {
 
 reload(): void {
     const self = this as any;
+    // Отменяем незавершённую порционную постройку.
+    this._buildToken = (this._buildToken ?? 0) + 1;
     for (const obj of [...(self._objects ?? [])]) obj.remove();
     self._objects = [];
     if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
@@ -508,7 +514,9 @@ if (this.crs) await Projections.ensure(this.crs);
             this._computeDiagram3DAuto(geojson);
             this._computeDiagramAuto(geojson);
             this._computeCoinDenoms(geojson);
-            this._parse(geojson);
+            const token = this._buildToken ?? 0;
+            await this._parseAsync(geojson, token);
+            if (token !== (this._buildToken ?? 0)) return;
             this._buildLegend(geojson);
             this._loaded = true;
         } catch (err) { console.error('GeoJSONLayer: load/parse error', err); }
@@ -702,7 +710,30 @@ if (this.crs) await Projections.ensure(this.crs);
     }
 
     // ── dispatch ────────────────────────────────────────────────────
+    /** Порционный разбор больших FeatureCollection: по кадру на порцию. */
+    private async _parseAsync(geojson: GeoJSONInput, token: number): Promise<void> {
+        const type = (geojson as { type: string }).type;
+        const features = type === 'FeatureCollection'
+            ? (geojson as GeoJSONFeatureCollection).features
+            : null;
+        if (!features || features.length <= PARSE_CHUNK_SIZE) {
+            this._parse(geojson);
+            return;
+        }
+        const frame = (): Promise<void> => new Promise((resolve) => {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+            else setTimeout(resolve, 0);
+        });
+        for (let i = 0; i < features.length; i += PARSE_CHUNK_SIZE) {
+            if (token !== (this._buildToken ?? 0)) return;
+            const end = Math.min(features.length, i + PARSE_CHUNK_SIZE);
+            for (let k = i; k < end; k++) this._addFeature(features[k]);
+            if (end < features.length) await frame();
+        }
+    }
+
     private _parse(geojson: GeoJSONInput): void {
+
         const type = (geojson as { type: string }).type;
         if (type === 'FeatureCollection') {
             for (const f of (geojson as GeoJSONFeatureCollection).features) this._addFeature(f);

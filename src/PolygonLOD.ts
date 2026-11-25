@@ -9,6 +9,7 @@ import {
     interpolateSurface, centralAngle,
     azimuthalEquidistant, sphericalCentroidLonLat,
 } from './PolygonUtils.js';
+import { subdivideStepRadFor } from './PolygonGeometry.js';
 import type { Polygon } from './Polygon.js';
 
 /**
@@ -376,7 +377,7 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
                     this._vertexLonLat,
                     contourCount,
                     holeIndices,
-                    2 * Math.PI / 180,
+                    subdivideStepRadFor(this._vertexLonLat),
                     planeCenter,
                 );
                 coords.length = 0;

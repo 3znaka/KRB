@@ -30,7 +30,184 @@ function filterNearDegenerateTriangles(coords, indices, relativeAreaEpsilon = 1e
     }
     return out;
 }
+/**
+ * Максимальная длина ребра на сфере, после которой ребро делится (градусы).
+ * Меньше = мельче треугольники и больше вершин. Настраивается через
+ * setGlobeTriangulationOptions() из KRB.
+ */
+let globeSubdivideDeg = 0.75;
+/** Шаг для самых мелких полигонов (размер ≤ SMALL_SIZE_DEG), градусы. */
+let globeSubdivideSmallDeg = 5;
+/** Размер полигона (градусы), начиная с которого действует мелкий шаг. */
+const SMALL_SIZE_DEG = 2;
+/** Размер полигона (градусы), начиная с которого действует крупный шаг. */
+const LARGE_SIZE_DEG = 15;
+export function setGlobeSubdivideDeg(deg) {
+    if (Number.isFinite(deg) && deg > 0)
+        globeSubdivideDeg = deg;
+}
+export function getGlobeSubdivideDeg() {
+    return globeSubdivideDeg;
+}
+export function setGlobeSubdivideSmallDeg(deg) {
+    if (Number.isFinite(deg) && deg > 0)
+        globeSubdivideSmallDeg = deg;
+}
+/**
+ * Шаг субдивизии (радианы) для полигона.
+ * Крупные и вытянутые полигоны (размер ≥ LARGE_SIZE_DEG) получают
+ * globeSubdivideDeg; мелкие (≤ SMALL_SIZE_DEG) — globeSubdivideSmallDeg;
+ * между ними — линейная интерполяция. Размер — наибольший угловой
+ * размер ограничивающего прямоугольника по lon/lat вершинам.
+ */
+export function subdivideStepRadFor(lonLats) {
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const p of lonLats) {
+        if (!p)
+            continue;
+        if (p[0] < minLon)
+            minLon = p[0];
+        if (p[0] > maxLon)
+            maxLon = p[0];
+        if (p[1] < minLat)
+            minLat = p[1];
+        if (p[1] > maxLat)
+            maxLat = p[1];
+    }
+    const size = Math.max(maxLon - minLon, maxLat - minLat);
+    let deg;
+    if (!Number.isFinite(size) || size >= LARGE_SIZE_DEG)
+        deg = globeSubdivideDeg;
+    else if (size <= SMALL_SIZE_DEG)
+        deg = globeSubdivideSmallDeg;
+    else {
+        const t = (size - SMALL_SIZE_DEG) / (LARGE_SIZE_DEG - SMALL_SIZE_DEG);
+        deg = globeSubdivideSmallDeg + (globeSubdivideDeg - globeSubdivideSmallDeg) * t;
+    }
+    return deg * Math.PI / 180;
+}
+/** Включает децимацию контура на глобусе. Выключено: ломало заливку (см. историю). */
+const DECIMATE_INTERIOR = false;
+/** Порог углового отклонения точки контура от её соседей на сфере, градусы. */
+const DECIMATE_TOLERANCE_DEG = 0.2;
+/**
+ * Децимация контуров с последующей перетриангуляцией earcut.
+ *
+ * Для каждой вершины контура (внутри каждого кольца) считается угловое
+ * отклонение от сферического центра её соседей по кольцу. Если оно меньше
+ * порога, точка удаляется. Кольцо всегда сохраняет минимум 3 точки. Затем
+ * earcut перетриангулирует полигон по выжившим точкам с теми же дырами —
+ * треугольники гарантированно лежат внутри полигона, отдельная проверка
+ * валидности звёзд не нужна.
+ *
+ * Возвращает новый массив индексов. Координаты в `coords` (плоские) заменяются
+ * на выжившие, поэтому вызывающий код должен пересобрать свои массивы по
+ * возвращённому порядку — см. `result.coords`.
+ */
+function decimateContourAndRetriangulate(coords, holeIndices, sphere, toleranceRad) {
+    const vertCount = coords.length / 2;
+    const ringStarts = [0, ...holeIndices].map(s => s);
+    const ringEnds = [...holeIndices, vertCount];
+    const keep = []; // исходные индексы выживших вершин
+    const newHoles = [];
+    for (let r = 0; r < ringStarts.length; r++) {
+        const s = ringStarts[r], e = ringEnds[r];
+        const n = e - s;
+        if (r > 0)
+            newHoles.push(keep.length);
+        if (n < 4) {
+            for (let i = s; i < e; i++)
+                keep.push(i);
+            continue;
+        }
+        // Итеративно удаляем вершины с малым угловым отклонением.
+        const alive = [];
+        for (let i = s; i < e; i++)
+            alive.push(i);
+        let changed = true;
+        while (changed && alive.length > 3) {
+            changed = false;
+            for (let k = 0; k < alive.length && alive.length > 3; k++) {
+                const prev = alive[(k - 1 + alive.length) % alive.length];
+                const cur = alive[k];
+                const next = alive[(k + 1) % alive.length];
+                const sp = sphere[prev], sc = sphere[cur], sn = sphere[next];
+                if (!sp || !sc || !sn)
+                    continue;
+                const sx = sp.x + sn.x, sy = sp.y + sn.y, sz = sp.z + sn.z;
+                const sl = Math.hypot(sx, sy, sz);
+                const lc = Math.hypot(sc.x, sc.y, sc.z);
+                if (!(sl > 1e-9) || !(lc > 1e-9))
+                    continue;
+                const cosA = Math.max(-1, Math.min(1, (sc.x * sx + sc.y * sy + sc.z * sz) / (lc * sl)));
+                if (Math.acos(cosA) <= toleranceRad) {
+                    alive.splice(k, 1);
+                    changed = true;
+                    k--;
+                }
+            }
+        }
+        for (const i of alive)
+            keep.push(i);
+    }
+    // Новые координаты по выжившим вершинам (порядок сохраняется по кольцам).
+    const newCoords = [];
+    for (const i of keep)
+        newCoords.push(coords[i * 2], coords[i * 2 + 1]);
+    const indices = triangulatePolygonEarcut(newCoords, newHoles);
+    return { coords: newCoords, indices, keep };
+}
+/** Упорядоченное по обходу кольцо соседей вершины v по её треугольникам. */
+function starRing(v, tris) {
+    // Для каждого треугольника (v, a, b) ребро a->b задаёт направление обхода.
+    const next = new Map();
+    for (const tri of tris) {
+        const k = tri.indexOf(v);
+        if (k < 0)
+            continue;
+        const a = tri[(k + 1) % 3];
+        const b = tri[(k + 2) % 3];
+        next.set(a, b);
+    }
+    if (next.size === 0)
+        return null;
+    const start = next.keys().next().value;
+    const ring = [start];
+    let cur = next.get(start);
+    while (cur !== undefined && cur !== start && ring.length <= next.size) {
+        ring.push(cur);
+        cur = next.get(cur);
+    }
+    if (ring.length !== next.size)
+        return null; // звезда не замкнута — не трогаем
+    return ring;
+}
+/** Earcut по локальному плоскому кольцу (внутренний вызов, без дырок). */
+function earcutRing(coords) {
+    const idx = triangulatePolygonEarcut(coords, []);
+    return idx && idx.length ? idx : null;
+}
 export const PolygonGeometryMixin = {
+    /**
+     * 3D-позиции вершин на поверхности (для углового критерия децимации).
+     * Вершина без lon/lat получает null и не участвует в децимации.
+     */
+    _sphereVerticesFor(lonLats) {
+        const surface = this._map?.surface;
+        const out = new Array(lonLats.length).fill(null);
+        if (!surface)
+            return out;
+        for (let i = 0; i < lonLats.length; i++) {
+            const ll = lonLats[i];
+            if (!ll)
+                continue;
+            const v = surface.position(ll[0], ll[1], 0, new THREE.Vector3());
+            if (v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) {
+                out[i] = { x: v.x, y: v.y, z: v.z };
+            }
+        }
+        return out;
+    },
     /**
      * Subdivide earcut triangles on the globe surface.
      *
@@ -535,7 +712,16 @@ export const PolygonGeometryMixin = {
         if (!indices.length)
             return [];
         if (isGlobeMap) {
-            indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180, planeCenter);
+            indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, subdivideStepRadFor(this._vertexLonLat), planeCenter);
+            if (DECIMATE_INTERIOR) {
+                const flat = [];
+                for (const w of this._worldCoords)
+                    flat.push(w[0], w[1]);
+                const sphere = this._sphereVerticesFor(this._vertexLonLat);
+                const dec = decimateContourAndRetriangulate(flat, holeIndices, sphere, DECIMATE_TOLERANCE_DEG * Math.PI / 180);
+                if (dec.indices.length)
+                    indices = dec.indices.map(i => dec.keep[i]);
+            }
         }
         const p2d = new Array(this._worldCoords.length);
         for (let i = 0; i < this._worldCoords.length; i++) {
@@ -666,7 +852,7 @@ export const PolygonGeometryMixin = {
             // После earcut разбиваем крупные globe-треугольники по поверхности;
             // 2° — компромисс между кривизной и количеством вершин.
             if (indices.length && isGlobe) {
-                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180, planeCenter);
+                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, subdivideStepRadFor(this._vertexLonLat), planeCenter);
                 // arrays may have grown; regenerate points2D from updated world coords
                 points2D.length = 0;
                 for (const [x, z] of this._worldCoords)
@@ -679,6 +865,20 @@ export const PolygonGeometryMixin = {
         if (indices.length === 0) {
             console.warn('Polygon: triangulation returned no triangles');
             return;
+        }
+        // Децимация внутренних вершин (внешний контур не трогаем). Работаем в
+        // плоских координатах, которые совпадают с проекцией earcut.
+        if (isGlobe && DECIMATE_INTERIOR) {
+            const flat = [];
+            for (const pt of points2D)
+                flat.push(pt.x, pt.y);
+            const sphere = this._sphereVerticesFor(this._vertexLonLat);
+            // Заливка перестраивается по выжившим контурным точкам. Стенки и
+            // _ringStartIndices остаются по полному контуру (см. комментарий).
+            const dec = decimateContourAndRetriangulate(flat, holeIndices, sphere, DECIMATE_TOLERANCE_DEG * Math.PI / 180);
+            if (dec.indices.length) {
+                indices = dec.indices.map(i => dec.keep[i]);
+            }
         }
         const firstCrossY = crossY(points2D[indices[0]], points2D[indices[1]], points2D[indices[2]]);
         const topIndices = firstCrossY >= 0 ? indices : flipIndices(indices);

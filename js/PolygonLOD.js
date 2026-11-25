@@ -4,6 +4,7 @@
 import { THREE } from './js_TP/tpb.js';
 import { simplifyRingIndices } from './Simplify.js';
 import { crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat, interpolateSurface, centralAngle, azimuthalEquidistant, sphericalCentroidLonLat, } from './PolygonUtils.js';
+import { subdivideStepRadFor } from './PolygonGeometry.js';
 /**
  * Допуск упрощения контура в пикселях экрана. Один на всю карту: уровень
  * детализации зависит только от зума, поэтому соседние полигоны стыкуются.
@@ -333,7 +334,7 @@ export const PolygonLODMixin = {
             if (indices.length === 0)
                 indices = triangulatePolygonEarcut(coords, holeIndices);
             if (indices.length && isGlobeMap) {
-                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, 2 * Math.PI / 180, planeCenter);
+                indices = this._subdivideGlobeTriangles(indices, this._vertexLonLat, contourCount, holeIndices, subdivideStepRadFor(this._vertexLonLat), planeCenter);
                 coords.length = 0;
                 for (const [x, z] of this._worldCoords)
                     coords.push(x - this._centroidWorld.x, z - this._centroidWorld.z);

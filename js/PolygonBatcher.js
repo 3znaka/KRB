@@ -36,6 +36,9 @@ class BatchedGroup {
     _globeBox = null;
     _globeCorner = null;
     _globeSize = null;
+    /** Кэш мирового bounding sphere батча на глобусе (см. _registerInteraction). */
+    _globeBoxCache = null;
+    _globeBoxKey = null;
     _minZoom = -Infinity;
     _maxZoom = Infinity;
     /** Р Р°Р·РґРµР»СЏРµРјР°СЏ С‚РµРєСЃС‚СѓСЂР° РїР°С‚С‚РµСЂРЅР° вЂ” РІР»Р°РґРµР»РµС† PolygonBatcher. */
@@ -359,6 +362,8 @@ class BatchedGroup {
             this.strokeLine = line;
             this.strokeMaterial = sMat;
         }
+        this._globeBoxCache = null;
+        this._globeBoxKey = null;
         const bs = geom.boundingSphere;
         if (bs) {
             this._boundingSphere = {
@@ -387,26 +392,46 @@ class BatchedGroup {
                 // (плоский anchor + bs.center не описывает 3D-положение).
                 if (map.globe === true && this.mesh) {
                     const mesh = this.mesh;
-                    // Пересчёт каждый раз: позиции могут меняться (см. PolygonUpdate).
-                    mesh.geometry.computeBoundingBox();
-                    const gb = mesh.geometry.boundingBox;
-                    if (gb) {
-                        mesh.updateMatrixWorld(true);
-                        const box = this._globeBox || (this._globeBox = new THREE.Box3());
-                        const c = this._globeCorner || (this._globeCorner = new THREE.Vector3());
-                        box.makeEmpty();
-                        for (const x of [gb.min.x, gb.max.x])
-                            for (const y of [gb.min.y, gb.max.y])
-                                for (const z of [gb.min.z, gb.max.z]) {
-                                    c.set(x, y, z).applyMatrix4(mesh.matrixWorld);
-                                    box.expandByPoint(c);
-                                }
-                        if (!box.isEmpty()) {
-                            const center = this._boundingSphereWorldCenter;
-                            box.getCenter(center);
-                            const size = this._globeSize || (this._globeSize = new THREE.Vector3());
-                            return { center, radius: box.getSize(size).length() * 0.5 };
+                    // Кэш мирового бокса: геометрия батча меняется только при
+                    // пересборке (build), а сдвиг worldGroup учитываем через
+                    // сброс ключа по позиции карты.
+                    const key = this._globeBoxKey;
+                    const gp = wgPos;
+                    if (!this._globeBoxCache || !key
+                        || key.x !== gp.x || key.y !== gp.y || key.z !== gp.z
+                        || key.geo !== mesh.geometry) {
+                        mesh.geometry.computeBoundingBox();
+                        const gb = mesh.geometry.boundingBox;
+                        if (gb) {
+                            mesh.updateMatrixWorld(true);
+                            const box = this._globeBox || (this._globeBox = new THREE.Box3());
+                            const c = this._globeCorner || (this._globeCorner = new THREE.Vector3());
+                            box.makeEmpty();
+                            for (const x of [gb.min.x, gb.max.x])
+                                for (const y of [gb.min.y, gb.max.y])
+                                    for (const z of [gb.min.z, gb.max.z]) {
+                                        c.set(x, y, z).applyMatrix4(mesh.matrixWorld);
+                                        box.expandByPoint(c);
+                                    }
+                            if (!box.isEmpty()) {
+                                const center = this._boundingSphereWorldCenter;
+                                box.getCenter(center);
+                                const size = this._globeSize || (this._globeSize = new THREE.Vector3());
+                                this._globeBoxCache = { center: center.clone(), radius: box.getSize(size).length() * 0.5 };
+                            }
+                            else {
+                                this._globeBoxCache = null;
+                            }
                         }
+                        else {
+                            this._globeBoxCache = null;
+                        }
+                        this._globeBoxKey = { x: gp.x, y: gp.y, z: gp.z, geo: mesh.geometry };
+                    }
+                    if (this._globeBoxCache) {
+                        const cached = this._globeBoxCache;
+                        this._boundingSphereWorldCenter.copy(cached.center);
+                        return { center: this._boundingSphereWorldCenter, radius: cached.radius };
                     }
                 }
                 if (!this._boundingSphere)

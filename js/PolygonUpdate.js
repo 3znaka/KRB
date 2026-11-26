@@ -220,7 +220,12 @@ export const PolygonUpdateMixin = {
         const globe = map.globe === true && !!map.surface;
         const origin = this._centroidWorld;
         // РљРѕРѕСЂРґРёРЅР°С‚Р° РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅС‹ РІ Р»РѕРєР°Р»СЊРЅРѕРј РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІРµ РіСЂСѓРїРїС‹.
-        const localPos = new Float32Array(n * 3);
+        // Буфер позиций переиспользуем между вызовами (без аллокации на каждый кадр).
+        let localPos = this._localPosBuf;
+        if (!localPos || localPos.length !== n * 3) {
+            localPos = new Float32Array(n * 3);
+            this._localPosBuf = localPos;
+        }
         if (globe) {
             for (let i = 0; i < n; i++) {
                 const ll = this._vertexLonLatOf(i);
@@ -390,12 +395,25 @@ export const PolygonUpdateMixin = {
         const map = this._map;
         if (!map)
             return null;
+        // 0) Кэш: центроид зависит только от вершин (lon/lat), а они меняются
+        //    лишь при пересборке геометрии/смене бакета — там кэш сбрасывается.
+        const arr = this._vertexLonLat;
+        const cacheKey = arr ? arr.length : -1;
+        const cc = this._centroidLonLatCache;
+        if (cc && cc.src === arr && cc.n === cacheKey)
+            return cc.value;
+        const value = this._centroidLonLatUncached(map);
+        this._centroidLonLatCache = { n: cacheKey, src: arr, value };
+        return value;
+    },
+    _centroidLonLatUncached(map) {
+        let ll = null;
         // 1) Быстрый путь: геодезические координаты вершин уже есть
         //    (`_vertexLonLat` заполняется при сборке геометрии).
         //    ВАЖНО: после батчинга `_vertices2D` обнуляется, поэтому
         //    ориентируемся только на сам массив.
         const arr = this._vertexLonLat;
-        let ll = this._averageLonLat(arr, arr ? arr.length : 0);
+        ll = this._averageLonLat(arr, arr ? arr.length : 0);
         if (ll)
             return ll;
         // 2) Own-геометрия ещё не строилась (полигон сразу ушёл в батчер).

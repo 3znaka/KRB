@@ -17,6 +17,7 @@ export interface PolygonUpdate {
     _updateHeights(): boolean;
     _vertexLonLatOf(i: number): [number, number] | null;
     _centroidLonLat(): [number, number] | null;
+    _centroidLonLatUncached(map: any): [number, number] | null;
     _averageLonLat(arr: Array<[number, number] | null> | null, nPts: number): [number, number] | null;
     _orientIndicesOutward(posArr: Float32Array, origin: any): void;
     _updateStroke(): void;
@@ -256,7 +257,12 @@ _updateHeights(this: Polygon): boolean {
         const origin = this._centroidWorld;
 
         // РљРѕРѕСЂРґРёРЅР°С‚Р° РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅС‹ РІ Р»РѕРєР°Р»СЊРЅРѕРј РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІРµ РіСЂСѓРїРїС‹.
-        const localPos = new Float32Array(n * 3);
+        // Буфер позиций переиспользуем между вызовами (без аллокации на каждый кадр).
+        let localPos = (this as any)._localPosBuf as Float32Array | undefined;
+        if (!localPos || localPos.length !== n * 3) {
+            localPos = new Float32Array(n * 3);
+            (this as any)._localPosBuf = localPos;
+        }
         if (globe) {
             for (let i = 0; i < n; i++) {
                 const ll = this._vertexLonLatOf(i);
@@ -415,12 +421,28 @@ _centroidLonLat(this: Polygon): [number, number] | null {
     const map = (this as any)._map;
     if (!map) return null;
 
+    // 0) Кэш: центроид зависит только от вершин (lon/lat), а они меняются
+    //    лишь при пересборке геометрии/смене бакета — там кэш сбрасывается.
+    const arr = this._vertexLonLat;
+    const cacheKey = arr ? arr.length : -1;
+    const cc = (this as any)._centroidLonLatCache as
+        { n: number; src: unknown; value: [number, number] | null } | undefined;
+    if (cc && cc.src === arr && cc.n === cacheKey) return cc.value;
+
+    const value = this._centroidLonLatUncached(map);
+    (this as any)._centroidLonLatCache = { n: cacheKey, src: arr, value };
+    return value;
+},
+
+_centroidLonLatUncached(this: Polygon, map: any): [number, number] | null {
+    let ll: [number, number] | null = null;
+
     // 1) Быстрый путь: геодезические координаты вершин уже есть
     //    (`_vertexLonLat` заполняется при сборке геометрии).
     //    ВАЖНО: после батчинга `_vertices2D` обнуляется, поэтому
     //    ориентируемся только на сам массив.
     const arr = this._vertexLonLat;
-    let ll = this._averageLonLat(arr, arr ? arr.length : 0);
+    ll = this._averageLonLat(arr, arr ? arr.length : 0);
     if (ll) return ll;
 
     // 2) Own-геометрия ещё не строилась (полигон сразу ушёл в батчер).

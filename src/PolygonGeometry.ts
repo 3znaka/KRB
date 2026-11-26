@@ -254,9 +254,9 @@ export const PolygonGeometryMixin = {
         const cacheHit = this._subdivCache.get(cacheKey);
         if (cacheHit && cacheHit.params === cacheParams && cacheHit.inputLength === indices.length) {
             this._worldCoords.length = 0;
-            this._worldCoords.push(...cacheHit.world);
+            for (const p of cacheHit.world) this._worldCoords.push(p);
             this._vertexLonLat.length = 0;
-            this._vertexLonLat.push(...cacheHit.lonLat);
+            for (const p of cacheHit.lonLat) this._vertexLonLat.push(p);
             this._nodeHeights.length = cacheHit.world.length;
             for (let i = contourCount; i < cacheHit.world.length; i++) this._nodeHeights[i] = 0;
             this._cachedHeights = cacheHit.heights.slice();
@@ -388,9 +388,9 @@ export const PolygonGeometryMixin = {
         // Preserve ring boundaries and contour-vertex metadata; append the
         // generated surface samples after all original contour vertices.
         this._worldCoords.length = 0;
-        this._worldCoords.push(...outWorld);
+        for (const p of outWorld) this._worldCoords.push(p);
         this._vertexLonLat.length = 0;
-        this._vertexLonLat.push(...outLonLat);
+        for (const p of outLonLat) this._vertexLonLat.push(p);
         this._nodeHeights.length = outWorld.length;
         for (let i = contourCount; i < outWorld.length; i++) this._nodeHeights[i] = 0;
         this._cachedHeights = outCachedHeights;

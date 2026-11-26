@@ -50,7 +50,10 @@ export const PolygonUpdateMixin = {
                     this._scheduleBucketChange(bucket);
                 }
             }
-            this._updateCentroidScreenPos();
+            // Экранную позицию центроида НЕ пересчитываем каждый кадр для всех
+            // полигонов: это дорогая проекция + обход вершин на каждый объект.
+            // Её считает getScreenPosition() по запросу (с кэшем на кадр).
+            this._screenPosDirty = true;
             return;
         }
 

@@ -816,7 +816,13 @@ export const PolygonGeometryMixin = {
             this._ringStartIndices.length = 0;
             return;
         }
-        if (!this._hasAntimeridianWrap()
+        // Антимеридиан зависит только от исходных колец, которые не меняются —
+        // считаем один раз на полигон, а не на каждую пересборку геометрии.
+        const self = this;
+        if (self._antimeridianWrapCache === undefined) {
+            self._antimeridianWrapCache = this._hasAntimeridianWrap();
+        }
+        if (!self._antimeridianWrapCache
             && this._isGeometryInvalid(ringStartIndices, map.WORLD_SIZE)) {
             this._invalidGeometry = true;
             this._group.visible = false;

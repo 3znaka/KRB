@@ -76,6 +76,7 @@ export interface CoreInputMethods {
     resize(): void;
     _getCanvasRect(): { left: number; top: number; width: number; height: number };
     _invalidateCanvasRect(): void;
+    _getCanvasHeight(): number;
     _correctGlobeRoll(): void;  
     
     
@@ -154,6 +155,19 @@ _invalidateCanvasRect() {
     (this as any)._cachedCanvasRect = null;
 },
 
+/**
+ * Высота канваса в CSS-пикселях — из кэша. Чтение `clientHeight` на каждом
+ * шаге инерции заставляет браузер делать синхронный layout (reflow), что и
+ * давало проседание. Кэш обновляется в onResize().
+ */
+_getCanvasHeight(): number {
+    const cached = (this as any)._canvasHeightCache as number | undefined;
+    if (cached && cached > 0) return cached;
+    const h = this.renderer.domElement.clientHeight || 1;
+    (this as any)._canvasHeightCache = h;
+    return h;
+},
+
 /** Фиксирует точку захвата под курсором (единичный вектор в СК глобуса). */
 _globeGrabAt(screenX: number, screenY: number): boolean {
     this._globeGrabActive = false;
@@ -186,7 +200,7 @@ _globeGrabAt(screenX: number, screenY: number): boolean {
  */
 _globeInertialShift(dx: number, dy: number): void {
     const cam = this.camera;
-    const H = this.renderer.domElement.clientHeight || 1;
+    const H = this._getCanvasHeight();
 
     // Метров (world-ед.) на пиксель в центре экрана на дистанции до цели.
     const dist = Math.max(cam.position.distanceTo(this.controls.target), 1e-6);
@@ -246,7 +260,7 @@ _globeOrbit(dx: number, dy: number, inertial = false): void {
 
     const cam = this.camera;
     const wg  = this.worldGroup;
-    const H   = this.renderer.domElement.clientHeight || 1;
+    const H   = this._getCanvasHeight();
 
     const x0 = this._globeLastX, y0 = this._globeLastY;
     const x1 = x0 + dx,          y1 = y0 + dy;
@@ -1253,6 +1267,7 @@ onResize() {
     this.renderer.setSize(w, h);
     // Layout changed — canvas rect cache must be refreshed.
     this._invalidateCanvasRect();
+    this._canvasHeightCache = h;
     this.maybeUpdateVisibleTiles();
     this._emitResize(w, h);
     if (this._padding) this._applyPadding(this._padding);

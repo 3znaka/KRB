@@ -178,6 +178,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _lastDiscreteZoom = -1;
 
     _centroidScreenPos: { x: number; y: number } | null = null;
+    /** Экранная позиция устарела — пересчитать при следующем getScreenPosition(). */
+    _screenPosDirty = true;
     _strokePositionsArray: number[] = [];
 
     constructor(options: PolygonOptions) {
@@ -383,7 +385,13 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
     getLabelType(): 'polygon' { return 'polygon'; }
 
     getScreenPosition(): { x: number; y: number } | null {
-        return this._isVisible ? this._centroidScreenPos : null;
+        if (!this._isVisible) return null;
+        // Ленивый пересчёт: кадр, в котором позицию реально запросили.
+        if (this._screenPosDirty) {
+            this._updateCentroidScreenPos();
+            this._screenPosDirty = false;
+        }
+        return this._centroidScreenPos;
     }
 
     // =================================================================
@@ -725,6 +733,7 @@ _normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
         }
         this._rings = rings;
         (this as any)._steinerCache = null;
+        (this as any)._antimeridianWrapCache = undefined;
         this._boundsCache.clear();
         this._visualCenterCache = null;
         this._centroidFromOriginal = null;

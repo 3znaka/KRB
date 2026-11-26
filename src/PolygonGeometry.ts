@@ -3,6 +3,7 @@
  * fill-pattern, поверхностные материалы.
  */
 import { THREE, Line2, LineMaterial, LineGeometry } from './js_TP/tpb.js';
+import { Projections } from './Projections.js';
 import {
     type UVParams,
     POLYGON_RENDER_ORDER, INVALID_EDGE_FRACTION, DEFAULT_FILL_PATTERN_SCALE,
@@ -187,6 +188,7 @@ function earcutRing(coords: number[]): number[] | null {
 export interface PolygonGeometry {
     _disposeMeshes(): void;
     _isPolarOrWrapping(): boolean;
+    _projectionHasLobes(map: any): boolean;
     _loadFillPattern(): void;
     _configureFillPatternTexture(): void;
     _applyFillPatternToMaterials(): void;
@@ -422,6 +424,22 @@ export const PolygonGeometryMixin = {
             prev = p;
         }
         return false;
+    },
+
+    /**
+     * Лепестковая проекция (расщеплённая развёртка с lobes, как FLOWER/Гуд):
+     * только в них контур Антарктиды уходит за ±180° и требует рамки-вычитания.
+     */
+    _projectionHasLobes(this: Polygon, map: any): boolean {
+        try {
+            const proj = map?.getProjection?.();
+            if (!proj) return false;
+            const raw = typeof proj === 'string' ? Projections.getRaw(proj) : proj;
+            const lobes = raw?.lobes ?? raw?.options?.lobes;
+            return Array.isArray(lobes) && lobes.length > 0;
+        } catch {
+            return false;
+        }
     },
 
     _disposeMeshes(this: Polygon): void {
@@ -782,6 +800,48 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         const holeIndices: number[] = [];
         const ringStartIndices: number[] = [];
 
+        // Лепестковые проекции (с lobes): берег Антарктиды уходит за ±180°, и
+        // earcut в lon/lat превращает её в «квадрат» с перекрутами. Схема:
+        // первое кольцо — квадрат мира, контур полигона — дырка в нём. В
+        // непрерывных проекциях (Меркатор и т.п.) развёртка корректна, там
+        // earcut по lon/lat работает как раньше — рамку НЕ добавляем.
+        let flatLobedPolar = false;
+        if (map.globe !== true && this._projectionHasLobes(map)) {
+            outer: for (const ring of rings) {
+                const lonLats = ring.lonLats;
+                if (!lonLats) continue;
+                let prev: [number, number] | null = null;
+                for (const p of lonLats) {
+                    if (!p) continue;
+                    if (Math.abs(p[1]) >= 80 || (prev && Math.abs(p[0] - prev[0]) > 180)) {
+                        flatLobedPolar = true;
+                        break outer;
+                    }
+                    prev = p;
+                }
+            }
+        }
+        if (flatLobedPolar) {
+            const W = map.WORLD_SIZE ? map.WORLD_SIZE / 2 : 20037508.342789244;
+            // Квадрат берём по полному домену карты (X и Y), иначе в
+            // неквадратных проекциях рамка не накроет углы развёртки.
+            const H = typeof map.mapHalfExtentY === 'number' && isFinite(map.mapHalfExtentY)
+                ? map.mapHalfExtentY : W;
+            const worldRing: Array<[number, number]> = [
+                [-W, -H], [W, -H], [W, H], [-W, H],
+            ];
+            ringStartIndices.push(0);
+            this._ringStartIndices.push(0);
+            for (const [ax, az] of worldRing) {
+                coords.push(ax, az);
+                triCoords.push(ax, az);
+                points2D.push(new THREE.Vector2(ax, az));
+                this._worldCoords.push([ax, az]);
+                this._nodeHeights.push(0);
+                this._vertexLonLat.push(null);
+            }
+        }
+
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
             const { worldCoords, heights, lonLats } = rings[ringIdx];
             if (worldCoords.length < 3) {
@@ -790,7 +850,8 @@ _hasAntimeridianWrap(this: Polygon): boolean {
             }
             ringStartIndices.push(points2D.length);
             this._ringStartIndices.push(points2D.length);
-            if (ringIdx > 0) holeIndices.push(coords.length / 2);
+            // С рамкой мира первое кольцо полигона — дырка в ней.
+            if (ringIdx > 0 || flatLobedPolar) holeIndices.push(coords.length / 2);
 
             let firstPoint: [number, number] | null = null;
             for (let i = 0; i < worldCoords.length; i++) {
@@ -853,7 +914,9 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         // денсифицированного контура хорда не даёт заметного среза.
         // Steiner/CDT оставляем только для плоского режима и особых разрывов.
         const isGlobe = map.globe === true && !!map.surface;
-        const useEarcut = isGlobe || this._isPolarOrWrapping();
+        // В непрерывных проекциях полярные кольца триангулируются как раньше
+        // (earcut в lon/lat); рамка-вычитание — только для лепестковых.
+        const useEarcut = isGlobe || flatLobedPolar || this._isPolarOrWrapping();
 
         const steiner = useEarcut
             ? { world: [] as Array<[number, number]>, lonLat: [] as Array<[number, number]> }
@@ -872,7 +935,10 @@ _hasAntimeridianWrap(this: Polygon): boolean {
         // lon/lat-развёртка разрывна у антимеридиана и полюса (Марокко, Чили,
         // Антарктида): CDT там может вернуть пусто. Тогда пробуем мировые (x,z).
         let indices: number[];
-        if (useEarcut) {
+        if (flatLobedPolar) {
+            // Лепестковая проекция: рамка мира + контур-дырка уже в coords (x,z).
+            indices = triangulatePolygonEarcut(coords, holeIndices);
+        } else if (useEarcut) {
             // Полярные/разорванные кольца: lon/lat-развёртка разрывна (скачок ±180°,
             // полюс внутри контура). Триангулируем в азимутальной равнодистантной
             // проекции с центром в сферическом центроиде кольца — она непрерывна

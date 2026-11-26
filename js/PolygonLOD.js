@@ -395,6 +395,27 @@ export const PolygonLODMixin = {
         const rings = this._getRenderRings(this._currentSimplifyBucket);
         if (!rings || !rings.length)
             return;
+        // Лепестковая проекция (lobes): рамка мира + контур-дырка, как в
+        // _buildFillGeometry. В непрерывных проекциях (Меркатор и т.п.) — нет.
+        const lodMap = this._map;
+        let flatLobedPolar = false;
+        if (lodMap && lodMap.globe !== true && this._projectionHasLobes(lodMap)) {
+            outer: for (const ring of rings) {
+                const lonLats = ring.lonLats;
+                if (!lonLats)
+                    continue;
+                let prevLL = null;
+                for (const p of lonLats) {
+                    if (!p)
+                        continue;
+                    if (Math.abs(p[1]) >= 80 || (prevLL && Math.abs(p[0] - prevLL[0]) > 180)) {
+                        flatLobedPolar = true;
+                        break outer;
+                    }
+                    prevLL = p;
+                }
+            }
+        }
         this._worldCoords.length = 0;
         this._nodeHeights.length = 0;
         this._ringStartIndices.length = 0;
@@ -402,12 +423,29 @@ export const PolygonLODMixin = {
         const coords = [];
         const triCoords = [];
         const holeIndices = [];
+        if (flatLobedPolar) {
+            const W = lodMap.WORLD_SIZE ? lodMap.WORLD_SIZE / 2 : 20037508.342789244;
+            const H = typeof lodMap.mapHalfExtentY === 'number' && isFinite(lodMap.mapHalfExtentY)
+                ? lodMap.mapHalfExtentY : W;
+            const cx = this._centroidWorld.x, cz = this._centroidWorld.z;
+            const worldRing = [
+                [-W, -H], [W, -H], [W, H], [-W, H],
+            ];
+            this._ringStartIndices.push(0);
+            for (const [ax, az] of worldRing) {
+                coords.push(ax - cx, az - cz);
+                triCoords.push(ax, az);
+                this._worldCoords.push([ax, az]);
+                this._nodeHeights.push(0);
+                this._vertexLonLat.push(null);
+            }
+        }
         for (let ringIdx = 0; ringIdx < rings.length; ringIdx++) {
             const { worldCoords, heights, lonLats } = rings[ringIdx];
             if (worldCoords.length < 3)
                 continue;
             this._ringStartIndices.push(this._worldCoords.length);
-            if (ringIdx > 0)
+            if (ringIdx > 0 || flatLobedPolar)
                 holeIndices.push(coords.length / 2);
             let firstPoint = null;
             for (let i = 0; i < worldCoords.length; i++) {
@@ -428,13 +466,12 @@ export const PolygonLODMixin = {
                 triCoords.push(ll ? ll[0] : absX, ll ? ll[1] : absZ);
             }
         }
-        // Число вершин контуров — зафиксировано ДО добавления Steiner.
         const contourCount = coords.length / 2;
-        this._contourVertexCount = contourCount;
+        this._contourVertexCount = flatLobedPolar ? contourCount - 4 : contourCount;
         // На глобусе контур уже денсифицирован с шагом 0.25°. Используем
         // быстрый earcut вместо CDT+Steiner: CDT блокирует главный поток на
         // секунды при первой загрузке/перестроении больших наборов.
-        const useEarcut = this._map?.globe === true || this._isPolarOrWrapping();
+        const useEarcut = lodMap?.globe === true || flatLobedPolar || this._isPolarOrWrapping();
         // Steiner нужен только для плоской/особой CDT-ветки.
         const steiner = useEarcut
             ? { world: [], lonLat: [] }
@@ -449,10 +486,18 @@ export const PolygonLODMixin = {
             this._vertexLonLat.push(ll);
         }
         let indices;
-        if (useEarcut) {
+        if (flatLobedPolar) {
+            // Лепестковая проекция: рамка+дырка уже в coords (проекционные x,z).
+            indices = triangulatePolygonEarcut(coords, holeIndices);
+            if (indices.length === 0) {
+                this._cachedTopIndices = null;
+                return;
+            }
+        }
+        else if (useEarcut) {
             // Полярные/разорванные кольца — та же азимутальная проекция, что и в
             // _buildFillGeometry (lon/lat-развёртка разрывна у антимеридиана/полюса).
-            const isGlobeMap = this._map?.globe === true;
+            const isGlobeMap = lodMap?.globe === true;
             const usePolarPlane = isGlobeMap && this._isPolarOrWrapping();
             let planeCoords = triCoords;
             let planeCenter = null;

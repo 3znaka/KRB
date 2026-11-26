@@ -19,8 +19,8 @@ await KRB.addCrs(['FLOWER:0000']);
 
 const map = new KRB.Map({
     target: 'map',
-    crs: 'FLOWER:0000',
-    graticule: { crs: 'EPSG:4326', step: 10, color: '#888', width: 1,  },
+crs: 'FLOWER:0000',
+graticule: { crs: 'EPSG:4326', step: 10, color: '#888', width: 1,  },
     view: new KRB.View({
         centerLonLat: [10, 20],
         zoom: 2, minZoom: 0, maxZoom: 8,
@@ -33,7 +33,7 @@ const map = new KRB.Map({
 new KRB.GeoJSONLayer({
     url: 'world.geojson',
     crs: 'EPSG:4326',
-   extendAntarctica: true,
+extendAntarctica: true,
     tooltipOnHover: true,
     tooltip: (p) => `<b>${p.name}</b><br>Население: ${p.pop}`,
     

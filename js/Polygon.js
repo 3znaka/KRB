@@ -135,6 +135,8 @@ export class Polygon extends SpatialObject {
     _lastWorldGroupPos;
     _lastDiscreteZoom = -1;
     _centroidScreenPos = null;
+    /** Экранная позиция устарела — пересчитать при следующем getScreenPosition(). */
+    _screenPosDirty = true;
     _strokePositionsArray = [];
     constructor(options) {
         super();
@@ -314,7 +316,14 @@ export class Polygon extends SpatialObject {
     }
     getLabelType() { return 'polygon'; }
     getScreenPosition() {
-        return this._isVisible ? this._centroidScreenPos : null;
+        if (!this._isVisible)
+            return null;
+        // Ленивый пересчёт: кадр, в котором позицию реально запросили.
+        if (this._screenPosDirty) {
+            this._updateCentroidScreenPos();
+            this._screenPosDirty = false;
+        }
+        return this._centroidScreenPos;
     }
     // =================================================================
     // Batch hooks
@@ -681,6 +690,7 @@ export class Polygon extends SpatialObject {
         }
         this._rings = rings;
         this._steinerCache = null;
+        this._antimeridianWrapCache = undefined;
         this._boundsCache.clear();
         this._visualCenterCache = null;
         this._centroidFromOriginal = null;

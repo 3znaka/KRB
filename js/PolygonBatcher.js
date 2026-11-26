@@ -656,8 +656,13 @@ export class PolygonBatcher {
             this._lastWG = { x: wg.x, y: wg.y, z: wg.z };
         if (camPos)
             this._lastCam = { x: camPos.x, y: camPos.y, z: camPos.z };
-        if (moving)
+        if (moving) {
             this._lastMoveTime = now;
+            // Камера сдвинулась: экранные позиции батченных полигонов устарели.
+            // Только флаг — без проекций; пересчёт — лениво в getScreenPosition().
+            for (const p of this._polygonToBatch.keys())
+                p._screenPosDirty = true;
+        }
         if (this._pendingRebuild) {
             // Ждём, пока камера успокоится (`_idleMs`), но не дольше `_maxDeferMs`
             // с момента первой отложенной пересборки — иначе при непрерывной

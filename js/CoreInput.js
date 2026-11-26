@@ -109,6 +109,19 @@ export const CoreInputMixin = {
     _invalidateCanvasRect() {
         this._cachedCanvasRect = null;
     },
+    /**
+     * Высота канваса в CSS-пикселях — из кэша. Чтение `clientHeight` на каждом
+     * шаге инерции заставляет браузер делать синхронный layout (reflow), что и
+     * давало проседание. Кэш обновляется в onResize().
+     */
+    _getCanvasHeight() {
+        const cached = this._canvasHeightCache;
+        if (cached && cached > 0)
+            return cached;
+        const h = this.renderer.domElement.clientHeight || 1;
+        this._canvasHeightCache = h;
+        return h;
+    },
     /** Фиксирует точку захвата под курсором (единичный вектор в СК глобуса). */
     _globeGrabAt(screenX, screenY) {
         this._globeGrabActive = false;
@@ -143,7 +156,7 @@ export const CoreInputMixin = {
      */
     _globeInertialShift(dx, dy) {
         const cam = this.camera;
-        const H = this.renderer.domElement.clientHeight || 1;
+        const H = this._getCanvasHeight();
         // Метров (world-ед.) на пиксель в центре экрана на дистанции до цели.
         const dist = Math.max(cam.position.distanceTo(this.controls.target), 1e-6);
         const worldPerPx = (2 * dist * Math.tan(cam.fov * Math.PI / 360)) / H;
@@ -189,7 +202,7 @@ export const CoreInputMixin = {
             return;
         const cam = this.camera;
         const wg = this.worldGroup;
-        const H = this.renderer.domElement.clientHeight || 1;
+        const H = this._getCanvasHeight();
         const x0 = this._globeLastX, y0 = this._globeLastY;
         const x1 = x0 + dx, y1 = y0 + dy;
         // Инерция: сдвиг в касательной плоскости вокруг точки обзора (см. ниже).
@@ -1117,6 +1130,7 @@ export const CoreInputMixin = {
         this.renderer.setSize(w, h);
         // Layout changed — canvas rect cache must be refreshed.
         this._invalidateCanvasRect();
+        this._canvasHeightCache = h;
         this.maybeUpdateVisibleTiles();
         this._emitResize(w, h);
         if (this._padding)

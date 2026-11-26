@@ -62,6 +62,8 @@ new KRB.Marker({
         defaultStrokeWidth: 0.3,
     }).addTo(map);
 
+// ВРЕМЕННО: сравнение производительности. ?nopoly — скрыть полигоны.
+if (new URLSearchParams(location.search).has('nopoly')) world.setVisible(false);
 
 window.map = map; 
 

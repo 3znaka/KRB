@@ -24,9 +24,7 @@ await KRB.addCrs(['ESRI:54052']);
 
 const map = new KRB.Map({
     target: 'map',
-
-    
-
+    crs: 'ESRI:54052',
         layers: [],
         graticule: {
             crs: 'EPSG:4326',
@@ -52,7 +50,7 @@ const vectorLayer = new KRB.VectorTile({
 }).addTo(map);
 
 
-map.setCrs('EPSG:3857');
+
 
 
 </script>

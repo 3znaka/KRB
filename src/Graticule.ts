@@ -1426,8 +1426,9 @@ private _createMaterial(): void {
             // Точка lonMin принадлежит ПЕРВОМУ лепестку, который её содержит
             // (forward() делает break по первому совпадению), поэтому для
             // не-первых лепестков отступаем внутрь.
+            // Правый край тоже отступаем внутрь: lon=180 wrap180'ом уходит в лепесток 0.
             const lonStart = lobe.lonMin + (isFirst ? 0 : EPS_LON);
-            const lonEnd   = lobe.lonMax;
+            const lonEnd   = lobe.lonMax - EPS_LON;
             if (lonEnd - lonStart <= 0) continue;
 
             const pts: Array<[number, number, number]> = [];
@@ -1618,10 +1619,12 @@ private _sampleLobeBoundary(lobe: any): Array<[number, number]> {
     const latTop = lobe.latMax - (Math.abs(lobe.latMax) >= 90 ? EPS : 0);
     const latBot = lobe.latMin + (Math.abs(lobe.latMin) >= 90 ? EPS : 0);
 
-    // Не отступаем от глобальных краев (-180, 180), 
-    // но отступаем от внутренних границ лепестков (например, -40, 80)
-    const lonMin = lobe.lonMin + (lobe.lonMin <= -180 ? 0 : EPS_LON);
-    const lonMax = lobe.lonMax - (lobe.lonMax >= 180 ? 0 : EPS_LON);
+    // Границы лепестков на долготе ±180 обязаны попасть в свой лепесток:
+    // проекция нормализует 180° → -180° (wrap180), и точка уходит в соседний
+    // лепесток. Поэтому сдвигаем ОБЕ границы внутрь на EPS_LON — и для глобальных
+    // краёв, и для внутренних. Иначе маска шва 180° строится неверно.
+    const lonMin = lobe.lonMin + EPS_LON;
+    const lonMax = lobe.lonMax - EPS_LON;
 
     for (let i = 0; i <= N; i++) {
         push(lonMin + (lonMax - lonMin) * (i / N), latTop);

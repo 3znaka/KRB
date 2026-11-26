@@ -328,7 +328,7 @@ for (const layer of this._getLayersInOrder()) {
             layer._postUpdate(this);
         }
         if (this.textManager) this.textManager.update();
-       if (this.renderer && typeof this.renderer.clear === 'function') {
+        if (this.renderer && typeof this.renderer.clear === 'function') {
     // autoClear = false у нас, поэтому чистим stencil вручную, чтобы
     // старая маска Graticule не «залипла» после движения камеры.
     this.renderer.clear(false, false, true);

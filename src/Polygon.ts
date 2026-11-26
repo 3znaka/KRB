@@ -24,6 +24,12 @@ import { PolygonUpdateMixin, type PolygonUpdate } from './PolygonUpdate.js';
 
 export * from './PolygonUtils.js';
 
+/**
+ * ВРЕМЕННО: отключает LOD полигонов на глобусе (только для сравнения FPS).
+ * Вернуть в false, чтобы снова включить LOD на глобусе.
+ */
+const DISABLE_GLOBE_LOD_TEMP = true;
+
 export class Polygon extends SpatialObject implements GeoJSONExportable {
     // ── Кольца / CRS ──
     _rings: PolygonRing[];
@@ -52,11 +58,34 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _simplifyTolerance = 0.5;
     _simplifyZoomBucket = 1;
     _simplifyCache = new Map<number, RenderRing[]>();
+    /** Кэш результатов субдивизии глобуса по бакету LOD (пункт 3). */
+    _subdivCache = new Map<number, {
+        params: string;
+        inputLength: number;
+        indices: number[];
+        world: Array<[number, number]>;
+        lonLat: Array<[number, number] | null>;
+        heights: number[];
+    }>();
+    /** ECEF-точки вершин по бакету (см. _ecefCache). */
+    _ecefByBucket = new Map<number, { count: number; heights: number[]; ecef: Float64Array }>();
+    /** Снимки состояния батча по бакету LOD (кэш пункта 1). */
+    _batchSnapCache = new Map<number, {
+        worldCoords: Array<[number, number]>;
+        nodeHeights: number[];
+        ringStartIndices: number[];
+        vertexLonLat: Array<[number, number] | null>;
+        contourVertexCount: number;
+        topIndices: number[] | null;
+    }>();
     _renderRings: RenderRing[] | null = null;
     _fullRenderRings: RenderRing[] | null = null;
     _currentSimplifyBucket = -1;
     _pendingBucket = -1;
-    _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+    /** true, пока полигон стоит в очереди LOD (пункт 2). */
+    _queuedForLOD = false;
+    /** Незавершённая асинхронная сборка бакета (воркер упрощения). */
+    _pendingRingJobs: { bucket: number; remaining: number; results: Array<Int32Array | null | undefined> } | null = null;
     _pendingRebuild = false;
 
     _centroidFromOriginal: { x: number; z: number } | null = null;
@@ -137,6 +166,9 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _boundingSphereWorldCenter: any;
     // Глобус: временные объекты для мирового bounding sphere (без аллокаций на hit).
     _globeBox: any = null;
+    /** Кэш мировой bounding sphere для глобуса (см. _globeWorldBoundingSphere). */
+    _globeSphereCache: { center: any; radius: number } | null = null;
+    _globeSphereDirty = true;
     _globeCorners: any[] | null = null;
     _globeSize: any = null;
     _raycastMeshesCache: any[] | null = null;
@@ -242,11 +274,18 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         }
         // Глобус: упрощение выключено, чтобы общие границы соседних полигонов
         // стыковались (каждый полигон иначе режется по своему контуру).
-        // LOD на глобусе включён (см. историю: отключался в старой версии).
+        // ВРЕМЕННО: LOD на глобусе отключён для сравнения производительности.
+        // Вернуть: DISABLE_GLOBE_LOD_TEMP = false.
+        if (map.globe === true && !this._simplifyExplicit && DISABLE_GLOBE_LOD_TEMP) {
+            this._simplify = false;
+        }
         this._loadFillPattern();
 
         this._currentSimplifyBucket = Math.floor(map.currentDiscreteZoom / this._simplifyZoomBucket);
         this._simplifyCache.clear();
+        this._subdivCache.clear();
+        this._batchSnapCache.clear();
+        this._ecefByBucket.clear();
         this._renderRings = null;
         this._fullRenderRings = null;
         this._centroidFromOriginal = null;
@@ -270,10 +309,7 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
     protected _teardown(): void {
         this._fillPatternGeneration++;
 
-        if (this._rebuildTimer) {
-            clearTimeout(this._rebuildTimer);
-            this._rebuildTimer = null;
-        }
+        // Очередь LOD (PolygonLOD.processLODQueue) пропускает полигон без _map.
         this._pendingBucket = -1;
         this._pendingRebuild = false;
 
@@ -318,6 +354,9 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         this._avgNodeHeightValid = false;
         this._boundsCache.clear();
         this._simplifyCache.clear();
+        this._subdivCache.clear();
+        this._batchSnapCache.clear();
+        this._ecefByBucket.clear();
         this._renderRings = null;
         this._fullRenderRings = null;
         this._currentSimplifyBucket = -1;
@@ -358,9 +397,12 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         if (this._fillPatternSource != null && typeof this._fillPatternSource !== 'string') return null;
         if (!this._useSimpleStroke && this._strokeWidth > 1 && this._strokeOpacity > 0) return null;
 
+        // _fillColor намеренно НЕ входит в ключ: цвет заливки батча меняется
+        // через вершинные цвета (PolygonBatcher.recolorAll), без пересборки.
+        // Иначе смена картограммы (updateData) пересоздаёт все батчи.
         return [
             this._extruded ? 'E' : 'NE',
-            this._fillColor, this._fillOpacity,
+            this._fillOpacity,
             this._extruded ? this._roughness : '',
             this._extruded ? this._metalness : '',
             this._extruded ? (this._castShadow ? 1 : 0) : '',
@@ -374,6 +416,59 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
             this._fillPatternScale, this._fillPatternFit,
             'b' + (this._simplify ? this._currentSimplifyBucket : 0),
         ].join('|');
+    }
+
+    /**
+     * @internal
+     * Гарантирует наличие всех LOD/батч-кэшей. Экземпляры, созданные до
+     * применения правок (горячая перезагрузка модуля), не получают новых полей
+     * из инициализаторов класса — поэтому создаём недостающие Map лениво.
+     */
+    _ensureCaches(): void {
+        const self = this as any;
+        if (!self._simplifyCache) self._simplifyCache = new Map();
+        if (!self._subdivCache) self._subdivCache = new Map();
+        if (!self._batchSnapCache) self._batchSnapCache = new Map();
+        if (!self._ecefByBucket) self._ecefByBucket = new Map();
+    }
+
+    /**
+     * @internal
+     * ECEF-точки вершин (до worldGroup.localToWorld) для текущего бакета.
+     * Кэш по бакету; сверяется по высотам, от которых зависят точки.
+     * Возвращает null, если какая-либо вершина не проецируется.
+     */
+    _ecefCache(bucket: number, n: number, heights: number[]): Float64Array | null {
+        // Ленивая инициализация: экземпляры, созданные до применения правки
+        // (горячая перезагрузка модуля), не получают поле из инициализатора класса.
+        this._ensureCaches();
+        const hit = this._ecefByBucket.get(bucket);
+        if (hit && hit.count === n && hit.heights.length === n) {
+            let same = true;
+            for (let i = 0; i < n; i++) {
+                if (hit.heights[i] !== heights[i]) { same = false; break; }
+            }
+            if (same) return hit.ecef;
+        }
+        const map = (this as any)._map;
+        const surf = map?.surface;
+        if (!surf) return null;
+        const ecef = new Float64Array(n * 3);
+        const tmp = new THREE.Vector3();
+        for (let i = 0; i < n; i++) {
+            const ll = this._vertexLonLat?.[i];
+            if (!ll) return null;
+            surf.position(ll[0], ll[1], heights[i], tmp);
+            ecef[i * 3] = tmp.x;
+            ecef[i * 3 + 1] = tmp.y;
+            ecef[i * 3 + 2] = tmp.z;
+        }
+        this._ecefByBucket.set(bucket, { count: n, heights: heights.slice(), ecef });
+        // Держим только текущий бакет и соседние (как у остальных LOD-кэшей).
+        for (const key of Array.from(this._ecefByBucket.keys())) {
+            if (Math.abs(key - bucket) > 2) this._ecefByBucket.delete(key);
+        }
+        return ecef;
     }
 
     /** @internal */
@@ -409,20 +504,23 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         const map = (this as any)._map;
         if (map?.globe && map.surface && typeof map.projectSurfaceVertex === 'function') {
             const n = this._worldCoords.length;
-            worldPositions = new Float32Array(n * 3);
-            const v = new THREE.Vector3();
-            let ok = true;
-            for (let i = 0; i < n; i++) {
-                const ll = this._vertexLonLat?.[i];
-                const p = ll
-                    ? map.projectSurfaceVertex(ll, 'EPSG:4326', heights[i], null, v)
-                    : null;
-                if (!p) { ok = false; break; }
-                worldPositions[i * 3]     = v.x;
-                worldPositions[i * 3 + 1] = v.y;
-                worldPositions[i * 3 + 2] = v.z;
+            // Кэш ECEF-точек (до localToWorld). Геодезия lon/lat/h → ECEF не
+            // зависит от положения карты, поэтому переживает панорамирование.
+            // Ключ — бакет + высоты (высоты меняются вместе с экструзией/altitude).
+            const bucket = this._currentSimplifyBucket;
+            const ecef = this._ecefCache(bucket, n, heights);
+            if (ecef) {
+                worldPositions = new Float32Array(n * 3);
+                const v = new THREE.Vector3();
+                const wg = map.worldGroup;
+                for (let i = 0; i < n; i++) {
+                    v.set(ecef[i * 3], ecef[i * 3 + 1], ecef[i * 3 + 2]);
+                    if (wg) wg.localToWorld(v);
+                    worldPositions[i * 3]     = v.x;
+                    worldPositions[i * 3 + 1] = v.y;
+                    worldPositions[i * 3 + 2] = v.z;
+                }
             }
-            if (!ok) worldPositions = null;
         }
 
         // Обводка — отдельно, по КОНТУРНЫМ вершинам (без Steiner): последовательно
@@ -559,6 +657,9 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
      * расширяем радиус на масштаб матрицы. Объединяем в одну сферу.
      */
     _globeWorldBoundingSphere(wgPos: any): { center: any; radius: number } | null {
+        // Кэш (пункт: убрать пересчёт на каждый hover/raycast). Сбрасывается в
+        // _globeSphereDirty при смене позиций/геометрии.
+        if (this._globeSphereCache && !this._globeSphereDirty) return this._globeSphereCache;
         const meshes = this._getRaycastMeshes();
         if (!meshes.length) return null;
 
@@ -589,7 +690,9 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         // содержит все углы (а значит и всю геометрию полигона).
         const size = box.getSize(this._globeSize || (this._globeSize = new THREE.Vector3()));
         const radius = size.length() * 0.5;
-        return { center, radius };
+        this._globeSphereCache = { center, radius };
+        this._globeSphereDirty = false;
+        return this._globeSphereCache;
     }
 
     /** @internal */
@@ -626,6 +729,9 @@ _normalizeCoord(pt: PolygonCoord, crs: any | null): NormalizedPosition {
         this._visualCenterCache = null;
         this._centroidFromOriginal = null;
         this._simplifyCache.clear();
+        this._subdivCache.clear();
+        this._batchSnapCache.clear();
+        this._ecefByBucket.clear();
         this._renderRings = null;
         this._fullRenderRings = null;
 

@@ -273,7 +273,13 @@ reload(): void {
     const self = this as any;
     // Отменяем незавершённую порционную постройку.
     this._buildToken = (this._buildToken ?? 0) + 1;
-    for (const obj of [...(self._objects ?? [])]) obj.remove();
+    // Удаляем все объекты надёжно: remove() не вызывается для тех, у кого уже
+    // нет _map/_layer, и они оставались в _objects → список рос на каждом
+    // переключении (89 → 334 → 668). Чистим явно и сам массив.
+    for (const obj of [...(self._objects ?? [])]) {
+        try { obj.remove(); } catch { /* уже отвязан */ }
+    }
+    if (self._objects && self._objects.length) self._objects.length = 0;
     self._objects = [];
     if (this.legend) { try { this.legend.destroy(); } catch {} this.legend = null; }
     this._loaded = false;
@@ -316,8 +322,12 @@ reload(): void {
     ): boolean {
         const matchField = options.matchField ?? 'name';
         this.data = data;
-        if (!this._map || !this._loaded) {
-            if (this._map) this.reload(); else this._loaded = false;
+        // _loaded не проверяем: он сбрасывается в reload() и становится true только
+        // после асинхронной сборки. При быстрых переключениях updateData приходит
+        // именно в этот промежуток — и раньше из-за этого каждый раз делался полный
+        // reload (объекты пересоздавались). Достоверное состояние — _objects.
+        if (!this._map) {
+            this._loaded = false;
             return false;
         }
 
@@ -488,8 +498,13 @@ reload(): void {
     // ── load ────────────────────────────────────────────────────────
    private async _load(): Promise<void> {
         let geojson: GeoJSONInput | null = null;
+        // Токен фиксируем до первого await: если за время ожидания был вызван
+        // reload()/setData(), эта (уже устаревшая) загрузка не должна ничего
+        // добавлять в _objects — иначе объекты дублируются (89 → 334 → 668).
+        const startToken = this._buildToken ?? 0;
         try {
 if (this.crs) await Projections.ensure(this.crs);
+            if (startToken !== (this._buildToken ?? 0)) return;
 
             if (this.data) {
                 geojson = this.extendAntarctica 
@@ -727,7 +742,12 @@ if (this.crs) await Projections.ensure(this.crs);
         for (let i = 0; i < features.length; i += PARSE_CHUNK_SIZE) {
             if (token !== (this._buildToken ?? 0)) return;
             const end = Math.min(features.length, i + PARSE_CHUNK_SIZE);
-            for (let k = i; k < end; k++) this._addFeature(features[k]);
+            for (let k = i; k < end; k++) {
+                // Проверяем токен на каждой фиче: устаревшая сборка не должна
+                // дописывать объекты в _objects, уже принадлежащий новой сборке.
+                if (token !== (this._buildToken ?? 0)) return;
+                this._addFeature(features[k]);
+            }
             if (end < features.length) await frame();
         }
     }

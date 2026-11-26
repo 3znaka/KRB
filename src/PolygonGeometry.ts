@@ -243,6 +243,24 @@ export const PolygonGeometryMixin = {
     ): number[] {
         if (!indices.length || !(maxStepRad > 0)) return indices;
 
+        // Кэш субдивизии: результат зависит только от бакета LOD (контур и
+        // индексы определяются им), поэтому повторные вызовы для того же
+        // бакета не пересчитываются. Ключ — текущий бакет + параметры.
+        this._ensureCaches();
+        const cacheKey = this._currentSimplifyBucket;
+        const cacheParams = `${contourCount}|${maxStepRad}|${planeCenter ? planeCenter.join(',') : ''}|${holeIndices.join(',')}`;
+        const cacheHit = this._subdivCache.get(cacheKey);
+        if (cacheHit && cacheHit.params === cacheParams && cacheHit.inputLength === indices.length) {
+            this._worldCoords.length = 0;
+            this._worldCoords.push(...cacheHit.world);
+            this._vertexLonLat.length = 0;
+            this._vertexLonLat.push(...cacheHit.lonLat);
+            this._nodeHeights.length = cacheHit.world.length;
+            for (let i = contourCount; i < cacheHit.world.length; i++) this._nodeHeights[i] = 0;
+            this._cachedHeights = cacheHit.heights.slice();
+            return cacheHit.indices.slice();
+        }
+
         const outLonLat: Array<[number, number] | null> = lonLats.slice(0, contourCount);
         const outWorld: Array<[number, number]> = this._worldCoords.slice(0, contourCount);
         const outCachedHeights = (this._cachedHeights ?? []).slice(0, contourCount);
@@ -375,6 +393,16 @@ export const PolygonGeometryMixin = {
         for (let i = contourCount; i < outWorld.length; i++) this._nodeHeights[i] = 0;
         this._cachedHeights = outCachedHeights;
         while (this._cachedHeights.length < outWorld.length) this._cachedHeights.push(0);
+
+        // Сохраняем результат для текущего бакета (пункт 3).
+        this._subdivCache.set(cacheKey, {
+            params: cacheParams,
+            inputLength: indices.length,
+            indices: result.slice(),
+            world: outWorld.slice(),
+            lonLat: outLonLat.slice(),
+            heights: this._cachedHeights.slice(),
+        });
         return result;
     },
 
@@ -731,6 +759,7 @@ _hasAntimeridianWrap(this: Polygon): boolean {
     _buildFillGeometry(this: Polygon, map: any): void {
 
         this._cachedTopIndices = null;
+        this._globeSphereDirty = true;
         const rings = this._getRenderRings(this._currentSimplifyBucket);
         if (!rings || !rings.length || rings[0].worldCoords.length < 3) {
             console.warn('Polygon: rings[0] must have at least 3 points');

@@ -40,7 +40,6 @@ globe: true,
         zoom: 8,
         maxZoom: 18
     }),
-    debug:true,
 });
 
 new KRB.Marker({
@@ -57,7 +56,8 @@ new KRB.Marker({
         url: 'world.geojson',
         //extendAntarctica: true,
         defaultFillColor:   '#aa0101',
-      
+       // Отключаем подписи стран, чтобы не мешали
+    style: { polygon: { default: { title: '' } } },
         defaultStrokeColor: '#000000',
         defaultStrokeWidth: 0.3,
     }).addTo(map);

@@ -22,7 +22,7 @@
     /* ── Общая «карточка» для панелей ─────────────────────────────── */
     .panel {
         position: absolute;
-        z-index: 900;                 /* ниже панели управления KRB (1000) */
+        z-index: 950;                 /* выше карты (#map, 900), ниже KRB-панели управления (1000) */
         background: rgba(255, 255, 255, 0.94);
         border: 1px solid #ddd;
         border-radius: 6px;
@@ -606,6 +606,25 @@ let geoToken = 0;
 let choroplethBuilt = false;
 
 /**
+ * Перекрашивает уже созданные полигоны по новым значениям `fc`, не трогая
+ * геометрию и список объектов слоя. Сопоставление — по `name`.
+ */
+function recolorChoropleth(fc) {
+    const byName = new Map();
+    for (const feature of fc.features) byName.set(String(feature.properties.name), feature.properties);
+
+    const objects = choroplethLayer._objects ?? [];
+    for (const obj of objects) {
+        const name = obj.getProperties?.()?.name;
+        const props = byName.get(String(name));
+        if (!props) continue;
+        obj.setProperties?.(props);
+        obj.setFillColor?.(choroplethLayer._choroplethColorOf(props), true);
+    }
+    choroplethLayer._polygonBatcher?.recolorAll?.();
+}
+
+/**
  * Показывает народ: портрет и заголовок — сразу, картограмма — после
  * загрузки данных. Дублирует состояние кнопок, поэтому пригодна и для
  * прямых вызовов (старт, консоль), а не только из switchNation().
@@ -626,13 +645,19 @@ async function renderNation(nation) {
         // значения. Первый раз создаём полигоны (setData), дальше только
         // перекрашиваем через updateData — без повторной триангуляции
         // (это разница в секунды) и без сброса камеры.
-        const inPlace = choroplethBuilt
-            && choroplethLayer.updateData(fc, { matchField: 'name' });
+        // Дожидаемся, пока предыдущая порционная сборка слоя завершится: иначе
+        // _objects ещё не совпадает с числом фич, и updateData уходит в reload().
+        if (choroplethLayer._readyPromise) await choroplethLayer._readyPromise;
+        if (token !== geoToken) return;
 
-        if (!inPlace) {
+        if (!choroplethBuilt) {
+            // Первый раз: создаём геометрию один раз.
             choroplethLayer.setData(fc);
+            choroplethBuilt = true;
+        } else {
+            // Дальше геометрию НЕ трогаем: перекрашиваем уже созданные полигоны по имени.
+            recolorChoropleth(fc);
         }
-        choroplethBuilt = true;
         showStatus(`Готово: ${nation}`, 1200);
     } catch (err) {
         if (token !== geoToken) return;

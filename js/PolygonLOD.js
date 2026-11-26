@@ -5,6 +5,7 @@ import { THREE } from './js_TP/tpb.js';
 import { simplifyRingIndices } from './Simplify.js';
 import { crossY, flipIndices, REBUILD_DEBOUNCE_MS, triangulatePolygonCDT, triangulatePolygonEarcut, globeSteinerLonLat, interpolateSurface, centralAngle, azimuthalEquidistant, sphericalCentroidLonLat, } from './PolygonUtils.js';
 import { subdivideStepRadFor } from './PolygonGeometry.js';
+import { createSimplifyWorker } from './simplifyWorker.js';
 /**
  * Допуск упрощения контура в пикселях экрана. Один на всю карту: уровень
  * детализации зависит только от зума, поэтому соседние полигоны стыкуются.
@@ -13,6 +14,8 @@ import { subdivideStepRadFor } from './PolygonGeometry.js';
 const GLOBE_LOD_PIXELS = 0.4;
 /** Угол (градусы), ниже которого вершина на LOD-бакете считается остриём клина. */
 const SHARP_ANGLE_DEG = 10;
+/** Сколько соседних LOD-бакетов держать в кэшах (пункт 5). */
+const LOD_CACHE_KEEP_RADIUS = 2;
 export const PolygonLODMixin = {
     _worldPerPixel(z) {
         const map = this._map;
@@ -286,7 +289,55 @@ export const PolygonLODMixin = {
         this._simplifyCache.set(bucket, result);
         this._renderRings = result;
         this._currentSimplifyBucket = bucket;
+        this._pruneLODCaches(bucket);
         return result;
+    },
+    /**
+     * Пункт 5: удаляем из кэшей LOD и субдивизии бакеты, далёкие от текущего
+     * (больше LOD_CACHE_KEEP_RADIUS). Иначе кэш растёт при каждом зуме и
+     * держит устаревшую геометрию в памяти.
+     */
+    _pruneLODCaches(current) {
+        this._ensureCaches();
+        for (const key of Array.from(this._simplifyCache.keys())) {
+            if (Math.abs(key - current) > LOD_CACHE_KEEP_RADIUS)
+                this._simplifyCache.delete(key);
+        }
+        for (const key of Array.from(this._subdivCache.keys())) {
+            if (Math.abs(key - current) > LOD_CACHE_KEEP_RADIUS)
+                this._subdivCache.delete(key);
+        }
+        for (const key of Array.from(this._batchSnapCache.keys())) {
+            if (Math.abs(key - current) > LOD_CACHE_KEEP_RADIUS)
+                this._batchSnapCache.delete(key);
+        }
+    },
+    /**
+     * Применяет асинхронно посчитанные keptIdx (из воркера): собирает кольца
+     * бакета тем же способом, что синхронный _getRenderRings, и переключает LOD.
+     */
+    _applyAsyncSimplify(bucket, results) {
+        const full = this._getFullRenderRings();
+        const rings = full.map((ring, r) => {
+            const kept = results[r];
+            if (!kept || kept.length < 3)
+                return ring;
+            const { worldCoords, heights } = ring;
+            const sWC = new Array(kept.length);
+            const sH = new Array(kept.length);
+            const sLL = new Array(kept.length);
+            for (let k = 0; k < kept.length; k++) {
+                sWC[k] = worldCoords[kept[k]];
+                sH[k] = heights[kept[k]];
+                sLL[k] = ring.lonLats ? (ring.lonLats[kept[k]] ?? null) : null;
+            }
+            return { worldCoords: sWC, heights: sH, lonLats: sLL };
+        });
+        this._simplifyCache.set(bucket, rings);
+        this._pruneLODCaches(bucket);
+        // Переключаемся на готовый бакет через обычный путь перестройки.
+        this._pendingBucket = bucket;
+        this._onSimplifyBucketChange(bucket);
     },
     _sameRingCounts(a, b) {
         if (a.length !== b.length)
@@ -320,6 +371,24 @@ export const PolygonLODMixin = {
     _refreshWorldCoordsForBatch() {
         if (!this._map)
             return;
+        this._ensureCaches();
+        const bucketKey = this._currentSimplifyBucket;
+        // Кэш батч-геометрии по бакету: при возврате на уже виденный бакет
+        // восстанавливаем готовое состояние без триангуляции и субдивизии.
+        const snap = this._batchSnapCache.get(bucketKey);
+        if (snap) {
+            this._worldCoords.length = 0;
+            this._worldCoords.push(...snap.worldCoords);
+            this._nodeHeights.length = 0;
+            this._nodeHeights.push(...snap.nodeHeights);
+            this._ringStartIndices.length = 0;
+            this._ringStartIndices.push(...snap.ringStartIndices);
+            this._vertexLonLat.length = 0;
+            this._vertexLonLat.push(...snap.vertexLonLat);
+            this._contourVertexCount = snap.contourVertexCount;
+            this._cachedTopIndices = snap.topIndices ? snap.topIndices.slice() : null;
+            return;
+        }
         const rings = this._getRenderRings(this._currentSimplifyBucket);
         if (!rings || !rings.length)
             return;
@@ -415,22 +484,158 @@ export const PolygonLODMixin = {
         }
         const firstCrossY = crossY(p2d[indices[0]], p2d[indices[1]], p2d[indices[2]]);
         this._cachedTopIndices = firstCrossY >= 0 ? indices : flipIndices(indices);
+        // Сохраняем снимок состояния батча для этого бакета (кэш пункта 1).
+        this._batchSnapCache.set(bucketKey, {
+            worldCoords: this._worldCoords.slice(),
+            nodeHeights: this._nodeHeights.slice(),
+            ringStartIndices: this._ringStartIndices.slice(),
+            vertexLonLat: this._vertexLonLat.slice(),
+            contourVertexCount: this._contourVertexCount,
+            topIndices: this._cachedTopIndices ? this._cachedTopIndices.slice() : null,
+        });
     },
     _scheduleBucketChange(bucket) {
-        if (this._rebuildTimer) {
-            this._pendingBucket = bucket;
-            return;
-        }
+        // Пункт 2: вместо таймера на каждый полигон — общая очередь с
+        // time-slicing. Полигон кладётся в очередь один раз, бакет обновляется.
         this._pendingBucket = bucket;
-        this._rebuildTimer = setTimeout(() => {
-            this._rebuildTimer = null;
-            if (!this._map)
-                return;
-            const b = this._pendingBucket;
-            this._pendingBucket = -1;
-            if (b >= 0 && b !== this._currentSimplifyBucket) {
-                this._onSimplifyBucketChange(b);
-            }
-        }, REBUILD_DEBOUNCE_MS);
+        if (this._queuedForLOD)
+            return;
+        this._queuedForLOD = true;
+        lodQueue.push(this);
+        scheduleLODQueue();
     },
 };
+/**
+ * Асинхронное упрощение колец в воркере (см. simplifyWorker.ts).
+ * Возвращает false, если воркер недоступен — тогда вызывающий делает
+ * синхронный путь (фоллбэк). Пока результат не пришёл, полигон остаётся на
+ * текущем бакете, поэтому подвисания при зуме не возникает.
+ */
+let lodWorker = null;
+let lodWorkerFailed = false;
+let lodReqSeq = 0;
+const lodPending = new Map();
+function getLODWorker() {
+    if (lodWorkerFailed)
+        return null;
+    if (lodWorker)
+        return lodWorker;
+    lodWorker = createSimplifyWorker();
+    if (!lodWorker) {
+        lodWorkerFailed = true;
+        return null;
+    }
+    try {
+        lodWorker.onmessage = (ev) => {
+            const job = lodPending.get(ev.data.id);
+            lodPending.delete(ev.data.id);
+            if (!job)
+                return;
+            const { poly, bucket, ringIdx } = job;
+            const acc = poly._pendingRingJobs;
+            if (!acc || acc.bucket !== bucket || !poly._map)
+                return;
+            acc.results[ringIdx] = ev.data.keptIdx;
+            acc.remaining--;
+            if (acc.remaining <= 0) {
+                poly._pendingRingJobs = null;
+                // Все кольца готовы — собираем бакет и переключаемся на него.
+                poly._applyAsyncSimplify(bucket, acc.results);
+            }
+        };
+        lodWorker.onerror = () => { lodWorkerFailed = true; lodWorker = null; };
+    }
+    catch {
+        lodWorkerFailed = true;
+        lodWorker = null;
+    }
+    return lodWorker;
+}
+function requestSimplifyAsync(poly, bucket) {
+    const worker = getLODWorker();
+    if (!worker || !poly._simplify || bucket < 0)
+        return false;
+    if (poly._simplifyCache.has(bucket)) {
+        // Кэш уже готов — синхронный путь дешёвый, выполняем его сразу.
+        return false;
+    }
+    const map = poly._map;
+    if (!map)
+        return false;
+    const full = poly._getFullRenderRings();
+    if (!full.length)
+        return false;
+    // Для каждого кольца отправляем отдельную задачу; ответы собираем в одну.
+    const jobs = [];
+    const tolerance = poly._worldPerPixel(bucket * poly._simplifyZoomBucket) * GLOBE_LOD_PIXELS;
+    const thrRad = subdivideStepRadFor(poly._vertexLonLat);
+    const surf = map.globe === true ? map.surface : null;
+    for (let r = 0; r < full.length; r++) {
+        const ring = full[r];
+        if (ring.worldCoords.length < 4)
+            continue;
+        const id = ++lodReqSeq;
+        const n = ring.worldCoords.length;
+        const world = new Float64Array(n * 2);
+        for (let i = 0; i < n; i++) {
+            world[i * 2] = ring.worldCoords[i][0];
+            world[i * 2 + 1] = ring.worldCoords[i][1];
+        }
+        // ECEF-векторы вершин — нужны воркеру для восстановления дуг (как в sync).
+        let ecef = null;
+        if (surf && ring.lonLats) {
+            ecef = new Float64Array(n * 3);
+            const v = new THREE.Vector3();
+            for (let i = 0; i < n; i++) {
+                const ll = ring.lonLats[i];
+                if (!ll)
+                    continue;
+                surf.position(ll[0], ll[1], 0, v);
+                ecef[i * 3] = v.x;
+                ecef[i * 3 + 1] = v.y;
+                ecef[i * 3 + 2] = v.z;
+            }
+        }
+        worker.postMessage({ id, world, tolerance, ecef, thrRad });
+        jobs.push({ id, ringIdx: r });
+    }
+    if (!jobs.length)
+        return false;
+    // Регистрируем задачи: по приходу всех колец бакет применяется целиком.
+    poly._pendingRingJobs = { bucket, remaining: jobs.length, results: new Array(full.length) };
+    for (const j of jobs)
+        lodPending.set(j.id, { poly, bucket, ringIdx: j.ringIdx });
+    return true;
+}
+/** Очередь полигонов, ожидающих смены LOD-бакета (пункт 2). */
+const lodQueue = [];
+/** Бюджет времени на один тик обработки очереди, мс. */
+const LOD_QUEUE_BUDGET_MS = 4;
+let lodQueueScheduled = false;
+function scheduleLODQueue() {
+    if (lodQueueScheduled)
+        return;
+    lodQueueScheduled = true;
+    setTimeout(processLODQueue, REBUILD_DEBOUNCE_MS);
+}
+function processLODQueue() {
+    lodQueueScheduled = false;
+    const start = performance.now();
+    while (lodQueue.length) {
+        const poly = lodQueue.shift();
+        poly._queuedForLOD = false;
+        const b = poly._pendingBucket;
+        poly._pendingBucket = -1;
+        if (poly._map && b >= 0 && b !== poly._currentSimplifyBucket) {
+            if (!requestSimplifyAsync(poly, b))
+                poly._onSimplifyBucketChange(b);
+        }
+        if (performance.now() - start >= LOD_QUEUE_BUDGET_MS)
+            break;
+    }
+    if (lodQueue.length) {
+        // Остаток переносим на следующий тик, чтобы не блокировать кадр.
+        lodQueueScheduled = true;
+        setTimeout(processLODQueue, 0);
+    }
+}

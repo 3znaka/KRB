@@ -101,7 +101,16 @@ export const PolygonUpdateMixin = {
         const worldGroupPosChanged = !this._lastWorldGroupPos.equals(map.worldGroup.position);
         const discreteZoomChanged = this._lastDiscreteZoom !== map.currentDiscreteZoom;
         if (worldGroupPosChanged || discreteZoomChanged) {
-            this._heightsDirty = true;
+            // Глобус: при простом сдвиге/вращении worldGroup вершины полигона
+            // в его локальной СК не меняются (меш едет вместе с родителем), поэтому
+            // дорогой пересчёт (_updateHeights) нужен только при смене зума/бакета,
+            // а не на каждый кадр вращения. Плоская карта — как раньше.
+            // Высоты на глобусе для не-динамических полигонов (absolute) от зума и
+            // положения карты не зависят — вершины лежат на эллипсоиде, а меш едет
+            // вместе с worldGroup. Поэтому смена зума/сдвиг не требуют пересчёта.
+            const staticOnGlobe = map.globe === true && this._altitudeMode !== 'clampToGround';
+            if (!staticOnGlobe) this._heightsDirty = true;
+            this._globeSphereDirty = true;
             this._lastWorldGroupPos.copy(map.worldGroup.position);
             this._lastDiscreteZoom = map.currentDiscreteZoom;
         }
@@ -276,6 +285,8 @@ _updateHeights(this: Polygon): boolean {
         this._fillGeometry.computeBoundingSphere();
         // Бокс для hit-теста на глобусе кэшируется — после смены позиций сбрасываем.
         this._fillGeometry.boundingBox = null;
+        // Позиции изменились — мировая bounding sphere для hit-теста устарела.
+        this._globeSphereDirty = true;
 
         if (this._bottomGeometry) {
             const bottomPos = this._bottomGeometry.attributes.position.array as Float32Array;

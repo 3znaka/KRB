@@ -638,7 +638,18 @@ export class PolygonBatcher {
     private _dirtyTime = 0;
     private _lastCheckTime = 0;
     private _checkInterval = 2000;
+    /** Последние известные размеры для дешёвой проверки _shouldRebuild. */
+    private _lastObjectCount = -1;
+    private _lastBatchedCount = -1;
     private _debounceMs = 100;
+    /** Пересборка откладывается, пока камера движется: нужно «тихо» idleMs. */
+    private _idleMs = 250;
+    /** Предел отсрочки: даже при непрерывном движении пересобрать через maxDeferMs. */
+    private _maxDeferMs = 1500;
+    private _lastMoveTime = 0;
+    private _lastZoom: number | undefined = undefined;
+    private _lastWG: { x: number; y: number; z: number } | null = null;
+    private _lastCam: { x: number; y: number; z: number } | null = null;
     private _disposed = false;
 
     constructor(layer: any) {
@@ -719,8 +730,28 @@ export class PolygonBatcher {
         if (this._disposed || !this._map) return;
         const now = performance.now();
 
+        // Отслеживаем движение камеры: пока она движется (вращение/зум),
+        // пересборку батчей не запускаем — она синхронная и даёт заикание.
+        const zoom = map.continuousZoom;
+        const wg = map.worldGroup?.position;
+        const camPos = map.camera?.position;
+        const moving = this._lastZoom !== undefined && (
+            zoom !== this._lastZoom
+            || (wg && this._lastWG && (wg.x !== this._lastWG.x || wg.y !== this._lastWG.y || wg.z !== this._lastWG.z))
+            || (camPos && this._lastCam && (camPos.x !== this._lastCam.x || camPos.y !== this._lastCam.y || camPos.z !== this._lastCam.z))
+        );
+        this._lastZoom = zoom;
+        if (wg) this._lastWG = { x: wg.x, y: wg.y, z: wg.z };
+        if (camPos) this._lastCam = { x: camPos.x, y: camPos.y, z: camPos.z };
+        if (moving) this._lastMoveTime = now;
+
         if (this._pendingRebuild) {
-            if (now - this._dirtyTime >= this._debounceMs) {
+            // Ждём, пока камера успокоится (`_idleMs`), но не дольше `_maxDeferMs`
+            // с момента первой отложенной пересборки — иначе при непрерывной
+            // анимации батч никогда не обновится.
+            const idle = now - this._lastMoveTime >= this._idleMs;
+            const overdue = now - this._dirtyTime >= this._maxDeferMs;
+            if ((idle && now - this._dirtyTime >= this._debounceMs) || overdue) {
                 this._rebuild();
                 this._pendingRebuild = false;
                 this._lastCheckTime = now;
@@ -738,6 +769,12 @@ export class PolygonBatcher {
 
     private _shouldRebuild(): boolean {
         const objects: any[] = this._layer._objects ?? [];
+        // Дёшево: если состав слоя не менялся по длине и по последнему набору —
+        // полный обход (вызов _getBatchStyleKey для каждого объекта) не нужен.
+        if (objects.length === this._lastObjectCount && this._polygonToBatch.size === this._lastBatchedCount) {
+            return false;
+        }
+        this._lastObjectCount = objects.length;
         let batchableCount = 0;
         for (const obj of objects) {
             if (!isBatchable(obj)) continue;
@@ -747,7 +784,9 @@ export class PolygonBatcher {
             const expected = this._batches.get(key);
             if (!expected || !expected.polygonSet.has(obj)) return true;
         }
-        return batchableCount !== this._polygonToBatch.size;
+        const need = batchableCount !== this._polygonToBatch.size;
+        this._lastBatchedCount = this._polygonToBatch.size;
+        return need;
     }
 
     private _rebuild(): void {

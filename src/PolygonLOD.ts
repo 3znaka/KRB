@@ -393,7 +393,10 @@ _pushDensifiedEdge(this: Polygon, prev: any, cur: any, maxStep: number, maxSub: 
         if (!(this as any)._map) return;
 
         if (this._batch) {
-            this._refreshWorldCoordsForBatch();
+            // Данные вершин бакета подготовит _getBatchGeometryData при пересборке
+            // батча (отложенной, см. PolygonBatcher.update) — без синхронной
+            // триангуляции на каждый полигон при каждом переходе бакета.
+            this._batchGeometryDirty = true;
             this._invalidateBatch();
             return;
         }

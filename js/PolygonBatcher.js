@@ -587,6 +587,7 @@ export class PolygonBatcher {
     /** Предел отсрочки: даже при непрерывном движении пересобрать через maxDeferMs. */
     _maxDeferMs = 1500;
     _lastMoveTime = 0;
+    _lastScreenDirtyTime = 0;
     _lastZoom = undefined;
     _lastWG = null;
     _lastCam = null;
@@ -628,6 +629,8 @@ export class PolygonBatcher {
         }
         this._batches.clear();
         this._polygonToBatch.clear();
+        this._pendingBuild = [];
+        this._pendingOld = null;
         if (this._group.parent)
             this._group.parent.remove(this._group);
         this._map = null;
@@ -685,8 +688,13 @@ export class PolygonBatcher {
             this._lastMoveTime = now;
             // Камера сдвинулась: экранные позиции батченных полигонов устарели.
             // Только флаг — без проекций; пересчёт — лениво в getScreenPosition().
-            for (const p of this._polygonToBatch.keys())
-                p._screenPosDirty = true;
+            // Флаги ставим один раз на кадр, а не на каждый полигон при каждом
+            // движении: при сотнях полигонов это лишний O(N) на кадр.
+            if (now - this._lastScreenDirtyTime >= 16) {
+                this._lastScreenDirtyTime = now;
+                for (const p of this._polygonToBatch.keys())
+                    p._screenPosDirty = true;
+            }
         }
         if (this._pendingRebuild) {
             // Ждём, пока камера успокоится (`_idleMs`), но не дольше `_maxDeferMs`
@@ -705,6 +713,9 @@ export class PolygonBatcher {
                 this._rebuild();
             this._lastCheckTime = now;
         }
+        // Доделываем отложенную сборку батчей по бюджету времени кадра.
+        if (this._pendingBuild.length)
+            this._pumpRebuild(performance.now());
         const layerVisible = this._layer.visible !== false;
         for (const batch of this._batches.values()) {
             batch.update(map, layerVisible);
@@ -734,6 +745,12 @@ export class PolygonBatcher {
         this._lastBatchedCount = this._polygonToBatch.size;
         return need;
     }
+    /**
+     * Пересборка батчей. Групировка по ключу — дешёвая; тяжёлую часть
+     * (build: триангуляция, нормали, материалы) не выполняем за один кадр,
+     * а раскладываем по кадрам с бюджетом времени (см. _pumpRebuild).
+     * Батчи с неизменившимся ключом и составом переиспользуются.
+     */
     _rebuild() {
         if (!this._map)
             return;
@@ -753,37 +770,77 @@ export class PolygonBatcher {
             }
             arr.push(obj);
         }
-        const oldPolygons = new Set(this._polygonToBatch.keys());
-        for (const batch of this._batches.values())
-            batch.dispose();
-        this._batches.clear();
-        this._polygonToBatch.clear();
+        // Переиспользуем батч, если ключ и состав полигонов не изменились.
+        const reuse = new Map();
         for (const [key, polys] of groups) {
-            if (this._map.hasElevation) {
-                const anyDynamic = polys.some(p => p._altitudeMode === 'clampToGround');
-                if (anyDynamic)
-                    continue;
-            }
-            const batch = new BatchedGroup(polys);
-            batch.build(this._map, (url) => this._getPatternTexture(url));
-            if (!batch.mesh)
-                continue;
-            this._group.add(batch.mesh);
-            if (batch.strokeLine)
-                this._group.add(batch.strokeLine);
-            this._batches.set(key, batch);
-            for (const p of polys) {
-                p._batch = batch;
-                p._onBatchChange?.(true, batch);
-                this._polygonToBatch.set(p, batch);
+            const old = this._batches.get(key);
+            if (old && old.polygons.length === polys.length
+                && polys.every(p => old.polygonSet.has(p))) {
+                reuse.set(key, old);
             }
         }
-        // РџРѕР»РёРіРѕРЅС‹, РєРѕС‚РѕСЂС‹Рµ Р±РѕР»СЊС€Рµ РЅРµ РІС…РѕРґСЏС‚ РЅРё РІ РѕРґРёРЅ Р±Р°С‚С‡,
-        // СЂР°Р·Р±Р°С‚С‡РёРІР°РµРј вЂ” Сѓ РЅРёС… РїРµСЂРµСЃРѕР±РµСЂС‘С‚СЃСЏ СЃРІРѕСЏ РіРµРѕРјРµС‚СЂРёСЏ.
-        for (const p of oldPolygons) {
-            if (!this._polygonToBatch.has(p)) {
-                p._onBatchChange?.(false, null);
+        // Старые батчи, которые не переиспользуем, — освобождаем.
+        const kept = new Set(reuse.values());
+        for (const batch of this._batches.values()) {
+            if (!kept.has(batch))
+                batch.dispose();
+        }
+        const oldPolygons = new Set(this._polygonToBatch.keys());
+        this._batches = reuse;
+        this._polygonToBatch.clear();
+        for (const batch of reuse.values()) {
+            for (const p of batch.polygons)
+                this._polygonToBatch.set(p, batch);
+        }
+        // Полигоны, которым нужна новая геометрия (нет переиспользуемого батча).
+        this._pendingBuild = [];
+        for (const [key, polys] of groups) {
+            if (reuse.has(key))
+                continue;
+            if (this._map.hasElevation && polys.some(p => p._altitudeMode === 'clampToGround'))
+                continue;
+            this._pendingBuild.push({ key, polys });
+        }
+        this._pendingOld = oldPolygons;
+        this._pumpRebuild(performance.now());
+    }
+    /** Очередь батчей, ждущих build(). Обрабатывается по бюджету времени. */
+    _pendingBuild = [];
+    _pendingOld = null;
+    /** Бюджет времени на сборку батчей за кадр, мс. */
+    _buildBudgetMs = 6;
+    /**
+     * Строит батчи из очереди, пока не исчерпан бюджет времени кадра.
+     * Остаток переносится на следующие кадры (вызывается из update()).
+     */
+    _pumpRebuild(start) {
+        if (!this._map)
+            return;
+        while (this._pendingBuild.length) {
+            const { key, polys } = this._pendingBuild.shift();
+            const batch = new BatchedGroup(polys);
+            batch.build(this._map, (url) => this._getPatternTexture(url));
+            if (batch.mesh) {
+                this._group.add(batch.mesh);
+                if (batch.strokeLine)
+                    this._group.add(batch.strokeLine);
+                this._batches.set(key, batch);
+                for (const p of polys) {
+                    p._batch = batch;
+                    p._onBatchChange?.(true, batch);
+                    this._polygonToBatch.set(p, batch);
+                }
             }
+            if (performance.now() - start >= this._buildBudgetMs)
+                break;
+        }
+        if (!this._pendingBuild.length && this._pendingOld) {
+            // Полигоны, которые больше не входят ни в один батч.
+            for (const p of this._pendingOld) {
+                if (!this._polygonToBatch.has(p))
+                    p._onBatchChange?.(false, null);
+            }
+            this._pendingOld = null;
         }
     }
     dispose() {

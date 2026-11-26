@@ -92,6 +92,8 @@ export class Polygon extends SpatialObject {
     _cachedHeights = [];
     _cachedStrokeHeights = [];
     _cachedTopIndices = null;
+    /** Вершины LOD-бакета нужно пересчитать при следующей сборке батча. */
+    _batchGeometryDirty = false;
     _nodeHeights = [];
     /**
      * lon/lat каждой вершины кольца (индекс — как в `_worldCoords`).
@@ -425,6 +427,12 @@ export class Polygon extends SpatialObject {
     _getBatchGeometryData() {
         if (this._invalidGeometry)
             return null;
+        // Вершины текущего LOD-бакета готовим лениво, только когда батч реально
+        // пересобирается (а не синхронно при каждом переходе бакета).
+        if (this._batchGeometryDirty) {
+            this._batchGeometryDirty = false;
+            this._refreshWorldCoordsForBatch();
+        }
         if (!this._worldCoords.length)
             return null;
         let indices;

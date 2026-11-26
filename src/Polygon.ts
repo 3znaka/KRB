@@ -127,6 +127,8 @@ export class Polygon extends SpatialObject implements GeoJSONExportable {
     _cachedHeights: number[] = [];
     _cachedStrokeHeights: number[] = [];
     _cachedTopIndices: number[] | null = null;
+    /** Вершины LOD-бакета нужно пересчитать при следующей сборке батча. */
+    _batchGeometryDirty = false;
     _nodeHeights: number[] = [];
     /**
      * lon/lat каждой вершины кольца (индекс — как в `_worldCoords`).
@@ -482,6 +484,12 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
     /** @internal */
     _getBatchGeometryData(): any | null {
         if (this._invalidGeometry) return null;
+        // Вершины текущего LOD-бакета готовим лениво, только когда батч реально
+        // пересобирается (а не синхронно при каждом переходе бакета).
+        if ((this as any)._batchGeometryDirty) {
+            (this as any)._batchGeometryDirty = false;
+            this._refreshWorldCoordsForBatch();
+        }
         if (!this._worldCoords.length) return null;
 
         let indices: ArrayLike<number>;

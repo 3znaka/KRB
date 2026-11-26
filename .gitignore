@@ -15,3 +15,4 @@ static_nations/
 build.log
 build-output.txt
 *.pyc
+src/PolygonBatcher.incremental.bak.ts

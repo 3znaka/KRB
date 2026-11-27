@@ -237,6 +237,14 @@ export namespace THREE {
         material: Material;
     }
 
+    export class ShaderMaterial extends Material {
+        constructor(parameters?: Record<string, any>);
+        uniforms: Record<string, { value: any }>;
+        vertexShader: string;
+        fragmentShader: string;
+        [key: string]: any;
+    }
+
     // ----------------------------------------------------------------
     // Geometry
     // ----------------------------------------------------------------

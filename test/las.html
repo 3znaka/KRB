@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>KRB.LAS — test.las</title>
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; font:13px sans-serif; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #panel {
+            position:fixed; top:8px; right:8px; z-index:1000; background:rgba(255,255,255,0.92);
+            padding:8px 10px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.3); width:260px;
+        }
+        #panel label { display:block; margin:4px 0 2px; }
+        #panel input, #panel select { width:100%; box-sizing:border-box; }
+        #status { margin-top:6px; color:#333; white-space:pre-wrap; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+await KRB.crs.add('EPSG:4978');
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [new KRB.Tile({ texture: 'demo', heightScale: 2.0 })],
+    view: new KRB.View({ centerLonLat: [38.37, 59.69], zoom: 10, pitch: 40 })
+});
+
+const las = new KRB.LAS({
+    crs: 'EPSG:4978',
+    url: 'test.las',         
+    colorBy: 'rgb',
+    size: 2,
+     onLoad: (l) => map.fitTo(l),
+   }).addTo(map);
+
+</script>
+</body>
+</html>

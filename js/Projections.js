@@ -490,7 +490,7 @@ class ProjectionRegistry {
     get(code) {
         const p = this._map.get(code);
         if (!p)
-            throw new Error(`CRS ${code} не загружен. Вызовите \`await Projections.addCrs('${code}')\` ` +
+            throw new Error(`CRS ${code} не загружен. Вызовите \`await KRB.crs.add('${code}')\` ` +
                 `до создания карты.`);
         return p;
     }

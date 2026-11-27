@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>PointCloud — 100 случайных точек над Москвой</title>
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #lod-debug {
+            position:fixed; top:8px; left:8px; z-index:1000;
+            background:rgba(0,0,0,0.7); color:#fff;
+            font:12px/1.4 monospace; padding:6px 8px; border-radius:4px;
+            pointer-events:none; white-space:pre;
+        }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="lod-debug">LOD: —</div>
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [
+        new KRB.Tile({
+             texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd',
+            heightScale: 2.0
+        })
+    ],
+    view: new KRB.View({
+        centerLonLat: [37.62, 55.75],   // Москва, Красная площадь
+        zoom: 13,
+        pitch: 50
+    })
+});
+
+// ── Генератор случайных точек в окрестности Москвы ──
+const CENTER = [37.62, 55.75];
+const SPREAD_LON = 0.06;   // ≈ ±3.5 км по долготе
+const SPREAD_LAT = 0.03;   // ≈ ±3.3 км по широте
+// ?mode=simple — только цвет на точку (PointsMaterial, без шейдера, быстрее).
+// ?mode=shaped (по умолчанию) — размер, форма и окантовка на каждую точку.
+// ?count=N — число точек (по умолчанию 2 000 000).
+const params = new URLSearchParams(location.search);
+const MODE = params.get('mode') === 'simple' ? 'simple' : 'shaped';
+const COUNT = Number(params.get('count')) || 6000000;
+// ?budget=N — сколько точек рисовать за кадр после прореживания (LOD).
+const BUDGET = Number(params.get('budget')) || 100000;
+const SIMPLE = MODE === 'simple';
+
+const rand = (a, b) => a + Math.random() * (b - a);
+
+const positions = [];
+const colors = [];
+const sizes = [];
+const shapes = ['circle', 'square', 'diamond', 'triangle', 'cross'];
+const shapeList = [];
+
+for (let i = 0; i < COUNT; i++) {
+    const lon = CENTER[0] + rand(-SPREAD_LON, SPREAD_LON);
+    const lat = CENTER[1] + rand(-SPREAD_LAT, SPREAD_LAT);
+    // Высота над поверхностью рельефа: 0..500 м
+    const h = rand(0, 500);
+    positions.push([lon, lat, h]);
+
+    // Случайный цвет
+    colors.push(`hsl(${Math.round(rand(0, 360))}, 85%, 55%)`);
+
+    // Размер и форма нужны только в shaped-режиме
+    if (!SIMPLE) {
+        sizes.push(rand(4, 14));
+        shapeList.push(shapes[Math.floor(Math.random() * shapes.length)]);
+    }
+}
+
+const cloud = new KRB.PointCloud({
+    mode: MODE,
+    lodBudget: BUDGET,
+    positions,
+    crs: 'EPSG:4326',
+    colors,
+    ...(SIMPLE
+        ? { size: 3 }                                  // один размер на все точки
+        : { sizes, shapes: shapeList, strokeColor: '#000000', strokeWidth: 1 }),
+    opacity: 0.95,
+    altitudeMode: 'clampToGround',   // h — над поверхностью рельефа
+    title: `${COUNT} точек (${MODE})`,
+    titleStyle: { color: '#ffffff', textShadow: '0 1px 2px #000' },
+    tooltip: `<b>PointCloud</b><br>${COUNT} точек, режим ${MODE}`
+});
+
+cloud.addTo(map);
+
+// Точный счёт «в экране» — только при ?debug=exact (в воркере, не в кадре).
+if (params.get('debug') === 'exact') cloud.setExactCount(true);
+
+// ── Дебаг-оверлей: сколько точек отрисовано и сколько видно (до прореживания) ──
+const debugEl = document.getElementById('lod-debug');
+let lastText = '';
+const fmt = (n) => n.toLocaleString('ru-RU');
+function tickDebug() {
+    const s = cloud.getLodStats();
+    const text =
+        `точек всего:        ${fmt(s.total)}\n` +
+        `в экране (ячейки):  ${fmt(s.visibleTotal)}\n` +
+        `в экране (точно):   ${params.get('debug') === 'exact' ? fmt(s.inFrustum) : 'выкл (?debug=exact)'}\n` +
+        `отрисовано:         ${fmt(s.drawn)}\n` +
+        `бюджет:             ${fmt(cloud.getLodBudget())}`;
+    if (text !== lastText) { debugEl.textContent = text; lastText = text; }
+    requestAnimationFrame(tickDebug);
+}
+requestAnimationFrame(tickDebug);
+
+// Одиночная точка для сравнения — в центре облака, выше остальных
+new KRB.Point({
+    position: [CENTER[0], CENTER[1], 800],
+    crs: 'EPSG:4326',
+    color: '#ffdd00',
+    size: 18,
+    shape: 'diamond',
+    strokeColor: '#000000',
+    strokeWidth: 2,
+    altitudeMode: 'clampToGround',
+    title: 'Point · +800 м',
+    titleStyle: { color: '#ffdd00', textShadow: '0 1px 2px #000' },
+    tooltip: 'Одиночная точка Point'
+}).addTo(map);
+
+</script>
+</body>
+</html>

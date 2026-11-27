@@ -5,7 +5,7 @@ import {
   Box3, Sphere, Plane, Frustum, Raycaster, Color,
   // core / scene graph
   BufferAttribute, BufferGeometry,
-  Group, Scene, Mesh, Line, LineSegments,
+  Group, Scene, Mesh, Line, LineSegments, Points,
   PerspectiveCamera, WebGLRenderer,
   AmbientLight, DirectionalLight,
   Clock, AnimationMixer,
@@ -15,6 +15,7 @@ import {
   // materials
   Material, MeshBasicMaterial, MeshStandardMaterial,
   MeshLambertMaterial, LineBasicMaterial,
+  PointsMaterial, ShaderMaterial,
   // textures
   Texture, CanvasTexture, DataTexture, TextureLoader,
   // constants
@@ -31,7 +32,7 @@ export const THREE = {
   Vector2, Vector3, Vector4, Quaternion, Euler, Matrix4,
   Box3, Sphere, Plane, Frustum, Raycaster, Color,
   BufferAttribute, BufferGeometry,
-  Group, Scene, Mesh, Line, LineSegments,
+  Group, Scene, Mesh, Line, LineSegments, Points,
   PerspectiveCamera, WebGLRenderer,
   AmbientLight, DirectionalLight,
   Clock, AnimationMixer,
@@ -39,6 +40,7 @@ export const THREE = {
   ConeGeometry, CylinderGeometry, CircleGeometry, EdgesGeometry,
   Material, MeshBasicMaterial, MeshStandardMaterial,
   MeshLambertMaterial, LineBasicMaterial,
+  PointsMaterial, ShaderMaterial,
   Texture, CanvasTexture, DataTexture, TextureLoader,
   AdditiveBlending, MultiplyBlending, NormalBlending, SubtractiveBlending,
   DoubleSide, FrontSide,

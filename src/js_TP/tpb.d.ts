@@ -237,6 +237,23 @@ export namespace THREE {
         material: Material;
     }
 
+    export class PointsMaterial extends Material {
+        constructor(parameters?: Record<string, any>);
+        color: Color;
+        size: number;
+        sizeAttenuation: boolean;
+        vertexColors: boolean;
+        [key: string]: any;
+    }
+
+    export class ShaderMaterial extends Material {
+        constructor(parameters?: Record<string, any>);
+        uniforms: Record<string, { value: any }>;
+        vertexShader: string;
+        fragmentShader: string;
+        [key: string]: any;
+    }
+
     // ----------------------------------------------------------------
     // Geometry
     // ----------------------------------------------------------------
@@ -273,6 +290,7 @@ export namespace THREE {
         getAttribute(name: string): BufferAttribute | undefined;
         deleteAttribute(name: string): this;
         setIndex(index: BufferAttribute | number[] | null): this;
+        setDrawRange(start: number, count: number): void;
         computeBoundingSphere(): void;
         computeBoundingBox(): void;
         computeVertexNormals(): void;

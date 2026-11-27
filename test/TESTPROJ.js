@@ -36,7 +36,7 @@
  * Загрузка:
  *   await Projections.addFile(file);              // <input type="file"> / drag&drop
  *   await Projections.addUrl('./TEST_PROJ.js');   // со своего сервера
- *   await Projections.addCrs('TEST:PROJ');        // если положить в customCRS/
+ *   await KRB.crs.add('TEST:PROJ');        // если положить в customCRS/
  *
  * @module customCRS/TEST_PROJ
  */

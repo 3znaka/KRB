@@ -423,8 +423,14 @@ export class PointCloud extends SpatialObject {
 
         // Минимум высоты узлов: для clampToGround самая низкая точка облака
         // ставится на уровень поверхности (y=0 на плоскости, эллипсоид на глобусе).
+        // Учитываем масштаб высоты точки (тот же, что в геометрии): минимум — по scaled-высотам.
         let minH = Infinity;
-        for (const h of this._nodeHeights) if (Number.isFinite(h) && h < minH) minH = h;
+        for (let i = 0; i < n; i++) {
+            const h = this._nodeHeights[i];
+            if (!Number.isFinite(h)) continue;
+            const hs = h * this._pointScale(i);
+            if (hs < minH) minH = hs;
+        }
         this._minNodeHeight = Number.isFinite(minH) ? minH : 0;
     }
 
@@ -440,6 +446,11 @@ export class PointCloud extends SpatialObject {
     protected _resolveAltitudeMode(map: any): void {
         if (this._altitudeModeExplicit) return;
         this._altitudeMode = map.hasElevation ? 'absolute' : 'clampToGround';
+    }
+
+    /** Масштаб высоты точки i (SpatialObject._verticalScale) по её WGS-84 широте. */
+    private _pointScale(i: number): number {
+        return this._verticalScale(this._lonLat[i] ?? null);
     }
 
     /** lon/lat (WGS-84) узла; null, если перевод невозможен. */
@@ -472,7 +483,9 @@ export class PointCloud extends SpatialObject {
         for (let i = 0; i < n; i++) {
             const [x, z] = this._planar[i];
             positionArr[i * 3]     = Number.isFinite(x - ox) ? x - ox : 0;
-            positionArr[i * 3 + 1] = Number.isFinite(this._nodeHeights[i]) ? this._nodeHeights[i] : 0;
+            // nodeHeight — истинные метры: масштаб по широте точки (как у Polygon/Polyline).
+            const kN = this._pointScale(i);
+            positionArr[i * 3 + 1] = Number.isFinite(this._nodeHeights[i]) ? this._nodeHeights[i] * kN : 0;
             positionArr[i * 3 + 2] = Number.isFinite(z - oz) ? z - oz : 0;
         }
 
@@ -612,7 +625,9 @@ export class PointCloud extends SpatialObject {
         //  - absolute: высоты точек как есть, затем + altitude.
         // Высоты точек уже внутри геометрии (nodeHeight), поэтому для clampToGround
         // вычитаем минимум, а рельеф (hasElevation) добавляем в точке облака.
-        let lift = this._altitude;
+        // altitude — истинные метры: масштаб по центроиду облака. minNodeHeight уже масштабирован.
+        const kC = this._verticalScale(this._centerLonLat());
+        let lift = this._altitude * kC;
         if (this._altitudeMode === 'clampToGround') {
             lift += -this._minNodeHeight;
             if (!map.globe && map.hasElevation) {
@@ -686,7 +701,7 @@ export class PointCloud extends SpatialObject {
         for (let i = 0; i < n; i++) {
             xs[i] = this._planar[i][0] - ox;
             zs[i] = this._planar[i][1] - oz;
-            const h = this._nodeHeights[i];
+            const h = this._nodeHeights[i] * this._pointScale(i);
             if (h < minH) minH = h;
             if (h > maxH) maxH = h;
         }
@@ -701,8 +716,9 @@ export class PointCloud extends SpatialObject {
         // Высоты точек в системе геометрии (nodeHeight − minNodeHeight): нужны LOD для точного AABB ячейки.
         // Высоты точек ровно как в геометрии (nodeHeight, без вычитания minNodeHeight):
         // их мировое положение задаётся мешем (см. _update), поэтому бокс совпадает с рисуемым.
+        // Высоты — в той же системе, что геометрия меша (nodeHeight · k точки), иначе AABB ячеек не совпадает с точками.
         const ys = new Float32Array(n);
-        for (let i = 0; i < n; i++) ys[i] = this._nodeHeights[i];
+        for (let i = 0; i < n; i++) ys[i] = this._nodeHeights[i] * this._pointScale(i);
         this._lod = new PointCloudLOD(xs, zs, { budget: this._lodBudget, ys });
     }
 
@@ -1108,7 +1124,7 @@ export class PointCloud extends SpatialObject {
         for (let i = 0; i < n; i++) {
             const p = this._planar[i];
             xs[i] = origin.x + (p[0] - ox);
-            ys[i] = origin.y + this._nodeHeights[i] + this._altitude;
+            ys[i] = origin.y + this._nodeHeights[i] * this._pointScale(i) + this._altitude * this._verticalScale(this._centerLonLat());
             zs[i] = origin.z + (p[1] - oz);
         }
         w.setPoints(xs, ys, zs);

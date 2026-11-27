@@ -538,7 +538,9 @@ export class PathFollower extends SpatialObject {
         }
         // altitude: вдоль нормали (на глобусе — «вверх» от поверхности,
         // на плоскости — по Y, как раньше).
-        const lift = this._altitude + this._altitudeOffset;
+        // Высота — истинные метры: масштаб по широте центра пути (нормаль на плоскости = Y).
+        const kPath = this._path instanceof LivePathAdapter ? this._path.pathScaleLat() : 1;
+        const lift = (this._altitude + this._altitudeOffset) * kPath;
         if (lift !== 0)
             this._tmpPos.addScaledVector(this._tmpUp, lift);
         // родитель
@@ -948,6 +950,32 @@ class LivePathAdapter {
         }
         return out;
     }
+    /** Масштаб высоты по центру пути (среднее lon/lat вершин), кешируется до смены пути. */
+    _pathScaleCache = null;
+    /** Единый масштаб высоты (как SpatialObject._verticalScale): 1/cos(lat) на Меркаторе, 1 на глобусе. */
+    _vScale(lonLat) {
+        const map = this._attachedMap;
+        if (!map || map.globe)
+            return 1;
+        if (!lonLat || !Number.isFinite(lonLat[1]))
+            return 1;
+        return map._planarHeightScale(lonLat, 'EPSG:4326');
+    }
+    pathScaleLat() {
+        const sig = this._sig;
+        if (this._pathScaleCache && this._pathScaleCache.sig === sig)
+            return this._pathScaleCache.k;
+        const lls = this._lonLats();
+        let sx = 0, sy = 0;
+        for (const ll of lls) {
+            sx += ll[0];
+            sy += ll[1];
+        }
+        const c = lls.length ? [sx / lls.length, sy / lls.length] : null;
+        const k = this._vScale(c);
+        this._pathScaleCache = { sig, k };
+        return k;
+    }
     /** Карта, к которой привязан PathFollower (задаётся через attach). */
     _attachedMap = null;
     attach(map) { this._attachedMap = map; this._sig = ''; this._points = []; }
@@ -988,7 +1016,8 @@ class LivePathAdapter {
                 const xy = map.projectSafe(ll, 'EPSG:4326');
                 if (!xy)
                     continue;
-                pts.push([xy[0], h, xy[1]]);
+                // Высота пути — истинные метры: масштаб по широте вершины.
+                pts.push([xy[0], h * this._vScale(ll), xy[1]]);
             }
         }
         this._points = pts;

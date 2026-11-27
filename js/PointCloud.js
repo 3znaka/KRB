@@ -387,7 +387,7 @@ export class PointCloud extends SpatialObject {
             },
             vertexShader: VERTEX_SHADER,
             fragmentShader: FRAGMENT_SHADER,
-            transparent: this._opacity < 1,
+            transparent: true, // сглаженные края фигуры должны смешиваться с фоном, а не давать светлую кайму
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
         });
@@ -398,7 +398,7 @@ export class PointCloud extends SpatialObject {
             size: this._size,
             sizeAttenuation: false, // размер в пикселях экрана
             opacity: this._opacity,
-            transparent: this._opacity < 1,
+            transparent: true, // сглаженные края фигуры должны смешиваться с фоном, а не давать светлую кайму
             depthTest: this._depthTest,
             depthWrite: this._depthWrite,
         });

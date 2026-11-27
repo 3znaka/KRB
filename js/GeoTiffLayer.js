@@ -6,6 +6,20 @@ import { loadGeoTiffModule } from './geotiff-loader.js';
 import { resolveColorRamp, sampleColorRamp, parseColorToRGBA } from './ColorRamps.js';
 import { applyGapMaskToMaterial } from './PolygonUtils.js';
 import { assetUrl } from './assets.js';
+import { buildDots } from './DotsBuilder.js';
+import { PointCloud } from './PointCloud.js';
+/** Нормализует опцию mode в массив видов. По умолчанию — цвет (как раньше, без mode). */
+function normalizeMode(mode) {
+    if (mode === undefined)
+        return [];
+    const list = Array.isArray(mode) ? mode : [mode];
+    const allowed = ['color', 'elevation', 'dots'];
+    for (const m of list) {
+        if (!allowed.includes(m))
+            throw new Error(`GeoTiffLayer: неизвестный mode "${m}"`);
+    }
+    return list;
+}
 /** @private */ const GEOTIFF_RENDER_ORDER = 995;
 /** @private */ const defaultWorkerUrl = () => assetUrl('js_TP/geotiff.worker.js');
 /** @private */ const DEFAULT_HEIGHT_SCALE = 1.0;
@@ -85,11 +99,17 @@ export class GeoTiffLayer extends SpatialObject {
         this._effectiveMax = null;
         this._effectiveNoData = null;
         // Elevation
-        this._asElevation = options.asElevation === true;
+        // Новый API видов отображения: mode: 'color' | 'elevation' | 'dots' | массив.
+        // Флаги asElevation / colorRamp сохранены для обратной совместимости.
+        this._mode = normalizeMode(options.mode);
+        this._dotParams = options.dotParams ?? null;
+        this._dotsObject = null;
+        this._asElevation = options.asElevation === true || this._mode.includes('elevation');
         this._elevationHeightScale = options.heightScale ?? DEFAULT_HEIGHT_SCALE;
         // Merge-into-tiles: применяется только если слой реально elevation.
         this._mergeIntoTiles = options.mergeIntoTiles !== false;
-        if (this._asElevation)
+        // Точки dots строятся из сырых значений растра — сохраняем их в памяти.
+        if (this._asElevation || this._mode.includes('dots'))
             this._keepRawData = true;
         else if (options.keepRawData === true)
             this._keepRawData = true;
@@ -723,8 +743,55 @@ export class GeoTiffLayer extends SpatialObject {
         this._tileTextureCache.clear();
     }
     /* ==== SpatialObject hooks ==== */
-    _onAttached(map) { }
+    _onAttached(map) {
+        // Точки могли быть построены до присоединения к карте (загрузка стартует в конструкторе):
+        // добавляем их теперь, когда карта известна.
+        if (this._dotsObject && !this._dotsObject._map)
+            this._dotsObject.addTo(map);
+    }
+    /**
+     * Точечный способ: строит точки по значениям растра (DotsBuilder) и отдаёт их
+     * PointCloud. Точки лежат в CRS растра; PointCloud переводит их в карту сам.
+     */
+    _buildDotsCloud(data, width, height, noData) {
+        if (!this._dotParams || !(this._dotParams.weight > 0)) {
+            console.warn('GeoTiffLayer: mode "dots" требует dotParams.weight > 0');
+            return;
+        }
+        if (!this._geoOrigin || !this._geoResolution) {
+            console.warn('GeoTiffLayer: mode "dots" — нет геопривязки растра');
+            return;
+        }
+        const res = buildDots({
+            data, width, height,
+            origin: [this._geoOrigin[0], this._geoOrigin[1]],
+            resolution: [this._geoResolution[0], this._geoResolution[1]],
+            noData,
+        }, this._dotParams);
+        const positions = res.positions;
+        const p = this._dotParams;
+        if (this._dotsObject)
+            this._dotsObject.remove();
+        this._dotsObject = new PointCloud({
+            positions: positions.map(([x, y]) => [x, y, 0]),
+            crs: this._crsCode ?? undefined,
+            color: p.color ?? '#e0443a',
+            size: p.size ?? 4,
+            shape: p.shape ?? 'circle',
+            mode: 'shaped',
+            altitudeMode: 'clampToGround',
+        });
+        if (this._map)
+            this._dotsObject.addTo(this._map);
+    }
     _teardown() {
+        if (this._dotsObject) {
+            try {
+                this._dotsObject.remove();
+            }
+            catch { /* swallow */ }
+            this._dotsObject = null;
+        }
         if (this._unregisterInteraction) {
             try {
                 this._unregisterInteraction();
@@ -858,8 +925,13 @@ export class GeoTiffLayer extends SpatialObject {
                 return;
             }
         }
-        this._group.visible = true;
+        // Режим dots-only: подложка растра не показывается, видны только точки.
+        this._group.visible = !this._dotsOnly();
         this._isVisible = true;
+    }
+    /** true, если растр показывает только точки (без цвета и рельефа). */
+    _dotsOnly() {
+        return this._mode.includes('dots') && !this._mode.includes('color') && !this._mode.includes('elevation');
     }
     /**
      * Глобус: видна ли хотя бы одна точка растра (углы, середины сторон, центр).
@@ -1199,6 +1271,10 @@ export class GeoTiffLayer extends SpatialObject {
                     this._geoResolution = null;
                 }
             }
+        }
+        // Точечный способ: точки по значениям растра (нужны сырые данные и геопривязка).
+        if (this._mode.includes('dots')) {
+            this._buildDotsCloud(data, width, height, noData);
         }
         let minV = this._minValue;
         let maxV = this._maxValue;

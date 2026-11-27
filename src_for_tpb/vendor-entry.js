@@ -24,6 +24,10 @@ import {
   LinearFilter, RepeatWrapping,
   RGBAFormat, SRGBColorSpace,
   MOUSE,
+  // используются в src/*.ts, но раньше не были импортированы
+  Shape, ShapeGeometry, Object3D, Camera, AnimationClip,
+  AlwaysStencilFunc, EqualStencilFunc, KeepStencilOp, ReplaceStencilOp,
+  ClampToEdgeWrapping, LinearSRGBColorSpace, NoColorSpace, LinearEncoding,
 } from 'three';
 
 // Сохраняем обратную совместимость `THREE.X`.
@@ -47,6 +51,9 @@ export const THREE = {
   LinearFilter, RepeatWrapping,
   RGBAFormat, SRGBColorSpace,
   MOUSE,
+  Shape, ShapeGeometry, Object3D, Camera, AnimationClip,
+  AlwaysStencilFunc, EqualStencilFunc, KeepStencilOp, ReplaceStencilOp,
+  ClampToEdgeWrapping, LinearSRGBColorSpace, NoColorSpace, LinearEncoding,
 };
 
 // ── Аддоны ──────────────────────────────────────────────────────

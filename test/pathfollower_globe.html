@@ -49,7 +49,7 @@ const GLOBE = params.get('flat') !== '1';
 
 const map = new KRB.Map({
     target: 'map',
-    globe: GLOBE,
+ globe: GLOBE,
     graticule: { crs: 'EPSG:4326', step: 15, color: '#888', width: 1 },
     view: new KRB.View({ centerLonLat: [20, 10], zoom: 2, minZoom: 0, maxZoom: 8 }),
 });
@@ -70,17 +70,7 @@ const vector = new KRB.Vector3D({
     animation: { type: 'none' },
 }).addTo(map);
 
-const vectorFollower = new KRB.PathFollower({
-    path: vector,
-    visual: KRB.createPrimitiveVisual({ primitiveType: 'sphere', color: '#ffeb3b' }),
-    size: 14,
-    sizeMode: 'px',
-    alignToPath: true,
-    title: 'Vector3D',
-    tooltip: 'Едет по Vector3D',
-    titleStyle: { color: '#c62828', fontWeight: 'bold', fontSize: '12px' },
-}).addTo(map);
-vectorFollower.moveTo({ from: 0, to: 1, duration: 14, loop: 'restart' });
+
 
 // ── 2. POLYLINE: ломаная над Азией ─────────────────────────────────
 const polyline = new KRB.Polyline({
@@ -91,6 +81,7 @@ const polyline = new KRB.Polyline({
         [110, 50],
         [130, 40],
     ],
+
     crs: 'EPSG:4326',
     color: '#1e88e5',
     width: 3,
@@ -102,6 +93,7 @@ const polylineFollower = new KRB.PathFollower({
     visual: KRB.createPrimitiveVisual({ primitiveType: 'cone', color: '#0d47a1' }),
     size: 14,
     sizeMode: 'px',
+        forwardAxis: 'y',
     alignToPath: true,
     title: 'Polyline',
     titleStyle: { color: '#0d47a1', fontWeight: 'bold', fontSize: '12px' },
@@ -125,26 +117,29 @@ const polygon = new KRB.Polygon({
     tooltip: '<b>Polygon</b><br>движение по внешнему кольцу',
 }).addTo(map);
 
-const polygonFollower = new KRB.PathFollower({
-    path: polygon,
-    visual: KRB.createPrimitiveVisual({ primitiveType: 'box', color: '#1b5e20' }),
-    size: 14,
-    sizeMode: 'px',
-    alignToPath: true,
-    title: 'Polygon',
-    titleStyle: { color: '#1b5e20', fontWeight: 'bold', fontSize: '12px' },
-}).addTo(map);
-polygonFollower.moveTo({ from: 0, to: 1, duration: 18, loop: 'restart' });
+
 
 // ── Панель: пауза / продолжить и лог прогресса ─────────────────────
-const followers = { vector: vectorFollower, polyline: polylineFollower, polygon: polygonFollower };
+const followers = { polyline: polylineFollower,};
 document.getElementById('pauseAll').onclick = () =>
     Object.values(followers).forEach(f => f.pause());
 document.getElementById('resumeAll').onclick = () =>
     Object.values(followers).forEach(f => f.play());
 
 const logEl = document.getElementById('log');
+let dbgTick = 0;
 function tick() {
+    // DEBUG: раз в ~60 кадров — ориентация и касательная каждого фолловера.
+    if ((dbgTick++ % 60) === 0) {
+        for (const [name, f] of Object.entries(followers)) {
+            const g = f._group;
+            console.log('[dbg]', name,
+                'quat', g?.quaternion?.toArray().map(v => +v.toFixed(3)),
+                'tangent', f._tmpTangent?.toArray().map(v => +v.toFixed(3)),
+                'up', f._tmpUp?.toArray().map(v => +v.toFixed(3)),
+                'axis', f._forwardAxis, 'align', f._alignToPath, 'globe', !!(map.globe && map.surface));
+        }
+    }
     const lines = Object.entries(followers).map(([name, f]) => {
         const p = f.getProgress();
         return `${name.padEnd(9)} t=${p.fraction.toFixed(3)}  v=${p.speed.toFixed(1)} м/с  L=${f.getTotalPathLength().toFixed(0)} м`;

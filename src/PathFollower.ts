@@ -808,18 +808,31 @@ setSpeed(speed: SpeedSpec): this {
             return;
         }
 
-        // Глобус: поворот, переводящий ось модели в касательную,
-        // с последующим выравниванием «верха» модели по нормали.
-        // 1) касательная, выпрямленная относительно нормали (forward ⟂ up);
-        const fwd = this._tmpBasisF.copy(t);
-        fwd.addScaledVector(up, -fwd.dot(up));
-        if (fwd.lengthSq() < 1e-12) fwd.copy(t);
-        fwd.normalize();
-        // 2) базовый поворот: ось модели → fwd;
-        this._tmpQuat.setFromUnitVectors(axis, fwd);
-        // 3) затем доворот вокруг fwd, чтобы верх модели (Y) совпал с нормалью.
-        this._tmpBasisUp.copy(this._upY).applyQuaternion(this._tmpQuat);
-        this._tmpQuat2.setFromUnitVectors(this._tmpBasisUp, up);
+        // Глобус: ось модели (axis) ставим на касательную — как на плоскости, вершина идёт
+        // вдоль пути. Затем доворачиваем вокруг касательной, чтобы верх модели (Y) был ближе
+        // всего к нормали эллипсоида (крен). Порядок «Y → нормаль первым» при axis = Y
+        // стирал касательную: вершина всегда вставала по нормали.
+        // 1) ось модели → касательная (как на плоскости).
+        this._tmpQuat.setFromUnitVectors(axis, t);
+        // 2) куда теперь смотрит модельный Y.
+        this._tmpBasisF.copy(this._upY).applyQuaternion(this._tmpQuat);
+        // 3) нормаль, спроецированная в плоскость, перпендикулярную касательной.
+        const upProj = this._tmpBasisUp.copy(up);
+        upProj.addScaledVector(t, -upProj.dot(t));
+        if (upProj.lengthSq() < 1e-12) {
+            this._group.quaternion.copy(this._tmpQuat);
+            return;
+        }
+        upProj.normalize();
+        // 4) модельный Y, спроецированный в плоскость ⟂ касательной.
+        this._tmpBasisF.addScaledVector(t, -this._tmpBasisF.dot(t));
+        if (this._tmpBasisF.lengthSq() < 1e-12) {
+            this._group.quaternion.copy(this._tmpQuat);
+            return;
+        }
+        this._tmpBasisF.normalize();
+        // 5) доворот вокруг касательной: модельный Y → нормаль (проекция).
+        this._tmpQuat2.setFromUnitVectors(this._tmpBasisF, upProj);
         this._tmpQuat2.multiply(this._tmpQuat);
         this._group.quaternion.copy(this._tmpQuat2);
     }
@@ -839,13 +852,12 @@ setSpeed(speed: SpeedSpec): this {
      * worldGroup). Нормаль берётся по геодезическим lon/lat точки пути.
      */
     private _sampleNormal(map: any, localPos: any, out: any): void {
-        const g = map.surfacePointToLonLat?.(
-            map.getVec3().set(
-                localPos.x + map.worldGroup.position.x,
-                localPos.y + map.worldGroup.position.y,
-                localPos.z + map.worldGroup.position.z,
-            ),
-        );
+        // localPos — в системе worldGroup. Переводим в мир через матрицу группы
+        // (поворот + сдвиг), а не простым сложением: у повёрнутого глобуса сложение
+        // даёт неверную точку и неверную нормаль под конусом.
+        const worldPt = map.getVec3().copy(localPos);
+        if (map.worldGroup) map.worldGroup.localToWorld(worldPt);
+        const g = map.surfacePointToLonLat?.(worldPt);
         if (!g || !Number.isFinite(g[0]) || !Number.isFinite(g[1])) {
             out.set(0, 1, 0);
             return;

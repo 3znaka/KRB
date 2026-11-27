@@ -48,6 +48,7 @@ await KRB.crs.add('EPSG:4978');
 await KRB.crs.add('EPSG:20923');
 await KRB.crs.add('EPSG:32637');
 
+
 const map = new KRB.Map({
     target: 'map',
 //globe:true,
@@ -55,6 +56,14 @@ const map = new KRB.Map({
     layers: [new KRB.Tile({      texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd', heightScale: 2.0 })],
     view: new KRB.View({ centerLonLat: [38.37, 59.69], zoom: 10, pitch: 40 })
 });
+
+
+
+new KRB.Marker({
+    position: [ 38.367686, 59.857296],
+    altitudeMode: 'absolute',
+}).addTo(map);
+
 
 const status = document.getElementById('status');
 let e57 = null;

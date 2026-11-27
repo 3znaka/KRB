@@ -150,6 +150,7 @@ export class PointCloud extends SpatialObject {
     // ── Временные объекты ──
     _worldCenter = new THREE.Vector3();
     _tmpVec = new THREE.Vector3();
+    _tmpVec2 = new THREE.Vector3();
     // ── 3D-объекты ──
     _points = null;
     _geometry = null;
@@ -325,6 +326,16 @@ export class PointCloud extends SpatialObject {
             sz += z;
         }
         this._origin = n > 0 ? [sx / n, sz / n] : [0, 0];
+        // Глобус: origin должен быть ТОЙ ЖЕ точкой, что и _originWorld (центр lon/lat на поверхности).
+        // Среднее мировых X/Z даёт другую точку на сфере → облако смещается на десятки метров.
+        if (map.globe && map.surface) {
+            const ll = this._centerLonLat();
+            const o = ll ? map.projectSurfacePoint(ll, 'EPSG:4326', 0, this._tmpVec, null) : null;
+            if (o) {
+                // Точки храним в мировой системе; геометрия строится как (точка − origin).
+                this._origin = [o.x, o.z];
+            }
+        }
         // Минимум высоты узлов: для clampToGround самая низкая точка облака
         // ставится на уровень поверхности (y=0 на плоскости, эллипсоид на глобусе).
         // Учитываем масштаб высоты точки (тот же, что в геометрии): минимум — по scaled-высотам.
@@ -382,8 +393,26 @@ export class PointCloud extends SpatialObject {
         const n = this._planar.length;
         const positionArr = new Float32Array(n * 3);
         const colorArr = new Float32Array(n * 3);
+        const map = this._map;
+        const globe = !!(map && map.globe && map.surface);
+        if (globe) {
+            // Глобус: каждая точка — 3D-позиция на эллипсоиде над своей lon/lat на высоте
+            // nodeHeight·k, относительно origin (как Polygon/Polyline). Никаких X/Z-смещений
+            // на сфере: они дают сдвиг по касательной плоскости.
+            const oc = this._originWorld(map);
+            const origin = oc ? new THREE.Vector3(oc.x, oc.y, oc.z) : new THREE.Vector3();
+            const v = this._tmpVec;
+            for (let i = 0; i < n; i++) {
+                const ll = this._lonLat[i];
+                const h = (Number.isFinite(this._nodeHeights[i]) ? this._nodeHeights[i] : 0) * this._pointScale(i);
+                const p = ll ? map.projectSurfaceVertex(ll, 'EPSG:4326', h, origin, v) : null;
+                positionArr[i * 3] = p ? v.x : 0;
+                positionArr[i * 3 + 1] = p ? v.y : 0;
+                positionArr[i * 3 + 2] = p ? v.z : 0;
+            }
+        }
         const [ox, oz] = this._origin;
-        for (let i = 0; i < n; i++) {
+        for (let i = 0; !globe && i < n; i++) {
             const [x, z] = this._planar[i];
             positionArr[i * 3] = Number.isFinite(x - ox) ? x - ox : 0;
             // nodeHeight — истинные метры: масштаб по широте точки (как у Polygon/Polyline).
@@ -527,20 +556,45 @@ export class PointCloud extends SpatialObject {
                     lift += h;
             }
         }
-        this._points.position.set(origin.x - wx, origin.y + lift - wy, origin.z - wz);
+        if (map.globe && map.surface) {
+            // Глобус: origin — мировая точка на эллипсоиде. Подъём (lift) откладываем вдоль
+            // местной нормали, как и на плоскости по Y: для clampToGround — самая низкая точка
+            // облака на поверхности (−minNodeHeight) плюс рельеф, если elevation включён.
+            const ll = this._centerLonLat();
+            let liftG = this._altitude * kC;
+            if (this._altitudeMode === 'clampToGround') {
+                liftG += -this._minNodeHeight;
+                if (map.hasElevation && ll) {
+                    const sp = map.projectSurfacePoint(ll, 'EPSG:4326', 0, this._tmpVec2, null);
+                    if (sp) {
+                        const sh = map.getSurfaceHeightAt(sp.x, sp.z);
+                        if (Number.isFinite(sh))
+                            liftG += sh;
+                    }
+                }
+            }
+            const lp = this._tmpVec.set(origin.x, origin.y, origin.z);
+            if (ll && liftG) {
+                const nrm = this._tmpVec2.set(0, 0, 0);
+                map.surface.normal(ll[0], ll[1], nrm);
+                if (map.worldGroup)
+                    nrm.transformDirection(map.worldGroup.matrixWorld);
+                lp.addScaledVector(nrm.normalize(), liftG);
+            }
+            // Группа живёт в worldGroup → переводим мировую точку в локальную систему.
+            if (map.worldGroup)
+                map.worldGroup.worldToLocal(lp);
+            this._points.position.copy(lp);
+        }
+        else {
+            this._points.position.set(origin.x - wx, origin.y + lift - wy, origin.z - wz);
+        }
         // Глобус: облако «стоит» вдоль местной нормали эллипсоида в точке origin (как Marker3D),
         // а не вдоль мировой Y. Иначе вертикаль облака отклонена от поверхности.
         if (map.globe && map.surface) {
-            const ll = this._centerLonLat();
-            if (ll) {
-                const n = map.getVec3().set(0, 0, 0);
-                map.surface.normal(ll[0], ll[1], n);
-                if (map.worldGroup)
-                    n.transformDirection(map.worldGroup.matrixWorld);
-                n.normalize();
-                const up = map.getVec3().set(0, 1, 0);
-                this._points.quaternion.setFromUnitVectors(up, n);
-            }
+            // Глобус: позиции точек уже заданы в мировых осях относительно origin
+            // (projectSurfaceVertex), поэтому поворот меша не нужен.
+            this._points.quaternion.identity();
         }
         else {
             this._points.quaternion.identity();
@@ -580,14 +634,15 @@ export class PointCloud extends SpatialObject {
             this._lod = null;
             return;
         }
-        const [ox, oz] = this._origin;
+        // Координаты LOD — ровно те, что у геометрии (глобус: 3D-позиции; плоскость: X/Z−origin).
+        const pos = this._geometry?.getAttribute('position')?.array;
         const xs = new Float32Array(n);
         const zs = new Float32Array(n);
         let minH = Infinity, maxH = -Infinity;
         for (let i = 0; i < n; i++) {
-            xs[i] = this._planar[i][0] - ox;
-            zs[i] = this._planar[i][1] - oz;
-            const h = this._nodeHeights[i] * this._pointScale(i);
+            xs[i] = pos ? pos[i * 3] : this._planar[i][0] - this._origin[0];
+            zs[i] = pos ? pos[i * 3 + 2] : this._planar[i][1] - this._origin[1];
+            const h = pos ? pos[i * 3 + 1] : this._nodeHeights[i] * this._pointScale(i);
             if (h < minH)
                 minH = h;
             if (h > maxH)

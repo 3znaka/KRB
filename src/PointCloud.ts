@@ -248,6 +248,8 @@ export class PointCloud extends SpatialObject {
     private _lod: PointCloudLOD | null = null;
     private _minH = 0;
     private _maxH = 0;
+    /** Мировая Y самой низкой точки облака (обновляется в _update). */
+    private _worldBaseY = 0;
     private _tmpPV = new THREE.Matrix4();
     private _tmpFrustum = new THREE.Frustum();
     private _tmpBox = new THREE.Box3();
@@ -292,6 +294,9 @@ export class PointCloud extends SpatialObject {
         this._strokeWidth = Math.max(0, options.strokeWidth ?? 0);
         this._depthTest = options.depthTest ?? true;
         this._depthWrite = options.depthWrite ?? true;
+        // Режим по умолчанию выбирается при присоединении к карте: clampToGround,
+        // если на карте нет elevation, иначе absolute (см. _resolveAltitudeMode).
+        this._altitudeModeExplicit = options.altitudeMode !== undefined;
         this._altitudeMode = options.altitudeMode ?? 'clampToGround';
         this._mode = options.mode ?? 'shaped';
         if (options.lodBudget !== undefined) this._lodBudget = Math.max(1, options.lodBudget);
@@ -319,6 +324,7 @@ export class PointCloud extends SpatialObject {
     // =================================================================
 
     protected _onAttached(map: any): void {
+        this._resolveAltitudeMode(map);
         this._crs = this._crsCode ? Projections.get(this._crsCode) : map.inputCRS;
         this._computePlanar(map);
         this._buildGeometry();
@@ -402,6 +408,26 @@ export class PointCloud extends SpatialObject {
         let sx = 0, sz = 0;
         for (const [x, z] of this._planar) { sx += x; sz += z; }
         this._origin = n > 0 ? [sx / n, sz / n] : [0, 0];
+
+        // Минимум высоты узлов: для clampToGround самая низкая точка облака
+        // ставится на уровень поверхности (y=0 на плоскости, эллипсоид на глобусе).
+        let minH = Infinity;
+        for (const h of this._nodeHeights) if (Number.isFinite(h) && h < minH) minH = h;
+        this._minNodeHeight = Number.isFinite(minH) ? minH : 0;
+    }
+
+    /** Минимальная высота узлов облака (над уровнем поверхности / эллипсоидом). */
+    private _minNodeHeight = 0;
+    /** true, если режим задан явно (тогда автоматический выбор его не меняет). */
+    private _altitudeModeExplicit = false;
+
+    /**
+     * Если режим не задан явно: clampToGround при отсутствии elevation на карте
+     * (плоская карта без тайлов рельефа и GeoTIFF), иначе absolute.
+     */
+    protected _resolveAltitudeMode(map: any): void {
+        if (this._altitudeModeExplicit) return;
+        this._altitudeMode = map.hasElevation ? 'absolute' : 'clampToGround';
     }
 
     /** lon/lat (WGS-84) узла; null, если перевод невозможен. */
@@ -568,14 +594,25 @@ export class PointCloud extends SpatialObject {
         // Локальная позиция меша = мировой origin − сдвиг worldGroup.
         // Высота каждой точки уже внутри геометрии (nodeHeight); здесь
         // добавляем altitude и (для clampToGround на плоскости) рельеф.
+        // Правило (как у Marker3D):
+        //  - clampToGround: самая низкая точка облака ставится на поверхность
+        //    (y=0 на плоскости; эллипсоид — на глобусе), затем + altitude.
+        //  - absolute: высоты точек как есть, затем + altitude.
+        // Высоты точек уже внутри геометрии (nodeHeight), поэтому для clampToGround
+        // вычитаем минимум, а рельеф (hasElevation) добавляем в точке облака.
         let lift = this._altitude;
-        if (this._altitudeMode === 'clampToGround' && !map.globe) {
-            const h = map.getSurfaceHeightAt(origin.x, origin.z);
-            if (Number.isFinite(h)) lift += h;
+        if (this._altitudeMode === 'clampToGround') {
+            lift += -this._minNodeHeight;
+            if (!map.globe && map.hasElevation) {
+                const h = map.getSurfaceHeightAt(origin.x, origin.z);
+                if (Number.isFinite(h)) lift += h;
+            }
         }
 
         this._points.position.set(origin.x - wx, origin.y + lift - wy, origin.z - wz);
         this._worldCenter.set(origin.x, origin.y + lift, origin.z);
+        // Мировая Y самой низкой точки облака (геометрия от 0 до maxH − minH).
+        this._worldBaseY = origin.y + lift;
 
         // Дистанционный LOD.
         if (map.view?.objectRenderDistanceFactor > 0) {
@@ -629,10 +666,16 @@ export class PointCloud extends SpatialObject {
         // Реальный вертикальный диапазон точек + altitude + небольшой запас
         // на рельеф (clampToGround). Запас 50 м, а не 1000 м: широкий бокс
         // ложно «видит» ячейки, которых на экране нет.
-        const pad = 50;
-        this._minH = (Number.isFinite(minH) ? minH : 0) + this._altitude - pad;
-        this._maxH = (Number.isFinite(maxH) ? maxH : 0) + this._altitude + pad;
-        this._lod = new PointCloudLOD(xs, zs, { budget: this._lodBudget });
+        // Храним чистый диапазон высот узлов (без altitude и без запаса):
+        // запас и сдвиг применяются в _updateLOD относительно реального origin.
+        this._minH = Number.isFinite(minH) ? minH : 0;
+        this._maxH = Number.isFinite(maxH) ? maxH : 0;
+        // Высоты точек в системе геометрии (nodeHeight − minNodeHeight): нужны LOD для точного AABB ячейки.
+        // Высоты точек ровно как в геометрии (nodeHeight, без вычитания minNodeHeight):
+        // их мировое положение задаётся мешем (см. _update), поэтому бокс совпадает с рисуемым.
+        const ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) ys[i] = this._nodeHeights[i];
+        this._lod = new PointCloudLOD(xs, zs, { budget: this._lodBudget, ys });
     }
 
     /**
@@ -649,11 +692,21 @@ export class PointCloud extends SpatialObject {
         this._tmpFrustum.setFromProjectionMatrix(this._tmpPV);
 
         // AABB ячейки: плоская (x, z) ячейки + высота облака, переведённые в мир.
-        const yMin = origin.y + this._minH;
-        const yMax = origin.y + this._maxH;
-        const changed = lod.update((minX, maxX, minZ, maxZ) => {
-            this._tmpBox.min.set(origin.x + minX, yMin, origin.z + minZ);
-            this._tmpBox.max.set(origin.x + maxX, yMax, origin.z + maxZ);
+        // Вертикальный диапазон бокса — относительно фактической точки origin, которую
+        // мы уже вычислили в _update (с учётом altitudeMode, minNodeHeight и рельефа).
+        // Диапазон высот точек: от 0 до (maxH − minH) над уровнем облака, с запасом.
+        // В геометрии высота узла = nodeHeight − minNodeHeight (минимум вычитается в lift),
+        // поэтому мировой диапазон по Y: [origin.y − pad, origin.y + (maxH − minH) + pad].
+        // Низ облака — фактическая мировая высота меша (уже включает altitude и рельеф),
+        // а не оценка. Запас небольшой: геометрия смещена на minH − minH = 0.
+        // Точный AABB ячейки в мировых координатах: X/Z — относительно origin, Y — от
+        // мировой высоты низа геометрии (_worldBaseY). Небольшой запас против погрешности float32.
+        const pad = 0.5;
+        const changed = lod.update((minX, maxX, minY, maxY, minZ, maxZ) => {
+            // ДИАГНОСТИКА: отсечение по фрустуму выключено — все ячейки видимы.
+            if ((globalThis as any).__KRB_LOD_NO_CULL) return true;
+            this._tmpBox.min.set(origin.x + minX - pad, this._worldBaseY + minY - pad, origin.z + minZ - pad);
+            this._tmpBox.max.set(origin.x + maxX + pad, this._worldBaseY + maxY + pad, origin.z + maxZ + pad);
             return this._tmpFrustum.intersectsBox(this._tmpBox);
         });
 

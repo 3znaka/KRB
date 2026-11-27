@@ -58,7 +58,8 @@ export class LAS extends PointCloud {
             opacity: options.opacity ?? 1,
             lodBudget: options.lodBudget,
             altitude: options.altitude,
-            altitudeMode: options.altitudeMode ?? 'absolute',
+            // Не задан — выберем при присоединении к карте (см. _onAttached): по наличию elevation.
+            altitudeMode: options.altitudeMode,
             minZoom: options.minZoom,
             maxZoom: options.maxZoom,
             title: options.title,

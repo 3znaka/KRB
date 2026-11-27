@@ -27,6 +27,8 @@ export interface PointCloudLODOptions {
     maxLevel?: number;
     /** Сид для случайной перестановки (для воспроизводимости). */
     seed?: number;
+    /** Высоты точек в системе геометрии; нужны для точного AABB ячейки по Y. */
+    ys?: Float32Array;
 }
 
 export interface LODCell {
@@ -39,6 +41,9 @@ export interface LODCell {
     maxX: number;
     minZ: number;
     maxZ: number;
+    /** Диапазон высот точек ячейки (в системе геометрии). */
+    minY: number;
+    maxY: number;
     /** Текущий уровень детализации. */
     level: number;
 }
@@ -67,6 +72,7 @@ export class PointCloudLOD {
     private _appliedKey = '';
 
     constructor(xs: Float32Array, zs: Float32Array, options: PointCloudLODOptions = {}) {
+        const ys = options.ys ?? new Float32Array(xs.length);
         const g = Math.max(1, options.grid ?? DEFAULTS.grid);
         this._budget = options.budget ?? DEFAULTS.budget;
         this._maxLevel = options.maxLevel ?? DEFAULTS.maxLevel;
@@ -112,20 +118,32 @@ export class PointCloudLOD {
             }
         }
 
+        // AABB каждой ячейки — по фактическим точкам (X, Y, Z), а не по прямоугольнику
+        // сетки. Тогда отсечение фрустумом не отбрасывает видимые точки ячейки.
+        const cMinX = new Float64Array(g * g).fill(Infinity), cMaxX = new Float64Array(g * g).fill(-Infinity);
+        const cMinY = new Float64Array(g * g).fill(Infinity), cMaxY = new Float64Array(g * g).fill(-Infinity);
+        const cMinZ = new Float64Array(g * g).fill(Infinity), cMaxZ = new Float64Array(g * g).fill(-Infinity);
+        for (let i = 0; i < n; i++) {
+            const c = cellOf[i];
+            const x = xs[i], y = ys[i], z = zs[i];
+            if (x < cMinX[c]) cMinX[c] = x; if (x > cMaxX[c]) cMaxX[c] = x;
+            if (y < cMinY[c]) cMinY[c] = y; if (y > cMaxY[c]) cMaxY[c] = y;
+            if (z < cMinZ[c]) cMinZ[c] = z; if (z > cMaxZ[c]) cMaxZ[c] = z;
+        }
+
         this.cells = [];
         for (let c = 0; c < g * g; c++) {
             if (counts[c] === 0) continue;
-            const cx = c % g, cz = Math.floor(c / g);
             this.cells.push({
                 start: starts[c],
                 count: counts[c],
-                minX: minX + cx * cellW,
-                maxX: minX + (cx + 1) * cellW,
-                minZ: minZ + cz * cellH,
-                maxZ: minZ + (cz + 1) * cellH,
+                minX: cMinX[c], maxX: cMaxX[c],
+                minZ: cMinZ[c], maxZ: cMaxZ[c],
+                minY: cMinY[c], maxY: cMaxY[c],
                 level: 0,
             });
         }
+        void cellW; void cellH;
     }
 
     /**
@@ -133,13 +151,13 @@ export class PointCloudLOD {
      * AABB ячейки относительно фрустума (ячейки в плоскости, y = 0 относительно origin).
      * Возвращает true, если уровни изменились.
      */
-    update(isCellVisible: (minX: number, maxX: number, minZ: number, maxZ: number) => boolean): boolean {
+    update(isCellVisible: (minX: number, maxX: number, minY: number, maxY: number, minZ: number, maxZ: number) => boolean): boolean {
         // 1. Видимость каждой ячейки и суммарное число её точек на полной детализации.
         if (this._vis.length !== this.cells.length) this._vis = new Uint8Array(this.cells.length);
         let fullTotal = 0;
         for (let i = 0; i < this.cells.length; i++) {
             const c = this.cells[i];
-            const v = isCellVisible(c.minX, c.maxX, c.minZ, c.maxZ) ? 1 : 0;
+            const v = isCellVisible(c.minX, c.maxX, c.minY, c.maxY, c.minZ, c.maxZ) ? 1 : 0;
             this._vis[i] = v;
             if (v) fullTotal += c.count;
         }

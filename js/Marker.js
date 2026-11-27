@@ -483,7 +483,10 @@ export class Marker extends SpatialObject {
         }
         // Подъём над поверхностью: высота режима + высота узла (3-я координата).
         // На глобусе откладывается вдоль местной нормали, на плоскости — по Y.
-        let lift = this._altitude + this._nodeHeight;
+        // Высоты (altitude, nodeHeight) — истинные метры: масштаб по широте (как в Area3D/Polygon).
+        // Рельеф (_cachedWorldY) уже в мировых единицах — не масштабируем.
+        const kLift = this._verticalScale(this.getLonLat());
+        let lift = (this._altitude + this._nodeHeight) * kLift;
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > 500) {

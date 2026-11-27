@@ -351,8 +351,22 @@ this._crsCode = options.crs ?? null;
     // Построение примитива / GLB
     // =================================================================
 
+    /** WGS-84 [lon, lat] маркера для масштаба высоты. Проекционный _coord сюда не годится. */
+    private _lonLatForScale(): [number, number] | null {
+        if (this._lon !== null && this._lat !== null && Number.isFinite(this._lon) && Number.isFinite(this._lat)) {
+            return [this._lon, this._lat];
+        }
+        const crs = this._crs;
+        if (!crs || typeof crs.toLonLat !== 'function') return null;
+        const ll = crs.toLonLat(this._coord);
+        return ll && Number.isFinite(ll[0]) && Number.isFinite(ll[1]) ? [ll[0], ll[1]] : null;
+    }
+
      protected _createPrimitive(): void {
-        const [w, h, d] = this._normalizePrimitiveSize(this._size);
+        const [w, h0, d] = this._normalizePrimitiveSize(this._size);
+        // Единый масштаб высоты (SpatialObject._verticalScale): геометрия и _height
+        // должны совпадать, иначе подпись окажется не над моделью.
+        const h = h0 * this._verticalScale(this._lonLatForScale());
         this._height = h;
 
         let geometry: any;
@@ -876,19 +890,19 @@ if (this._altitudeMode === 'clampToGround') {
         map.projectSurfacePoint(this._coord, this._crs, this._cachedWorldY + this._altitude, this._worldPosition);
         worldY = this._worldPosition.y;
     } else {
-        worldY = this._cachedWorldY + this._altitude;
+        worldY = this._cachedWorldY + this._altitude * this._verticalScale(this._lonLatForScale());
     }
 } else if (map.globe) {
     map.projectSurfacePoint(this._coord, this._crs,
         this._altitude + this._nodeHeight, this._worldPosition);
     worldY = this._worldPosition.y;
 } else {
-    worldY = this._altitude + this._nodeHeight;
+    worldY = (this._altitude + this._nodeHeight) * this._verticalScale(this._lonLatForScale());
 }
 
 if (!map.globe) {
     // Плоский режим: высота узла аддитивна, модель стоит вдоль мировой Y.
-    worldY += this._nodeHeight;
+    worldY += this._nodeHeight * this._verticalScale(this._lonLatForScale());
 }
 
 // Позиция МЕША — локальная (объект лежит в worldGroup, который сам

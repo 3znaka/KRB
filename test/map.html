@@ -499,8 +499,8 @@ function buildBuildingLayer() {
     floor_layer.features.forEach(f => {
         const props = f.properties;
         const floor = props.floor;
-        const minH  = 6 * (floor - 1);
-        const height = 6;
+        const minH  = 3 * (floor - 1);
+        const height = 3;
 
         eachRing(f, rings => {
             buildingsLayer.add(new KRB.Polygon({

@@ -192,14 +192,17 @@ export const PolygonUpdateMixin = {
             const wc = this._worldCoords[i];
             if (!wc)
                 continue;
-            let base = altitude;
+            // altitude, nodeHeight, minHeight, экструзия — истинные метры: масштаб по широте вершины.
+            // Рельеф (getSurfaceHeightAt) уже в мировых единицах — не масштабируем.
+            const kI = this._vertexScale(i);
+            let base = altitude * kI;
             if (isDynamic) {
                 const worldX = wc[0] + wgPos.x;
                 const worldZ = wc[1] + wgPos.z;
                 ensureFor(worldX, worldZ);
-                base = map.getSurfaceHeightAt(worldX, worldZ) + altitude;
+                base = map.getSurfaceHeightAt(worldX, worldZ) + altitude * kI;
             }
-            this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) + this._minHeight + extrude;
+            this._cachedHeights[i] = base + (this._nodeHeights[i] ?? 0) * kI + (this._minHeight + extrude) * kI;
         }
         const strokeLen = this._strokeWorldCoords.length;
         if (this._cachedStrokeHeights.length !== strokeLen) {
@@ -209,14 +212,15 @@ export const PolygonUpdateMixin = {
             const wc = this._strokeWorldCoords[i];
             if (!wc)
                 continue;
-            let base = altitude;
+            const kS = this._vertexScale(i);
+            let base = altitude * kS;
             if (isDynamic) {
                 const worldX = wc[0] + wgPos.x;
                 const worldZ = wc[1] + wgPos.z;
                 map.ensureTileForPoint?.(worldX, worldZ);
-                base = map.getSurfaceHeightAt(worldX, worldZ) + altitude;
+                base = map.getSurfaceHeightAt(worldX, worldZ) + altitude * kS;
             }
-            this._cachedStrokeHeights[i] = base + (this._strokeNodeHeights[i] ?? 0) + this._minHeight + extrude;
+            this._cachedStrokeHeights[i] = base + (this._strokeNodeHeights[i] ?? 0) * kS + (this._minHeight + extrude) * kS;
         }
         // РќР° РіР»РѕР±СѓСЃРµ РєР°Р¶РґРѕР№ РІРµСЂС€РёРЅРµ РЅСѓР¶РЅС‹ РЎР’РћР X/Y/Z (С‚РѕС‡РєР° РЅР° СЌР»Р»РёРїСЃРѕРёРґРµ),
         // РёРЅР°С‡Рµ РІСЃСЏ РіРµРѕРјРµС‚СЂРёСЏ РѕСЃС‚Р°С‘С‚СЃСЏ РІ РїР»РѕСЃРєРѕСЃС‚Рё y = const.
@@ -266,8 +270,9 @@ export const PolygonUpdateMixin = {
             if (globe) {
                 for (let i = 0; i < n; i++) {
                     const ll = this._vertexLonLatOf(i);
+                    const hBot = this._cachedHeights[i] - height * this._vertexScale(i);
                     const p = ll
-                        ? map.projectSurfaceVertex(ll, 'EPSG:4326', this._cachedHeights[i] - height, origin, _v3)
+                        ? map.projectSurfaceVertex(ll, 'EPSG:4326', hBot, origin, _v3)
                         : null;
                     const k = i * 3;
                     if (p) {
@@ -276,12 +281,12 @@ export const PolygonUpdateMixin = {
                         bottomPos[k + 2] = _v3.z;
                     }
                     else
-                        bottomPos[k + 1] = this._cachedHeights[i] - height;
+                        bottomPos[k + 1] = hBot;
                 }
             }
             else {
                 for (let i = 0; i < n; i++)
-                    bottomPos[i * 3 + 1] = this._cachedHeights[i] - height;
+                    bottomPos[i * 3 + 1] = this._cachedHeights[i] - height * this._vertexScale(i);
             }
             this._bottomGeometry.attributes.position.needsUpdate = true;
             this._bottomGeometry.computeBoundingSphere();
@@ -297,9 +302,9 @@ export const PolygonUpdateMixin = {
                 const upperJ = this._cachedHeights[idxJ];
                 const base = k * 4;
                 sidePos[base * 3 + 1] = upperI;
-                sidePos[(base + 1) * 3 + 1] = upperI - height;
+                sidePos[(base + 1) * 3 + 1] = upperI - height * this._vertexScale(idxI);
                 sidePos[(base + 2) * 3 + 1] = upperJ;
-                sidePos[(base + 3) * 3 + 1] = upperJ - height;
+                sidePos[(base + 3) * 3 + 1] = upperJ - height * this._vertexScale(idxJ);
             }
             this._sideGeometry.attributes.position.needsUpdate = true;
             if (this._builtSideHeight !== height) {

@@ -37,6 +37,7 @@ export interface CoreCoordinatesMethods {
      * `height` — высота над поверхностью вдоль местной нормали.
      */
     projectSurfacePoint(coord: number[], fromCrs: any, height: number, out: any, origin?: any): any | null;
+    _planarHeightScale(coord: number[], fromCrs?: any): number;
     /** Обратное к projectSurfacePoint: мировые координаты → [lon, lat]. */
     surfacePointToLonLat(worldPoint: any): [number, number] | null;
     /** Мировые координаты → точка под ними у поверхности (для hit-тестов). */
@@ -71,6 +72,20 @@ export const CoreCoordinatesMixin: CoreCoordinatesMethods & ThisType<KrbMap> = {
  * лежащих ВНУТРИ worldGroup: их локальные координаты не должны включать
  * сдвиг мира).
  */
+/**
+ * Масштаб высоты относительно горизонтали на плоской карте: 1/cos(lat) для Меркатора,
+ * иначе 1. Нужен, чтобы высоты в истинных метрах совпадали по виду с горизонталью.
+ */
+_planarHeightScale(coord, fromCrs) {
+    if (!this.projection || !this.projection.isMercator) return 1;
+    const src = fromCrs ? (typeof fromCrs === 'string' ? Projections.getRaw(fromCrs) : fromCrs) : this.inputCRS;
+    const ll = src && typeof src.toLonLat === 'function' ? src.toLonLat(coord) : null;
+    if (!ll || !Number.isFinite(ll[1])) return 1;
+    const c = Math.cos(ll[1] * Math.PI / 180);
+    if (!(c > 1e-6)) return 1;
+    return 1 / c;
+},
+
 projectSurfacePoint(coord, fromCrs, height, out, origin?) {
     const h = Number.isFinite(height) ? height : 0;
     const originX = origin ? origin.x : 0;
@@ -82,6 +97,9 @@ projectSurfacePoint(coord, fromCrs, height, out, origin?) {
         if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
         // ПЛОСКИЙ режим: карта живёт в worldGroup, который панорамируется.
         const wg = this.worldGroup ? this.worldGroup.position : null;
+        // Масштаб высоты (1/cos(lat) для Меркатора) здесь НЕ применяется: объекты сами
+        // масштабируют свою геометрию по высоте (см. Area3D._createPrimitive). Иначе высота
+        // центра объекта и его геометрия масштабировались бы дважды.
         return out.set(
             x + (wg ? wg.x : 0) - originX,
             h + (wg ? wg.y : 0) - originY,

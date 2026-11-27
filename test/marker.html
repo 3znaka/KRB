@@ -60,16 +60,16 @@ new KRB.Marker({
 
 // Тот же синтаксис у 3D-маркера:
 new KRB.Marker3D({
-    position: [lon + 0.45, lat, 2000],
+    position: [lon + 0.45, lat, 0],
     altitudeMode: 'absolute',
     primitiveType: 'cone',
-    size: [200, 400, 200],
+    size: [400, 400, 400],
     color: 0xffaa00,
     title: 'Marker3D · 2000 м'
 }).addTo(map);
 
 new KRB.Polyline({
-    positions: [[lon, lat, 1500], [lon + 0.2, lat + 0.1, 800]],
+    positions: [[lon, lat, 1500], [lon + 0.2, lat + 0.1, 4000]],
     altitudeMode: 'absolute'
 }).addTo(map);
 

@@ -395,11 +395,23 @@ export class PointCloud extends SpatialObject {
 
         for (let i = 0; i < n; i++) {
             const nn = this._normalizePosition(this._positions[i], this._crs);
-            const p = nn.lonLat
-                ? map.project(nn.lonLat, 'EPSG:4326')
-                : map.project(nn.coord, this._crs);
-            const x = Number.isFinite(p[0]) ? p[0] : 0;
-            const z = Number.isFinite(p[1]) ? p[1] : 0;
+            let x = 0, z = 0;
+            if (map.globe && map.surface) {
+                // Глобус: точку кладём той же функцией, что и origin (projectSurfacePoint),
+                // иначе относительное положение точек и центра расходятся по знаку (разворот 180°).
+                const ll = nn.lonLat ?? this._lonLatOf(nn);
+                const v = map.getVec3();
+                // Высоту не передаём: nodeHeight уже задаёт Y геометрии (см. _buildGeometry),
+                // иначе высота учтётся дважды.
+                const w = ll ? map.projectSurfacePoint(ll, 'EPSG:4326', 0, v, null) : null;
+                if (w) { x = w.x; z = w.z; }
+            } else {
+                const p = nn.lonLat
+                    ? map.project(nn.lonLat, 'EPSG:4326')
+                    : map.project(nn.coord, this._crs);
+                x = Number.isFinite(p[0]) ? p[0] : 0;
+                z = Number.isFinite(p[1]) ? p[1] : 0;
+            }
             this._planar[i] = [x, z];
             this._nodeHeights[i] = nn.nodeHeight;
             this._lonLat[i] = this._lonLatOf(nn);
@@ -610,6 +622,22 @@ export class PointCloud extends SpatialObject {
         }
 
         this._points.position.set(origin.x - wx, origin.y + lift - wy, origin.z - wz);
+
+        // Глобус: облако «стоит» вдоль местной нормали эллипсоида в точке origin (как Marker3D),
+        // а не вдоль мировой Y. Иначе вертикаль облака отклонена от поверхности.
+        if (map.globe && map.surface) {
+            const ll = this._centerLonLat();
+            if (ll) {
+                const n = map.getVec3().set(0, 0, 0);
+                map.surface.normal(ll[0], ll[1], n);
+                if (map.worldGroup) n.transformDirection(map.worldGroup.matrixWorld);
+                n.normalize();
+                const up = map.getVec3().set(0, 1, 0);
+                this._points.quaternion.setFromUnitVectors(up, n);
+            }
+        } else {
+            this._points.quaternion.identity();
+        }
         this._worldCenter.set(origin.x, origin.y + lift, origin.z);
         // Мировая Y самой низкой точки облака (геометрия от 0 до maxH − minH).
         this._worldBaseY = origin.y + lift;
@@ -702,11 +730,33 @@ export class PointCloud extends SpatialObject {
         // Точный AABB ячейки в мировых координатах: X/Z — относительно origin, Y — от
         // мировой высоты низа геометрии (_worldBaseY). Небольшой запас против погрешности float32.
         const pad = 0.5;
+        // Глобус: меш повёрнут к нормали эллипсоида, а AABB строится по мировым осям,
+        // поэтому бокс не совпадает с точками и ячейки ложно отбрасываются у камеры.
+        // Для повёрнутого облака отсечение по боксу отключаем: все ячейки видимы
+        // (облако небольшое, экономия от отсечения здесь не нужна).
+        // Бокс ячейки строится в ЛОКАЛЬНОЙ системе геометрии (8 углов), затем переносится в мир
+        // матрицей меша (поворот + позиция). Так бокс корректен и для повёрнутого (глобус),
+        // и для неповёрнутого меша. Мировой AABB от 8 углов содержит повёрнутую ячейку целиком.
+        const mesh = this._points;
+        mesh.updateMatrix();
+        mesh.updateMatrixWorld(true);
+        const M = mesh.matrixWorld;
+        const corner = this._tmpVec;
+        // Локальный низ геометрии по Y — 0 (геометрия от nodeHeight; см. _buildGeometry).
         const changed = lod.update((minX, maxX, minY, maxY, minZ, maxZ) => {
-            // ДИАГНОСТИКА: отсечение по фрустуму выключено — все ячейки видимы.
-            if ((globalThis as any).__KRB_LOD_NO_CULL) return true;
-            this._tmpBox.min.set(origin.x + minX - pad, this._worldBaseY + minY - pad, origin.z + minZ - pad);
-            this._tmpBox.max.set(origin.x + maxX + pad, this._worldBaseY + maxY + pad, origin.z + maxZ + pad);
+            let bx0 = Infinity, by0 = Infinity, bz0 = Infinity;
+            let bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+            for (let c = 0; c < 8; c++) {
+                const lx = (c & 1) ? maxX + pad : minX - pad;
+                const ly = (c & 2) ? maxY + pad : minY - pad;
+                const lz = (c & 4) ? maxZ + pad : minZ - pad;
+                corner.set(lx, ly, lz).applyMatrix4(M);
+                if (corner.x < bx0) bx0 = corner.x; if (corner.x > bx1) bx1 = corner.x;
+                if (corner.y < by0) by0 = corner.y; if (corner.y > by1) by1 = corner.y;
+                if (corner.z < bz0) bz0 = corner.z; if (corner.z > bz1) bz1 = corner.z;
+            }
+            this._tmpBox.min.set(bx0, by0, bz0);
+            this._tmpBox.max.set(bx1, by1, bz1);
             return this._tmpFrustum.intersectsBox(this._tmpBox);
         });
 

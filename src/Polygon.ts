@@ -482,6 +482,22 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
     }
 
     /** @internal */
+    /** Центр полигона в WGS-84 [lon, lat] (среднее вершин). Для одного масштаба толщины экструзии. */
+    _centroidLonLat(): [number, number] | null {
+        let sx = 0, sy = 0, k = 0;
+        for (const ll of this._vertexLonLat ?? []) {
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
+            sx += ll[0]; sy += ll[1]; k++;
+        }
+        return k ? [sx / k, sy / k] : null;
+    }
+
+    /** Масштаб высоты вершины i (SpatialObject._verticalScale) по её WGS-84 широте. */
+    _vertexScale(i: number): number {
+        const ll = this._vertexLonLat?.[i];
+        return this._verticalScale(ll ?? null);
+    }
+
     _getBatchGeometryData(): any | null {
         if (this._invalidGeometry) return null;
         // Вершины текущего LOD-бакета готовим лениво, только когда батч реально
@@ -510,7 +526,8 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
         const base = this._altitude + this._minHeight + extrude;
         const heights = new Array(this._worldCoords.length);
         for (let i = 0; i < heights.length; i++) {
-            heights[i] = base + (this._nodeHeights[i] ?? 0);
+            // Все высоты (altitude, minHeight, экструзия, nodeHeight) — истинные метры: масштабируем на k вершины.
+            heights[i] = (base + (this._nodeHeights[i] ?? 0)) * this._vertexScale(i);
         }
 
         // Глобус: у вершин разные X/Y/Z (точки эллипсоида). Батчер по
@@ -560,7 +577,7 @@ this._crs = this._crsCode ? Projections.get(this._crsCode) : null;
             zoomInterpolations: this._zoomInterpolations ?? null,
             ringStarts: this._ringStartIndices,
             extruded: this._extruded,
-            height: this._extruded ? this._height : 0,
+            height: this._extruded ? this._height * this._verticalScale(this._centroidLonLat()) : 0,
             fillColor: this._fillColor,
             fillOpacity: this._fillOpacity,
             strokeColor: this._strokeColor,

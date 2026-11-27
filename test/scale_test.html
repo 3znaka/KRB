@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>Масштаб высот — тест куба</title>
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; font:13px sans-serif; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #info { position:fixed; top:8px; left:8px; background:rgba(255,255,255,0.94); padding:6px 8px; border-radius:4px; white-space:pre; z-index:9; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="info">куб 100 × 100 × 100 м: должен быть кубом</div>
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [new KRB.Tile({ texture: 'demo', heightScale: 1.0 })],
+    view: new KRB.View({ centerLonLat: [37.62, 55.75], zoom: 17, pitch: 45 })
+});
+
+// Куб: квадрат ~100 м по широте/долготе (в градусах), высота 100 м.
+// 1 градус широты ≈ 111 320 м; 1 градус долготы на широте 55.75° ≈ 111 320·cos(55.75°) ≈ 62 390 м.
+const dLat = 100 / 111320;
+const dLon = 100 / 62390;
+const lon = 37.62, lat = 55.75;
+const ring = [
+    [lon,        lat],
+    [lon + dLon, lat],
+    [lon + dLon, lat + dLat],
+    [lon,        lat + dLat],
+];
+
+// Полигон задан в градусах (ширина и глубина ~100 м по земле, как в широте/долготе).
+// Высота — в метрах через size[1]. fit: 'stretch' берёт размеры полигона по горизонтали
+// и высоту из size, не подгоняя её под полигон — так высота не зависит от искажения проекции.
+// (При 'contain' высота масштабируется коэффициентом полигона, что скрыло бы проблему.)
+const cube = new KRB.Area3D({
+    rings: [ring],
+    crs: 'EPSG:4326',
+    primitiveType: 'box',
+    size: [100, 100, 100],
+    fit: 'stretch',
+    altitudeMode: 'absolute',
+    altitude: 0,
+    color: '#44aa88',
+});
+cube.addTo(map);
+</script>
+</body>
+</html>

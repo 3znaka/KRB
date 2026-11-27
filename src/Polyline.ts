@@ -948,6 +948,12 @@ private _getFullLineData(): SimplifiedLineData {
         return true;
     }
 
+    /** Масштаб высоты вершины i (SpatialObject._verticalScale) по её WGS-84 широте. */
+    private _vertexScale(i: number): number {
+        const ll = this._vertexLonLat?.[i];
+        return this._verticalScale(ll ?? null);
+    }
+
     private _updateHeights(): void {
         if (!this._map) return;
         const isDynamic = this._map.hasElevation && this._altitudeMode === 'clampToGround';
@@ -980,9 +986,9 @@ private _getFullLineData(): SimplifiedLineData {
                 }
                 let surfaceY = this._map.getSurfaceHeightAt(worldX, worldZ);
                 if (!Number.isFinite(surfaceY)) surfaceY = 0;
-                y = surfaceY + this._altitude + nodeH;
+                y = surfaceY + (this._altitude + nodeH) * this._vertexScale(i);
             } else {
-                y = this._altitude + nodeH;
+                y = (this._altitude + nodeH) * this._vertexScale(i);
             }
 
             const finalY = Number.isFinite(y) ? y : this._altitude;
@@ -1158,7 +1164,7 @@ private _getFullLineData(): SimplifiedLineData {
                 continue;
             }
             const [ax, az] = pts[i];
-            let y = this._altitude + (this._nodeHeights[i] ?? 0);
+            let y = (this._altitude + (this._nodeHeights[i] ?? 0)) * this._vertexScale(i);
             if (this._cachedHeights) y = this._cachedHeights[i];
             points3D[i] = new THREE.Vector3(ax + wgPos.x, y + wgPos.y, az + wgPos.z);
         }

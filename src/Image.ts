@@ -580,7 +580,9 @@ private _computeWorldPositionsFromNodes(): any[] {
         const [x, z] = nn.lonLat
             ? map.project(nn.lonLat, 'EPSG:4326')
             : map.project(nn.coord, this._crs);
-        const y = nn.nodeHeight + this._altitude;
+        // Высоты — истинные метры: масштаб по широте узла (как у Area3D/Polygon).
+        const kY = this._verticalScale(nn.lonLat ?? this._crs?.toLonLat?.(nn.coord) ?? null);
+        const y = (nn.nodeHeight + this._altitude) * kY;
         return new THREE.Vector3(x, y, z);
     });
 
@@ -620,7 +622,8 @@ private _computeWorldPositionsFromAnchor(): any[] {
         ? this._map.project(nn.lonLat, 'EPSG:4326')
         : this._map.project(nn.coord, this._crs);
 
-    const center = new THREE.Vector3(worldX, nn.nodeHeight + this._altitude, worldZ);
+    const kCY = this._verticalScale(nn.lonLat ?? this._crs?.toLonLat?.(nn.coord) ?? null);
+    const center = new THREE.Vector3(worldX, (nn.nodeHeight + this._altitude) * kCY, worldZ);
 
 
         const halfW = width / 2;

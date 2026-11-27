@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>Масштаб высот — все пространственные объекты</title>
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; font:13px sans-serif; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #info { position:fixed; top:8px; left:8px; background:rgba(255,255,255,0.94); padding:8px 10px;
+                border-radius:4px; white-space:pre; z-index:9; line-height:1.5; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="info">Все объекты: высота 100 м, absolute, altitude 0, extrude 100 м (где применимо).
+Все должны выглядеть одинаково высокими на широте 55.75°.
+Укажите, какие выбиваются.</div>
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [new KRB.Tile({ texture: 'demo', heightScale: 1.0 })],
+    view: new KRB.View({ centerLonLat: [37.62, 55.75], zoom: 17, pitch: 45 })
+});
+
+// Общие параметры: высота 100 м, один и тот же extrude.
+const H = 100;               // высота / extrude, м
+const LAT = 55.75;
+// Шаг по долготе: ~150 м на широте 55.75° (1° lon ≈ 62 390 м).
+const STEP = 150 / 62390;
+const START = 37.60;
+
+// Квадрат ~100 м по земле, как в scale_test.html.
+const dLat = 100 / 111320;
+const dLon = 100 / 62390;
+const squareAt = (lon, lat) => [
+    [lon,        lat],
+    [lon + dLon, lat],
+    [lon + dLon, lat + dLat],
+    [lon,        lat + dLat],
+];
+
+const x = i => START + i * STEP;   // долгота i-го объекта
+const cellCenter = i => [x(i) + dLon / 2, LAT + dLat / 2];
+
+// 0. Area3D (box 100×100×100) — эталон.
+new KRB.Area3D({
+    rings: [squareAt(x(0), LAT)],
+    crs: 'EPSG:4326',
+    primitiveType: 'box',
+    size: [100, H, 100],
+    fit: 'stretch',
+    altitudeMode: 'absolute',
+    altitude: 0,
+    color: '#44aa88',
+    title: '0 Area3D (box)',
+}).addTo(map);
+
+// 1. Marker3D (box 100 м).
+new KRB.Marker3D({
+    position: [...cellCenter(1), 0],
+    altitudeMode: 'absolute',
+    primitiveType: 'box',
+    size: [100, H, 100],
+    color: 0x44aaff,
+    title: '1 Marker3D (box)',
+}).addTo(map);
+
+// 2. Polygon extruded, height 100 м, minHeight 0.
+new KRB.Polygon({
+    rings: [squareAt(x(2), LAT)],
+    crs: 'EPSG:4326',
+    fillColor: '#ffaa33',
+    fillOpacity: 1,
+    extruded: true,
+    height: H,
+    altitudeMode: 'absolute',
+    altitude: 0,
+    title: '2 Polygon (extruded)',
+}).addTo(map);
+
+// 3. Polygon с minHeight (как здания этажа 2: основание 6 м, толщина 6 м) — проверка minHeight.
+//    Для сравнения с «100 м» — отдельный блок ниже; здесь minHeight=50, height=50 => верх на 100 м.
+new KRB.Polygon({
+    rings: [squareAt(x(3), LAT)],
+    crs: 'EPSG:4326',
+    fillColor: '#ff7788',
+    fillOpacity: 1,
+    extruded: true,
+    height: 50,
+    minHeight: 50,
+    altitudeMode: 'absolute',
+    altitude: 0,
+    title: '3 Polygon (minHeight 50 + extrude 50)',
+}).addTo(map);
+
+// 4. Polyline — вертикальная стойка 0→100 м через две вершины на одной точке.
+new KRB.Polyline({
+    positions: [
+        [cellCenter(4)[0], cellCenter(4)[1], 0],
+        [cellCenter(4)[0], cellCenter(4)[1], H],
+    ],
+    crs: 'EPSG:4326',
+    altitudeMode: 'absolute',
+    color: '#ff3333',
+    width: 6,
+    title: '4 Polyline (вертикаль 100 м)',
+}).addTo(map);
+
+// 5. Marker (точка на высоте 100 м, absolute).
+new KRB.Marker({
+    position: [...cellCenter(5), H],
+    altitudeMode: 'absolute',
+    title: '5 Marker (100 м)',
+}).addTo(map);
+
+// 6. Vector3D — вертикальный отрезок 0→100 м (в ECEF-CRS нужна конверсия;
+//    здесь берём lon/lat, если Vector3D принимает EPSG:4326 с 3-й координатой).
+new KRB.Vector3D({
+    positions: [
+        [cellCenter(6)[0], cellCenter(6)[1], 0],
+        [cellCenter(6)[0], cellCenter(6)[1], H],
+    ],
+    crs: 'EPSG:4326',
+    altitudeMode: 'absolute',
+    altitude: 0,
+    color: '#33ff99',
+    width: 4,
+    title: '6 Vector3D (вертикаль 100 м)',
+}).addTo(map);
+
+// 7. Polygon-«плита» (не extruded) на высоте 100 м — для проверки altitude без extrude.
+new KRB.Polygon({
+    rings: [squareAt(x(7), LAT)],
+    crs: 'EPSG:4326',
+    fillColor: '#aa66ff',
+    fillOpacity: 1,
+    extruded: false,
+    altitudeMode: 'absolute',
+    altitude: H,
+    title: '7 Polygon (плоский, altitude 100 м)',
+}).addTo(map);
+
+// 8. Area3D с altitude 100 м и primitive box 100 м — проверка altitude+размера.
+new KRB.Area3D({
+    rings: [squareAt(x(8), LAT)],
+    crs: 'EPSG:4326',
+    primitiveType: 'box',
+    size: [100, H, 100],
+    fit: 'stretch',
+    altitudeMode: 'absolute',
+    altitude: H,
+    color: '#ffcc00',
+    title: '8 Area3D (altitude 100 м + box 100 м)',
+}).addTo(map);
+
+// 9. Marker3D с altitude 100 м (absolute) — куб, нижняя грань на 100 м.
+new KRB.Marker3D({
+    position: [...cellCenter(9), 0],
+    altitudeMode: 'absolute',
+    altitude: H,
+    primitiveType: 'box',
+    size: [100, H, 100],
+    color: 0xff66cc,
+    title: '9 Marker3D (altitude 100 м + box 100 м)',
+}).addTo(map);
+
+// 10. Image (плоскость 100×100 м на высоте 100 м).
+new KRB.Image({
+    source: 'horse.png',
+    crs: 'EPSG:4326',
+    position: [...cellCenter(10), H],
+    size: [100, 100],
+    altitudeMode: 'absolute',
+    title: '10 Image (100 м)',
+}).addTo(map);
+
+window.map = map;
+</script>
+</body>
+</html>

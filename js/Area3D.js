@@ -421,6 +421,9 @@ export class Area3D extends SpatialObject {
     // =================================================================
     _createPrimitive() {
         let [w, h, d] = this._normalizeSize(this._size);
+        // Плоская карта: горизонталь в проекционных метрах растянута на k = 1/cos(lat),
+        // вертикаль (истинные метры) — нет. Масштабируем высоту на k в центроиде объекта,
+        // иначе куб выглядит приплюснутым (100 м → ~56 м по виду).
         if (this._fit === 'stretch') {
             w = this._polygonWidth;
             d = this._polygonDepth;
@@ -434,6 +437,9 @@ export class Area3D extends SpatialObject {
             d *= scale;
             h *= scale;
         }
+        // Масштаб высоты — ПОСЛЕ выбора размеров: блок stretch перезаписывает h из size,
+        // и более раннее умножение терялось. Плоская карта: вертикаль 1/cos(lat) к горизонтали.
+        h *= this._verticalScale(this._centroidWorldLonLat());
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
             case 'sphere':
@@ -536,7 +542,9 @@ export class Area3D extends SpatialObject {
             targetD = this._polygonDepth;
             if (this._size) {
                 const [, hFromSize] = this._normalizeSize(this._size);
-                targetH = hFromSize;
+                // Тот же масштаб высоты k, что и в геометрии (_createPrimitive): иначе scaleY = targetH/size.y
+                // гасит коэффициент и высота остаётся 100 м вместо 177.7.
+                targetH = hFromSize * this._verticalScale(this._centroidWorldLonLat());
             }
             else {
                 const containScale = Math.min(this._polygonWidth / widthModel, this._polygonDepth / depthModel);
@@ -602,6 +610,21 @@ export class Area3D extends SpatialObject {
         const size = box.getSize(new THREE.Vector3());
         this._boundingRadius = 0.5 * size.length();
         this._boundingCenterYLocal = box.min.y + size.y / 2;
+    }
+    /** Центр полигона в WGS-84 [lon, lat] (среднее вершин). Нужен для масштаба высоты. */
+    _centroidWorldLonLat() {
+        const norm = this._getNormalizedOuter();
+        let sx = 0, sy = 0, k = 0;
+        for (const nn of norm) {
+            // this._crs — уже объект CRS (см. конструктор); код-строка только если объекта нет.
+            const ll = nn.lonLat ?? (this._crs ? this._crs.toLonLat(nn.coord) : null);
+            if (!ll || !Number.isFinite(ll[0]) || !Number.isFinite(ll[1]))
+                continue;
+            sx += ll[0];
+            sy += ll[1];
+            k++;
+        }
+        return k ? [sx / k, sy / k] : null;
     }
     _normalizeSize(size) {
         if (!size)
@@ -822,6 +845,8 @@ export class Area3D extends SpatialObject {
     _updateFlatPlacement(map) {
         // Группа лежит в worldGroup: её позиция — локальная (без сдвига мира).
         this._group.quaternion.identity();
+        // Высоты (altitude, nodeHeight) — истинные метры: масштаб по широте центроида.
+        const kA = this._verticalScale(this._centroidWorldLonLat());
         if (this._altitudeMode === 'clampToGround') {
             const now = performance.now();
             if (now - this._lastHeightUpdateTime > this._heightUpdateInterval ||
@@ -833,10 +858,10 @@ export class Area3D extends SpatialObject {
                 this._lastHeightUpdateTime = now;
                 this._lastWorldGroupPos.copy(map.worldGroup.position);
             }
-            this._group.position.y = this._cachedSurfaceHeight + this._altitude + this._nodeHeight;
+            this._group.position.y = this._cachedSurfaceHeight + (this._altitude + this._nodeHeight) * kA;
         }
         else {
-            this._group.position.y = this._altitude + this._nodeHeight;
+            this._group.position.y = (this._altitude + this._nodeHeight) * kA;
         }
         this._group.updateMatrixWorld(true);
     }

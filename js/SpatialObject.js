@@ -453,6 +453,21 @@ export class SpatialObject {
             lonLat: null,
         };
     }
+    /**
+     * ЕДИНЫЙ источник истины для масштаба высоты всех пространственных объектов.
+     * Горизонталь на плоской карте (Меркатор) растянута на k = 1/cos(lat) относительно
+     * истинных метров, а высота в истинных метрах. Поэтому высоту (altitude, nodeHeight,
+     * размер по вертикали) умножаем на k, иначе вертикаль выглядит короче горизонтали.
+     * Глобус: высоты уже в метрах над эллипсоидом — коэффициент 1.
+     */
+    _verticalScale(lonLat) {
+        const map = this._map;
+        if (!map || map.globe)
+            return 1;
+        if (!lonLat || !Number.isFinite(lonLat[1]))
+            return 1;
+        return map._planarHeightScale(lonLat, 'EPSG:4326');
+    }
     _normalizePosition(position, crs) {
         return SpatialObject.normalizePosition(position, crs);
     }

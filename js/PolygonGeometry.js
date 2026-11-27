@@ -1066,11 +1066,14 @@ export const PolygonGeometryMixin = {
     },
     _buildBottomAndSides(points2D, topUVs, bottomIndices, patternScale) {
         const bottomGeometry = new THREE.BufferGeometry();
+        const kV = this._verticalScale(this._centroidLonLat());
         const bottomPosArray = new Float32Array(points2D.length * 3);
         for (let i = 0; i < points2D.length; i++) {
             const pt = points2D[i];
+            // Основание: minHeight + экструзия вычитаются по масштабу вершины (как в _updateHeights).
+            const kI = this._vertexScale(i);
             bottomPosArray[i * 3] = pt.x;
-            bottomPosArray[i * 3 + 1] = 0;
+            bottomPosArray[i * 3 + 1] = (this._minHeight || 0) * kI;
             bottomPosArray[i * 3 + 2] = pt.y;
         }
         bottomGeometry.setAttribute('position', new THREE.BufferAttribute(bottomPosArray, 3));
@@ -1092,7 +1095,7 @@ export const PolygonGeometryMixin = {
         this._bottomMaterial = bottomMaterial;
         this._group.add(bottomMesh);
         const sideUvScale = patternScale;
-        const initialHeight = this._height;
+        const initialHeight = this._height * kV;
         const vH = initialHeight / sideUvScale;
         let totalEdges = 0;
         for (let ringIdx = 0; ringIdx < this._ringStartIndices.length; ringIdx++) {

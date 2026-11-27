@@ -278,8 +278,22 @@ export class Marker3D extends SpatialObject {
     // =================================================================
     // Построение примитива / GLB
     // =================================================================
+    /** WGS-84 [lon, lat] маркера для масштаба высоты. Проекционный _coord сюда не годится. */
+    _lonLatForScale() {
+        if (this._lon !== null && this._lat !== null && Number.isFinite(this._lon) && Number.isFinite(this._lat)) {
+            return [this._lon, this._lat];
+        }
+        const crs = this._crs;
+        if (!crs || typeof crs.toLonLat !== 'function')
+            return null;
+        const ll = crs.toLonLat(this._coord);
+        return ll && Number.isFinite(ll[0]) && Number.isFinite(ll[1]) ? [ll[0], ll[1]] : null;
+    }
     _createPrimitive() {
-        const [w, h, d] = this._normalizePrimitiveSize(this._size);
+        const [w, h0, d] = this._normalizePrimitiveSize(this._size);
+        // Единый масштаб высоты (SpatialObject._verticalScale): геометрия и _height
+        // должны совпадать, иначе подпись окажется не над моделью.
+        const h = h0 * this._verticalScale(this._lonLatForScale());
         this._height = h;
         let geometry;
         switch (this._primitiveType.toLowerCase()) {
@@ -764,7 +778,7 @@ export class Marker3D extends SpatialObject {
                 worldY = this._worldPosition.y;
             }
             else {
-                worldY = this._cachedWorldY + this._altitude;
+                worldY = this._cachedWorldY + this._altitude * this._verticalScale(this._lonLatForScale());
             }
         }
         else if (map.globe) {
@@ -772,11 +786,11 @@ export class Marker3D extends SpatialObject {
             worldY = this._worldPosition.y;
         }
         else {
-            worldY = this._altitude + this._nodeHeight;
+            worldY = (this._altitude + this._nodeHeight) * this._verticalScale(this._lonLatForScale());
         }
         if (!map.globe) {
             // Плоский режим: высота узла аддитивна, модель стоит вдоль мировой Y.
-            worldY += this._nodeHeight;
+            worldY += this._nodeHeight * this._verticalScale(this._lonLatForScale());
         }
         // Позиция МЕША — локальная (объект лежит в worldGroup, который сам
         // смещается при панораме), а _worldPosition остаётся МИРОВОЙ.

@@ -1491,7 +1491,9 @@ private _recomputeWorldPoints(): void {
         if (clamp) {
             surfaceY = this._map.getSurfaceHeightAt(xy[0] + wgPos.x, xy[1] + wgPos.z);
         }
-        const worldY = surfaceY + n.nodeHeight * this._heightScale + this._altitude;
+        // Высоты (nodeHeight, altitude) — истинные метры: масштаб по широте вершины (как у Polyline/Polygon).
+        const kV = this._verticalScale(this._lonLatOfNormalized(n));
+        const worldY = surfaceY + (n.nodeHeight * this._heightScale + this._altitude) * kV;
         worldPts.push([xy[0], worldY, xy[1]]);
     }
     this._worldPoints = worldPts;

@@ -1297,6 +1297,15 @@ function processTile(tile, z, x, y, tileSizeX, tileSizeY, maxMercX, maxMercY, is
     const centerX = x * tileSizeX - maxMercX + tileSizeX / 2;
     const centerZ = -maxMercY + y * tileSizeY + tileSizeY / 2;
 
+    // Масштаб высоты зданий по широте центра тайла (1/cos(lat) для Меркатора) — только на плоскости.
+    // На глобусе геометрия сферизуется ниже, там высоты уже истинные метры.
+    const kTileHeight = (globeParams) ? 1 : (function () {
+        const R = maxMercY / Math.PI;                       // радиус Меркатора (halfExtentY = π·R)
+        const latR = 2 * Math.atan(Math.exp(centerZ / R)) - Math.PI / 2;
+        const c = Math.cos(latR);
+        return c > 1e-6 ? 1 / c : 1;
+    })();
+
     // Вычисляем тот же K, что и в главном потоке для _computeTileDeform
     const K = z < 6 ? 64 : z < 9 ? 32 : 16;
     const maxSegLen = Math.min(tileSizeX, tileSizeY) / K;
@@ -1431,7 +1440,8 @@ textPoints.push({
                         const isPart = props['building:part'] === 'yes';
                         const isSimpleBuilding = props['building:part'] === undefined;
                         if (is3d && (isPart || isSimpleBuilding)) {
- const geo = extrudeBuilding(rings, height, minHeight, eps, buildingEdges, halfTileX, halfTileY);
+ // Высоты — истинные метры: масштабируем по широте тайла (плоская карта).
+ const geo = extrudeBuilding(rings, height * kTileHeight, minHeight * kTileHeight, eps, buildingEdges, halfTileX, halfTileY);
 
                             if (geo) {
                                 const bColor = resolveColor(layerStyle.color, props, styleZoom, geomType);

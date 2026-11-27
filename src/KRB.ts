@@ -13,6 +13,8 @@ export { SurfacePolygon } from './SurfacePolygon.js';
 export { Marker3D } from './Marker3D.js';
 export { PointCloud, Point } from './PointCloud.js';
 export { LAS } from './LAS.js';
+export { E57 } from './E57.js';
+export type { E57Options } from './E57.js';
 export type { LASOptions, LASColorBy } from './LAS.js';
 export { parseLAS, readLASHeader, LASFormatError } from './LASParser.js';
 export type { PointCloudOptions, PointOptions, PointDatum, PointShape, PointCloudColor } from './PointCloud.js';

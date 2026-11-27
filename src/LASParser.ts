@@ -24,8 +24,15 @@ export interface LASHeader {
     hasColor: boolean;
 }
 
+/** Общая часть заголовка любого облака (LAS и E57): используется модулем KRB.LAS/E57. */
+export interface PointCloudFileHeader {
+    total: number;
+    bbox: [[number, number, number], [number, number, number]];
+    hasColor: boolean;
+}
+
 export interface LASData {
-    header: LASHeader;
+    header: LASHeader | PointCloudFileHeader;
     /** Число точек в результате (может быть меньше total, если включено прореживание). */
     count: number;
     /** Позиции x,y,z в СК файла, плоским массивом (метры). */

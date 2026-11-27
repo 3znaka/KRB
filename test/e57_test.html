@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>KRB.E57 — тест</title>
+    <link href="../KRB.css" rel="stylesheet">
+    <style>
+        body { margin:0; overflow:hidden; font:13px sans-serif; }
+        #map { width:100%; height:100dvh; touch-action:none; position:relative; }
+        #panel {
+            position:fixed; top:8px; right:8px; z-index:1000; background:rgba(255,255,255,0.94);
+            padding:8px 10px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.3); width:280px;
+        }
+        #panel label { display:block; margin:6px 0 2px; }
+        #panel input, #panel select { width:100%; box-sizing:border-box; }
+        #status { margin-top:8px; color:#222; white-space:pre-wrap; }
+        #status .warn { color:#b45309; }
+        #status .err { color:#b91c1c; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+    <b>KRB.E57 test</b>
+    <label>Файл (test/Д3.e57 — исправный XML, test/test.e57 — с повреждённым XML)</label>
+    <input id="file" type="file" accept=".e57">
+    <label>CRS (пусто — из файла)</label>
+    <input id="crs" placeholder="например EPSG:32637" title="Оставьте пустым: CRS возьмётся из файла">
+    <label>zRange, сырые целые: min,max (пусто — не задавать)</label>
+    <input id="zrange" placeholder="27408,75098" title="Нужно только если в XML повреждён maximum Z">
+    <label>Раскраска</label>
+    <select id="colorBy">
+        <option value="rgb">rgb</option>
+        <option value="elevation">elevation</option>
+        <option value="intensity">intensity</option>
+        <option value="classification">classification</option>
+    </select>
+    <label>Размер точки</label>
+    <input id="size" type="range" min="1" max="8" step="0.5" value="2">
+    <div id="status">Выберите файл .e57</div>
+</div>
+<script type="module">
+import * as KRB from '../js/KRB.js';
+
+await KRB.crs.add('EPSG:4978');
+await KRB.crs.add('EPSG:20923');
+await KRB.crs.add('EPSG:32637');
+
+const map = new KRB.Map({
+    target: 'map',
+    layers: [new KRB.Tile({      texture: 'https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1&ts=online_sd', heightScale: 2.0 })],
+    view: new KRB.View({ centerLonLat: [38.37, 59.69], zoom: 10, pitch: 40 })
+});
+
+const status = document.getElementById('status');
+let e57 = null;
+
+function parseZRange(text) {
+    const m = text.trim().match(/^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/);
+    return m ? [Number(m[1]), Number(m[2])] : undefined;
+}
+
+function show(lines) {
+    status.innerHTML = lines.map(l => l.cls ? `<span class="${l.cls}">${l.text}</span>` : l.text).join('\n');
+}
+
+function describe(obj) {
+    const h = obj.getE57Header();
+    const warnings = obj.getWarnings();
+    const lines = [
+        `файл: ${obj.getFileName()}`,
+        `CRS: ${obj.getCRS()}`,
+        `точек в файле: ${obj.getTotalCount().toLocaleString('ru-RU')}`,
+        `загружено: ${obj.getLoadedCount().toLocaleString('ru-RU')}`,
+    ];
+    if (h) lines.push(`версия E57: ${h.versionMajor}.${h.versionMinor}`);
+    for (const w of warnings) lines.push({ text: '⚠ ' + w, cls: 'warn' });
+    return lines;
+}
+
+function load(file) {
+    if (e57) e57.remove();
+    show(['Чтение…']);
+    e57 = new KRB.E57({
+        file,
+        crs: document.getElementById('crs').value.trim() || undefined,
+        zRange: parseZRange(document.getElementById('zrange').value),
+        colorBy: document.getElementById('colorBy').value,
+        size: Number(document.getElementById('size').value),
+        fitOnLoad: true,
+        onLoad: (obj) => show(describe(obj)),
+        onError: (err) => show([{ text: 'Ошибка: ' + err.message, cls: 'err' }]),
+    });
+    e57.addTo(map);
+}
+
+document.getElementById('file').addEventListener('change', (e) => {
+    if (e.target.files[0]) load(e.target.files[0]);
+});
+document.getElementById('colorBy').addEventListener('change', (e) => {
+    if (e57 && e57.getLoadState() === 'loaded') e57.setColorBy(e.target.value);
+});
+document.getElementById('size').addEventListener('input', (e) => {
+    if (e57) e57.setPointSize(Number(e.target.value));
+});
+</script>
+</body>
+</html>

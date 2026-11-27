@@ -831,6 +831,17 @@ export class PointCloud extends SpatialObject {
     }
     getAltitudeMode(): PointCloudAltitudeMode { return this._altitudeMode; }
 
+    /**
+     * Меняет CRS координат точек. Нужен, когда CRS становится известен после
+     * создания (например, E57 читает его из файла). Если объект на карте —
+     * геометрия пересобирается.
+     */
+    setCRS(code: string | null): this {
+        this._crsCode = code;
+        if (this._map) this._rebuildAll();
+        return this;
+    }
+
     getCRS(): string | null { return this._crsCode; }
 
     // =================================================================

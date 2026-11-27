@@ -45,9 +45,7 @@ export class LAS extends PointCloud {
     _onError;
     _fitOnLoad;
     constructor(options) {
-        if (!options || !options.crs) {
-            throw new Error('LAS: опция crs обязательна (LAS-файл не хранит систему координат).');
-        }
+        LAS._validateOptions(options);
         if (!options.url && !options.file && !options.buffer) {
             throw new Error('LAS: укажите источник — url, file или buffer.');
         }
@@ -69,7 +67,7 @@ export class LAS extends PointCloud {
             userData: options.userData,
             zoomInterpolate: options.zoomInterpolate,
         });
-        this._lasCrs = options.crs;
+        this._lasCrs = options.crs ?? '';
         this._colorBy = options.colorBy ?? null;
         this._loadSource = { url: options.url, file: options.file, buffer: options.buffer };
         this._maxPoints = options.maxPoints ?? DEFAULT_MAX_POINTS;
@@ -113,7 +111,7 @@ export class LAS extends PointCloud {
                 this._loadState = 'idle';
                 return;
             }
-            const data = parseLAS(ab, { maxPoints: this._maxPoints });
+            const data = this._parseBuffer(ab);
             this._applyData(data);
             this._loadState = 'loaded';
             if (!this._title)
@@ -131,6 +129,26 @@ export class LAS extends PointCloud {
             else
                 console.error('LAS:', this._loadError);
         }
+    }
+    /**
+     * Проверка опций до создания. LAS требует crs (LAS-файл её не хранит).
+     * E57 переопределяет: там CRS берётся из файла, поэтому crs необязателен.
+     */
+    static _validateOptions(options) {
+        if (!options || !options.crs) {
+            throw new Error('LAS: опция crs обязательна (LAS-файл не хранит систему координат).');
+        }
+        if (!options.url && !options.file && !options.buffer) {
+            throw new Error('LAS: укажите источник — url, file или buffer.');
+        }
+    }
+    /**
+     * Разбор содержимого файла. По умолчанию — LAS. Подклассы (например, E57)
+     * переопределяют его и возвращают тот же LASData, поэтому вся остальная
+     * логика (раскраска, LOD, fitOnLoad, состояния) работает без изменений.
+     */
+    _parseBuffer(ab) {
+        return parseLAS(ab, { maxPoints: this._maxPoints });
     }
     /** Применяет разобранные данные: позиции и раскраска в PointCloud. */
     _applyData(data) {

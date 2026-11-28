@@ -32,6 +32,13 @@ export function buildSheet(req) {
     const fillMap = new Map();
     const lineMap = new Map();
     const points = [];
+    /** Порядок отображения слоя объекта (Таблица 11). Нет слоя — наверх (255). */
+    const orderOf = (code) => {
+        const e = cls?.objectByCode.get(code);
+        if (!e)
+            return 255;
+        return cls.layers.find(l => l.number === e.layer)?.order ?? 255;
+    };
     const layerOf = (code) => {
         const e = cls?.objectByCode.get(code);
         if (!e)
@@ -63,11 +70,14 @@ export function buildSheet(req) {
             points.push({ x: wx, z: wz, icon: spec.icon, label: name, color: style.fill ?? '#888888', classCode: obj.classCode });
             continue;
         }
+        // Порядок слоя (Таблица 11) — ключ группировки, чтобы батчи одного слоя не смешивались.
+        const layerOrder = orderOf(obj.classCode);
         if (loc === 'SQR') {
+            // Батч по коду объекта: здания и кварталы одного слоя не смешиваются.
             if (style.fill)
-                addFill(fillMap, style.fill, obj, doc, req.transform);
+                addFill(fillMap, `${layerOrder}|${obj.classCode}|${style.fill}`, obj, doc, req.transform);
             if (style.stroke)
-                addRings(lineMap, style.stroke, style.width ?? 1, null, obj, doc, req.transform);
+                addRings(lineMap, `${layerOrder}|${obj.classCode}|${style.stroke}`, style.width ?? 1, null, obj, doc, req.transform);
             continue;
         }
         if (loc === 'TIT')
@@ -76,23 +86,38 @@ export function buildSheet(req) {
         const color = style.line ?? style.stroke;
         if (!color)
             continue;
-        addRings(lineMap, color, style.width ?? 1, style.dash ?? null, obj, doc, req.transform);
+        addRings(lineMap, `${layerOrder}|${obj.classCode}|${color}`, style.width ?? 1, style.dash ?? null, obj, doc, req.transform);
     }
     const fills = [];
-    for (const [color, f] of fillMap) {
+    // Z-order внутри батчей: порядок слоя (Таблица 11) → средняя площадь объектов батча (крупные ниже).
+    // Площадь — измеренное свойство: кварталы крупнее отдельных строений, поэтому строения ложатся сверху.
+    // Порядок батча: сначала по слою, затем по убыванию средней площади (крупные — ниже).
+    const fillArea = new Map();
+    for (const [key, f] of fillMap) {
+        const [order] = key.split('|');
         const pos = new Float32Array(f.pos.length / 2 * 3);
         for (let i = 0, j = 0; i < f.pos.length; i += 2, j += 3) {
             pos[j] = f.pos[i];
             pos[j + 1] = 0;
             pos[j + 2] = f.pos[i + 1];
         }
-        fills.push({ color, positions: pos, indices: new Uint32Array(f.idx) });
+        const color = key.split('|')[2];
+        fillArea.set(key, f.count ? f.area / f.count : 0);
+        fills.push({ color, order: Number(order), positions: pos, indices: new Uint32Array(f.idx) });
     }
+    const fillKeys = [...fillMap.keys()];
+    const areaOfIndex = fills.map((_, i) => fillArea.get(fillKeys[i]) ?? 0);
+    const sorted = fills.map((f, i) => ({ f, a: areaOfIndex[i] }))
+        .sort((x, y) => x.f.order - y.f.order || y.a - x.a);
+    fills.length = 0;
+    for (const s of sorted)
+        fills.push(s.f);
     const lines = [];
     for (const [key, l] of lineMap) {
-        const color = key.split('|')[0];
-        lines.push({ color, width: l.width, dash: l.dash, segments: new Float32Array(l.seg) });
+        const [order, , color] = key.split('|');
+        lines.push({ color, order: Number(order), width: l.width, dash: l.dash, segments: new Float32Array(l.seg) });
     }
+    lines.sort((a, b) => a.order - b.order);
     return { type: 'built', id: req.id, fills, lines, points, count: doc.objects.length };
 }
 function addFill(map, color, obj, doc, t) {
@@ -116,9 +141,17 @@ function addFill(map, color, obj, doc, t) {
         return;
     let bucket = map.get(color);
     if (!bucket) {
-        bucket = { pos: [], idx: [] };
+        bucket = { pos: [], idx: [], area: 0, count: 0 };
         map.set(color, bucket);
     }
+    // Площадь внешнего контура (формула шнурования) — для порядка батчей внутри слоя.
+    let a = 0;
+    for (let i = 0; i < flat.length; i += 2) {
+        const j = (i + 2) % flat.length;
+        a += flat[i] * flat[j + 1] - flat[j] * flat[i + 1];
+    }
+    bucket.area += Math.abs(a) / 2;
+    bucket.count += 1;
     const base = bucket.pos.length / 2;
     for (const v of flat)
         bucket.pos.push(v);

@@ -7,7 +7,7 @@ import { THREE, Line2, LineMaterial, LineSegmentsGeometry } from './js_TP/tpb.js
 import { parseSxf, type SxfDocument } from './sxf/sxfParser.js';
 import { parseRsc, type RscClassifier } from './sxf/rscParser.js';
 import { poiFor } from './sxf/sxfPoi.js';
-import { rasterizeVectorSymbol } from './sxf/symbolRaster.js';
+import { rasterizeVectorSymbol, SYMBOL_PX_PER_MM } from './sxf/symbolRaster.js';
 import { SXF_THEME } from './styles/theme.sxf.js';
 import type { SxfStyle, SxfTheme } from './styles/types.js';
 import { Sprite } from './Sprite.js';
@@ -78,6 +78,30 @@ const POI_SYNC_INTERVAL_MS = 150;
 // ----------------------------------------------------------------------
 // Реестр тем
 // ----------------------------------------------------------------------
+
+/** Во сколько раз делить толщину линий из классификатора (подбирается по глазу). */
+const LINE_WIDTH_DIVISOR = 7;
+
+/**
+ * Стиль линии/площади из классификатора (PAR). Возвращает цвета в #rrggbb и толщину в мкм → px
+ * не переводим здесь: единицы приводятся в рендере. Для точечных объектов стиль не нужен.
+ */
+function classifierStyleOf(style: { primitive: string | number; color?: { hex?: string }; fillColor?: { hex?: string }; width?: number; dash?: number; gap?: number } | null): {
+    fill?: string; stroke?: string; line?: string; width?: number; dash?: number[];
+} {
+    if (!style) return {};
+    const out: { fill?: string; stroke?: string; line?: string; width?: number; dash?: number[] } = {};
+    if (style.fillColor?.hex) out.fill = style.fillColor.hex;
+    if (style.color?.hex) {
+        out.stroke = style.color.hex;
+        out.line = style.color.hex;
+    }
+    // Толщина в PAR — микроны. 1 мм бумажной карты = SYMBOL_PX_PER_MM px (тот же коэффициент, что у знаков).
+    // Линии в 7 раз тоньше, чем даёт перевод мм → px (по запросу: обводка была слишком толстой).
+    if (style.width != null) out.width = Math.max(0.5, (style.width / 1000) * SYMBOL_PX_PER_MM / LINE_WIDTH_DIVISOR);
+    if (style.dash != null && style.gap != null) out.dash = [style.dash, style.gap];
+    return out;
+}
 
 /** Сравнение списков слоёв (порядок не важен). */
 function sameList(a: string[] | null, b: string[] | null): boolean {
@@ -478,8 +502,16 @@ export class Sxf {
         for (const code of codes) {
             const entry = this.classifier?.objectByCode.get(code);
             const layerName = entry ? (this.classifier!.layers.find(l => l.number === entry.layer)?.name ?? null) : null;
-            const s = this._styleFor(code, layerName);
-            out[code] = { fill: s.fill, stroke: s.stroke, line: s.line, width: s.width, dash: s.dash };
+            // Временно: тема отключена, стили только из классификатора (PAR).
+            const cls = classifierStyleOf(entry?.style ?? null);
+            const s: SxfStyle = {};
+            out[code] = {
+                fill: cls.fill ?? s.fill,
+                stroke: cls.stroke ?? s.stroke,
+                line: cls.line ?? s.line,
+                width: cls.width ?? s.width,
+                dash: cls.dash ?? s.dash,
+            };
         }
         return out;
     }
@@ -538,8 +570,10 @@ export class Sxf {
 
         const chunk = this._opts.chunkSize ?? 8;
         const jobs: Array<() => void> = [];
-        for (const f of res.fills) jobs.push(() => this._addFillBatch(group, f));
-        for (const l of res.lines) jobs.push(() => this._addLineBatch(group, l));
+        // Каждому батчу — свой renderOrder по его месту в отсортированном списке воркера
+        // (слой, затем убывание площади). Одинаковый renderOrder у разных материалов даёт случайный порядок.
+        res.fills.forEach((f, i) => jobs.push(() => this._addFillBatch(group, f, i)));
+        res.lines.forEach((l, i) => jobs.push(() => this._addLineBatch(group, l, res.fills.length + i)));
         this._scheduleChunks(jobs, chunk, () => this._addPoiChunked(res.points));
     }
 
@@ -573,6 +607,8 @@ export class Sxf {
                 side: THREE.DoubleSide,
                 transparent: this.fillOpacity < 1,
                 opacity: this.fillOpacity,
+                // 2D-подложка: порядок слоёв задаёт renderOrder, а не Z-буфер (все в одной плоскости).
+                depthTest: false,
                 depthWrite: false,
             });
             this._matCache.set(key, m);
@@ -590,6 +626,7 @@ export class Sxf {
                 linewidth: Math.max(0.5, width * this.lineWidthMultiplier),
                 resolution: new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
                 depthTest: false,
+                transparent: false,
                 depthWrite: false,
             };
             if (dash && dash.length >= 2) {
@@ -604,18 +641,19 @@ export class Sxf {
         return m as LineMaterial;
     }
 
-    private _addFillBatch(group: THREE.Group, f: FillBatch): void {
+    private _addFillBatch(group: THREE.Group, f: FillBatch, rank: number): void {
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.BufferAttribute(f.positions, 3));
         geom.setIndex(new THREE.BufferAttribute(f.indices, 1));
         geom.computeBoundingSphere();
         this._geometries.push(geom);
         const mesh = new THREE.Mesh(geom, this._fillMaterial(f.color));
-        mesh.renderOrder = 10;
+        // Уникальный renderOrder на батч: меньший rank — ниже (крупные кварталы раньше мелких зданий).
+        mesh.renderOrder = 10 + rank;
         group.add(mesh);
     }
 
-    private _addLineBatch(group: THREE.Group, l: LineBatch): void {
+    private _addLineBatch(group: THREE.Group, l: LineBatch, rank: number): void {
         if (l.segments.length < 6) return;
         const geom = new LineSegmentsGeometry();
         geom.setPositions(l.segments as unknown as number[]);
@@ -623,7 +661,9 @@ export class Sxf {
         const mat = this._lineMaterial(l.color, l.width, l.dash);
         const line = new Line2(geom as any, mat);
         if (mat.dashed) (line as any).computeLineDistances?.();
-        line.renderOrder = 20;
+        // Линии слоя — выше заливок того же слоя.
+        // Линии — выше всех заливок (ранги заливок идут первыми), в порядке своего ранга.
+        line.renderOrder = 10 + rank;
         group.add(line as unknown as THREE.Object3D);
     }
 

@@ -20,6 +20,26 @@ export interface TileSpec {
   layers: Record<string, LayerSpec>;
 }
 
+/** Стиль одного класса SXF (заливка, обводка, линия, пунктир, POI). */
+export interface SxfStyle {
+  fill?: string;
+  stroke?: string;
+  line?: string;
+  width?: number;
+  dash?: number[];
+  poi?: string;
+  color?: string;
+}
+
+/** Тема классификатора SXF: по слоям и по classCode (classCode приоритетнее). */
+export interface SxfTheme {
+  name: string;
+  backgroundColor?: string;
+  defaultStyle: SxfStyle;
+  layers: Record<string, SxfStyle>;
+  codes: Record<number, SxfStyle>;
+}
+
 export interface Theme {
   name: string;
   backgroundColor?: string;

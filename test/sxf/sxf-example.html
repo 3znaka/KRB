@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta charset="UTF-8">
+    <title>KRB.Sxf — пример</title>
+    <link href="../../KRB.css" rel="stylesheet">
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #map { width: 100%; height: 100dvh; touch-action: none; position: relative; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script type="module">
+// Библиотека собрана в корне репозитория (js/KRB.js). Пример лежит в test/sxf.
+import * as KRB from '../../js/KRB.js';
+
+await KRB.crs.add('EPSG:28407');
+
+const layer =  new KRB.Sxf({
+            sxfUrl: 'N-37-004-V-b.sxf',   // лист SXF (бинарный)
+            rscUrl: '25t05gm.rsc',         // классификатор RSC
+            theme: 'default',
+        });
+
+const map = new KRB.Map({
+    target: 'map',
+    debug: true,
+  //  globe: true,
+    layers: [
+       layer
+    ],
+    view: new KRB.View({
+        centerLonLat: [37.6, 55.75],      // Москва — район листа N-37-004
+        zoom: 11,
+        maxZoom: 20,
+    }),
+});
+
+// layer.poi = false;
+
+window.krbMap = map;
+</script>
+</body>
+</html>

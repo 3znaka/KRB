@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Фонтан — совмещение черт и кружков</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; background: #fff; }
+  .row { display: flex; gap: 24px; align-items: flex-start; }
+  canvas { border: 1px solid #ccc; background: #f8f8f8; }
+  .ctl { min-width: 280px; }
+  .ctl label { display: block; margin-top: 12px; }
+  .ctl input[type=range] { width: 260px; }
+  pre { font-size: 12px; background: #f4f4f4; padding: 8px; }
+</style>
+</head>
+<body>
+<h3>Фонтан: черты и кружки (координаты как в файле, без подгонки)</h3>
+<div class="row">
+  <canvas id="c" width="400" height="400"></canvas>
+  <div class="ctl">
+    <label>Сдвиг кружков по X: <span id="vx">0</span></label>
+    <input id="dx" type="range" min="-12000" max="12000" step="50" value="0">
+    <label>Сдвиг кружков по Y: <span id="vy">0</span></label>
+    <input id="dy" type="range" min="-12000" max="12000" step="50" value="0">
+    <label>Масштаб: <span id="vs">1</span></label>
+    <input id="sc" type="range" min="0.0002" max="0.002" step="0.00001" value="0.0009">
+    <pre id="info"></pre>
+  </div>
+</div>
+<script type="module">
+import { parseRsc } from '../../js/sxf/rscParser.js';
+
+const buf = await fetch('25t05gm.rsc').then(r => r.arrayBuffer());
+const cls = parseRsc(buf);
+const sym = cls.objectByCode.get(31650000).style.symbol;
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const dxS = document.getElementById('dx'), dyS = document.getElementById('dy'), scS = document.getElementById('sc');
+const info = document.getElementById('info');
+
+const CIRC = (f) => [6, 7, 64, 65].includes(f.chain);
+
+function draw() {
+  const dx = +dxS.value, dy = +dyS.value, sc = +scS.value;
+  document.getElementById('vx').textContent = dx;
+  document.getElementById('vy').textContent = dy;
+  document.getElementById('vs').textContent = sc;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  // Начало координат канвы: привязка знака (как в файле, без вычетов).
+  const ox = cv.width / 2, oy = cv.height / 2;
+  const T = (x, y) => [ox + x * sc, oy + y * sc];
+
+  // Черты (линии и площади) — в координатах файла, без сдвига.
+  ctx.strokeStyle = '#1f78a0'; ctx.fillStyle = '#1f78a0'; ctx.lineWidth = 2;
+  for (const f of sym.fragments) {
+    if (CIRC(f)) continue;
+    ctx.beginPath();
+    f.points.forEach(([x, y], k) => {
+      const [px, py] = T(x, y);
+      k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+    if (f.chain === 0) { ctx.closePath(); ctx.fill(); }
+    ctx.stroke();
+  }
+
+  // Кружки — центр сдвигается слайдерами, радиусы не меняются.
+  ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 1.5;
+  for (const f of sym.fragments) {
+    if (!CIRC(f) || f.points.length < 2) continue;
+    const [cx, cy] = f.points[0];
+    const [rx, ry] = f.points[1];
+    const [px, py] = T(cx + dx, cy + dy);
+    ctx.beginPath();
+    ctx.ellipse(px, py, Math.max(0.5, Math.abs(rx) * sc), Math.max(0.5, Math.abs(ry) * sc), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Точка начала координат.
+  ctx.fillStyle = '#000'; ctx.fillRect(ox - 2, oy - 2, 4, 4);
+
+  info.textContent =
+    'привязка: ' + JSON.stringify(sym.anchor) + '\n' +
+    'сдвиг кружков: (' + dx + ', ' + dy + ')\n' +
+    'масштаб: ' + sc + '\n' +
+    'кружков: ' + sym.fragments.filter(CIRC).length + ', черт: ' + sym.fragments.filter(f => !CIRC(f)).length;
+}
+
+for (const el of [dxS, dyS, scS]) el.addEventListener('input', draw);
+draw();
+</script>
+</body>
+</html>
